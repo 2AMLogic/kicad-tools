@@ -65,7 +65,11 @@ def _install_fake_cli(
 
     ``--help`` probes answer per the two capability flags; every real
     invocation writes an empty JSON report so the caller sees a successful
-    run with no violations.
+    run with no violations.  Issue #9938: the answers must look like real
+    kicad-cli output -- the refill probe only accepts a definitive "no"
+    from usage text that lacks the flag, and a completed
+    ``--save-board`` run rewrites the board file (fresh fills), which the
+    fill's save verification requires.
     """
 
     def fake_run(cmd, capture_output=True, text=True, **kwargs):
@@ -73,9 +77,14 @@ def _install_fake_cli(
         if "--help" in cmd:
             if "fill-zones" in cmd:
                 return _fake_completed(stdout="fill-zones" if has_fill_zones else "")
-            return _fake_completed(stdout="--refill-zones" if supports_refill else "")
+            return _fake_completed(
+                stdout="--refill-zones" if supports_refill else "Usage: kicad-cli pcb drc"
+            )
         if "--output" in cmd:
-            Path(cmd[cmd.index("--output") + 1]).write_text("{}")
+            Path(cmd[cmd.index("--output") + 1]).write_text('{"violations": []}')
+        if "--save-board" in cmd:
+            # A completed --save-board always rewrites the board.
+            Path(cmd[-1]).write_text("(kicad_pcb (version 20260206) filled)")
         return _fake_completed()
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)

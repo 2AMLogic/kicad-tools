@@ -18,9 +18,162 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..schema.bom import BOMItem
-    from ..spec.schema import BOMEntry
+    from ..spec.schema import BOMEntry, ProjectSpec
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AssemblySpecErrors:
+    """Optional declarations a malformed spec lost; everything else stays usable."""
+
+    profiles: dict[tuple[int, str | None], str] = field(default_factory=dict)
+    pad_containers: dict[int, str] = field(default_factory=dict)
+    land_patterns: dict[int, str] = field(default_factory=dict)
+    tolerance: str | None = None
+    tolerance_upper: str | None = None
+    mounting: dict[int, str] = field(default_factory=dict)
+    guarantees: dict[str, str] = field(default_factory=dict)
+    wires: dict[int, str] = field(default_factory=dict)
+    """Invalid prepared diameter or source, keyed by the wire declaration's row (Issue #10473)."""
+    unattached_wires: list[str] = field(default_factory=list)
+    """Wire declarations that name no usable pad, as ``wire_terminations[<row>]: <reason>``."""
+
+
+def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
+    """Keep BOM assignments usable when an optional assembly declaration is invalid.
+
+    Profile errors identify the BOM row and pad (None for the part-level lead).
+    Land-pattern errors identify the BOM row. Wire errors identify the termination row.
+    A malformed mounting declaration, upper finished-hole tolerance or
+    finished-hole guarantee (Issue #10476) is dropped alone, so the valid
+    declarations beside it keep their effect.  Other schema errors retain
+    the regular spec loader's strict behavior.
+    """
+    from pydantic import ValidationError
+
+    from ..spec.parser import load_spec_data
+    from ..spec.schema import ProjectSpec
+
+    data = load_spec_data(path)
+    errors = AssemblySpecErrors()
+    try:
+        return ProjectSpec.model_validate(data), errors
+    except ValidationError as exc:
+        dropped_guarantees: set[int] = set()
+        dropped: set[int] = set()
+        for error in exc.errors():
+            loc = error["loc"]
+            if loc == ("requirements", "manufacturing", "finished_hole_tolerance_mm"):
+                data["requirements"]["manufacturing"].pop("finished_hole_tolerance_mm", None)
+                errors.tolerance = f"invalid {loc[-1]}: {error['msg']}"
+                continue
+            if loc == ("requirements", "manufacturing", "finished_hole_tolerance_source"):
+                manufacturing = data["requirements"]["manufacturing"]
+                manufacturing.pop("finished_hole_tolerance_mm", None)
+                manufacturing.pop("finished_hole_tolerance_source", None)
+                manufacturing.pop("finished_hole_tolerance_upper_mm", None)
+                errors.tolerance = f"invalid {loc[-1]}: {error['msg']}"
+                continue
+            if loc == ("requirements", "manufacturing", "finished_hole_tolerance_upper_mm"):
+                data["requirements"]["manufacturing"].pop("finished_hole_tolerance_upper_mm", None)
+                errors.tolerance_upper = f"invalid {loc[-1]}: {error['msg']}"
+                continue
+            if loc[:3] == ("requirements", "manufacturing", "finished_hole_guarantees"):
+                manufacturing = data["requirements"]["manufacturing"]
+                if len(loc) == 3 or not isinstance(loc[3], int):
+                    manufacturing.pop("finished_hole_guarantees", None)
+                    errors.guarantees.setdefault(
+                        "finished_hole_guarantees",
+                        f"invalid finished_hole_guarantees: {error['msg']}",
+                    )
+                else:
+                    dropped_guarantees.add(loc[3])
+                    where = f"finished_hole_guarantees[{loc[3]}]"
+                    errors.guarantees.setdefault(where, f"invalid {where}: {error['msg']}")
+                continue
+            if loc and loc[0] == "wire_terminations":
+                if len(loc) < 2 or not isinstance(loc[1], int):
+                    # The list itself is unusable: none of it can be tied to a pad.
+                    if "wire_terminations" in data:
+                        del data["wire_terminations"]
+                        errors.unattached_wires.append(f"wire_terminations: {error['msg']}")
+                elif loc[1] not in dropped:
+                    row = loc[1]
+                    declaration = data["wire_terminations"][row]
+                    if loc[2:] in (("diameter_mm",), ("source",)) and isinstance(declaration, dict):
+                        declaration.pop("diameter_mm", None)
+                        declaration.pop("source", None)
+                        errors.wires[row] = f"invalid {loc[2]}: {error['msg']}"
+                    else:
+                        # Without a usable reference and pad the declaration
+                        # names no pad; drop it and keep its siblings.
+                        dropped.add(row)
+                        errors.wires.pop(row, None)
+                        where = ".".join(map(str, loc[2:]))
+                        errors.unattached_wires.append(
+                            f"wire_terminations[{row}]: {where + ': ' if where else ''}{error['msg']}"
+                        )
+                continue
+            if len(loc) < 3 or loc[0] != "bom_entries" or not isinstance(loc[1], int):
+                raise
+            row = loc[1]
+            if loc[2] == "lead":
+                pad = None
+                data["bom_entries"][row].pop("lead", None)
+            elif loc[2] == "land_pattern":
+                data["bom_entries"][row].pop("land_pattern", None)
+                field_path = ".".join(map(str, loc[2:]))
+                msg = f"invalid {field_path}: {error['msg']}"
+                if row in errors.land_patterns:
+                    errors.land_patterns[row] += f"; {msg}"
+                else:
+                    errors.land_patterns[row] = msg
+                continue
+            elif loc[2] == "pad_leads" and len(loc) >= 4 and isinstance(loc[3], str):
+                pad = loc[3]
+                overrides = data["bom_entries"][row]["pad_leads"]
+                # Match the raw YAML key to the normalized KiCad pad number.
+                for key in list(overrides):
+                    if str(key) == pad:
+                        del overrides[key]
+            elif loc[2:] == ("pad_leads",):
+                data["bom_entries"][row].pop("pad_leads", None)
+                errors.pad_containers[row] = f"invalid pad_leads: {error['msg']}"
+                continue
+            elif loc[2] == "mounting_holes":
+                data["bom_entries"][row].pop("mounting_holes", None)
+                errors.mounting[row] = f"invalid mounting_holes: {error['msg']}"
+                continue
+            else:
+                raise
+            field_path = ".".join(map(str, loc[2:]))
+            errors.profiles[row, pad] = f"invalid {field_path}: {error['msg']}"
+        if dropped_guarantees:
+            manufacturing = data["requirements"]["manufacturing"]
+            kept_guarantees = [
+                guarantee
+                for index, guarantee in enumerate(
+                    manufacturing.get("finished_hole_guarantees") or []
+                )
+                if index not in dropped_guarantees
+            ]
+            if kept_guarantees:
+                manufacturing["finished_hole_guarantees"] = kept_guarantees
+            else:
+                manufacturing.pop("finished_hole_guarantees", None)
+        if dropped:
+            kept: list[object] = []
+            remapped: dict[int, str] = {}
+            for row, declaration in enumerate(data["wire_terminations"]):
+                if row in dropped:
+                    continue
+                if row in errors.wires:
+                    remapped[len(kept)] = errors.wires[row]
+                kept.append(declaration)
+            data["wire_terminations"] = kept
+            errors.wires = remapped
+    return ProjectSpec.model_validate(data), errors
 
 
 # ---------------------------------------------------------------------------

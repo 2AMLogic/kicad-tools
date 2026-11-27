@@ -338,7 +338,7 @@ def test_endpoint_on_other_layer_cannot_copy_surface_pad():
 
 def test_offset_conductor_cap_is_not_translated():
     pad = Pad(10, 9.5, 0.3, 1.55, NET, NET_NAME)
-    stub = Segment(10, 10.5, 10, 11.5, 0.05, Layer.F_CU, NET, NET_NAME)
+    stub = Segment(pad.x, pad.y, 10, 11.5, 0.05, Layer.F_CU, NET, NET_NAME)
     escape = EscapeRoute(pad, EscapeDirection.NORTH, (10, 11.5005), Layer.F_CU, segments=[stub])
     terminal = escape_endpoint_pad(pad, escape, fallback_width=0.2)
     assert terminal.width / 2 + abs(terminal.y - stub.y2) <= stub.width / 2

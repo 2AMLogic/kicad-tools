@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -296,6 +297,153 @@ def test_outer_archive_members_resolve_against_committed_tree(mod, tmp_path):
         )
 
 
+def test_board05_recipe_zip_refreshes_to_the_published_layout(mod, tmp_path):
+    from kicad_tools.cli.readiness_cmd import write_manufacturing_archive
+
+    mfg = tmp_path / "manufacturing"
+    (mfg / "gerbers").mkdir(parents=True)
+    (mfg / "gerbers/gerbers.zip").write_bytes(b"plots")
+    (mfg / "manifest.json").write_bytes(b"original manifest")
+    archive = write_manufacturing_archive(mfg)
+    names = {"gerbers/gerbers.zip", "manifest.json"}
+    with zipfile.ZipFile(archive) as raw:
+        assert set(raw.namelist()) == {f"manufacturing/{name}" for name in names}
+
+    (mfg / "manifest.json").write_bytes(b"updated manifest")
+    assert set(mod.rebuild_archive(archive, [mfg], flat_bundle_members=names)) == names
+    with zipfile.ZipFile(archive) as published:
+        assert set(published.namelist()) == names
+        assert all(published.read(name) == (mfg / name).read_bytes() for name in names)
+    final_bytes = archive.read_bytes()
+    assert mod.rebuild_archive(archive, [mfg], flat_bundle_members=names) == []
+    assert archive.read_bytes() == final_bytes
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        ["manifest.json", "manufacturing/artwork.zip"],
+        ["manufacturing/manifest.json"],
+        ["manufacturing/manifest.json", "manufacturing/artwork.zip", "extra.pdf"],
+    ],
+)
+def test_board05_rejects_an_incomplete_or_mixed_recipe_zip(mod, tmp_path, members):
+    mfg = tmp_path / "manufacturing"
+    mfg.mkdir()
+    archive = tmp_path / "manufacturing.zip"
+    mod.write_deterministic_zip(archive, dict.fromkeys(members, b"old"))
+    raw = archive.read_bytes()
+    with pytest.raises(mod.GateFailure, match="inventory"):
+        mod.rebuild_archive(archive, [mfg], flat_bundle_members={"artwork.zip", "manifest.json"})
+    assert archive.read_bytes() == raw
+
+
+@pytest.mark.parametrize("selection", ["bare", "stem", "explicit"])
+def test_refresh_uses_selected_map_for_delivered_board(mod, tmp_path, selection):
+    out = tmp_path / "output"
+    out.mkdir()
+    pcb = out / "board_routed.kicad_pcb"
+    schematic = out / "board.kicad_sch"
+    pcb.touch()
+    schematic.touch()
+    bare = out / "net_class_map.json"
+    bare.write_bytes(b"bare")
+    if selection != "bare":
+        (out / "board_routed.net_class_map.json").write_bytes(b"stem")
+    if selection == "explicit":
+        (tmp_path / "chosen.json").write_bytes(b"explicit")
+        (out / "readiness.json").write_text('{"selected_net_class_map":"chosen.json"}')
+    derived, replaces = mod.delivered_project_members(pcb, schematic)
+    archive = out / "kicad_project.zip"
+    member = "board.net_class_map.json"
+    mod.write_deterministic_zip(archive, {member: b"old"})
+    assert mod.rebuild_archive(archive, [out], derived=derived, replaces=replaces) == [member]
+    with zipfile.ZipFile(archive) as z:
+        assert z.read(member) == selection.encode()
+    mod.write_deterministic_zip(archive, {schematic.name: b""})
+    before = archive.read_bytes()
+    assert mod.rebuild_archive(archive, [out], derived=derived, replaces=replaces) == []
+    assert archive.read_bytes() == before
+
+
+def test_rebuild_archive_refreshes_the_delivered_project_members(mod, tmp_path):
+    """A package filed under the root sheet's basename refreshes from the routed board (#10108)."""
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "board.kicad_sch").write_text("sch")
+    (out / "board.kicad_pcb").write_bytes(b"unrouted placement")
+    (out / "board.kicad_pro").write_bytes(b'{"unrouted": true}')
+    (out / "board_routed.kicad_pcb").write_bytes(b"routed v2")
+    (out / "board_routed.kicad_pro").write_bytes(
+        b'{"meta": {"filename": "board_routed.kicad_pro"}}'
+    )
+    (out / "board_routed.kicad_dru").write_bytes(b"(version 1)")
+    pcb = out / "board_routed.kicad_pcb"
+    derived, replaces = mod.delivered_project_members(pcb, out / "board.kicad_sch")
+    assert sorted(derived) == [
+        "VERSION.md",
+        "board.kicad_dru",
+        "board.kicad_pcb",
+        "board.kicad_pro",
+    ]
+    assert replaces == {
+        "board_routed.kicad_dru",
+        "board_routed.kicad_pcb",
+        "board_routed.kicad_pro",
+    }
+    archive = tmp_path / "kicad_project.zip"
+    mod.write_deterministic_zip(
+        archive,
+        {
+            "VERSION.md": derived["VERSION.md"],
+            "board.kicad_dru": derived["board.kicad_dru"],
+            "board.kicad_pcb": b"routed v1",
+            "board.kicad_pro": derived["board.kicad_pro"],
+            "board.kicad_sch": b"sch",
+        },
+    )
+
+    assert mod.rebuild_archive(archive, [out], derived=derived, replaces=replaces) == [
+        "board.kicad_pcb"
+    ]
+    with zipfile.ZipFile(archive) as z:
+        assert z.read("board.kicad_pcb") == b"routed v2"
+        assert z.read("board.kicad_pro") == b'{"meta": {"filename": "board.kicad_pro"}}'
+    assert mod.rebuild_archive(archive, [out], derived=derived, replaces=replaces) == []
+
+    # A bundle written before the renaming -- boards 05-07 file the unrouted
+    # original project beside the routed one -- refreshes member by member.
+    legacy = tmp_path / "legacy.zip"
+    mod.write_deterministic_zip(
+        legacy,
+        {
+            "board.kicad_pro": b'{"unrouted": true}',
+            "board.kicad_sch": b"sch",
+            "board_routed.kicad_pcb": b"routed v1",
+            "board_routed.kicad_pro": b'{"meta": {"filename": "older.kicad_pro"}}',
+        },
+    )
+    assert mod.rebuild_archive(legacy, [out], derived=derived, replaces=replaces) == [
+        "board_routed.kicad_pcb",
+        "board_routed.kicad_pro",
+    ]
+    with zipfile.ZipFile(legacy) as z:
+        assert z.read("board.kicad_pro") == b'{"unrouted": true}'
+        assert z.read("board_routed.kicad_pcb") == b"routed v2"
+        assert (
+            z.read("board_routed.kicad_pro") == b'{"meta": {"filename": "board_routed.kicad_pro"}}'
+        )
+
+    (out / "board.kicad_pcb").rename(out / "placement.kicad_pcb")
+    (out / "board_routed.kicad_pcb").rename(out / "board.kicad_pcb")
+    (out / "board_routed.kicad_pro").rename(out / "board.kicad_pro")
+    (out / "board_routed.kicad_dru").rename(out / "board.kicad_dru")
+    assert mod.delivered_project_members(out / "board.kicad_pcb", out / "board.kicad_sch") == (
+        {},
+        frozenset(),
+    )
+
+
 # ---------------------------------------------------------------- known issues (#7323)
 CHECKED_AT = "2026-10-18T00:00:00+00:00"
 ADVISORY = "7220:one-sided thermal:advisory"
@@ -500,6 +648,25 @@ def test_repin_staged_gates_and_publishes_a_staged_copy(mod, tmp_path, monkeypat
     )
     # dry_run: the committed board is untouched
     assert json.loads((board / "output" / "readiness.json").read_text())["checked_at"] != CHECKED_AT
+
+
+def test_new_buyer_file_is_published_loose_and_archived(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    source = board / "fixture.patch"
+    source.write_bytes(b"patch payload\n")
+    member = "engineering/fixture.patch"
+    loose = board / "output/manufacturing" / member
+    cfg = replace(mod.BOARDS[board.name], additional_bundle_files=((source.name, member),))
+    monkeypatch.setitem(mod.BOARDS, board.name, cfg)
+
+    assert loose.relative_to(board).as_posix() in mod.refresh(board, CHECKED_AT, dry_run=True)
+    assert not loose.exists()
+    mod.refresh(board, CHECKED_AT)
+    with zipfile.ZipFile(board / "output/manufacturing.zip") as archive:
+        assert archive.read(member) == loose.read_bytes() == source.read_bytes()
+    report = json.loads((board / "output/readiness.json").read_bytes())
+    assert report["inputs"][loose.relative_to(board).as_posix()] == mod.sha256(source)
+    assert mod.refresh(board, CHECKED_AT, dry_run=True) == []
 
 
 def test_waivers_sidecar_beside_the_routed_pcb_is_bound_into_inputs(mod, tmp_path, monkeypatch):

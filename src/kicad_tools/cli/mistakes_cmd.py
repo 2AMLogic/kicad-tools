@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kicad_tools.explain.mistakes import MistakeCategory
+from kicad_tools.explain.mistakes import DECOUPLING_INVENTORY_REPORT_KEY, MistakeCategory
 from kicad_tools.findings import findings_payload, from_violation_dict
 
 if TYPE_CHECKING:
@@ -237,11 +237,14 @@ def _analyze_pcb(args) -> int:
     # of silently looking like a clean pass -- mirrors the #4011
     # vacuity-guard discipline used for `kct check`'s `lvs` sub-check.
     detector = MistakeDetector()
+    # Issue #10241: the JSON report's decoupling inventory comes from the
+    # registered check's own run, not a second instance and schematic parse.
+    reports: dict[str, Any] | None = {} if args.format == "json" else None
     if args.category:
         cat = MistakeCategory(args.category)
-        mistakes, coverage = detector.detect_by_category_with_coverage(pcb, cat)
+        mistakes, coverage = detector.detect_by_category_with_coverage(pcb, cat, reports)
     else:
-        mistakes, coverage = detector.detect_with_coverage(pcb)
+        mistakes, coverage = detector.detect_with_coverage(pcb, reports)
 
     # Issue #6006: stable keys + evidence hashes, then evidence-bound waivers.
     waiver_outcome, code = _apply_waivers(args, pcb, pcb_path, mistakes, coverage)
@@ -262,7 +265,13 @@ def _analyze_pcb(args) -> int:
     if args.format == "json":
         from kicad_tools.explain.mistake_waivers import board_origin
 
-        _output_json(mistakes, coverage, advisories, board_origin(pcb))
+        _output_json(
+            mistakes,
+            coverage,
+            advisories,
+            board_origin(pcb),
+            decoupling_inventory=_decoupling_inventory(reports),
+        )
     elif args.format == "sarif":
         from kicad_tools.explain.mistake_waivers import board_origin
 
@@ -499,11 +508,23 @@ def _summary(mistakes: list, advisories: list) -> dict:
     }
 
 
+def _decoupling_inventory(reports: dict[str, Any] | None) -> list[dict] | None:
+    """Issue #10134: per-pin decoupling inventory (clean and empty pins too).
+
+    From the registered decoupling check's own run (Issue #10241), so it
+    shares the findings' settings and schematic parse.  None when the check
+    did not produce one (another ``--category``, or the check was incomplete).
+    """
+    rows = (reports or {}).get(DECOUPLING_INVENTORY_REPORT_KEY)
+    return None if rows is None else [row.to_dict() for row in rows]
+
+
 def _output_json(
     mistakes: list,
     coverage: list | None = None,
     advisories: list | None = None,
     origin: tuple[float, float] = (0.0, 0.0),
+    decoupling_inventory: list[dict] | None = None,
 ) -> None:
     """Output mistakes (and coverage, issue #4899) as JSON."""
     coverage = coverage or []
@@ -521,6 +542,8 @@ def _output_json(
         "coverage": [c.to_dict() for c in coverage],
         "coverage_complete": all(c.status == "ran" for c in coverage),
     }
+    if decoupling_inventory is not None:
+        data["decoupling_inventory"] = decoupling_inventory
     print(json.dumps(data, indent=2))
 
 

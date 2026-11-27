@@ -6,9 +6,22 @@ expansion, pad-size and annular-ring checks. See [mask geometry](mask-geometry.m
 for the underlying geometry inspection APIs.
 
 To repair a track that enters its own pad off-centre (the `same-net own-pad
-entry` relation) instead of only flagging it, run the `fix-drc` repair pass:
+entry` relation), or to nudge a disjoint `same-net pass-through` track or via
+clear of its own pad's opening, run the `fix-drc` repair pass:
 `kct fix-drc board.kicad_pcb --only mask-copper` — see the
-[CLI reference](../reference/cli.md#fix-drc).
+[CLI reference](../reference/cli.md#fix-drc). The pass-through nudge
+translates the whole conductor (dragging every same-net end joined to it)
+away from the opening until it clears the policy clearance plus a margin;
+moves that would crowd other copper, a drill, another opening or pull an end
+out of a pad it terminates in are declined with a reason, and every kept move
+is re-checked on the saved board. On a partially routed net, the check preserves
+each group of pads already joined by copper. `pad_connection_lost` identifies
+a refused move that would split a group. By default, a pass-through nudge also
+compares KiCad's DRC results before and after the move. A new error or an
+increase in unconnected items rejects the candidate, including on boards
+without pours. On boards with pours, the command
+refills a private copy with the original project rules and checks the saved
+copper before publishing the repair.
 
 Supply a process-specific clearance requirement with its source, process and
 revision. A manufacturer profile, mask expansion or minimum mask-web width does
@@ -24,8 +37,9 @@ replace all four policy values with the requirement for your actual process.
 do not fail the verdict. Mask expansion is the board's native effective
 expansion. An explicit `--mask-copper-config` overrides the default policy,
 `--skip mask_to_copper` disables it, and runs without `--mfr` (or with a
-manufacturer that has no cited policy) stay opt-in. Without native KiCad 10.0.5
-the result is `incomplete` with the reason shown, never a silent pass.
+manufacturer that has no cited policy) stay opt-in. An unqualified KiCad build
+leaves the check incomplete and blocks sign-off. The coverage note names the
+available qualified releases.
 `MaskCopperPolicy.warning_clearance_mm` enables the warning tier in custom
 requests too.
 
@@ -51,10 +65,11 @@ Save this request as `mask-request.json`:
 }
 ```
 
-Choose the Python interpreter that can import KiCad's `pcbnew` module. The CLI
-and Python must both use KiCad 10.0.5. The object-attribution profile reproduces
-that version's plotting branches; other versions require separate verification
-and currently produce incomplete coverage. `native_command` and
+Choose the Python interpreter that can import KiCad's `pcbnew` module. Use the
+same qualified release for both `kicad-cli` and `pcbnew`. KiCad 10.0.5, 10.0.6
+and 10.0.8 have each passed the native plot comparison. With Docker available,
+`KCT_KICAD_DOCKER=1` runs both passes in the pinned KiCad image when using the
+default commands. `native_command` and
 `native_python_command` are argument lists, so container launchers can be used
 without shell interpolation. Both processes must see the temporary source files
 at the same absolute paths; set `native.scratch_dir` to a shared mounted directory
@@ -239,7 +254,8 @@ All of these must hold, otherwise the measurement keeps its verdict:
   "thermal relief for through-hole pads only" counts only on a plated
   through-hole pad. The relief gap and spoke width are the pad's overrides when
   set, otherwise the zone's. A solid, "none" or unreadable connection never
-  qualifies, and a custom `zone_connection` DRC rule already makes the native run
+  qualifies as thermal (solid has its own class, below), and a custom
+  `zone_connection` DRC rule already makes the native run
   incomplete;
 - **the fill shows the spokes**: it overlaps the pad by more than `u`;
 - **nothing beyond the pad is exposed**, exactly as for `within_own_pad`, so pour
@@ -255,8 +271,8 @@ So the copper this class excuses is the spokes and only the spokes: each spoke's
 crossing of the pad edge out to 0.15 mm. The pour body must lie at least 0.15 mm
 from the opening. These stay errors:
 
-- a solid pad-to-pour connection (untested by the fab), whatever the fill looks
-  like, and a thermal declaration whose fill is solid around the pad;
+- a thermal declaration whose fill is solid around the pad, and a solid
+  declaration whose fill shows spokes or no join;
 - a same-net pour not connected to the pad, a separate same-net zone or island
   beside the opening, or extra copper of the same zone in the band;
 - a pour body inside 0.15 mm of the opening, even with spokes. The fab result
@@ -269,8 +285,31 @@ from the opening. These stay errors:
 
 The measurement records `pour_spokes`, `pour_relief_gap_mm` and
 `pour_spoke_width_mm`; for this class `beside_owner_excess_mm2` is the non-spoke
-copper found in the band (0). A solid-connection fab result would be the evidence
-to revisit the class.
+copper found in the band (0).
+
+### A pad solid-connected to its own pour
+
+A same-net zone the pad is **solid**-connected to is `own_pour_solid` at info
+(Issue #9436). JLCDFM (`--mfr jlcpcb`, 2026-11-18) reported 0 danger / 0 warning
+for 13 such pads at 0 mm expansion. The conditions are those above except the
+spoke band, which does not apply (a solid pour body lies inside it):
+
+- a plain pad with a mask margin of 0 or more;
+- the *effective* connection is solid: the pad's override, else its footprint's,
+  else the zone's; "thermal relief for through-hole pads only" counts as solid on
+  an SMD pad;
+- the fill overlaps the pad by more than `u` and nothing is exposed beyond the pad;
+- every piece of the zone within the examined band touches the pad, so a
+  disconnected same-zone island beside the opening stays an error;
+- the fill joins the pad continuously. A relief spoke has parallel sides at the
+  pad rim and widens into the body of the pour beyond the gap. The checker
+  follows those sides in the actual fill, even when the zone clips a relief
+  or the gap differs from its setting. A neighbouring clearance cutout can
+  leave a solid connection, as can a narrow zone running through the pad.
+
+An unconnected same-net pour, a positive expansion with pour in the ring,
+different-net pour and unreadable connection data stay errors. The measurement
+has no `pour_*` fields.
 
 ## Declare a particular connected escape
 
@@ -371,3 +410,49 @@ be treated as fully attributed merely because other copper covers it. Inspect
 the retained Gerbers, source hashes and native object provenance when reviewing
 results. A passing assessment applies to its recorded inputs and supplied policy;
 it is not supplier approval or qualification of an entire manufacturing order.
+
+### Review nominal exposure and the outgoing artwork
+
+In stdout JSON and the saved report, each `mask_copper_assessments[].nominal_exposure`
+summarizes the board and its two faces. Start with `opening_counts`. Each connected
+plotted opening counts once, including a quiet land. Each face lists its openings
+with their bounds in mm, source instance UUIDs, land reference and net. Merged
+regions and mask-only pads without a proven land are unresolved. Exclusions list
+the source UUID and reason, including unnetted pads, mechanical holes and graphics.
+
+`finding_counts` counts opening–conductor measurements. Follow the zero-based
+`measurement_indices` on an opening or in a face's category to the assessment's
+full `measurements` array. Two traces on one land can contribute two findings.
+`measured_opening_counts` gives the denominator of fully evaluated matched
+openings and the number of those openings exposing each kind of copper. For
+example, two foreign-net traces crossing one land count as two findings and
+one exposed opening. Zeros for this subset apply only to its evaluated lands.
+
+| Category | Nominal geometry on a matched land |
+| --- | --- |
+| `foreign_net` | Any positive intersection of other-net copper with the opening, including inside the land. |
+| `same_net_beyond_land` | Positive area of same-net copper inside the opening and outside the owning land. |
+| `registration_or_near_pad_only` | A policy violation, uncertain measurement or warning with neither nominal exposure. Inspect clearance and beside-owner excess. |
+| `no_nominal_exposure` | A measured pair with neither nominal exposure nor a near-pad policy finding. |
+| `unevaluated` / `excluded` | Ownership, net or geometry was insufficient to classify the pair, or the opening was outside the component check. |
+
+Areas use mm² and distances use mm. The nominal area threshold is zero, so
+touching alone contributes no exposure. The report records the assessor's
+construction uncertainty in mm. A same-net trace can have positive opening
+overlap, zero beyond-land area and positive beside-owner excess. Its clearance
+can still fail the configured fabrication policy. Use the assessment's
+`policy`, `coverage`, `passed` and measurement dispositions for sign-off.
+Physical registration on a manufactured board requires separate evidence.
+
+Check each face's `status`. With partial coverage, positive finding counts are
+observations and an unknown total is `null`. A missing layer or a legacy report
+without an aperture inventory cannot establish zero exposure. An unevaluated
+area in a measurement remains `null`.
+
+The artwork source `internal_replot` identifies the checker's Gerbers. To compare
+an outgoing ZIP, identify each member by layer and hash its uncompressed file
+bytes, for example `unzip -p order.zip 'board-F_Cu.gbr' | sha256sum` for a
+known, unique front copper member. Compare with `faces["F.Mask"].gerber_sha256`
+for both F.Cu and F.Mask, then repeat for B.Cu and B.Mask under B.Mask.
+Only two matching digests bind that face's result to the outgoing files.
+A missing, ambiguous or different member leaves that face unverified.

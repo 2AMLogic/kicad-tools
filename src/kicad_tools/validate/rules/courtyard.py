@@ -37,7 +37,7 @@ missing and unresolvable outlines, so sign-off refuses until every footprint
 can be evaluated.
 
 Note on ``fp_poly``: the schema parser now records ``fp_poly`` vertices in
-:attr:`FootprintGraphic.points`.  This rule *does* consume them when present
+:attr:`FootprintGraphic.boundary_points`.  This rule *does* consume them when present
 (a closed polygon is directly usable).  ``fp_circle`` courtyards (stock
 fiducials / mounting holes) also resolve now, via the radius the parser derives
 from ``center``/``end``; ``fp_arc`` courtyards do not.  The "unresolved" info

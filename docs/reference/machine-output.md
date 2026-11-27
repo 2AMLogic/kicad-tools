@@ -153,22 +153,27 @@ is the separate mechanical sweep **#4674**.
 
 `kct route --format json` now reaches the existing routing-diagnostics formatter.
 For boards with placement-invalid nets, the final attempt summary also contains
-`placement_disposition`, including early outcomes. This flag controls diagnostic
-payloads; routing progress and all strategy paths are not yet normalized to the
+`placement_disposition`, including early outcomes. When all requested nets complete
+and verified DRC alone fails, the same JSON object carries `exit_code: 3`,
+`output_written`, and `summary.failure_reason: "post_route_drc"` on both layer
+paths. This flag controls diagnostic payloads; routing progress and all strategy paths are not yet normalized to the
 general single-document stdout contract. Callers must not treat parser flag
 coverage alone as proof that the entire stream is one JSON document. See the
 [route reference](cli.md#routing-around-invalid-placement) for disposition scope.
 
-Every `kct route --format json` code path that finishes routing prints the
-same document -- `summary` (with `nets_requested`, `nets_routed` and the single
-final `summary.verdict`), `successful_routes`, `failed_routes`, `suggestions`
-and `placement_disposition` -- whether layer escalation is on or off
-(`--no-auto-layers`), quiet or not, and for every `--strategy` (Issue #6277).
-Only runs that never built a router (dry runs, early validation exits) fall back
-to the minimal `{"exit_code", "verdict"}` document, and a run killed by
-`--timeout` prints no document.
+The detailed `kct route --format json` document includes `summary` (with
+`nets_requested`, `nets_routed` and `verdict`), `successful_routes`,
+`failed_routes`, `suggestions` and `placement_disposition` (Issue #6277).
+Direct routing and default layer escalation emit this form. Consumers should
+also accept a document with only `exit_code` and `verdict`. Dry runs, early
+validation exits and some completed escalation runs emit this shorter form.
+For example, `--no-auto-layers --adaptive-rules` can finish routing and emit
+only `{"exit_code":0,"verdict":"success"}`. When verified post-route DRC is the
+sole failure, adaptive routing with either layer setting keeps the top-level
+`exit_code` and `verdict` and adds the routing summary with
+`failure_reason: "post_route_drc"`. A run killed by `--timeout` prints no document.
 
-The document also carries a `grid` object -- the routing grid the run
+The detailed document also carries a `grid` object -- the routing grid the run
 actually built (Issue #6875):
 
 | Key | Meaning |
@@ -193,6 +198,18 @@ kicad-cli crashed, was killed or hit its per-call DRC timeout (Issue #6724).
 The board is saved but not verified, so run `kct check` on it before
 manufacturing. It only ever replaces a would-be exit 0 (Issue #6273; see the
 [`kct route` exit-code ladder](cli.md#kct-route-ladder)).
+
+On any finishing path — a direct attempt with all escalation disabled (for
+example `--layers 2` alone) or the default layer escalation —
+`summary.failure_reason` is `"post_route_drc"` when all requested nets routed,
+the saved board passed the connectivity check, and post-route DRC is the sole
+failure. The command exits 3 and `summary.verdict` is `"failed"`. Other
+exit-3 causes omit the key (Issue #10049). Before Issue #10057 the default
+`--auto-layers` path alone returned exit 0 with `summary.verdict` set to
+`"success"` and no `failure_reason` for this case; scripts that accepted
+exit 0 there now see exit 3. Treat both `summary` and the reason as
+optional. When a clean board is required, run
+`kct check <routed.kicad_pcb> --drc-only` on the saved board after any final copper edits.
 
 Every default route also builds a report-only `RoutingPlan` (tile-level
 demand/capacity/overflow from the tile-based global-routing pass) written
@@ -369,9 +386,9 @@ an improvement or an enforceable rule set from it: `optimize-placement`,
 
 | Command | Document |
 |---|---|
-| `optimize-placement` | `{"command": "optimize-placement", "pcb", "output", "strategy", "seed_method", "max_iterations", "board": {width_mm, height_mm, components, nets}, "mode": "evaluate"\|"optimize", "scores": {…}, "feasible", "infeasible_detail", "iterations", "wall_time_s", "interrupted", "overlaps_remaining", "allow_infeasible", "dry_run", "saved", "written_to", "success"}` — `scores` is `{"current": …}` under `--dry-run` and `{"initial", "final"}` otherwise; each score is `{total, feasible, breakdown}` with the breakdown taken straight off the cost dataclass. The `--dry-run` document additionally carries `"wirelength_estimators": {centre_anchored_mm, pad_anchored_mm, delta_mm, delta_pct, scored, pads_available, pad_count}` — the same layout measured both ways (issue #4831 M5); `scored` names the one the objective used (`--pad-anchored-wirelength` switches it), the other is report-only and `delta_pct` is `null` when the centre-anchored estimate is 0. Both documents carry `"decoupling": [{net, cap, pin, distance_mm}, …]` — each decoupling cap's assigned IC supply pin and its distance in the scored (`--dry-run`) or written placement, empty when the board has no cap/supply-pin structure or the `decoupling` weight is 0 (issue #6020). Under `--route-check` the optimize document also carries `"route_check": {enabled, budget, stages: [{stage, skipped, accepted, incumbent, candidate, note}], routes_run, route_wall_time_s, accepted_stage, warnings}`; each `incumbent`/`candidate` is `{nets_routed, nets_requested, completion, drc_errors, exit_code, wall_time_s, reproducible, error}`, and `route_wall_time_s` / `wall_time_s` are volatile. The key is absent without the flag (issue #6234). The optimize document also carries `"snap_silk_repair"`: `null` when the decoupling snap moved nothing, else `{affected, moved, unresolved: [{reference, status, reason}], error}` — the references whose silkscreen text was re-anchored after the snap, and any it had to leave in place (issue #6256) |
+| `optimize-placement` | `{"command": "optimize-placement", "pcb", "output", "strategy", "seed_method", "max_iterations", "board": {width_mm, height_mm, components, nets}, "mode": "evaluate"\|"optimize", "scores": {…}, "feasible", "infeasible_detail", "iterations", "wall_time_s", "interrupted", "overlaps_remaining", "allow_infeasible", "dry_run", "saved", "written_to", "success"}` — `scores` is `{"current": …}` under `--dry-run` and `{"initial", "final"}` otherwise; each score is `{total, feasible, breakdown}` with the breakdown taken straight off the cost dataclass. The `--dry-run` document additionally carries `"wirelength_estimators": {centre_anchored_mm, pad_anchored_mm, delta_mm, delta_pct, scored, pads_available, pad_count}` — the same layout measured both ways (issue #4831 M5); `scored` names the one the objective used (`--pad-anchored-wirelength` switches it), the other is report-only and `delta_pct` is `null` when the centre-anchored estimate is 0. Both documents carry `"decoupling": [{net, cap, pin, distance_mm}, …]` — each decoupling cap's assigned IC supply pin and its distance in the scored (`--dry-run`) or written placement, empty when the board has no cap/supply-pin structure or the `decoupling` weight is 0 (issue #6020). Under `--route-check` the optimize document also carries `"route_check": {enabled, budget, stages: [{stage, skipped, accepted, incumbent, candidate, note}], routes_run, route_wall_time_s, accepted_stage, warnings}`; each `incumbent`/`candidate` is `{nets_routed, nets_requested, completion, drc_errors, exit_code, wall_time_s, reproducible, error}`, and `route_wall_time_s` / `wall_time_s` are volatile. The key is absent without the flag (issue #6234). The optimize document also carries `"snap_silk_repair"`: `null` when the decoupling snap moved nothing, else `{affected, moved, unresolved: [{reference, status, reason}], error}` — the references whose silkscreen text was re-anchored after the snap, and any it had to leave in place (issue #6256). It also carries `"silk_fix"`: the default silk-legalisation pass's `{applied, manufacturer, total_fixed, total_moved, unresolved: [{kind, item, detail}], board}` summary (Issue #9799), or an `{applied: false, error}` document when the pass could not run; `null` under `--no-silk-fix` or when no manufacturer profile resolved |
 | `optimize-traces` | `{"command": "optimize-traces", "pcb", "output", "net_filter", "net_pattern", "optimizations": {merge_collinear, eliminate_zigzags, convert_45_corners, remove_jogs, compress_staircase, pull_tight, shorten_detours, chamfer_size_mm}, "drc_aware", "manufacturer", "layers", "copper_oz", "stats": {nets_optimized, nets_rolled_back, segments_before, segments_after, segment_reduction_pct, corners_before, corners_after, length_before_mm, length_after_mm, length_reduction_pct, drc_errors_before, drc_errors_after, nets_touched: [net], per_net: [{net, segments_before, segments_after, length_before_mm, length_after_mm, rolled_back, changed}]}, "dry_run", "saved", "written_to", "success"}` — with `--voltage-map` the document also carries `voltage_map` and `creepage_skipped: [{net_a, net_b, count}]` (issue #8300); `stats.per_net` has one entry per optimized net; `stats.nets_touched` lists the nets whose geometry actually changed (`changed` per net; issue #8299); `-v/--verbose` prints the same data as a per-net table in text mode (issue #7065) |
-| `route-auto` | `{"command": "route-auto", "pcb", "output", "strategy", "dry_run", "nets": [...], "nets_requested", "nets_routed", "success"}` — one `nets[]` entry per requested net in request order: routed entries carry `success`/`partial`/`strategy_used`/`metrics`/`segments_written`/`warnings`/`pads_connected`/`pads_total`/`error`/`alternative_strategies` (plus `rolled_back`/`rolled_back_to_pass` when a regressing pass was undone -- such an entry reports `success: false`, and `resumed: true` for a net skipped because the `--resume` checkpoint already completed it, Issue #5945; a partial or failed entry also carries `unrouted` + `unrouted_diagnosis`, the `kct route` congested/blocked/unclassified schema, unless `--diagnose-unrouted-budget 0`, Issue #6001), `--dry-run` entries carry the preview (`would_route`, `via_drill_mm` + `via_drill_source`, …). Under `--lint-gate` the document also carries `lint_gate` (below) and, on a rollback, every routed entry reports `success: false` with `lint_gate_rolled_back: true` |
+| `route-auto` | `{"command": "route-auto", "pcb", "output", "strategy", "dry_run", "nets": [...], "nets_requested", "nets_routed", "success"}` — one `nets[]` entry per requested net in request order: routed entries carry `success`/`partial`/`strategy_used`/`metrics`/`segments_written`/`warnings`/`pads_connected`/`pads_total`/`error`/`alternative_strategies` (plus `rolled_back`/`rolled_back_to_pass` when a regressing pass was undone -- such an entry reports `success: false`, and `resumed: true` for a net skipped because the `--resume` checkpoint already completed it, Issue #5945; a partial or failed entry also carries `unrouted` + `unrouted_diagnosis`, the `kct route` congested/blocked/unclassified schema, unless `--diagnose-unrouted-budget 0`, Issue #6001), `--dry-run` entries carry the preview (`would_route`, `via_drill_mm` + `via_drill_source`, …). Under `--lint-gate` the document also carries `lint_gate` (below) and, on a rollback, every routed entry reports `success: false` with `lint_gate_rolled_back: true`. When the default silk-legalisation pass ran on the published output the document also carries `"silk_fix"`: `{applied, manufacturer, total_fixed, total_moved, unresolved: [{kind, item, detail}], board}` (Issue #9799); the key is absent when the run publishes no new copper, the lint gate rolls back the board, no manufacturer profile resolves, or `--no-silk-fix` is set |
 | `reason` | `{"command": "reason", "pcb", "output", "dry_run", "warnings", "drc": {ran, source, …}, "board": {…}, "mode": "prompt"\|"analyze"\|"export-state"\|"auto-route", …, "success"}` — plus the mode's own payload: `prompt`, `analysis`, `state` + `state_output`, or `auto_route` (`attempted`/`routed`/`nets[]`) with `saved`/`written_to` |
 | `creepage-export-rules` | `{"command": "creepage-export-rules", "project", "pcb", "dru", "voltage_map", "standard", "pollution_degree", "material_group", "hv_threshold_v", "dru_floor_mm", "domains", "net_domains", "nets_assigned", "rules": [{name, condition, min_mm}], "bridging_exemptions", "dru_block", "dry_run", "written", "skipped_reason", "success"}` — `dru_block` is carried only on the `--dry-run` path (mirroring the prose that prints it instead of writing it) |
 

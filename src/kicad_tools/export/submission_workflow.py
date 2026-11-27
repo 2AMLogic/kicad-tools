@@ -51,6 +51,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..cli.board_readiness import (
+    ReadinessLayout,
+    board_directory_for_pcb,
+    declared_readiness_layout,
+    is_manufacturing_manifest,
+    readiness_input_hash_matches,
+    validate_source_pcb,
+)
 from ..parts.jlcpcb_api import JLCCredentials, JLCNoInventorySourceError
 from .submission_plan import (
     FactorySettings,
@@ -205,12 +213,13 @@ def _verify_file_records(bundle_root: Path, files: dict[str, Any]) -> None:
             )
 
 
-def _load_manifest(bundle_root: Path) -> dict[str, Any]:
+def _load_manifest(bundle_root: Path) -> tuple[dict[str, Any], bytes]:
     manifest_path = bundle_root / "manifest.json"
     if not manifest_path.is_file():
         raise WorkflowError("Tapeout manifest.json not found in bundle")
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw = manifest_path.read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
     except ValueError as exc:
         raise WorkflowError("Tapeout manifest.json is not valid JSON") from exc
     if not isinstance(manifest, dict):
@@ -218,7 +227,7 @@ def _load_manifest(bundle_root: Path) -> dict[str, Any]:
     files = manifest.get("files")
     if not isinstance(files, dict) or not files:
         raise WorkflowError("Tapeout manifest lists no files")
-    return manifest
+    return manifest, raw
 
 
 #: Receipt checks that must be present and ``passed`` before a bundle can be signed.
@@ -259,34 +268,90 @@ def _rehash_receipt_inputs(
 
 
 _READINESS_LOCATION_MSG = (
-    "Readiness receipt must be <board>/output/readiness.json or "
-    "<board>/output/readiness-verification/readiness.json (where `kct readiness --verify` writes it)"
+    "Readiness receipt must be readiness.json or readiness-verification/readiness.json "
+    "in the selected board's declared output root (by default <board>/output/readiness.json "
+    "or <board>/output/readiness-verification/readiness.json)"
 )
 
 
-def _load_readiness(
-    readiness: Path, board_sha: str, bundle_shas: dict[str, str], bundle_root: Path
-) -> str:
-    """Refuse unless a ``kct readiness`` receipt proves every gate passed for this board.
+def _selected_layout(board: Path) -> ReadinessLayout | None:
+    try:
+        return declared_readiness_layout(board, board_directory_for_pcb(board))
+    except ValueError as exc:
+        raise WorkflowError(str(exc)) from exc
 
-    Returns the receipt's sha256. The receipt must be ``<board>/output/readiness.json`` or
-    ``<board>/output/readiness-verification/readiness.json`` (``--verify``'s location),
-    ``schema_version`` 1, ``ready`` with no ``blockers``, every check ``passed``
-    (including :data:`REQUIRED_GATE_CHECKS`). Every ``inputs`` / ``external_inputs``
-    entry is re-hashed against disk (as ``read_readiness`` does), exempting only
-    the bundle ``manifest.json`` that sign-off rewrites. Its ``inputs`` must hash
-    a ``.kicad_pcb`` equal to ``--board``, and every bundle file (bar
-    ``manifest.json``) must appear in ``inputs`` by sha256.
-    """
-    if not readiness.is_file():
-        raise WorkflowError(f"Readiness receipt not found: {readiness}")
-    raw = readiness.read_bytes()
+
+def _receipt_locations(generated: Path) -> tuple[Path, Path]:
+    return generated, generated.parent / "readiness-verification/readiness.json"
+
+
+def _readiness_record(
+    raw: bytes, layout: ReadinessLayout | None, board_dir: Path
+) -> dict[str, Any]:
     try:
         data = json.loads(raw)
     except ValueError as exc:
         raise WorkflowError("Readiness receipt is not valid JSON") from exc
     if not isinstance(data, dict):
         raise WorkflowError("Readiness receipt is not a JSON object")
+    if layout is not None:
+        try:
+            layout.validate_declaration(data, board_dir)
+        except ValueError as exc:
+            raise WorkflowError(str(exc)) from exc
+    elif "output_root" in data:
+        raise WorkflowError("Readiness receipt needs its project output declaration")
+    return data
+
+
+def _manifest_covers_renders(
+    uncovered: list[str], manifest: Path, raw: bytes, base: Path, inputs: dict[str, Any]
+) -> bool:
+    """Use the receipt pin for the same manifest whose file records we just verified."""
+    from ..cli.render_cmd import COVERAGE_FILE, PROVENANCE_FILE, RENDER_OUTPUTS
+
+    if not manifest.is_relative_to(base):
+        return False
+    name = manifest.relative_to(base).as_posix()
+    if not is_manufacturing_manifest(name) or not readiness_input_hash_matches(
+        name, raw, inputs.get(name)
+    ):
+        return False
+    render_names = (*RENDER_OUTPUTS.values(), COVERAGE_FILE, PROVENANCE_FILE)
+    return set(uncovered).issubset(f"renders/{name}" for name in render_names)
+
+
+def _load_readiness(
+    readiness: Path,
+    board: Path,
+    board_sha: str,
+    bundle_shas: dict[str, str],
+    bundle_root: Path,
+    manifest_bytes: bytes,
+) -> tuple[str, bool]:
+    """Refuse unless a ``kct readiness`` receipt proves every gate passed for this board.
+
+    Returns the receipt's sha256 and whether it requires a project declaration. Use the
+    generated or verification receipt under the selected board's output root. It must have
+    ``schema_version`` 1, ``ready`` with no ``blockers``, every check ``passed``
+    (including :data:`REQUIRED_GATE_CHECKS`). Every ``inputs`` / ``external_inputs``
+    entry is re-hashed against disk (as ``read_readiness`` does), exempting only
+    the bundle ``manifest.json`` that sign-off rewrites. Its ``inputs`` must hash
+    a ``.kicad_pcb`` equal to ``--board`` and directly cover every fabrication
+    file. The receipt can cover the standard render outputs through its hash
+    of the selected manufacturing manifest.
+    """
+    if not readiness.is_file():
+        raise WorkflowError(f"Readiness receipt not found: {readiness}")
+    board = board.resolve()
+    board_dir = board_directory_for_pcb(board)
+    layout = _selected_layout(board)
+    generated = layout.report if layout is not None else board_dir / "output/readiness.json"
+    readiness = readiness.resolve()
+    if readiness not in _receipt_locations(generated):
+        raise WorkflowError(_READINESS_LOCATION_MSG)
+    raw = readiness.read_bytes()
+    data = _readiness_record(raw, layout, board_dir)
     if data.get("schema_version") != 1:
         raise WorkflowError("Readiness receipt schema_version is not 1")
     if data.get("status") != "ready":
@@ -310,20 +375,13 @@ def _load_readiness(
     inputs = data.get("inputs")
     if not isinstance(inputs, dict) or not inputs:
         raise WorkflowError("Readiness receipt has no 'inputs' hash map")
-    readiness = readiness.resolve()
-    if readiness.name != "readiness.json":
-        raise WorkflowError(_READINESS_LOCATION_MSG)
-    if readiness.parent.name == "output":
-        board_dir = readiness.parent.parent
-    elif (
-        readiness.parent.name == "readiness-verification"
-        and readiness.parent.parent.name == "output"
-    ):
-        board_dir = readiness.parent.parent.parent
-    else:
-        raise WorkflowError(_READINESS_LOCATION_MSG)
+    input_base = layout.input_base if layout is not None else board_dir
+    try:
+        validate_source_pcb(data, board, input_base, generated.parent)
+    except (OSError, ValueError) as exc:
+        raise WorkflowError(str(exc)) from exc
     exempt = (bundle_root / "manifest.json").resolve()
-    _rehash_receipt_inputs(board_dir, inputs, exempt, "inputs", relative_to="board-relative")
+    _rehash_receipt_inputs(input_base, inputs, exempt, "inputs", relative_to="board-relative")
     external = data.get("external_inputs")
     if external is not None:
         declared = data.get("project_root")
@@ -333,14 +391,75 @@ def _load_readiness(
         _rehash_receipt_inputs(
             project_root, external, exempt, "external_inputs", relative_to="project-root-relative"
         )
-    boards = {v for k, v in inputs.items() if str(k).endswith(".kicad_pcb")}
-    if board_sha not in boards:
-        raise WorkflowError("Readiness receipt was not produced for this --board (sha256 differs)")
-    covered = set(inputs.values())
-    uncovered = sorted(name for name, sha in bundle_shas.items() if sha not in covered)
-    if uncovered:
+    if inputs.get(board.relative_to(input_base).as_posix()) != board_sha:
+        raise WorkflowError(
+            "Readiness receipt was not produced for this --board (path or sha256 differs)"
+        )
+    if layout is not None:
+        try:
+            layout.checked_schematic_root(data)
+        except (OSError, ValueError) as exc:
+            raise WorkflowError(str(exc)) from exc
+        bundle = bundle_root.resolve()
+        if bundle.name != "manufacturing" or not bundle.is_relative_to(generated.parent):
+            raise WorkflowError("The selected bundle is outside the declared manufacturing output")
+        prefix = bundle.relative_to(input_base)
+        uncovered = sorted(
+            name
+            for name, sha in bundle_shas.items()
+            if inputs.get((prefix / name).as_posix()) != sha
+        )
+    else:
+        covered = set(inputs.values())
+        uncovered = sorted(name for name, sha in bundle_shas.items() if sha not in covered)
+    if uncovered and not _manifest_covers_renders(
+        uncovered, exempt, manifest_bytes, input_base, inputs
+    ):
         raise WorkflowError(f"Readiness receipt does not cover bundle files: {uncovered}")
-    return _sha(raw)
+    return _sha(raw), layout is not None
+
+
+def _check_declared_submission_sources(
+    layout: ReadinessLayout, facts: Preflight, board: Path, schematic: Path, schematic_sha: str
+) -> None:
+    """Bind the chosen design files to the exact receipt used at release sign-off."""
+    signed_sha = facts.manifest["tapeout"]["readiness_sha256"]
+    for location in _receipt_locations(layout.report):
+        try:
+            if not location.is_file() or location.resolve(strict=True) != location:
+                continue
+            raw = location.read_bytes()
+        except (OSError, RuntimeError):
+            continue
+        if _sha(raw) == signed_sha:
+            break
+    else:
+        raise WorkflowError("The readiness receipt used at release sign-off is missing or changed")
+
+    record = _readiness_record(raw, layout, board_directory_for_pcb(board))
+    inputs = record.get("inputs")
+    if not isinstance(inputs, dict):
+        raise WorkflowError("The signed readiness receipt has no inputs hash map")
+    if schematic.suffix.lower() != ".kicad_sch":
+        raise WorkflowError("The selected schematic must be a .kicad_sch file")
+    for role, path, digest in (
+        ("PCB", board, facts.board_sha256),
+        ("schematic", schematic, schematic_sha),
+    ):
+        if (
+            not path.is_relative_to(layout.input_base)
+            or inputs.get(path.relative_to(layout.input_base).as_posix()) != digest
+        ):
+            raise WorkflowError(
+                f"The signed readiness receipt does not cover the selected {role} path and sha256"
+            )
+    try:
+        validate_source_pcb(record, board, layout.input_base, layout.report.parent)
+        root = layout.checked_schematic_root(record)
+    except (OSError, ValueError) as exc:
+        raise WorkflowError(str(exc)) from exc
+    if schematic != root:
+        raise WorkflowError("The selected schematic differs from the signed root schematic")
 
 
 SIGNOFF_STAGES = ("release", "fab-review", "fab-dfm")
@@ -479,7 +598,7 @@ def sign_off_bundle(
         raise WorkflowError("Sign-off needs a non-blank --reviewer (a human's name)")
     if not board.is_file():
         raise WorkflowError(f"Board file not found: {board}")
-    manifest = _load_manifest(bundle_root)
+    manifest, manifest_bytes = _load_manifest(bundle_root)
     files = manifest["files"]
     on_disk = {
         p.relative_to(bundle_root).as_posix() for p in bundle_root.rglob("*") if p.is_file()
@@ -534,17 +653,21 @@ def sign_off_bundle(
     else:
         if readiness is None:
             raise WorkflowError("The release sign-off needs --readiness <readiness.json>")
-        receipt_sha = _load_readiness(
+        receipt_sha, declared = _load_readiness(
             Path(readiness),
+            board,
             board_sha,
             {n: r["sha256"] for n, r in files.items() if n != "manifest.json"},
             bundle_root,
+            manifest_bytes,
         )
         tapeout = {
             "board_sha256": board_sha,
             "readiness_sha256": receipt_sha,
             "human_signoff": record,
         }
+        if declared:
+            tapeout["requires_project_declaration"] = True
         manifest["tapeout"] = tapeout
     (bundle_root / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=False) + "\n", encoding="utf-8"
@@ -576,7 +699,7 @@ def preflight(bundle_root: Path, board: Path) -> Preflight:
     checks that a receipt hash was recorded.
     """
     bundle_root, board = Path(bundle_root), Path(board)
-    manifest = _load_manifest(bundle_root)
+    manifest, _ = _load_manifest(bundle_root)
     files = manifest["files"]
     _verify_file_records(bundle_root, files)
 
@@ -738,14 +861,31 @@ def run_submission(
     output_dir = Path(output_dir)
 
     facts = preflight(bundle_root, board)  # offline; refuses before any network call
+    layout = _selected_layout(board.resolve())
+    if layout is None and facts.manifest["tapeout"].get("requires_project_declaration"):
+        raise WorkflowError("This signed release requires its project output declaration")
     source_root = board.parent
+    if layout is not None and not schematic.resolve().is_relative_to(source_root.resolve()):
+        source_root = layout.input_base
     try:
         schem_rel = schematic.resolve().relative_to(source_root.resolve()).as_posix()
     except ValueError as exc:
-        raise WorkflowError("Schematic must live under the board's directory") from exc
+        boundary = "the declared project" if layout is not None else "the board's directory"
+        raise WorkflowError(f"Schematic must live under {boundary}") from exc
+    selected_pcb = board.parent.resolve() / board.name
+    if not selected_pcb.is_relative_to(source_root.resolve()):
+        raise WorkflowError("PCB must live under the declared project")
+    pcb_rel = selected_pcb.relative_to(source_root.resolve()).as_posix()
+    if not schematic.is_file():
+        raise WorkflowError(f"Schematic file not found: {schematic}")
+    schematic_sha = _file_sha(schematic)
+    if layout is not None:
+        _check_declared_submission_sources(
+            layout, facts, board.resolve(), schematic.resolve(), schematic_sha
+        )
     evidence = {
-        "pcb": SourceEvidence(board.name, facts.board_sha256, board.stat().st_size),
-        "schematic": SourceEvidence(schem_rel, _file_sha(schematic), schematic.stat().st_size),
+        "pcb": SourceEvidence(pcb_rel, facts.board_sha256, board.stat().st_size),
+        "schematic": SourceEvidence(schem_rel, schematic_sha, schematic.stat().st_size),
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     plan = prepare_submission(

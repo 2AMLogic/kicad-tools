@@ -392,7 +392,7 @@ NB_MODULE(router_cpp, m) {
              "x"_a, "y"_a, "width"_a, "height"_a,
              "net"_a, "layer_idx"_a, "ref_hash"_a, "clearance_override"_a,
              "is_plane_net"_a = false, "rotation"_a = 0.0f,
-             "is_circular"_a = false)
+             "is_circular"_a = false, "copper_corner_radius"_a = -1.0f)
         .def("set_pad_class_clearances", &Grid3D::set_pad_class_clearances,
              "clearances"_a)
         .def("set_pad_via_policy", &Grid3D::set_pad_via_policy,
@@ -744,6 +744,14 @@ NB_MODULE(router_cpp, m) {
         .def_prop_ro("last_pairwise_block_y",
                      &Pathfinder::last_pairwise_block_y,
                      "Issue #4507: world Y of the refused candidate.")
+        .def("dependency_begin", &Pathfinder::dependency_begin, nb::arg("block"),
+             "Issue #8486: start recording the cells every search discovers, "
+             "folded into a coarse layer-agnostic mask of ``block`` x ``block`` "
+             "grid cells.")
+        .def("dependency_collect", &Pathfinder::dependency_collect,
+             "Issue #8486: stop recording and return ``(rows, cols, mask)`` "
+             "(row-major bytes, 1 = a search read a cell in that block; empty "
+             "when the grid was resized while recording).")
         .def_prop_ro("iterations", &Pathfinder::get_iterations)
         .def_prop_ro("nodes_explored", &Pathfinder::get_nodes_explored);
 

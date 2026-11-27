@@ -133,6 +133,24 @@ class TestFormatBackendStatus:
         assert "WARNING" not in status
         assert "Tip" in status
 
+    def test_python_backend_names_the_search_capacity_limitation(self):
+        """Issue #9900: the absent-extension status names the budget gap.
+
+        The Board 06 seed-42 pure-Python leg lost all four USB3 RX1/TX1
+        nets to per-net node-expansion caps the C++ search clears, so the
+        status must say a ``victim_budget`` outcome is a budget stop, not a
+        geometric seal.
+        """
+        info = {
+            "backend": "python",
+            "version": "pure-python",
+            "available": False,
+            "active": "python",
+        }
+        status = format_backend_status(info)
+        assert "victim_budget" in status
+        assert "geometric seal" in status
+
     def test_python_backend_zero_grid_shows_tip(self):
         """Test that zero grid cells (default) shows tip."""
         info = {

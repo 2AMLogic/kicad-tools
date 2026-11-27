@@ -258,10 +258,12 @@
 		(layers "F.Paste")
 		(roundrect_rratio 0.2)
 	)
-	(pad "" smd rect
+	(pad "29" smd rect
 		(at 0 0)
 		(size 3.1 5.18)
-		(layers "F.Mask")
+		(property pad_prop_heatsink)
+		(layers "F.Cu" "F.Mask")
+		(zone_connect 2)
 	)
 	(pad "" smd roundrect
 		(at 0.775 -1.295)
@@ -452,7 +454,7 @@
 		(remove_unused_layers no)
 	)
 	(pad "29" thru_hole circle
-		(at -1.2 -3)
+		(at -1.2 -3.1)
 		(size 0.5 0.5)
 		(drill 0.2)
 		(property pad_prop_heatsink)
@@ -492,7 +494,7 @@
 		(remove_unused_layers no)
 	)
 	(pad "29" thru_hole circle
-		(at -1.2 3)
+		(at -1.2 3.1)
 		(size 0.5 0.5)
 		(drill 0.2)
 		(property pad_prop_heatsink)
@@ -516,7 +518,7 @@
 		(remove_unused_layers no)
 	)
 	(pad "29" thru_hole circle
-		(at 0 -3)
+		(at 0 -3.1)
 		(size 0.5 0.5)
 		(drill 0.2)
 		(property pad_prop_heatsink)
@@ -570,7 +572,7 @@
 		(remove_unused_layers no)
 	)
 	(pad "29" thru_hole circle
-		(at 0 3)
+		(at 0 3.1)
 		(size 0.5 0.5)
 		(drill 0.2)
 		(property pad_prop_heatsink)
@@ -594,7 +596,7 @@
 		(remove_unused_layers no)
 	)
 	(pad "29" thru_hole circle
-		(at 1.2 -3)
+		(at 1.2 -3.1)
 		(size 0.5 0.5)
 		(drill 0.2)
 		(property pad_prop_heatsink)
@@ -634,7 +636,7 @@
 		(remove_unused_layers no)
 	)
 	(pad "29" thru_hole circle
-		(at 1.2 3)
+		(at 1.2 3.1)
 		(size 0.5 0.5)
 		(drill 0.2)
 		(property pad_prop_heatsink)

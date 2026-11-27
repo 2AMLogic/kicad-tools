@@ -40,6 +40,15 @@ from .geometry import (
     total_length,
 )
 from .kelvin_gate import kelvin_branch_gate
+from .pad_slits import (
+    ReplacementCheck,
+    adds_trace_gap,
+    covered_via_elbow,
+    mask_opening_check,
+    pad_gap_check,
+    via_exit_doglegs,
+    via_gap_check,
+)
 from .pcb import optimize_pcb
 from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
 
@@ -484,6 +493,9 @@ class TraceOptimizer:
         """
         self.config = config or OptimizationConfig()
         self.collision_checker = collision_checker
+        self._pad_gap_check = pad_gap_check(getattr(collision_checker, "grid", None))
+        self._via_gap_check: ReplacementCheck | None = None
+        self._mask_opening_check: ReplacementCheck | None = None
         self.net_anchors = net_anchors
         # Endpoints of the *other* chains in the current optimize_segments call
         # (same net and layer). A branch can end on a chain's body (a T-join
@@ -502,6 +514,9 @@ class TraceOptimizer:
         # Issue #9524: pad mask-opening zones (all nets), set by
         # ``set_pad_zones``; a rewrite may not break a pad's mask-clean escape.
         self._pad_zones: list[PadMaskZone] = []
+        # Issue #9748: the fab mask-to-copper clearance carried with the
+        # zones (0 guards the openings only).
+        self._pad_zone_clearance: float | None = None
         # True only inside :meth:`defer_pad_guard`: the Kelvin board gate
         # (#6889) vets a branch rewrite before the pad guard re-applies to
         # what it accepts, so its report still fires when both would refuse.
@@ -547,7 +562,9 @@ class TraceOptimizer:
         """
         self._pad_points = points_by_net_name
 
-    def set_pad_zones(self, zones: list[PadMaskZone]) -> None:
+    def set_pad_zones(
+        self, zones: list[PadMaskZone], danger_clearance: float | None = None
+    ) -> None:
         """Register every pad's mask-opening zone (Issue #9524).
 
         While zones are set, each pass's rewrite of a chain is vetoed when it
@@ -555,8 +572,31 @@ class TraceOptimizer:
         new copper (a bend, a crossing) into any pad's opening -- the cleanup
         equivalent of ``mask_to_copper``.  Callers that do not set zones get
         the pre-#9524 behaviour.
+
+        ``danger_clearance`` (Issue #9748) is the fab's mask-to-copper
+        clearance, passed only for ``--drc-aware --mfr`` runs (``None`` keeps
+        the pre-#9748 guard): new copper may not enter
+        the clearance band beside an opening either, unless it terminates on
+        that pad with one clean, steep crossing.
         """
         self._pad_zones = zones
+        self._pad_zone_clearance = danger_clearance
+
+    def set_mask_opening_guard(self, clearance: float, mask_margin: float = 0.0) -> None:
+        """Register the fab mask-to-copper *clearance* (Issue #9424).
+
+        While set, each pass's rewrite of a chain is declined when it adds
+        same-net copper beside a pad's mask opening -- the defect
+        ``kct check --mfr`` reports as ``mask_to_copper``: a leg whose rounded
+        corner comes within *clearance* of an opening it does not enter, or
+        copper over an opening that is not one clean entry.  Only growth counts,
+        so a rewrite that leaves the chain's defects unchanged or fewer is kept.
+        *mask_margin* is the board's solder-mask expansion.  Callers that never
+        call this get the previous behaviour.
+        """
+        self._mask_opening_check = mask_opening_check(
+            getattr(self.collision_checker, "grid", None), clearance, mask_margin
+        )
 
     def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
         """Optimize a list of segments for a single net/layer.
@@ -648,13 +688,10 @@ class TraceOptimizer:
             for enabled, apply_pass in passes:
                 if enabled:
                     rewritten = apply_pass(result)
-                    if (
-                        self._keeps_anchors(result, rewritten)
-                        and not self._lays_copper_twice(result, rewritten)
-                        and self._keeps_pad_escapes(result, rewritten)
-                    ):
+                    if self._accepts_chain_rewrite(result, rewritten):
                         result = rewritten
 
+            result = self._keep_via_clearance(chain, result)
             current[index] = result
             all_optimized.extend(result)
 
@@ -699,7 +736,48 @@ class TraceOptimizer:
             return True
         if not self._pad_zones or not old or old == new:
             return True
-        return rewrite_keeps_pad_escapes(old, new, self._pad_zones, self.config.tolerance)
+        return rewrite_keeps_pad_escapes(
+            old, new, self._pad_zones, self.config.tolerance, self._pad_zone_clearance
+        )
+
+    def _keep_via_clearance(self, original: list[Segment], result: list[Segment]) -> list[Segment]:
+        check = self._via_gap_check
+        if check is None or check(original, result, self._other_copper):
+            return result
+
+        # Keep the optimized tail if extending the launch clears the barrel.
+        # The rest of the chain and the copper on other nets constrain that move.
+        grid = getattr(self.collision_checker, "grid", None)
+        for changed, candidate in via_exit_doglegs(result, grid):
+            if (
+                all(self._path_is_clear(leg) for leg in changed)
+                and self._accepts_chain_rewrite(original, candidate)
+                and check(original, candidate, self._other_copper)
+            ):
+                return candidate
+        return original
+
+    def _accepts_chain_rewrite(self, old: list[Segment], new: list[Segment]) -> bool:
+        return (
+            self._keeps_anchors(old, new)
+            and not self._lays_copper_twice(old, new)
+            and self._keeps_pad_escapes(old, new)
+            and (self._pad_gap_check is None or self._pad_gap_check(old, new, self._other_copper))
+            and (
+                self._mask_opening_check is None
+                or self._mask_opening_check(old, new, self._other_copper)
+            )
+        )
+
+    def _replacement_is_clear(
+        self, original: list[Segment], candidate: list[Segment], kept: list[Segment]
+    ) -> bool:
+        """Whether a staircase replacement keeps the fab pad gap and mask openings."""
+        if self._pad_gap_check is not None and not self._pad_gap_check(original, candidate, kept):
+            return False
+        return self._mask_opening_check is None or self._mask_opening_check(
+            original, candidate, kept
+        )
 
     def _lays_copper_twice(self, old: list[Segment], new: list[Segment]) -> bool:
         """True if a leg *new* adds lies on the net's own copper (Issue #8603).
@@ -821,7 +899,13 @@ class TraceOptimizer:
         Returns:
             List with staircase patterns compressed.
         """
-        return compress_staircase(segments, self.config, self._path_is_clear, self._other_copper)
+        return compress_staircase(
+            segments,
+            self.config,
+            self._path_is_clear,
+            self._other_copper,
+            replacement_is_clear=self._replacement_is_clear,
+        )
 
     def convert_corners_45(self, segments: list[Segment]) -> list[Segment]:
         """Convert 90-degree corners to 45-degree chamfers.
@@ -945,9 +1029,34 @@ class TraceOptimizer:
 
         # Optimize each layer's segments (chain sorting happens in optimize_segments)
         optimized_segments: list[Segment] = []
-        for _layer, segs in segments_by_layer.items():
-            optimized = self.optimize_segments(segs)
-            optimized_segments.extend(optimized)
+        grid = getattr(self.collision_checker, "grid", None)
+        self._via_gap_check = via_gap_check(grid, route)
+        try:
+            for segs in segments_by_layer.values():
+                result = self.optimize_segments(segs)
+                if result != segs and (
+                    self._via_gap_check is not None or self._pad_gap_check is not None
+                ):
+                    elbow = covered_via_elbow(result, route, grid)
+                    if (
+                        elbow is not None
+                        and all(self._path_is_clear(s) for s in elbow)
+                        and self._accepts_chain_rewrite(result, elbow)
+                        and (self._via_gap_check is None or self._via_gap_check(result, elbow, []))
+                    ):
+                        result = elbow
+                    elif (
+                        len(result) == 2
+                        and route.vias
+                        and adds_trace_gap(segs, result, route, grid)
+                    ):
+                        # The polygon (or another guard) vetoed the retraction and
+                        # the optimized chain itself opens a trace-to-trace slit to
+                        # retained sibling copper: keep the clean incoming chain.
+                        result = segs
+                optimized_segments.extend(result)
+        finally:
+            self._via_gap_check = None
 
         # Connectivity-preserving guard: if optimisation dropped any
         # pad-like endpoint from the segment graph, revert to the

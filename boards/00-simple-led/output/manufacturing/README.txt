@@ -2,9 +2,12 @@ Manufacturing package for simple_led_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-11-11T19:00:00+00:00
+Generated        : 2026-11-27T19:00:00+00:00
 
 Assembly package: BOM and CPL are included.
+CPL rotations combine the KiCad angle with a catalog-part or footprint table offset.
+Project overrides in cpl_rotations.yaml take precedence. Before ordering, open the JLCPCB placement preview.
+Check each part's leads against its pads and verify pin 1 or polarity against the board markings.
 
 Contents
 --------
@@ -45,6 +48,13 @@ Copper cleanup
   step dedupe: applied (segments=0, vias=0)
   step prune: applied (segments_removed=0, ends_snapped=0)
   step optimize_traces: applied (segments_before=2, segments_after=2, corners_before=1, corners_after=1, layers=2, copper_oz=1.0)
+
+LCSC stock order
+----------------
+  order size: 5 board(s)
+  no parts declared as held in operator inventory
+  parts data sources: parts cache searched, no matching row; offline catalog not available on the generating host (no catalog file)
+  stock check WARN: Stock not verified: 3 assigned LCSC number(s) found in neither the parts cache nor the offline catalog; parts cache searched, no matching row; offline catalog not available on the generating host (no catalog file)
 
 Assembly prep
 -------------

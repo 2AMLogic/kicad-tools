@@ -23,19 +23,32 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from .bom_spec_overlay import AssemblySpecErrors, expand_ref_range
 from .pnp import _ref_sort_key, is_through_hole_footprint
 
 if TYPE_CHECKING:
     from ..drc.violation import DRCViolation
     from ..manufacturers.base import AssemblyCapabilities, ManufacturerProfile
-    from ..schema.pcb import PCB
+    from ..schema.pcb import PCB, Footprint, Pad
+    from ..spec.schema import (
+        BOMEntry,
+        DimensionLimits,
+        FinishedHoleGuarantee,
+        LeadProfile,
+        MountingHoleDeclaration,
+        ProjectSpec,
+        SmdLandPattern,
+        WireTermination,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +62,8 @@ class PreflightResult:
     message: str
     details: str = ""
     # Optional machine-readable record (Issue #8807): ``bom_lcsc_stock`` stores
-    # its per-part observations so a later ``--verify`` can re-evaluate them.
+    # its per-part observations so a later ``--verify`` can re-evaluate them,
+    # and (Issue #10386) where on this host its lookups reached.
     data: dict | None = None
 
     def to_dict(self) -> dict:
@@ -193,6 +207,859 @@ def resolve_ordered_copper(pcb: PCB, manufacturer: str) -> dict:
             return info
     info["status"] = "mismatch"
     return info
+
+
+# ---------------------------------------------------------------------------
+# Through-hole lead fit (Issue #10299)
+# ---------------------------------------------------------------------------
+
+# Reported margins are rounded to 3 decimals for display; pass/fail verdicts
+# use the unrounded values so a -0.0004 mm interference still fails.
+_LEAD_MARGIN_DECIMALS = 3
+
+
+def _lead_record(profile: LeadProfile) -> dict:
+    """Serialized form of a declared lead profile (dimensions + source)."""
+    rec: dict = {"shape": profile.shape, "source": profile.source}
+    if profile.shape == "round":
+        rec["diameter_mm"] = profile.diameter_mm
+    else:
+        rec["width_mm"] = profile.width_mm
+        rec["thickness_mm"] = profile.thickness_mm
+    return rec
+
+
+def _wire_record(wire: WireTermination) -> dict:
+    """Serialized form of a declared wire termination (prepared diameter + source)."""
+    return {"diameter_mm": wire.diameter_mm, "source": wire.source}
+
+
+def _lead_fit_finding(
+    reference: str,
+    pad: Pad,
+    entry: BOMEntry | None,
+    profile: LeadProfile | None,
+    tolerance_mm: float | None,
+    tolerance_source: str | None,
+    tolerance_reason: str,
+    profile_error: str | None,
+    wire: WireTermination | None = None,
+) -> dict:
+    """Build one per-pad lead-fit record (Issue #10299).
+
+    The drill geometry is read independently of the copper pad outline:
+    ``pad.drill`` is the round finished-hole diameter and
+    ``pad.drill_size`` holds both slot axes.  A negative nominal margin
+    fails nominal fit; a negative margin at minimum finish fails fit at
+    tolerance even when the nominal margin is positive.  Margins are
+    computed at full precision (required diameter subtracted from the
+    opening diameter) and rounded for reporting; the verdicts use the
+    unrounded values.
+
+    A declared wire termination (Issue #10473) is assessed the same way
+    from the maximum outside diameter of its prepared end: *profile* is
+    the round profile built from the declaration, ``mpn`` stays unset
+    because no part describes the pad, and the declaration is carried in
+    ``wire`` instead of ``lead``.
+    """
+    mpn = entry.part if entry is not None else None
+    lead_record = _lead_record(profile) if profile is not None and wire is None else None
+    wire_record = _wire_record(wire) if wire is not None else None
+
+    # A slot hole: identify it with both axes and stop -- a slot's long
+    # axis must not be mistaken for a round hole diameter.
+    if pad.drill_size is not None:
+        slot_w, slot_h = pad.drill_size
+        return {
+            "reference": reference,
+            "pad": pad.number,
+            "mpn": mpn,
+            "hole": {"shape": "slot", "size_mm": [slot_w, slot_h]},
+            "lead": lead_record,
+            "wire": wire_record,
+            "status": "unassessed",
+            "reason": (
+                f"slot hole {slot_w:.{_LEAD_MARGIN_DECIMALS}f} x "
+                f"{slot_h:.{_LEAD_MARGIN_DECIMALS}f} mm; only round holes are assessed"
+            ),
+        }
+
+    hole_mm = float(pad.drill)
+    hole: dict = {"shape": "round", "diameter_mm": hole_mm}
+    if hole_mm <= 0:
+        return {
+            "reference": reference,
+            "pad": pad.number,
+            "mpn": mpn,
+            "hole": hole,
+            "lead": lead_record,
+            "wire": wire_record,
+            "status": "unassessed",
+            "reason": "through-hole pad has no drill diameter",
+        }
+
+    if profile is None:
+        if profile_error:
+            reason = profile_error
+        elif wire is not None:
+            reason = (
+                f"wire termination declared for pad {pad.number} of {reference} "
+                "without a prepared diameter"
+            )
+        elif entry is None:
+            reason = (
+                f"no verified lead dimensions: reference {reference} has no "
+                "bom_entries assignment in the project spec"
+            )
+        else:
+            reason = f"no verified lead dimensions declared for pad {pad.number} of {mpn}"
+        return {
+            "reference": reference,
+            "pad": pad.number,
+            "mpn": mpn,
+            "hole": hole,
+            "lead": None,
+            "wire": wire_record,
+            "status": "unassessed",
+            "reason": reason,
+        }
+
+    # Preserve decimal fabrication dimensions through the tolerance addition.
+    diameter = Decimal(str(hole_mm))
+    required_mm = profile.required_diameter_decimal_mm()
+    nominal_margin = diameter - required_mm
+    finding: dict = {
+        "reference": reference,
+        "pad": pad.number,
+        "mpn": mpn,
+        "hole": hole,
+        "lead": lead_record,
+        "wire": wire_record,
+        "required_diameter_mm": round(float(required_mm), _LEAD_MARGIN_DECIMALS),
+        "nominal_margin_mm": round(float(nominal_margin), _LEAD_MARGIN_DECIMALS),
+        "nominal_status": "fail" if nominal_margin < 0 else "pass",
+    }
+
+    if tolerance_mm is None:
+        # Valid lead data, unknown hole tolerance: report the nominal fit
+        # and mark the tolerance result unassessed.
+        finding["tolerance"] = {
+            "status": "unassessed",
+            "reason": tolerance_reason,
+        }
+        finding["status"] = "fail" if nominal_margin < 0 else "pass"
+        return finding
+
+    minimum_hole_mm = diameter + Decimal(str(tolerance_mm))
+    minimum_margin = minimum_hole_mm - required_mm
+    finding["tolerance"] = {
+        "status": "fail" if minimum_margin < 0 else "pass",
+        "tolerance_mm": tolerance_mm,
+        "source": tolerance_source,
+        "minimum_hole_mm": round(float(minimum_hole_mm), _LEAD_MARGIN_DECIMALS),
+        "minimum_margin_mm": round(float(minimum_margin), _LEAD_MARGIN_DECIMALS),
+    }
+    finding["status"] = "fail" if (nominal_margin < 0 or minimum_margin < 0) else "pass"
+    return finding
+
+
+def _format_lead_finding(f: dict) -> str:
+    """One ``details`` line per pad, carrying the full per-pad evidence."""
+    mpn = f.get("mpn")
+    tag = f"{f['reference']} pad {f['pad']}" + (f" [{mpn}]" if mpn else "")
+
+    if f["status"] == "unassessed":
+        return f"{tag}: unassessed: {f['reason']}"
+
+    hole = f["hole"]
+    hole_desc = (
+        f"hole {hole['diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm round"
+        if hole["shape"] == "round"
+        else (
+            f"slot {hole['size_mm'][0]:.{_LEAD_MARGIN_DECIMALS}f} x "
+            f"{hole['size_mm'][1]:.{_LEAD_MARGIN_DECIMALS}f} mm"
+        )
+    )
+    wire = f.get("wire")
+    lead = f["lead"] or {}
+    if wire is not None:
+        lead_desc = f"wire termination dia {wire['diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm"
+        source = wire.get("source")
+    elif lead.get("shape") == "round":
+        lead_desc = f"round lead dia {lead['diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm"
+        source = lead.get("source")
+    else:
+        lead_desc = (
+            f"rectangular lead {lead['width_mm']:.{_LEAD_MARGIN_DECIMALS}f} x "
+            f"{lead['thickness_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm"
+        )
+        source = lead.get("source")
+    src = f" per '{source}'" if source else ""
+    head = (
+        f"{tag}: {hole_desc} vs {lead_desc} "
+        f"(needs {f['required_diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm dia){src}"
+    )
+
+    margin_fmt = f".{_LEAD_MARGIN_DECIMALS}f"
+    seg = f"nominal margin {f['nominal_margin_mm']:+{margin_fmt}} mm ({f['nominal_status']})"
+    tol = f["tolerance"]
+    if tol["status"] == "unassessed":
+        seg += f"; tolerance unassessed: {tol['reason']}"
+    else:
+        seg += (
+            f"; tolerance {tol['tolerance_mm']:+{margin_fmt}} mm"
+            + (f" per '{tol['source']}'" if tol.get("source") else "")
+            + f" -> min hole {tol['minimum_hole_mm']:{margin_fmt}} mm, "
+            f"min margin {tol['minimum_margin_mm']:+{margin_fmt}} mm ({tol['status']})"
+        )
+    return f"{head}; {seg}"
+
+
+def _lead_finding_sort_key(f: dict) -> tuple[int, tuple, tuple[int, int, str]]:
+    """Failures first, then unassessed, then passes; ref/pad order within."""
+    order = {"fail": 0, "unassessed": 1, "pass": 2}
+    pad_no = str(f["pad"])
+    pad_key: tuple[int, int, str] = (0, int(pad_no), "") if pad_no.isdigit() else (1, 0, pad_no)
+    return (order.get(f["status"], 3), _ref_sort_key(f["reference"]), pad_key)
+
+
+_NO_TOLERANCE_REASON = "no finished-hole tolerance declared in requirements.manufacturing"
+_NO_UPPER_TOLERANCE_REASON = (
+    "no upper finished-hole tolerance declared in requirements.manufacturing"
+)
+_PLATED_HOLE_TYPES = ("thru_hole", "through_hole")
+
+
+@dataclass(frozen=True)
+class _FinishedHoleOrder:
+    """Finished-hole evidence of the spec's fab order for one export.
+
+    ``fab_mismatch`` is set when the spec's order was placed with another
+    fabricator than this export's, which leaves none of it applicable.
+    """
+
+    lower_mm: float | None
+    upper_mm: float | None
+    source: str | None
+    fab_mismatch: str | None
+    guarantees: tuple[FinishedHoleGuarantee, ...]
+
+    @property
+    def applicable(self) -> bool:
+        return self.fab_mismatch is None
+
+    @property
+    def reason(self) -> str:
+        return self.fab_mismatch or _NO_TOLERANCE_REASON
+
+
+def _decimal_mm(value: float) -> Decimal:
+    """A declared millimetre value as an exact decimal, kept clear of binary rounding."""
+    return Decimal(str(value))
+
+
+def _limit_result(value: Decimal, low: Decimal, high: Decimal) -> dict:
+    """Compare one dimension with inclusive drawing limits and report the excess in mm."""
+    if value < low:
+        return {
+            "status": "fail",
+            "side": "lower",
+            "overrun_mm": float(low - value),
+        }
+    if value > high:
+        return {
+            "status": "fail",
+            "side": "upper",
+            "overrun_mm": float(value - high),
+        }
+    return {"status": "pass"}
+
+
+def _combined_status(results: Iterable[dict]) -> str:
+    """The worst of several independently judged measurements."""
+    statuses = {result["status"] for result in results}
+    return next((status for status in ("fail", "unassessed") if status in statuses), "pass")
+
+
+def _round_hole_mm(pad: Pad) -> float | None:
+    """Diameter of a pad's plated round hole, or ``None`` for a slot or no drill."""
+    if pad.drill_size is not None:
+        return None
+    hole_mm = float(pad.drill)
+    return hole_mm if math.isfinite(hole_mm) and hole_mm > 0 else None
+
+
+def _declared_pads(footprint: Footprint, number: str) -> tuple[list[Pad], str | None]:
+    """The plated through-hole pads a declared pad number names, or why it names none."""
+    matching = [
+        pad for pad in footprint.pads if pad.number == number and pad.type in _PLATED_HOLE_TYPES
+    ]
+    if matching:
+        return matching, None
+    if any(pad.number == number for pad in footprint.pads):
+        return (
+            [],
+            f"declared pad {number} on {footprint.reference} is not a plated through-hole pad",
+        )
+    return [], f"declared pad {number} not found on {footprint.reference}"
+
+
+def _drawing_record(declaration: MountingHoleDeclaration, limits: DimensionLimits) -> dict:
+    """Serialized form of a drawing's inclusive limits and their source."""
+    return {"source": declaration.source, "min_mm": limits.min_mm, "max_mm": limits.max_mm}
+
+
+def _mounting_hole_finding(
+    reference: str,
+    pad: Pad,
+    mpn: str,
+    declaration: MountingHoleDeclaration,
+    order: _FinishedHoleOrder,
+    guarantee: FinishedHoleGuarantee | None,
+    spec_errors: AssemblySpecErrors,
+) -> dict:
+    """Build one per-hole mounting record (Issue #10476).
+
+    The nominal drill and each evidenced end of the finished-hole interval
+    are judged independently against the drawing's inclusive limits, so a
+    nominal mismatch is told apart from a hole that is nominally correct
+    but whose order tolerance exceeds a limit.  A missing order bound
+    leaves that end unassessed and never passes it.
+    """
+    limits = declaration.hole_diameter
+    drawing = _drawing_record(declaration, limits)
+    finding: dict = {"reference": reference, "pad": pad.number, "mpn": mpn}
+    if pad.drill_size is not None:
+        slot_w, slot_h = pad.drill_size
+        finding.update(
+            hole={"shape": "slot", "size_mm": [slot_w, slot_h]},
+            drawing=drawing,
+            status="unassessed",
+            reason=(
+                f"slot hole {slot_w:.{_LEAD_MARGIN_DECIMALS}f} x "
+                f"{slot_h:.{_LEAD_MARGIN_DECIMALS}f} mm; only round holes are assessed"
+            ),
+        )
+        return finding
+
+    hole_mm = _round_hole_mm(pad)
+    if hole_mm is None:
+        finding.update(
+            hole={"shape": "round", "diameter_mm": float(pad.drill)},
+            drawing=drawing,
+            status="unassessed",
+            reason="through-hole pad has no drill diameter",
+        )
+        return finding
+
+    nominal_mm = _decimal_mm(hole_mm)
+    low, high = _decimal_mm(limits.min_mm), _decimal_mm(limits.max_mm)
+    nominal = _limit_result(nominal_mm, low, high)
+    if guarantee is not None:
+        order_result: dict = {
+            "kind": "guarantee",
+            "source": guarantee.source,
+            "min_mm": guarantee.min_mm,
+            "max_mm": guarantee.max_mm,
+            "min": _limit_result(_decimal_mm(guarantee.min_mm), low, high),
+            "max": _limit_result(_decimal_mm(guarantee.max_mm), low, high),
+        }
+    elif not order.applicable:
+        order_result = {"status": "unassessed", "reason": order.reason}
+    else:
+        order_result = {"kind": "general", "source": order.source}
+        ends = {
+            "min": (order.lower_mm, spec_errors.tolerance or order.reason),
+            "max": (
+                order.upper_mm,
+                spec_errors.tolerance_upper or spec_errors.tolerance or _NO_UPPER_TOLERANCE_REASON,
+            ),
+        }
+        for end, (tolerance_mm, reason) in ends.items():
+            if tolerance_mm is None:
+                order_result[end] = {"status": "unassessed", "reason": reason}
+            else:
+                end_mm = nominal_mm + _decimal_mm(tolerance_mm)
+                order_result[f"{end}_mm"] = float(end_mm)
+                order_result[end] = _limit_result(end_mm, low, high)
+    if "min" in order_result:
+        order_result["status"] = _combined_status(order_result[end] for end in ("min", "max"))
+    finding.update(
+        hole={"shape": "round", "diameter_mm": hole_mm},
+        drawing=drawing,
+        nominal=nominal,
+        order=order_result,
+        status=_combined_status((nominal, order_result)),
+    )
+    return finding
+
+
+def _pitch_member_issue(number: str, found: list[Pad], missing_reason: str | None) -> str | None:
+    """Why a declared pad cannot serve as one end of the measured pitch."""
+    if not found:
+        return missing_reason
+    if len(found) > 1:
+        return f"declared pad {number} matches {len(found)} pads; the pair is ambiguous"
+    pad = found[0]
+    if pad.drill_size is not None:
+        slot_w, slot_h = pad.drill_size
+        return (
+            f"declared pad {number} is a slot hole {slot_w:.{_LEAD_MARGIN_DECIMALS}f} x "
+            f"{slot_h:.{_LEAD_MARGIN_DECIMALS}f} mm; only round holes are measured"
+        )
+    if _round_hole_mm(pad) is None:
+        return f"declared pad {number} has no drill diameter"
+    if pad.drill_offset != (0.0, 0.0):
+        return f"declared pad {number} has an offset drill; its hole centre is not measured"
+    return None
+
+
+def _mounting_pitch_finding(
+    footprint: Footprint,
+    mpn: str,
+    declaration: MountingHoleDeclaration,
+    limits: DimensionLimits,
+    located: dict[str, tuple[list[Pad], str | None]],
+) -> dict:
+    """Compare the distance between footprint-local hole centres with the drawing limits."""
+    finding: dict = {
+        "reference": footprint.reference,
+        "pads": list(declaration.pads),
+        "mpn": mpn,
+        "drawing": _drawing_record(declaration, limits),
+    }
+    offsets: list[tuple[Decimal, Decimal]] = []
+    for number in declaration.pads:
+        found, missing_reason = located[number]
+        issue = _pitch_member_issue(number, found, missing_reason)
+        if issue is not None:
+            finding.update(status="unassessed", reason=issue)
+            return finding
+        # Both pads belong to one footprint, so rotation leaves their distance
+        # unchanged: the footprint-local coordinates give it exactly.
+        offsets.append((_decimal_mm(found[0].position[0]), _decimal_mm(found[0].position[1])))
+    (x1, y1), (x2, y2) = offsets
+    distance_sq = (x1 - x2) ** 2 + (y1 - y2) ** 2
+    low, high = _decimal_mm(limits.min_mm), _decimal_mm(limits.max_mm)
+    # Judge squared distances against squared limits so no rounding of the
+    # measured distance can hide an overrun.
+    measured = distance_sq.sqrt()
+    if distance_sq < low**2:
+        nominal = {
+            "status": "fail",
+            "side": "lower",
+            "overrun_mm": float(low - measured),
+        }
+    elif distance_sq > high**2:
+        nominal = {
+            "status": "fail",
+            "side": "upper",
+            "overrun_mm": float(measured - high),
+        }
+    else:
+        nominal = {"status": "pass"}
+    finding.update(
+        measured_mm=float(measured),
+        nominal=nominal,
+        status=nominal["status"],
+    )
+    return finding
+
+
+def _mounting_where(f: dict) -> str:
+    """``C1 pad 1`` or ``C1 pads 1-2``."""
+    if "pads" in f:
+        return f"{f['reference']} pads {f['pads'][0]}-{f['pads'][1]}"
+    return f"{f['reference']} pad {f['pad']}"
+
+
+def _mounting_tag(f: dict) -> str:
+    """A measurement's location with its MPN."""
+    mpn = f.get("mpn")
+    return _mounting_where(f) + (f" [{mpn}]" if mpn else "")
+
+
+def _format_limit_result(result: dict) -> str:
+    """``pass``, or which drawing limit is crossed, which way, and by how much."""
+    if result["status"] != "fail":
+        return "pass"
+    verb, bound = ("exceeds", "max") if result["side"] == "upper" else ("undercuts", "min")
+    amount = result["overrun_mm"]
+    if amount < 10**-_LEAD_MARGIN_DECIMALS:
+        display = f"{amount:.3g}"
+    else:
+        display = f"{amount:.{_LEAD_MARGIN_DECIMALS}f}"
+    return f"{verb} drawing {bound} by {display} mm (fail)"
+
+
+def _format_mounting_finding(f: dict) -> str:
+    """One ``details`` line per hole or pair, carrying its full evidence."""
+    tag = _mounting_tag(f)
+    if "reason" in f:
+        return f"{tag}: unassessed: {f['reason']}"
+
+    drawing = f["drawing"]
+    per_drawing = f" per '{drawing['source']}'"
+    fmt = f".{_LEAD_MARGIN_DECIMALS}f"
+    if "pads" in f:
+        return (
+            f"{tag}: pitch {f['measured_mm']:{fmt}} mm; drawing "
+            f"{drawing['min_mm']:{fmt}}-{drawing['max_mm']:{fmt}} mm{per_drawing}: "
+            f"{_format_limit_result(f['nominal'])}"
+        )
+
+    order = f["order"]
+    described = ["order"]
+    if order.get("kind") == "guarantee":
+        described.append("(guarantee)")
+    if order.get("source"):
+        described.append(f"per '{order['source']}'")
+    values = {end: order[f"{end}_mm"] for end in ("min", "max") if f"{end}_mm" in order}
+    if len(values) == 2:
+        described.insert(1, f"{values['min']:{fmt}}-{values['max']:{fmt}} mm")
+    elif values:
+        described.insert(1, f"{next(iter(values))} {next(iter(values.values())):{fmt}} mm")
+
+    def _end(end: str) -> str:
+        result = order[end]
+        if result["status"] == "unassessed":
+            return f"{end} unassessed: {result['reason']}"
+        return f"{end} {_format_limit_result(result)}"
+
+    if "min" not in order:
+        order_text = f"order unassessed: {order['reason']}"
+    else:
+        order_text = " ".join(described) + ": " + ", ".join(_end(end) for end in ("min", "max"))
+    return (
+        f"{tag}: hole {f['hole']['diameter_mm']:{fmt}} mm round; drawing "
+        f"{drawing['min_mm']:{fmt}}-{drawing['max_mm']:{fmt}} mm{per_drawing}: "
+        f"nominal {_format_limit_result(f['nominal'])}; {order_text}"
+    )
+
+
+def _mounting_finding_sort_key(
+    f: dict,
+) -> tuple[int, tuple, tuple[int, int, str], int]:
+    """Failures first, then unassessed, then passes; ref/pad order within, a pair after its holes."""
+    pair = int("pads" in f)
+    key = _lead_finding_sort_key({**f, "pad": f["pads"][0] if pair else f["pad"]})
+    return (*key, pair)
+
+
+def _mounting_summary(
+    holes: list[dict], pitches: list[dict], invalid: list[dict], order: _FinishedHoleOrder
+) -> dict:
+    """Counts behind the check's verdict, with the order evidence it applied."""
+    records = [*holes, *pitches]
+    order_unassessed = [f for f in holes if f.get("order", {}).get("status") == "unassessed"]
+    return {
+        "holes": len(holes),
+        "pitch_pairs": len(pitches),
+        "failed": sum(f["status"] == "fail" for f in records),
+        "unassessed": sum(f["status"] == "unassessed" for f in records),
+        "order_unassessed": len(order_unassessed),
+        "invalid_declarations": len(invalid),
+        "finished_hole_tolerance_mm": order.lower_mm,
+        "finished_hole_tolerance_upper_mm": order.upper_mm,
+        "finished_hole_tolerance_source": order.source,
+    }
+
+
+# ---------------------------------------------------------------------------
+# SMD two-terminal land-pattern verification (Issue #10505)
+# ---------------------------------------------------------------------------
+
+# Measurements are reported to 3 decimals (0.001 mm = 1 um).  Dimensional
+# equality uses +/-0.001 mm (1 um) against exact Decimal target values after
+# 9-decimal normalization: this absorbs KiCad 4-decimal coordinate rounding and
+# floating-point trig noise across rotated/mirrored placements while catching
+# any genuine copper land-pattern discrepancy (>= 2 um).
+_SMD_DIM_DECIMALS = 3
+_SMD_DIM_TOLERANCE_MM = 0.001
+_SMD_DIM_TOLERANCE_DEC = Decimal("0.001")
+_SMD_MIN_PITCH_MM = 1e-6
+_SMD_AXIS_ALIGN_TOL = 1e-3  # ~0.057 deg max deviation from terminal/transverse axes
+_SUPPORTED_SMD_PAD_SHAPES = frozenset({"rect", "roundrect", "oval", "circle"})
+
+
+def _pad_number_sort_key(pad_no: str) -> tuple[int, int, str]:
+    """Sort numeric pad numbers numerically, then non-numeric lexicographically."""
+    text = str(pad_no)
+    return (0, int(text), "") if text.isdigit() else (1, 0, text)
+
+
+def _smd_expected_record(pattern: SmdLandPattern) -> dict:
+    """Serialized form of a declared two-terminal SMD land pattern."""
+    return {
+        "pad_shape": pattern.pad_shape,
+        "pad_depth_mm": round(float(pattern.pad_depth_mm), _SMD_DIM_DECIMALS),
+        "pad_width_mm": round(float(pattern.pad_width_mm), _SMD_DIM_DECIMALS),
+        "pitch_mm": round(float(pattern.resolved_pitch_decimal_mm()), _SMD_DIM_DECIMALS),
+        "outer_span_mm": round(float(pattern.resolved_outer_span_decimal_mm()), _SMD_DIM_DECIMALS),
+        "source": pattern.source,
+    }
+
+
+def _smd_pattern_signature(pattern: SmdLandPattern) -> tuple:
+    """Canonical key for checking whether two rows declare the same pattern."""
+    return (
+        pattern.pad_shape,
+        Decimal(str(pattern.pad_depth_mm)),
+        Decimal(str(pattern.pad_width_mm)),
+        pattern.resolved_pitch_decimal_mm(),
+        pattern.resolved_outer_span_decimal_mm(),
+        pattern.source.strip(),
+    )
+
+
+def _copper_smd_pads(fp: Footprint) -> list[Pad]:
+    """Return copper-bearing SMD pads on *fp* (ignoring paste/mask-only pads)."""
+    return [
+        p
+        for p in fp.pads
+        if p.type == "smd" and any(str(layer).endswith(".Cu") for layer in (p.layers or ()))
+    ]
+
+
+def _measure_two_terminal_smd_copper(
+    fp: Footprint,
+) -> tuple[dict | None, dict | None, str | None]:
+    """Measure a placed two-terminal SMD footprint after undoing rotation and flip.
+
+    KiCad stores ``pad.position`` in footprint-local coordinates (already
+    y-mirrored on ``B.Cu``) and ``pad.rotation`` in the board-absolute frame
+    (already including ``fp.rotation``).  Subtracting ``fp.rotation`` recovers
+    the footprint-local pad angle, and negating local ``y`` and local angle for
+    ``B.Cu`` placements undoes front-to-back mirroring.
+
+    Returns ``(rounded_measured, raw_measured, error_reason)``.
+    """
+    from ..core.geometry import rotate_pad_offset
+
+    pads = _copper_smd_pads(fp)
+    if len(pads) != 2:
+        return (
+            None,
+            None,
+            f"expected 2 copper SMD pads, found {len(pads)}; "
+            "only two-terminal SMD chips are assessed",
+        )
+
+    p1, p2 = sorted(
+        pads,
+        key=lambda p: (_pad_number_sort_key(p.number), p.position[0], p.position[1]),
+    )
+    cu1 = {str(layer) for layer in p1.layers if str(layer).endswith(".Cu")}
+    cu2 = {str(layer) for layer in p2.layers if str(layer).endswith(".Cu")}
+    if not (cu1 & cu2) and "*.Cu" not in cu1 and "*.Cu" not in cu2:
+        return (
+            None,
+            None,
+            f"copper SMD pads {p1.number} ({', '.join(sorted(cu1))}) and "
+            f"{p2.number} ({', '.join(sorted(cu2))}) are on different copper layers",
+        )
+
+    for pad in (p1, p2):
+        if pad.shape not in _SUPPORTED_SMD_PAD_SHAPES:
+            return (
+                None,
+                None,
+                f"pad {pad.number} has unsupported shape '{pad.shape}'; "
+                "only rect, roundrect, oval and circle pads are assessed",
+            )
+        if pad.size[0] <= 0 or pad.size[1] <= 0:
+            return (
+                None,
+                None,
+                f"pad {pad.number} has non-positive size ({pad.size[0]}, {pad.size[1]}) mm",
+            )
+
+    is_back = fp.layer == "B.Cu"
+
+    def _undo_placement(pad: Pad) -> tuple[float, float, float]:
+        lx, ly = float(pad.position[0]), float(pad.position[1])
+        local_rot = float(pad.rotation) - float(fp.rotation)
+        if is_back:
+            return (lx, -ly, -local_rot)
+        return (lx, ly, local_rot)
+
+    ux1, uy1, rot1 = _undo_placement(p1)
+    ux2, uy2, rot2 = _undo_placement(p2)
+
+    dx = ux2 - ux1
+    dy = uy2 - uy1
+    pitch = math.hypot(dx, dy)
+    if pitch < _SMD_MIN_PITCH_MM:
+        return (None, None, "copper SMD pads have coincident centers; terminal axis is undefined")
+
+    # Unit vectors along the terminal axis (u) and transverse axis (t).
+    ux, uy = dx / pitch, dy / pitch
+    tx, ty = -uy, ux
+
+    raw_pads: list[dict] = []
+    rounded_pads: list[dict] = []
+    for pad, pad_rot in ((p1, rot1), (p2, rot2)):
+        w, h = float(pad.size[0]), float(pad.size[1])
+        if pad.shape == "circle":
+            if abs(Decimal(f"{w:.9f}") - Decimal(f"{h:.9f}")) > _SMD_DIM_TOLERANCE_DEC:
+                return (
+                    None,
+                    None,
+                    f"circular pad {pad.number} has unequal axes ({w:.3f} x {h:.3f} mm)",
+                )
+            depth, width = w, h
+        else:
+            # Pad's size[0] axis in the unrotated, unmirrored footprint frame.
+            wx, wy = rotate_pad_offset(1.0, 0.0, pad_rot)
+            dot_u = abs(wx * ux + wy * uy)
+            dot_t = abs(wx * tx + wy * ty)
+            if dot_t <= _SMD_AXIS_ALIGN_TOL:
+                depth, width = w, h
+            elif dot_u <= _SMD_AXIS_ALIGN_TOL:
+                depth, width = h, w
+            else:
+                return (
+                    None,
+                    None,
+                    f"pad {pad.number} is not axis-aligned with the terminal axis "
+                    f"(relative rotation {pad_rot:.2f} deg)",
+                )
+        raw_pads.append(
+            {"pad": pad.number, "shape": pad.shape, "depth_mm": depth, "width_mm": width}
+        )
+        rounded_pads.append(
+            {
+                "pad": pad.number,
+                "shape": pad.shape,
+                "depth_mm": round(depth, _SMD_DIM_DECIMALS),
+                "width_mm": round(width, _SMD_DIM_DECIMALS),
+            }
+        )
+
+    # Outer copper span along the terminal axis.
+    s1 = ux1 * ux + uy1 * uy
+    s2 = ux2 * ux + uy2 * uy
+    d1 = raw_pads[0]["depth_mm"]
+    d2 = raw_pads[1]["depth_mm"]
+    outer_span = max(s1 + d1 / 2.0, s2 + d2 / 2.0) - min(s1 - d1 / 2.0, s2 - d2 / 2.0)
+
+    raw = {"pads": raw_pads, "pitch_mm": pitch, "outer_span_mm": outer_span}
+    rounded = {
+        "pads": rounded_pads,
+        "pitch_mm": round(pitch, _SMD_DIM_DECIMALS),
+        "outer_span_mm": round(outer_span, _SMD_DIM_DECIMALS),
+    }
+    return (rounded, raw, None)
+
+
+def _dim_matches(measured_mm: float, expected_mm: Decimal) -> bool:
+    """Compare a measured copper dimension against an exact target within +/-0.001 mm."""
+    return abs(Decimal(f"{measured_mm:.9f}") - expected_mm) <= _SMD_DIM_TOLERANCE_DEC
+
+
+def _smd_land_pattern_finding(
+    fp: Footprint,
+    mpn: str | None,
+    pattern: SmdLandPattern | None,
+    pattern_error: str | None,
+) -> dict:
+    """Build one per-component SMD land-pattern finding (Issue #10505)."""
+    measured, raw, geom_error = _measure_two_terminal_smd_copper(fp)
+    expected = _smd_expected_record(pattern) if pattern is not None else None
+    source = pattern.source if pattern is not None else None
+
+    if pattern is None or geom_error is not None or raw is None:
+        reasons = [r for r in (pattern_error, geom_error) if r]
+        return {
+            "reference": fp.reference,
+            "mpn": mpn,
+            "footprint": fp.name,
+            "source": source,
+            "expected": expected,
+            "measured": measured,
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "; ".join(reasons) if reasons else "unassessed",
+        }
+
+    expected_depth = Decimal(str(pattern.pad_depth_mm))
+    expected_width = Decimal(str(pattern.pad_width_mm))
+    expected_pitch = pattern.resolved_pitch_decimal_mm()
+    expected_outer = pattern.resolved_outer_span_decimal_mm()
+
+    mismatched: list[str] = []
+    for pad_rec in raw["pads"]:
+        pad_id = pad_rec["pad"]
+        if pad_rec["shape"] != pattern.pad_shape:
+            mismatched.append(f"pad {pad_id} shape")
+        if not _dim_matches(pad_rec["depth_mm"], expected_depth):
+            mismatched.append(f"pad {pad_id} depth_mm")
+        if not _dim_matches(pad_rec["width_mm"], expected_width):
+            mismatched.append(f"pad {pad_id} width_mm")
+    if not _dim_matches(raw["pitch_mm"], expected_pitch):
+        mismatched.append("pitch_mm")
+    if not _dim_matches(raw["outer_span_mm"], expected_outer):
+        mismatched.append("outer_span_mm")
+
+    return {
+        "reference": fp.reference,
+        "mpn": mpn,
+        "footprint": fp.name,
+        "source": source,
+        "expected": expected,
+        "measured": measured,
+        "mismatched_fields": mismatched,
+        "status": "fail" if mismatched else "pass",
+    }
+
+
+def _format_measured_smd(measured: dict | None) -> str:
+    """Format measured copper geometry for one-line details output."""
+    if measured is None:
+        return "measured geometry unavailable"
+    fmt = f".{_SMD_DIM_DECIMALS}f"
+    pad_bits = ", ".join(
+        f"pad {p['pad']} {p['shape']} {p['depth_mm']:{fmt}} x {p['width_mm']:{fmt}} mm"
+        for p in measured["pads"]
+    )
+    return (
+        f"{pad_bits}, pitch {measured['pitch_mm']:{fmt}} mm, "
+        f"outer span {measured['outer_span_mm']:{fmt}} mm"
+    )
+
+
+def _format_smd_land_pattern_finding(f: dict) -> str:
+    """One ``details`` line per component carrying full evidence."""
+    mpn = f.get("mpn")
+    tag = f"{f['reference']}" + (f" [{mpn}]" if mpn else "")
+    if f["status"] == "unassessed":
+        measured_text = (
+            f" (measured: {_format_measured_smd(f['measured'])})"
+            if f.get("measured") is not None
+            else ""
+        )
+        return f"{tag}: unassessed: {f['reason']}{measured_text}"
+
+    exp = f["expected"]
+    fmt = f".{_SMD_DIM_DECIMALS}f"
+    src = f" per '{f['source']}'" if f.get("source") else ""
+    verdict = (
+        f"fail (mismatches: {', '.join(f['mismatched_fields'])})"
+        if f["status"] == "fail"
+        else "pass"
+    )
+    return (
+        f"{tag}: {verdict}{src}; "
+        f"expected {exp['pad_shape']} {exp['pad_depth_mm']:{fmt}} x {exp['pad_width_mm']:{fmt}} mm, "
+        f"pitch {exp['pitch_mm']:{fmt}} mm, outer span {exp['outer_span_mm']:{fmt}} mm; "
+        f"measured {_format_measured_smd(f['measured'])}"
+    )
+
+
+def _smd_finding_sort_key(f: dict) -> tuple[int, tuple]:
+    """Failures first, then unassessed, then passes; reference order within."""
+    order = {"fail": 0, "unassessed": 1, "pass": 2}
+    return (order.get(f["status"], 3), _ref_sort_key(f["reference"]))
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +1256,59 @@ def _describe_stock_record(rec: dict, boards: int) -> str:
     return f"needs {needed}, stock {rec['stock']} ({when})"
 
 
+# Where the ``bom_lcsc_stock`` lookups reached on the generating host
+# (issue #10386).  Every assigned LCSC number is searched in the parts cache
+# and then, when the cache does not settle it, in the offline catalog;
+# ``data["sources"]`` folds those per-number outcomes into one state per
+# source.  That lets a reader of recorded evidence tell a host that could
+# not check -- no catalog file, or one it could not read -- from a catalog
+# that was searched and does not list the part.
+LOOKUP_SOURCE_CACHE = "parts_cache"
+LOOKUP_SOURCE_CATALOG = "offline_catalog"
+
+# Fold order: the first state a run contains wins, so a query that failed is
+# never summarised as a search that found nothing.
+_LOOKUP_STATE_ORDER: dict[str, tuple[str, ...]] = {
+    LOOKUP_SOURCE_CACHE: ("unreadable", "hit", "miss", "not_consulted"),
+    LOOKUP_SOURCE_CATALOG: ("unreadable", "hit", "missing", "miss", "not_consulted"),
+}
+
+_LOOKUP_SOURCE_LABEL = {
+    LOOKUP_SOURCE_CACHE: "parts cache",
+    LOOKUP_SOURCE_CATALOG: "offline catalog",
+}
+
+_LOOKUP_STATE_TEXT = {
+    "hit": "searched, match found",
+    "miss": "searched, no matching row",
+    "missing": "not available on the generating host (no catalog file)",
+    "unreadable": "could not be read on the generating host",
+    "not_consulted": "not consulted",
+}
+
+
+def summarize_lookup_states(source: str, states: Iterable[str]) -> str:
+    """Fold the per-number lookup states of one source into the run's state."""
+    seen = set(states)
+    return next((s for s in _LOOKUP_STATE_ORDER[source] if s in seen), "not_consulted")
+
+
+def describe_lookup_sources(sources: object) -> str:
+    """Render a recorded ``sources`` block; empty when nothing was recorded.
+
+    ``data["sources"]`` is absent from bundles recorded before issue #10386
+    and from runs that assigned no LCSC number; those make no claim here.
+    """
+    if not isinstance(sources, dict):
+        return ""
+    described = []
+    for key, label in _LOOKUP_SOURCE_LABEL.items():
+        if key in sources:
+            state = str(sources[key])
+            described.append(f"{label} {_LOOKUP_STATE_TEXT.get(state, state)}")
+    return "; ".join(described)
+
+
 def evaluate_lcsc_stock(
     data: dict, boards: int, covered: frozenset[str], strict: bool
 ) -> PreflightResult:
@@ -399,7 +1319,9 @@ def evaluate_lcsc_stock(
     on the manifest's recorded ``data``), so a shortfall reads identically in
     both.  ``data`` holds ``parts`` (resolved LCSC ids with ``refs``,
     ``per_board``, ``stock``, ``verified``, ``source``, ``age_days``) and
-    ``unresolved`` (ids in neither the cache nor the catalog).
+    ``unresolved`` (ids in neither the cache nor the catalog).  When it also
+    holds ``sources`` (issue #10386), "Stock not verified" says what became
+    of the lookups the producer made; without it the message is unchanged.
     """
     name = "bom_lcsc_stock"
     boards = max(1, int(boards))
@@ -433,7 +1355,10 @@ def evaluate_lcsc_stock(
         suffix = f" (and {len(entries) - 5} more)" if len(entries) > 5 else ""
         return "; ".join(entries[:5]) + suffix
 
+    uncovered_unresolved = [u for u in unresolved if u not in covered]
     notes: list[str] = []
+    if uncovered_unresolved and (live_short or soft_short):
+        notes.append("stock also unresolved: " + ", ".join(uncovered_unresolved))
     if held:
         notes.append("held in operator inventory, not stock-verified: " + ", ".join(sorted(held)))
     if not_short:
@@ -472,12 +1397,14 @@ def evaluate_lcsc_stock(
             _fmt(soft_short),
         )
     checked = len(parts)
-    uncovered_unresolved = [u for u in unresolved if u not in covered]
-    if checked == 0 and uncovered_unresolved:
+    if uncovered_unresolved:
+        looked = describe_lookup_sources(data.get("sources"))
         return _result(
             "FAIL" if strict else "WARN",
             f"Stock not verified: {len(uncovered_unresolved)} assigned LCSC number(s) found in "
             f"neither the parts cache nor the offline catalog"
+            + (f"; {checked} other part(s) have recorded stock" if checked else "")
+            + (f"; {looked}" if looked else "")
             + (" (strict preflight)" if strict else ""),
             ", ".join(uncovered_unresolved[:10]),
         )
@@ -548,7 +1475,11 @@ class PreflightChecker:
         parts_catalog=None,
         merge_lcsc: bool = True,
         merge_lcsc_from: str | Path | None = None,
+        spec_path: Path | None = None,
+        no_spec: bool = False,
     ):
+        self.spec_path = spec_path
+        self.no_spec = no_spec
         self.pcb_path = Path(pcb_path)
         # LCSC merge source, mirroring AssemblyConfig (issue #8260).
         self._merge_lcsc = merge_lcsc
@@ -621,6 +1552,14 @@ class PreflightChecker:
             results.append(self._check_footprints_present())
             results.append(self._check_board_dimensions())
             results.append(self._check_drill_holes())
+            # Through-hole lead fit against the finished plated hole
+            # (Issue #10299).  Runs whenever the board loads: pads without
+            # verified lead dimensions report *unassessed* rather than
+            # passing silently.
+            results.append(self._check_assembly_lead_fit())
+            # MPN-specific two-terminal SMD land-pattern check (Issue #10505).
+            results.append(self._check_assembly_smd_land_pattern())
+            results.append(self._check_assembly_mounting_hole_fit())
             results.append(self._check_stackup_copper())
 
         # THT-in-CPL warning
@@ -1068,6 +2007,590 @@ class PreflightChecker:
             name="drill_holes",
             status="OK",
             message=f"Drill holes present ({via_count} vias, {th_pad_count} TH pads)",
+        )
+
+    # ------------------------------------------------------------------
+    # Through-hole lead fit (Issue #10299)
+    # ------------------------------------------------------------------
+
+    def _load_project_spec(self) -> tuple[ProjectSpec | None, AssemblySpecErrors]:
+        """Use the BOM export's spec selection and retain per-profile errors."""
+        from .bom_spec_overlay import find_spec_file, load_assembly_spec
+
+        if self.no_spec:
+            return None, AssemblySpecErrors()
+        try:
+            path = self.spec_path or find_spec_file(self.pcb_path.parent)
+            if path is not None:
+                return load_assembly_spec(path)
+        except (ImportError, OSError, ValueError) as exc:
+            logger.warning("Project spec load failed: %s", exc)
+        return None, AssemblySpecErrors()
+
+    def _assembly_assignments(
+        self,
+    ) -> tuple[ProjectSpec | None, AssemblySpecErrors, dict[str, tuple[int, BOMEntry]]]:
+        """The export's selected spec with its retained errors and per-reference assignments."""
+        spec, spec_errors = self._load_project_spec()
+        entries: dict[str, tuple[int, BOMEntry]] = {}
+        if spec is not None:
+            for row, assignment in enumerate(spec.bom_entries or []):
+                for ref in expand_ref_range(assignment.ref):
+                    entries[ref] = (row, assignment)
+        return spec, spec_errors, entries
+
+    def _finished_hole_order(self, spec: ProjectSpec | None) -> _FinishedHoleOrder:
+        """The spec's finished-hole tolerance and guarantees when its fab is this export's."""
+        not_declared = _FinishedHoleOrder(
+            lower_mm=None,
+            upper_mm=None,
+            source=None,
+            fab_mismatch=None,
+            guarantees=(),
+        )
+        if spec is None or spec.requirements is None or spec.requirements.manufacturing is None:
+            return not_declared
+        mfg = spec.requirements.manufacturing
+        from ..manufacturers import get_fab_family
+
+        if mfg.target_fab and get_fab_family(mfg.target_fab) != self._fab_family:
+            mismatch = (
+                f"no applicable tolerance for {self.manufacturer} (spec targets {mfg.target_fab})"
+            )
+            return replace(not_declared, fab_mismatch=mismatch)
+        # An order-specific guarantee is only the issuing fabricator's: with no
+        # target_fab there is no fab to bind it to, so only the general
+        # tolerance applies.
+        return replace(
+            not_declared,
+            lower_mm=mfg.finished_hole_tolerance_mm,
+            upper_mm=mfg.finished_hole_tolerance_upper_mm,
+            source=mfg.finished_hole_tolerance_source,
+            guarantees=tuple(mfg.finished_hole_guarantees or ()) if mfg.target_fab else (),
+        )
+
+    def _check_assembly_lead_fit(self) -> PreflightResult:
+        """Compare declared maximum lead dimensions with the finished hole.
+
+        Issue #10299: a designer declares *verified* maximum lead
+        dimensions for a part assignment (``bom_entries`` ``lead``, or a
+        ``pad_leads`` override per pad number) plus the fabricator's lower
+        finished-hole tolerance
+        (``requirements.manufacturing.finished_hole_tolerance_mm``), and
+        this check compares them with the placed footprint's plated
+        component holes.  For circular holes it reports the centred
+        geometric fit -- nominal margin (finished diameter minus required
+        diameter) and, when the tolerance is declared, the margin at
+        minimum finish.  A negative margin is a confirmed interference
+        and fails preflight.  Missing lead data, slot holes and an
+        unknown tolerance are reported as unassessed, never as a fit;
+        one pad's missing data never hides another pad's failure.
+
+        Issue #10473: a pad named by a ``wire_terminations`` declaration
+        is assessed by the maximum outside diameter of the prepared wire
+        or ferrule end that enters it instead of its part's lead, so a
+        wire land needs no ``bom_entries`` MPN.  Sibling pads keep the
+        component lead lookup.
+
+        Vias (not pads), SMD pads and non-plated holes are excluded.  The
+        result describes a centred geometric fit only -- one input to
+        reviewing placement and lead-pitch tolerances.
+        """
+        name = "assembly_lead_fit"
+        if self._pcb is None:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No PCB loaded; through-hole lead fit not assessed",
+                data={"pads": [], "summary": {"pads": 0}},
+            )
+
+        spec, spec_errors, entries = self._assembly_assignments()
+        order = self._finished_hole_order(spec)
+        tolerance_reason = spec_errors.tolerance or order.reason
+        if order.fab_mismatch is not None:
+            tolerance_reason = order.fab_mismatch
+        tolerance_mm = order.lower_mm
+        tolerance_source = order.source
+        wires: dict[tuple[str, str], list[tuple[int, WireTermination]]] = {}
+        if spec is not None:
+            from ..spec.schema import LeadProfile
+
+            for row, termination in enumerate(spec.wire_terminations or []):
+                wires.setdefault((termination.ref, termination.pad), []).append((row, termination))
+
+        findings: list[dict] = []
+        matched_wires: set[tuple[str, str]] = set()
+        for fp in self._pcb.footprints:
+            if fp.dnp:
+                continue
+            for pad in fp.pads:
+                # Excludes vias (not pads), SMD pads and np_thru_hole
+                # (non-plated) pads by type.
+                if pad.type not in ("thru_hole", "through_hole"):
+                    continue
+                entry = None
+                profile_error = None
+                profile: LeadProfile | None = None
+                wire: WireTermination | None = None
+                declared = wires.get((fp.reference, pad.number))
+                if declared:
+                    matched_wires.add((fp.reference, pad.number))
+                    # The prepared wire or ferrule end enters a declared pad,
+                    # not its part's lead (Issue #10473).
+                    row, wire = declared[0]
+                    profile_error = spec_errors.wires.get(row)
+                    if len(declared) > 1:
+                        profile_error = (
+                            f"{len(declared)} wire terminations declared for "
+                            f"{fp.reference} pad {pad.number}"
+                        )
+                    elif profile_error is None and wire.diameter_mm is not None:
+                        profile = LeadProfile(
+                            shape="round",
+                            diameter_mm=wire.diameter_mm,
+                            source=wire.source or "",
+                        )
+                elif fp.reference in entries:
+                    row, entry = entries[fp.reference]
+                    profile_error = spec_errors.pad_containers.get(row) or spec_errors.profiles.get(
+                        (row, pad.number)
+                    )
+                    if profile_error is None:
+                        profile = (entry.pad_leads or {}).get(pad.number) or entry.lead
+                        if profile is None:
+                            profile_error = spec_errors.profiles.get((row, None))
+                findings.append(
+                    _lead_fit_finding(
+                        fp.reference,
+                        pad,
+                        entry,
+                        profile,
+                        tolerance_mm,
+                        tolerance_source,
+                        tolerance_reason,
+                        profile_error,
+                        wire=wire,
+                    )
+                )
+
+        failed = [f for f in findings if f["status"] == "fail"]
+        unassessed = [f for f in findings if f["status"] == "unassessed"]
+        tolerance_unassessed = [
+            f
+            for f in findings
+            if f["status"] != "unassessed" and f["tolerance"]["status"] == "unassessed"
+        ]
+        unmatched_wires = [
+            f"{ref} pad {pad}: no matching plated through-hole pad on PCB"
+            for (ref, pad) in wires
+            if (ref, pad) not in matched_wires
+        ]
+        not_applied = [*spec_errors.unattached_wires, *unmatched_wires]
+        data: dict = {
+            "pads": findings,
+            "wire_terminations_not_applied": list(not_applied),
+            "summary": {
+                "pads": len(findings),
+                "failed": len(failed),
+                "unassessed": len(unassessed),
+                "tolerance_unassessed": len(tolerance_unassessed),
+                "finished_hole_tolerance_mm": tolerance_mm,
+                "finished_hole_tolerance_source": tolerance_source,
+            },
+        }
+
+        if not findings and not not_applied:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No plated through-hole component pads; lead fit not applicable",
+                data=data,
+            )
+
+        def _refs(fs: list[dict], limit: int = 5) -> str:
+            shown = ", ".join(f"{f['reference']} pad {f['pad']}" for f in fs[:limit])
+            if len(fs) > limit:
+                shown += f" (and {len(fs) - limit} more)"
+            return shown
+
+        if failed:
+            message = f"Through-hole lead fit fails on {len(failed)} pad(s): {_refs(failed)}"
+            status: Literal["OK", "WARN", "FAIL"] = "FAIL"
+        elif unassessed or tolerance_unassessed or not_applied:
+            bits = []
+            if unassessed:
+                bits.append(
+                    f"{len(unassessed)} pad(s) unassessed "
+                    "(no verified lead or prepared wire dimensions, or unsupported geometry)"
+                )
+            if tolerance_unassessed:
+                bits.append(
+                    f"{len(tolerance_unassessed)} pad(s) assessed without a finished-hole tolerance"
+                )
+            if not_applied:
+                bits.append(f"{len(not_applied)} wire termination declaration(s) not applied")
+            message = "Through-hole lead fit unverified: " + "; ".join(bits) + "; no failures"
+            status = "WARN"
+        else:
+            message = (
+                f"Through-hole lead fit verified: all {len(findings)} plated "
+                "through-hole pad(s) fit"
+            )
+            status = "OK"
+
+        lines = [_format_lead_finding(f) for f in sorted(findings, key=_lead_finding_sort_key)]
+        if len(lines) > 40:  # pragma: no cover - large boards
+            lines = lines[:40] + [f"(and {len(lines) - 40} more pads in data.pads)"]
+        lines.extend(f"Wire termination declaration not applied: {note}" for note in not_applied)
+        lines.append(
+            "Assessment covers centred geometric fit only (not lead pitch or placement tolerances)."
+        )
+        return PreflightResult(
+            name=name,
+            status=status,
+            message=message,
+            details="\n".join(lines),
+            data=data,
+        )
+
+    def _check_assembly_mounting_hole_fit(self) -> PreflightResult:
+        """Compare declared mounting holes with their drawing and the order's hole interval.
+
+        Issue #10476: a part assignment declares the mounting-hole pattern
+        its package drawing requires (``bom_entries`` ``mounting_holes``:
+        two pad numbers, inclusive finished-hole diameter limits and, when
+        the drawing gives them, inclusive pitch limits).  For every placed,
+        non-DNP reference this check judges the nominal drill and each
+        evidenced end of the fabricator's finished-hole interval -- the
+        general tolerance, or a documented guarantee covering the reference
+        -- against the diameter limits, and the nominal pitch between the
+        two holes against the pitch limits.  Limits are inclusive and the
+        verdicts precede display rounding.  A nominal mismatch is reported
+        apart from a nominally correct hole whose order tolerance crosses a
+        limit.  Missing or inapplicable order evidence, a slot or a missing
+        pad leaves that measurement unassessed, never passed, and never
+        hides another hole's result.  It is independent of
+        :meth:`_check_assembly_lead_fit`.
+        """
+        name = "assembly_mounting_hole_fit"
+        holes: list[dict] = []
+        pitches: list[dict] = []
+        invalid: list[dict] = []
+        if self._pcb is None:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No PCB loaded; mounting-hole fit not assessed",
+                data={
+                    "diameters": holes,
+                    "pitch": pitches,
+                    "summary": _mounting_summary(
+                        holes, pitches, invalid, _FinishedHoleOrder(None, None, None, None, ())
+                    ),
+                    "invalid_declarations": invalid,
+                },
+            )
+
+        spec, spec_errors, entries = self._assembly_assignments()
+        order = self._finished_hole_order(spec)
+        assignments = list(spec.bom_entries or []) if spec is not None else []
+        if spec_errors.tolerance:
+            field = spec_errors.tolerance.partition(":")[0].removeprefix("invalid ")
+            invalid.append({"field": field, "refs": [], "reason": spec_errors.tolerance})
+        if spec_errors.tolerance_upper:
+            invalid.append(
+                {
+                    "field": "finished_hole_tolerance_upper_mm",
+                    "refs": [],
+                    "reason": spec_errors.tolerance_upper,
+                }
+            )
+        for row, reason in sorted(spec_errors.mounting.items()):
+            refs = expand_ref_range(assignments[row].ref) if row < len(assignments) else []
+            invalid.append(
+                {"field": f"bom_entries[{row}].mounting_holes", "refs": refs, "reason": reason}
+            )
+
+        def _guarantee_index(item: tuple[str, str]) -> tuple[int, str]:
+            index = item[0].partition("[")[2].partition("]")[0]
+            return (int(index) if index.isdigit() else -1), item[0]
+
+        for where, reason in sorted(spec_errors.guarantees.items(), key=_guarantee_index):
+            invalid.append({"field": where, "refs": [], "reason": reason})
+
+        guarantees: dict[str, FinishedHoleGuarantee] = {}
+        for guarantee in order.guarantees:
+            for ref_spec in guarantee.refs:
+                for ref in expand_ref_range(ref_spec):
+                    guarantees.setdefault(ref, guarantee)
+
+        for fp in self._pcb.footprints:
+            if fp.dnp or fp.reference not in entries:
+                continue
+            entry = entries[fp.reference][1]
+            declaration = entry.mounting_holes
+            if declaration is None:
+                continue
+            located = {number: _declared_pads(fp, number) for number in declaration.pads}
+            for number, (found, missing_reason) in located.items():
+                if not found:
+                    holes.append(
+                        {
+                            "reference": fp.reference,
+                            "pad": number,
+                            "mpn": entry.part,
+                            "hole": None,
+                            "drawing": _drawing_record(declaration, declaration.hole_diameter),
+                            "status": "unassessed",
+                            "reason": missing_reason,
+                        }
+                    )
+                    continue
+                for pad in found:
+                    holes.append(
+                        _mounting_hole_finding(
+                            fp.reference,
+                            pad,
+                            entry.part,
+                            declaration,
+                            order,
+                            guarantees.get(fp.reference),
+                            spec_errors,
+                        )
+                    )
+            if declaration.pitch is not None:
+                pitches.append(
+                    _mounting_pitch_finding(fp, entry.part, declaration, declaration.pitch, located)
+                )
+
+        records = [*holes, *pitches]
+        failed = [f for f in records if f["status"] == "fail"]
+        unassessed = [f for f in records if f["status"] == "unassessed"]
+        data: dict = {
+            "diameters": holes,
+            "pitch": pitches,
+            "summary": _mounting_summary(holes, pitches, invalid, order),
+            "invalid_declarations": invalid,
+        }
+        if not records and not invalid:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message=(
+                    "No placed references with a mounting-hole declaration; "
+                    "mounting-hole fit not applicable"
+                ),
+                data=data,
+            )
+
+        def _listed(fs: list[dict], limit: int = 5) -> str:
+            shown = ", ".join(_mounting_where(f) for f in fs[:limit])
+            if len(fs) > limit:
+                shown += f" (and {len(fs) - limit} more)"
+            return shown
+
+        if failed:
+            status: Literal["OK", "WARN", "FAIL"] = "FAIL"
+            message = f"Mounting-hole fit fails on {len(failed)} measurement(s): {_listed(failed)}"
+        elif unassessed or invalid:
+            status = "WARN"
+            bits = []
+            unassessed_holes = [f for f in holes if f["status"] == "unassessed"]
+            unassessed_pitch = [f for f in pitches if f["status"] == "unassessed"]
+            if unassessed_holes:
+                bits.append(
+                    f"{len(unassessed_holes)} hole(s) unassessed "
+                    "(unsupported geometry or incomplete order evidence)"
+                )
+            if unassessed_pitch:
+                bits.append(f"{len(unassessed_pitch)} pitch pair(s) unassessed")
+            if invalid:
+                bits.append(
+                    f"{len(invalid)} invalid declaration(s): "
+                    + ", ".join(item["field"] for item in invalid)
+                )
+            message = "Mounting-hole fit unverified: " + "; ".join(bits) + "; no failures"
+        else:
+            status = "OK"
+            message = (
+                f"Mounting-hole fit verified: all {len(holes)} mounting hole(s) "
+                "within drawing limits"
+            )
+            if pitches:
+                message += f" and {len(pitches)} pitch pair(s)"
+
+        lines = [
+            _format_mounting_finding(f) for f in sorted(records, key=_mounting_finding_sort_key)
+        ]
+        for item in invalid:
+            where = item["field"]
+            if item["refs"]:
+                where += f" ({', '.join(item['refs'])})"
+            lines.append(f"invalid declaration {where}: {item['reason']}")
+        if len(lines) > 40:  # pragma: no cover - large boards
+            lines = lines[:40] + [f"(and {len(lines) - 40} more in data.diameters and data.pitch)"]
+        lines.append(
+            "Pitch is the nominal distance between hole centres on the PCB; "
+            "fabricated hole-position tolerances are not assessed."
+        )
+        return PreflightResult(
+            name=name,
+            status=status,
+            message=message,
+            details="\n".join(lines),
+            data=data,
+        )
+
+    def _check_assembly_smd_land_pattern(self) -> PreflightResult:
+        """Compare placed two-terminal SMD copper against declared MPN drawings.
+
+        Issue #10505: a designer declares a source-attributed manufacturer SMD
+        land pattern on a ``.kct`` ``bom_entries`` assignment (``land_pattern:``
+        with pad shape, depth along the terminal axis, transverse width,
+        pitch/outer span, and mandatory drawing/page ``source``).  This check
+        reads the placed PCB without mutating it, undoes footprint rotation and
+        front-to-back mirroring, and compares both copper pads' shape, depth,
+        width, center pitch, and outer copper span within ``+/-0.001 mm``.
+
+        Matching by footprint or package family name alone never verifies a
+        part: only a valid pattern declared for the reference's exact BOM MPN
+        counts.  Missing MPNs, missing or source-less declarations, and
+        unusable pad geometry are reported as unassessed with explicit reasons
+        without hiding findings on other references.
+        """
+        name = "assembly_smd_land_pattern"
+        if self._pcb is None:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No PCB loaded; SMD land pattern not assessed",
+                data={
+                    "components": [],
+                    "tolerance_mm": _SMD_DIM_TOLERANCE_MM,
+                    "summary": {"components": 0, "passed": 0, "failed": 0, "unassessed": 0},
+                },
+            )
+
+        spec, spec_errors = self._load_project_spec()
+        entries: dict[str, tuple[int, BOMEntry]] = {}
+        patterns_by_mpn: dict[str, dict[tuple, SmdLandPattern]] = {}
+        if spec is not None:
+            from .bom_spec_overlay import expand_ref_range
+
+            for row, assignment in enumerate(spec.bom_entries or []):
+                mpn_key = assignment.part.strip()
+                if mpn_key and assignment.land_pattern is not None:
+                    sig = _smd_pattern_signature(assignment.land_pattern)
+                    patterns_by_mpn.setdefault(mpn_key, {})[sig] = assignment.land_pattern
+                for ref in expand_ref_range(assignment.ref):
+                    entries[ref] = (row, assignment)
+
+        findings: list[dict] = []
+        for fp in self._pcb.footprints:
+            if (
+                fp.dnp
+                or fp.exclude_from_bom
+                or "board_only" in getattr(fp, "attr_flags", ())
+                or is_through_hole_footprint(fp)
+            ):
+                continue
+
+            copper_pads = _copper_smd_pads(fp)
+            entry_pair = entries.get(fp.reference)
+            has_declared_pattern = entry_pair is not None and (
+                entry_pair[1].land_pattern is not None or entry_pair[0] in spec_errors.land_patterns
+            )
+            if len(copper_pads) != 2 and not has_declared_pattern:
+                continue
+
+            mpn: str | None = None
+            pattern: SmdLandPattern | None = None
+            pattern_error: str | None = None
+            if entry_pair is None:
+                pattern_error = (
+                    f"no MPN or SMD land pattern: reference {fp.reference} has no "
+                    "bom_entries assignment in the project spec"
+                )
+            else:
+                row, entry = entry_pair
+                mpn = entry.part.strip() or None
+                if mpn is None:
+                    pattern_error = f"missing MPN on bom_entries assignment for {fp.reference}"
+                elif row in spec_errors.land_patterns:
+                    pattern_error = spec_errors.land_patterns[row]
+                elif entry.land_pattern is not None:
+                    pattern = entry.land_pattern
+                else:
+                    mpn_patterns = patterns_by_mpn.get(mpn)
+                    if mpn_patterns and len(mpn_patterns) == 1:
+                        pattern = next(iter(mpn_patterns.values()))
+                    elif mpn_patterns and len(mpn_patterns) > 1:
+                        pattern_error = f"conflicting SMD land-pattern declarations for MPN {mpn}"
+                    else:
+                        pattern_error = f"no verified SMD land pattern declared for MPN {mpn}"
+
+            findings.append(_smd_land_pattern_finding(fp, mpn, pattern, pattern_error))
+
+        passed = [f for f in findings if f["status"] == "pass"]
+        failed = [f for f in findings if f["status"] == "fail"]
+        unassessed = [f for f in findings if f["status"] == "unassessed"]
+        data: dict = {
+            "components": findings,
+            "tolerance_mm": _SMD_DIM_TOLERANCE_MM,
+            "summary": {
+                "components": len(findings),
+                "passed": len(passed),
+                "failed": len(failed),
+                "unassessed": len(unassessed),
+            },
+        }
+
+        if not findings:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No populated two-terminal SMD chips; SMD land-pattern check not applicable",
+                data=data,
+            )
+
+        def _refs(fs: list[dict], limit: int = 5) -> str:
+            shown = ", ".join(f["reference"] for f in fs[:limit])
+            if len(fs) > limit:
+                shown += f" (and {len(fs) - limit} more)"
+            return shown
+
+        if failed:
+            message = f"SMD land pattern mismatch on {len(failed)} component(s): {_refs(failed)}"
+            status: Literal["OK", "WARN", "FAIL"] = "FAIL"
+        elif unassessed:
+            message = (
+                f"SMD land pattern unverified: {len(unassessed)} two-terminal SMD "
+                "component(s) unassessed (missing MPN, source, or usable geometry); no failures"
+            )
+            status = "WARN"
+        else:
+            message = (
+                f"SMD land pattern verified: all {len(findings)} two-terminal SMD "
+                "component(s) match declared drawings"
+            )
+            status = "OK"
+
+        lines = [
+            _format_smd_land_pattern_finding(f) for f in sorted(findings, key=_smd_finding_sort_key)
+        ]
+        if len(lines) > 40:  # pragma: no cover - large boards
+            lines = lines[:40] + [f"(and {len(lines) - 40} more components in data.components)"]
+        lines.append(
+            f"Dimensional comparison tolerance: +/-{_SMD_DIM_TOLERANCE_MM:.{_SMD_DIM_DECIMALS}f} mm "
+            "(two-terminal SMD copper pads; placement rotation and mirroring undone)."
+        )
+        return PreflightResult(
+            name=name,
+            status=status,
+            message=message,
+            details="\n".join(lines),
+            data=data,
         )
 
     def _check_stackup_copper(self) -> PreflightResult:
@@ -1748,6 +3271,10 @@ class PreflightChecker:
         unknown source) it is a WARN -- a legacy cache row with no stock info
         also reads ``stock=0`` -- escalated to FAIL under
         ``strict_report_source`` (``--strict-preflight``).
+
+        The recorded ``data`` also says where the lookups reached on this
+        host (``sources``, issue #10386), so a later reader can tell an
+        unverified part from a host that had no source to check it against.
         """
         name = "bom_lcsc_stock"
         boards = max(1, int(self.config.order_boards))
@@ -1806,8 +3333,12 @@ class PreflightChecker:
 
         records: list[dict] = []
         unresolved: list[str] = []
+        cache_states: set[str] = set()
+        catalog_states: set[str] = set()
         for lcsc, refs in sorted(refs_by_lcsc.items()):
             verdict = verify_lcsc_assignment(cache, catalog, lcsc, "", refs[0])
+            cache_states.add(verdict.lookups.cache)
+            catalog_states.add(verdict.lookups.catalog)
             if verdict.part is None:
                 unresolved.append(lcsc)  # not in any source: also reported by bom_lcsc_values
                 continue
@@ -1833,6 +3364,12 @@ class PreflightChecker:
             "strict": bool(self.config.strict_report_source),
             "parts": records,
             "unresolved": unresolved,
+            "sources": {
+                LOOKUP_SOURCE_CACHE: summarize_lookup_states(LOOKUP_SOURCE_CACHE, cache_states),
+                LOOKUP_SOURCE_CATALOG: summarize_lookup_states(
+                    LOOKUP_SOURCE_CATALOG, catalog_states
+                ),
+            },
         }
         return evaluate_lcsc_stock(
             data,
@@ -2367,16 +3904,10 @@ class PreflightChecker:
         original (warn-on-missing) behaviour.
         """
         try:
-            from .bom_spec_overlay import expand_ref_range, find_spec_file
+            from .bom_spec_overlay import expand_ref_range
 
-            spec_file = find_spec_file(self.pcb_path.parent)
-            if spec_file is None:
-                return set()
-
-            from ..spec.parser import load_spec
-
-            spec = load_spec(spec_file)
-            if not spec.bom_entries:
+            spec, _ = self._load_project_spec()
+            if spec is None or not spec.bom_entries:
                 return set()
 
             refs: set[str] = set()
@@ -2396,14 +3927,11 @@ class PreflightChecker:
         Best-effort like the overlay: no/invalid spec means no exemptions.
         """
         try:
-            from .bom_spec_overlay import declared_exemptions, find_spec_file
+            from .bom_spec_overlay import declared_exemptions
 
-            spec_file = find_spec_file(self.pcb_path.parent)
-            if spec_file is None:
+            spec, _ = self._load_project_spec()
+            if spec is None:
                 return {}
-            from ..spec.parser import load_spec
-
-            spec = load_spec(spec_file)
             return declared_exemptions(spec.bom_entries) if spec.bom_entries else {}
         except Exception as e:
             logger.debug("Spec exemption lookup failed (ignoring): %s", e)
@@ -2454,18 +3982,13 @@ class PreflightChecker:
             from .bom_spec_overlay import (
                 apply_spec_overlay,
                 declared_exemptions,
-                find_spec_file,
                 resolved_refs,
             )
 
-            spec_file = find_spec_file(self.pcb_path.parent)
-            if spec_file is not None:
-                from ..spec.parser import load_spec
-
-                spec = load_spec(spec_file)
-                if spec.bom_entries:
-                    spec_refs = resolved_refs(apply_spec_overlay(items, spec.bom_entries))
-                    exempt_refs = set(declared_exemptions(spec.bom_entries))
+            spec, _ = self._load_project_spec()
+            if spec and spec.bom_entries:
+                spec_refs = resolved_refs(apply_spec_overlay(items, spec.bom_entries))
+                exempt_refs = set(declared_exemptions(spec.bom_entries))
         except Exception as e:
             logger.warning("Spec overlay failed in preflight (continuing without): %s", e)
 

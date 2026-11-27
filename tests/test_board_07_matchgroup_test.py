@@ -930,11 +930,11 @@ def test_pad_drill_wrapper_uses_shared_project_floor(generate_design_mod, tmp_pa
     candidate = tmp_path / source.name
     # Copper gap passes both manufacturer floors; drill gap is 0.27 mm.
     candidate.write_text(source.read_text().replace("10.4421", "10.47"))
-    candidate.with_suffix(".kicad_pro").write_text(
-        json.dumps(
-            {"board": {"design_settings": {"rules": {"min_hole_clearance": hole_clearance}}}}
-        )
-    )
+    # Keep the fixture's 0.1016 mm copper clearance. The landing has
+    # 0.145 mm of copper clearance and 0.27 mm of drill clearance.
+    project = json.loads(source.with_suffix(".kicad_pro").read_text())
+    project["board"]["design_settings"]["rules"]["min_hole_clearance"] = hole_clearance
+    candidate.with_suffix(".kicad_pro").write_text(json.dumps(project))
     before = candidate.read_bytes()
     pcb = PCB.load(candidate)
     identities = [(v.uuid, v.net_number, v.size, v.drill) for v in pcb.vias]

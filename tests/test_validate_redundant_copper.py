@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.sexp import parse_string
+from kicad_tools.validate.checker import DRCChecker
+from kicad_tools.validate.rules.physical_gap import (
+    FabGapPolicy,
+    GapBand,
+    check_physical_copper_gap,
+    check_physical_copper_gap_fab_view,
+)
 from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
 
 
@@ -200,6 +210,226 @@ def test_already_optimal_path_is_not_a_staircase():
     assert _stair_findings(res) == []
 
 
+# --- staircase shortcut vs the physical-gap slit floor (Issue #9862) ---------
+
+
+def _gap_board(*items):
+    return PCB(
+        parse_string(
+            """(kicad_pcb (version 20240108) (generator pcbnew)
+      (general (thickness 1.6))
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+      (net 0 "") (net 1 "SIG") (net 2 "OTHER") (net 3 "THIRD")
+    """
+            + "\n".join(items)
+            + ")"
+        )
+    )
+
+
+def _track(a, b, *, net=1, width=0.2, layer="F.Cu"):
+    return (
+        f"(segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) "
+        f'(width {width}) (layer "{layer}") (net {net}))'
+    )
+
+
+#: A 3-segment, 2-bend staircase whose diagonal-first shortcut runs
+#: (0,0)->(4,4)->(8,4) and whose orthogonal-first alternative runs
+#: (0,0)->(8,0)->(8,4).
+_L_CHAIN = (((0, 0), (4, 0)), ((4, 0), (4, 4)), ((4, 4), (8, 4)))
+
+
+def _chain_tracks(chain=_L_CHAIN):
+    return [_track(a, b) for a, b in chain]
+
+
+def _stair_pcb(*extra):
+    return _gap_board(*_chain_tracks(), *extra)
+
+
+def _staircase_findings(checker):
+    results = checker.check_redundant_copper()
+    return [v for v in results.violations if v.rule_id == "redundant_copper_staircase"]
+
+
+def _checker(pcb, *, gap_mm=None, fab_policy=None):
+    return DRCChecker(
+        pcb,
+        manufacturer="jlcpcb",
+        layers=2,
+        physical_copper_gap_mm=gap_mm,
+        fab_view=fab_policy is not None,
+        fab_view_gap_policy=fab_policy,
+        warn_on_inactive_skew_rules=False,
+    )
+
+
+def _pad(at, name):
+    return f"""(footprint "t{name}" (layer "F.Cu") (at {at[0]} {at[1]})
+      (property "Reference" "{name}")
+      (pad "1" smd circle (at 0 0) (size 1 1) (layers "F.Cu")
+      (net 1 "SIG") (uuid "pad{name}")))"""
+
+
+def _zone_strip(layer="F.Cu"):
+    """Zone copper whose edge parallels the (0,0)->(4,4) diagonal at 0.0828 mm."""
+    return f"""(zone (net 1) (net_name "SIG") (layer "{layer}") (uuid "z1")
+      (polygon (pts (xy 0.13 -0.13) (xy 4.13 3.87) (xy 4.63 3.37) (xy 0.63 -0.63)))
+      (filled_polygon (layer "{layer}")
+        (pts (xy 0.13 -0.13) (xy 4.13 3.87) (xy 4.63 3.37) (xy 0.63 -0.63))))"""
+
+
+def _branch(offset):
+    """Same-net diagonal parallel to the shortcut at the given centreline gap.
+
+    Ends at 3.6 along the run so its tip stays clear of the replacement's
+    second leg (only the parallel side edge faces the shortcut).
+    """
+    return _track((offset, -offset), (3.6 + offset, 3.6 - offset))
+
+
+DIAGONAL_FIRST = " -> (4.00, 4.00) -> "
+ORTHOGONAL_FIRST = " -> (4.00, 0.00) -> "
+
+
+def test_staircase_reports_diagonal_first_without_gap_policy():
+    found = _staircase_findings(_checker(_stair_pcb()))
+    assert len(found) == 1
+    assert DIAGONAL_FIRST in found[0].message
+
+
+def test_shortcut_rejected_when_it_opens_same_net_slit():
+    # Branch parallel to the diagonal-first leg at a 0.0828 mm edge gap
+    # (0.2828 mm centreline for two 0.2 mm tracks): under an explicit
+    # 0.1016 mm threshold the shortcut is rejected and the orthogonal-first
+    # alternative (the only other bend) is recommended instead.
+    found = _staircase_findings(_checker(_stair_pcb(_branch(0.2)), gap_mm=0.1016))
+    assert len(found) == 1
+    assert DIAGONAL_FIRST not in found[0].message
+    assert ORTHOGONAL_FIRST in found[0].message
+
+
+def test_rejected_shortcut_really_opens_physical_gap():
+    # Paired oracle: applying exactly the rejected first bend to a copy
+    # makes the physical-gap rule report the branch slit; the untouched
+    # board reports no physical_copper_gap finding at all.
+    applied = _gap_board(
+        _track((0, 0), (4, 4)),
+        _track((4, 4), (8, 4)),
+        _branch(0.2),
+    )
+    gaps = [
+        v
+        for v in check_physical_copper_gap(applied, 0.1016).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+    assert gaps and gaps[0].severity == "error"
+    assert gaps[0].actual_value == pytest.approx(0.0828, abs=1e-3)
+    untouched = [
+        v
+        for v in check_physical_copper_gap(_stair_pcb(_branch(0.2)), 0.1016).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+    assert untouched == []
+
+
+def test_branch_outside_band_lets_diagonal_return():
+    # Centreline 0.5657 mm -> 0.3657 mm edge gap, above the 0.1016 mm floor.
+    found = _staircase_findings(_checker(_stair_pcb(_branch(0.4)), gap_mm=0.1016))
+    assert len(found) == 1
+    assert DIAGONAL_FIRST in found[0].message
+
+
+def test_all_bends_rejected_no_report():
+    # The diagonal-first bend opens the same-net slit and a foreign track
+    # blocks the orthogonal-first leg electrically: no candidate remains.
+    blocker = _track((2, 0.15), (6, 0.15), net=2)
+    found = _staircase_findings(_checker(_stair_pcb(_branch(0.2), blocker), gap_mm=0.1016))
+    assert found == []
+
+
+def test_threshold_boundary_matches_physical_gap_oracle():
+    # Just inside / outside the rule's own reporting window
+    # (TOLERANCE < gap < minimum - TOLERANCE): the staircase gate must
+    # agree with check_physical_copper_gap on the applied shortcut.
+    for gap, keeps_diagonal in ((0.1005, False), (0.1007, True)):
+        offset = (0.2 + gap) / math.sqrt(2)
+        applied = _gap_board(_track((0, 0), (4, 4)), _track((4, 4), (8, 4)), _branch(offset))
+        oracle = [
+            v
+            for v in check_physical_copper_gap(applied, 0.1016).violations
+            if v.rule_id == "physical_copper_gap"
+        ]
+        found = _staircase_findings(_checker(_stair_pcb(_branch(offset)), gap_mm=0.1016))
+        assert len(found) == 1
+        assert (DIAGONAL_FIRST in found[0].message) == keeps_diagonal
+        assert bool(oracle) != keeps_diagonal
+
+
+def test_terminal_pad_contact_keeps_staircase_reportable():
+    pcb = _stair_pcb(_pad((0, 0), "U1"), _pad((8, 4), "U2"))
+    found = _staircase_findings(_checker(pcb, gap_mm=0.1016))
+    assert len(found) == 1
+    assert DIAGONAL_FIRST in found[0].message
+
+
+def test_unrelated_preexisting_gap_does_not_block():
+    noise = (
+        _track((20, 0), (24, 0.25), net=2),
+        _track((20, 0.5), (24, 0.5), net=3),
+    )
+    pcb = _stair_pcb(*noise)
+    assert check_physical_copper_gap(pcb, 0.1016).violations  # a gap exists today
+    found = _staircase_findings(_checker(pcb, gap_mm=0.1016))
+    assert len(found) == 1
+    assert DIAGONAL_FIRST in found[0].message
+
+
+def test_unfilled_zone_blocks_even_the_first_staircase_shortcut():
+    zone = """(zone (net 1) (net_name "SIG") (layer "F.Cu")
+      (polygon (pts (xy 0 0) (xy 8 0) (xy 8 4) (xy 0 4))))"""
+    assert _staircase_findings(_checker(_stair_pcb(zone), gap_mm=0.1016)) == []
+
+
+def test_zone_slit_rejects_under_explicit_threshold():
+    found = _staircase_findings(_checker(_stair_pcb(_zone_strip()), gap_mm=0.1016))
+    assert len(found) == 1
+    assert DIAGONAL_FIRST not in found[0].message
+    assert ORTHOGONAL_FIRST in found[0].message
+
+
+def test_zone_on_another_layer_does_not_reject():
+    found = _staircase_findings(_checker(_stair_pcb(_zone_strip("B.Cu")), gap_mm=0.1016))
+    assert len(found) == 1
+    assert DIAGONAL_FIRST in found[0].message
+
+
+def test_fab_view_zone_gap_is_info_and_keeps_candidate_eligible():
+    policy = FabGapPolicy(trace=GapBand(0.1016, None), pad=GapBand(0.15, None))
+    # Oracle side: once the diagonal shortcut is applied, the zone-fill gap
+    # it opens is the fab pass's info tier (zone pours are not judged).
+    applied = _gap_board(*_chain_tracks((((0, 0), (4, 4)), ((4, 4), (8, 4)))), _zone_strip())
+    info = [
+        v
+        for v in check_physical_copper_gap_fab_view(applied, policy).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+    assert info and info[0].severity == "info"
+    # Gate side: an info-only zone gap therefore leaves the candidate eligible.
+    found = _staircase_findings(_checker(_stair_pcb(_zone_strip()), fab_policy=policy))
+    assert len(found) == 1
+    assert DIAGONAL_FIRST in found[0].message
+
+
+def test_fab_view_trace_band_rejects_sub_band_slit():
+    policy = FabGapPolicy(trace=GapBand(0.1016, None), pad=GapBand(0.15, None))
+    found = _staircase_findings(_checker(_stair_pcb(_branch(0.2)), fab_policy=policy))
+    assert len(found) == 1
+    assert DIAGONAL_FIRST not in found[0].message
+    assert ORTHOGONAL_FIRST in found[0].message
+
+
 def test_staircase_message_uses_sheet_absolute_coordinates_with_origin():
     """Issue #8868: message coordinates share the frame of ``location``."""
     from kicad_tools.validate.checker import DRCChecker
@@ -262,11 +492,14 @@ def _seg_text(points, width=0.25, net=1, start_uuid=0):
     )
 
 
-def _board(tmp_path: Path, body: str):
+def _board(tmp_path: Path, body: str, margin: float = 0.05):
     from kicad_tools.schema.pcb import PCB
 
+    head = _BOARD_HEAD
+    if margin != 0.05:
+        head = head.replace("(pad_to_mask_clearance 0.05)", f"(pad_to_mask_clearance {margin})")
     path = tmp_path / "board.kicad_pcb"
-    path.write_text(_BOARD_HEAD + body + ")\n")
+    path.write_text(head + body + ")\n")
     return PCB.load(path)
 
 
@@ -405,3 +638,203 @@ def test_genuine_staircase_between_pads_still_reported(tmp_path):
 
     (finding,) = _checker_stairs(PCB.load(pcb.path))
     assert "(0.00, 0.00) -> (6.00, 0.00) -> (10.00, 4.00)" in finding.message
+
+
+# --- staircase legality, second round (Issue #9848) --------------------------
+#
+# Three suppressions #9842 introduced that hold back legal shortcuts: the
+# clearance comparison carried no acceptance band, an own-pad mask zone
+# rejected every clean entry, and a chain node on same-net copper by overlap
+# split the chain even when the replacement copper keeps the contact.
+
+
+def _gap_blockers(diag_gap: float, orth_gap: float) -> list[tuple[tuple[float, float], ...]]:
+    """Foreign blockers ``(diag, orth)`` parallel to the candidates' new legs.
+
+    Each sits ``gap`` mm copper-to-copper from its candidate leg (chain and
+    blocker widths as in the #9817 fixtures: 0.25 / 0.2 mm).
+    """
+    sqrt2 = 2**0.5
+
+    def off(gap: float) -> float:
+        return gap + 0.125 + 0.1
+
+    d, o = off(diag_gap), off(orth_gap)
+    return [
+        ((1 - d / sqrt2, 1 + d / sqrt2), (2 - d / sqrt2, 2 + d / sqrt2)),
+        ((2.5, -o), (3.5, -o)),
+    ]
+
+
+def _tie_board(tmp_path, diag_gap: float, orth_gap: float):
+    body = _seg_text(_NC_CHAIN)
+    for i, blocker in enumerate(_gap_blockers(diag_gap, orth_gap)):
+        body += _seg_text(list(blocker), width=0.2, net=2, start_uuid=100 + 10 * i)
+    pcb = _board(tmp_path, body)
+    _power_project(pcb.path, "OTHER")
+    from kicad_tools.schema.pcb import PCB
+
+    return PCB.load(pcb.path)
+
+
+def test_clearance_tie_within_band_agrees_with_pairwise_rule(tmp_path):
+    """Board 03 [XTAL1]: an exact-ish tie is legal copper (Issue #9848).
+
+    The diagonal candidate's blocker sits 200 nm short of the Power class's
+    0.2 mm -- inside the 500 nm acceptance band ``netclass_clearance_copper``
+    compares through -- while the orthogonal candidate's blocker is 800 nm
+    short, beyond the band.  Only the diagonal shortcut is eligible, so the
+    finding names its bend: a missing band rejects it and finds nothing.
+    """
+    (finding,) = _checker_stairs(_tie_board(tmp_path, 0.2 - 0.0002, 0.2 - 0.0008))
+    assert "(4.00, 4.00)" in finding.message
+
+
+def test_clearance_gap_beyond_band_not_reported(tmp_path):
+    """A gap 800 nm short of the class stays illegal (Issue #9848)."""
+    assert _checker_stairs(_tie_board(tmp_path, 0.2 - 0.0008, 0.2 - 0.0008)) == []
+
+
+def test_tie_gaps_match_the_pairwise_checker_verdicts(tmp_path):
+    """The two tie-board gaps score what ``netclass_clearance_copper`` scores.
+
+    Each board carries the diagonal candidate leg as a real segment next to
+    its blocker: the pairwise checker clears the in-band gap and flags the
+    beyond-band one, exactly what the staircase eligibility does above.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.checker import DRCChecker
+    from kicad_tools.validate.rules.netclass_clearance_copper import (
+        check_netclass_clearance_copper,
+    )
+
+    for gap, expected in ((0.2 - 0.0002, 0), (0.2 - 0.0008, 1)):
+        room = tmp_path / f"pair{gap}"
+        room.mkdir()
+        diag = _gap_blockers(gap, gap)[0]
+        pcb = _board(
+            room,
+            _seg_text([(0, 0), (4, 4)]) + _seg_text(list(diag), width=0.2, net=2, start_uuid=200),
+        )
+        _power_project(pcb.path, "OTHER")
+        pcb = PCB.load(pcb.path)
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        res = check_netclass_clearance_copper(pcb.path, pcb, checker.design_rules)
+        hits = [v for v in res.violations if v.rule_id == "netclass_clearance_copper"]
+        assert len(hits) == expected, (gap, [v.message for v in hits])
+
+
+# Board 02 [VCC]/[NODE_B]: the shortcut's new copper enters the chain's own
+# pad.  The chain's first leg is collinear with the diagonal candidate, so
+# the only new mask-zone copper is the perpendicular entry into the end pad.
+_ENTRY_CHAIN = [(0, 3), (1.5, 1.5), (5, 1.5), (5, 0.9), (10, 0.9), (10, 0)]
+
+
+def _entry_board(tmp_path, margin=0.0, extra_copper=""):
+    body = _pad_fp("A1", 0, 3) + _pad_fp("B1", 10, 0) + extra_copper + _seg_text(_ENTRY_CHAIN)
+    return _board(tmp_path, body, margin=margin)
+
+
+def test_own_pad_clean_entry_reported_at_zero_margin(tmp_path):
+    """Board 02 [VCC]/[NODE_B]: one clean entry is legal copper (Issue #9848).
+
+    The end pad declares no mask expansion, so the entry is exactly what
+    ``mask_to_copper`` scores ``within_own_pad`` (info), and the shortcut is
+    reported.  #9842's zone check rejected it sight unseen.
+    """
+    (finding,) = _checker_stairs(_entry_board(tmp_path))
+    assert "(0.00, 3.00) -> (3.00, 0.00) -> (10.00, 0.00)" in finding.message
+
+
+@pytest.mark.parametrize(("branch_y", "bend"), [(-0.31, "(7.00, 3.00)"), (-0.45, "(3.00, 0.00)")])
+def test_clean_own_pad_entry_checks_the_same_net_slit(tmp_path, branch_y, bend):
+    # The first bend enters the pad cleanly. The branch along its horizontal
+    # leg leaves either a 0.085 mm slit or 0.225 mm of clearance.
+    branch = _seg_text([(4, branch_y), (8, branch_y)], width=0.2, start_uuid=40)
+    pcb = _entry_board(tmp_path, extra_copper=branch)
+    (finding,) = _staircase_findings(_checker(pcb, gap_mm=0.1016))
+    assert f"-> {bend} ->" in finding.message
+
+
+def test_own_pad_entry_through_expansion_stays_rejected(tmp_path):
+    """An entry through a positive expansion keeps its verdict (#8858)."""
+    assert _checker_stairs(_entry_board(tmp_path, margin=0.05)) == []
+
+
+def test_trace_beside_or_through_own_pad_still_rejected(tmp_path):
+    """A leg that only passes the pad's zone is not an entry (Issue #9848).
+
+    ``C1`` clips the diagonal candidate's horizontal leg from beside (no
+    land contact: condition 2); ``C2`` straddles the orthogonal candidate's
+    first leg with no authored end inside (condition 4).  Both candidates
+    fail and nothing is reported.
+    """
+    beside = _pad_fp("C1", 6.5, 0.68) + _pad_fp("C2", 0.9, 3.0)
+    assert _checker_stairs(_entry_board(tmp_path, extra_copper=beside)) == []
+
+
+# Board 02 [VCC] B.Cu: the chain's interior node joins a same-net via by
+# overlap.  Only the diagonal candidate keeps contact with the via disc.
+_SPAN_CHAIN = [(0, 0), (1.1, 0.5), (1.8, 1.1), (6, 1.1)]
+
+
+def test_overlap_via_spanning_shortcut_with_contact_reported():
+    """The spanning candidate is reported when it keeps the via contact.
+
+    Two bend choices exist: the diagonal leg passes the disc (copper to
+    centre 0.318 mm <= 0.4 + 0.125), the orthogonal-first leg misses it
+    (0.55 mm).  Only the diagonal one is eligible, so the finding names it.
+    """
+    segs = [_Seg(a, b) for a, b in zip(_SPAN_CHAIN, _SPAN_CHAIN[1:], strict=False)]
+    (finding,) = _stair_findings(_run(segs, [_Via((1.0, 0.55))]))
+    assert "(0.00, 0.00) -> (1.10, 1.10) -> (6.00, 1.10)" in finding.message
+
+
+@pytest.mark.parametrize("via_y", [0.08, -0.02])
+def test_spanning_shortcut_preserves_via_along_removed_segment(tmp_path, via_y):
+    """The second via touches the first trace between its endpoints.
+
+    At y=-0.02 only the trace's width reaches the via. The diagonal
+    shortcut would preserve the first via and disconnect the second.
+    """
+    body = _seg_text(_SPAN_CHAIN, width=0.2)
+    body += '  (via (at 1.0 0.55) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))\n'
+    (finding,) = _checker_stairs(_board(tmp_path, body))
+    assert "(0.00, 0.00) -> (1.10, 1.10) -> (6.00, 1.10)" in finding.message
+
+    body += f'  (via (at 0.6 {via_y}) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1))\n'
+    assert _checker_stairs(_board(tmp_path, body)) == []
+
+
+# The interior node joins the via by overlap where BOTH candidates miss the
+# disc: the spanning shortcut is ineligible and the pieces keep their own
+# findings (the pre-#9848 outcome).
+_MISS_CHAIN = [(0, 0), (0.5, 1.5), (2, 1.5), (2.5, 3), (6, 3)]
+
+
+def test_overlap_via_missing_contact_falls_back_to_pieces():
+    segs = [_Seg(a, b) for a, b in zip(_MISS_CHAIN, _MISS_CHAIN[1:], strict=False)]
+    split_via = _Via((0.6, 1.42))
+    (finding,) = _stair_findings(_run(segs, [split_via]))
+    assert finding.location == (0.5, 1.5)
+    assert "(0.50, 1.50) -> (2.00, 3.00) -> (6.00, 3.00)" in finding.message
+    # The shorter piece must also preserve contacts along its own copper.
+    mid_segment_via = _Via((2.25, 2.25), size=0.4)
+    assert _stair_findings(_run(segs, [split_via, mid_segment_via])) == []
+
+
+def test_overlap_pad_bypass_rejected_falls_back_to_pieces(tmp_path):
+    """Board 02/03-style jog over a same-net pad land (Issue #9848).
+
+    The interior node lies on the pad's copper 0.224 mm off its centre;
+    neither candidate's replacement copper reaches the land, so the
+    spanning shortcut is rejected and the shorter chain behind the node is
+    still reported.
+    """
+    chain = _seg_text(_MISS_CHAIN)
+    (control,) = _stair_findings(RedundantCopperRule().check(_board(tmp_path, chain), None))
+    assert control.location == (0, 0)  # no pad: the whole chain qualifies
+    pcb = _board(tmp_path, _pad_fp("P1", 0.4, 1.3, size=0.8) + chain)
+    (finding,) = _stair_findings(RedundantCopperRule().check(pcb, None))
+    assert finding.location == (0.5, 1.5)
+    assert "(0.50, 1.50) -> (4.50, 1.50) -> (6.00, 3.00)" in finding.message

@@ -1135,24 +1135,21 @@ def test_layout_quality_layer_sidecar_survives_pcb_vanishing(tmp_path: Path, mon
 def test_layout_quality_match_group_skew_on_committed_board07():
     # Board 07 declares both a routed artifact and a net-class-map
     # sidecar: the committed fleet must report its four SDRAM match
-    # groups (values verified against derive_group_skew_data on the
-    # routed PCB in the #9614 review).
+    # groups. On the six-layer routing adopted by #8604 (SHA-256
+    # 716d270e82df), these are the longest minus the shortest member's
+    # corrected length in each group, across all 38 timed nets.
     #
-    # Issue #9304 re-pinned SDRAM_BYTE0 (0.104 -> 8.357) and SDRAM_BYTE1
-    # (2.842 -> 12.616): the ruler now sheds defect copper (stubs /
-    # off-path spurs) from each net's measured length instead of counting
-    # it, so the committed artifact's real routing defects on those two
-    # groups surface as skew rather than being averaged away. The board
-    # artifact is unchanged; only the ruler changed. SDRAM_ADDRESS and
-    # SDRAM_COMMAND are unaffected.
+    # The #9304 ruler deducts dead-end branches and terminal-rooted loops
+    # from each net's summed length. The release validator reports its
+    # separate path and via measurement in readiness/validation.json.
     m = extract_board_metrics(REPO_ROOT / "boards" / "07-matchgroup-test")
     skew = m["layout_quality"]["match_group_skew"]
     assert skew == pytest.approx(
         {
-            "SDRAM_ADDRESS": 2.452,
-            "SDRAM_BYTE0": 8.357,
-            "SDRAM_BYTE1": 12.616,
-            "SDRAM_COMMAND": 0.949,
+            "SDRAM_ADDRESS": 3.604,
+            "SDRAM_BYTE0": 1.856,
+            "SDRAM_BYTE1": 4.751,
+            "SDRAM_COMMAND": 4.202,
         },
         abs=1e-3,
     )

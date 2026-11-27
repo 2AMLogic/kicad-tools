@@ -640,61 +640,25 @@ def _pad_polygon(pad: Pad, footprint: Footprint):
     skip them.
     """
     require_shapely("pad clearance geometry")
-    import shapely
-    from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
-    from shapely.geometry import Point
-
     cx, cy = _transform_pad_position(pad, footprint)
     # A ``custom`` pad's copper is its anchor plus filled primitives (issues
     # #9468, #9498), not the nominal ``size`` box the generic branch below
     # would build.  When the builder refuses (unsupported primitive kind), the
     # anchor box below remains the geometry and ``ClearanceRule.check`` emits
     # the matching ``clearance_incomplete`` finding.
-    from kicad_tools.geometry.copper import custom_pad_board_outline
+    from kicad_tools.geometry.copper import custom_pad_board_outline, standard_pad_polygon
 
     custom = custom_pad_board_outline(pad, (cx, cy))
     if custom is not None:
         return custom
-    w, h = pad.size  # LOCAL size -- the rotation below orients the polygon
-    if w <= 0 or h <= 0:
-        return None
-
-    # pad.rotation is stored in the ABSOLUTE board frame (it already includes
-    # footprint.rotation per KiCad's file convention -- see Pad.rotation and
-    # issue #3902), so it is the pad shape's board-frame orientation directly.
-    total_rot = getattr(pad, "rotation", 0.0)
-    shape = pad.shape
-
-    if shape == "circle" or (shape in ("oval", "obround") and abs(w - h) < 1e-6):
-        # Symmetric disc -- rotation and the (origin) translate are no-ops
-        # on a circle, so build it directly at the board position.
-        return Point(cx, cy).buffer(min(w, h) / 2.0)
-
-    if shape in ("oval", "obround"):
-        # Stadium / capsule: a core rectangle shrunk by the minor
-        # half-axis on the long dimension, buffered by that radius so the
-        # short ends become true semicircles.
-        r = min(w, h) / 2.0
-        if w >= h:
-            core = shapely.box(-(w / 2.0 - r), 0.0, (w / 2.0 - r), 0.0)
-        else:
-            core = shapely.box(0.0, -(h / 2.0 - r), 0.0, (h / 2.0 - r))
-        poly = core.buffer(r)
-    elif shape == "roundrect":
-        rr = getattr(pad, "roundrect_rratio", 0.25)
-        r = rr * min(w, h)
-        if r <= 0:
-            poly = shapely.box(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0)
-        else:
-            inner = shapely.box(-(w / 2.0 - r), -(h / 2.0 - r), (w / 2.0 - r), (h / 2.0 - r))
-            poly = inner.buffer(r, join_style=1)  # round joins -> rounded corners
-    else:  # "rect" and any unknown shape -> exact rectangle (no over-approx)
-        poly = shapely.box(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0)
-
-    # Match KiCad's forward transform, without adding footprint rotation a
-    # second time. AABB/cardinal tests cannot detect the sign error (#5227).
-    poly = rotate(poly, -total_rot, origin=(0, 0), use_radians=False)
-    return translate(poly, cx, cy)
+    return standard_pad_polygon(
+        cx,
+        cy,
+        *pad.size,
+        pad.shape,
+        getattr(pad, "rotation", 0.0),
+        getattr(pad, "roundrect_rratio", 0.25),
+    )
 
 
 # _point_to_segment_distance and _segment_to_segment_distance are imported

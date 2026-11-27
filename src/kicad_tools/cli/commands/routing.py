@@ -83,7 +83,7 @@ def run_zones_command(args) -> int:
     """Handle zones command."""
     if not args.zones_command:
         print("Usage: kicad-tools zones <command> [options] <file>")
-        print("Commands: add, list, batch, hv-keepout, fill")
+        print("Commands: add, list, batch, hv-keepout, fill, relieve")
         return 1
 
     from ..zones_cmd import main as zones_main
@@ -173,6 +173,17 @@ def run_zones_command(args) -> int:
         if args.dry_run:
             sub_argv.append("--dry-run")
         # Use command-level quiet or global quiet
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
+        return zones_main(sub_argv) or 0
+
+    elif args.zones_command == "relieve":
+        sub_argv = ["relieve", args.pcb]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        # Both the leading global -q and a trailing --quiet reach the handler.
         if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
         if getattr(args, "format", "text") != "text":
@@ -534,6 +545,17 @@ def _parse_route_auto_targets(args, *, as_json: bool = False) -> tuple[list[str]
     return ordered, 0
 
 
+def _resolve_route_auto_mfr(board: str) -> str:
+    """The fab tier the default silk pass targets (#9799).
+
+    Same precedence as an unflagged ``kct export`` / ``kct check``: the
+    board's ``project.kct`` ``target_fab`` if present, else ``jlcpcb``.
+    """
+    from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+
+    return resolve_cli_manufacturer(None, board)
+
+
 def run_route_auto_command(args) -> int:
     """Handle route-auto command using RoutingOrchestrator.
 
@@ -554,7 +576,12 @@ def run_route_auto_command(args) -> int:
         return rc
     assert net_list is not None  # rc == 0 guarantees a list
 
-    def _emit(nets: list[dict], overall_rc: int, lint_gate: dict | None = None) -> None:
+    def _emit(
+        nets: list[dict],
+        overall_rc: int,
+        lint_gate: dict | None = None,
+        silk_fix: dict | None = None,
+    ) -> None:
         doc = {
             "command": "route-auto",
             "pcb": args.pcb,
@@ -569,6 +596,9 @@ def run_route_auto_command(args) -> int:
         if lint_gate is not None:
             # Issue #6054: present only under --lint-gate.
             doc["lint_gate"] = lint_gate
+        if silk_fix is not None:
+            # Issue #9799: the default silk pass outcome on the published board.
+            doc["silk_fix"] = silk_fix
         emit_json(doc)
 
     # Dry-run: preview strategy selection without routing (per net).
@@ -588,6 +618,12 @@ def run_route_auto_command(args) -> int:
     # last one -- one whole-run verdict over every net.
     gate = None
     requested_output = args.output
+    # Resolve the source project's tier before the gate substitutes its staged output.
+    silk_mfr = (
+        _resolve_route_auto_mfr(args.pcb)
+        if requested_output and not getattr(args, "no_silk_fix", False)
+        else None
+    )
     if getattr(args, "lint_gate", False):
         if not args.output:
             print(
@@ -634,6 +670,7 @@ def run_route_auto_command(args) -> int:
     working = passes.working
 
     routed_so_far = 0
+    silk_fix_doc = None
     try:
         for net_name in net_list:
             skip_doc = passes.resumed_skip(net_name)
@@ -659,6 +696,21 @@ def run_route_auto_command(args) -> int:
             if net_rc != 0:
                 overall_rc = 1
         passes.finish()
+        # A resume that skipped every net or a run which wrote no copper
+        # must preserve the seeded board, including its authored silk.
+        wrote_output = (
+            passes.accepted_pass > 0
+            if passes.active
+            else any(d.get("output_path") for d in net_docs)
+        )
+        if wrote_output and args.output and silk_mfr is not None:
+            from ..silk_default_pass import run_default_silk_pass
+
+            quiet = bool(getattr(args, "quiet", False) or getattr(args, "global_quiet", False))
+            with stdout_to_stderr_when(as_json):
+                silk_fix_doc = run_default_silk_pass(
+                    args.output, mfr=silk_mfr, quiet=quiet or as_json
+                )
     except BaseException:
         if gate is not None:
             gate.abort()
@@ -675,12 +727,17 @@ def run_route_auto_command(args) -> int:
         gate_doc = outcome.to_dict()
         if outcome.rolled_back:
             # None of this run's copper shipped.
+            silk_fix_doc = None
             for entry in net_docs:
                 if entry.get("success") and not entry.get("resumed"):
                     entry["success"] = False
                     entry["lint_gate_rolled_back"] = True
+        elif silk_fix_doc is not None:
+            silk_fix_doc = gate.relocate(silk_fix_doc)
+    if silk_fix_doc and silk_fix_doc.get("total_fixed"):
+        passes.finish_checkpoint(args.output)
     if as_json:
-        _emit(net_docs, overall_rc, gate_doc)
+        _emit(net_docs, overall_rc, gate_doc, silk_fix_doc)
     return overall_rc
 
 
@@ -950,6 +1007,21 @@ class _RouteAutoPasses:
             self._offer(score, pass_index, text, label)
         return False
 
+    def finish_checkpoint(self, output: str) -> None:
+        """Keep the selected best checkpoint in sync with final silk edits."""
+        from pathlib import Path
+
+        from kicad_tools.core.atomic_write import atomic_write_text
+
+        if self.writer is None or self.writer.best_pass != self.accepted_pass:
+            return
+        published = Path(output)
+        try:
+            if self.writer.path.resolve() != published.resolve():
+                atomic_write_text(self.writer.path, published.read_text(encoding="utf-8"))
+        except OSError as e:
+            self._err(f"  checkpoint: final silk update failed ({e}); continuing")
+
     def finish(self) -> None:
         import os
 
@@ -1003,6 +1075,10 @@ def run_optimize_command(args) -> int:
         sub_argv.append("--drc-aware")
     if getattr(args, "project", None):
         sub_argv.extend(["--project", args.project])
+    if getattr(args, "pour_slots", False):
+        sub_argv.append("--pour-slots")
+    if getattr(args, "pour_slots_pack", False):
+        sub_argv.append("--pour-slots-pack")
     if getattr(args, "allow_default_rules", False):
         sub_argv.append("--allow-default-rules")
     if getattr(args, "mfr", None):

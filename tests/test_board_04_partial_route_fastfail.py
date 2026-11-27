@@ -72,6 +72,7 @@ class TestBoard04PartialRouteFastFail:
         )
         monkeypatch.setattr(module, "quantize_escapes", _boom("quantize_escapes"))
         monkeypatch.setattr(module.runpy, "run_path", _boom("manufacturing repair"))
+        monkeypatch.setattr(module, "finalize_silkscreen", _boom("finalize_silkscreen"))
         monkeypatch.setattr(module, "fill_zones", _boom("fill_zones"))
         monkeypatch.setattr(module, "run_drc", _boom("run_drc"))
         monkeypatch.setattr(module, "write_lvs_report", _boom("write_lvs_report"))
@@ -136,6 +137,7 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(module, "merge_fragment_runs", lambda *a, **k: True)
         # Issue #9455: the via slide / silk-vs-hole gate replace the #9097 clip.
         monkeypatch.setattr(module, "slide_vias_off_silk", lambda *a, **k: True)
+        monkeypatch.setattr(module, "finalize_silkscreen", lambda *a, **k: True)
         monkeypatch.setattr(module, "check_silk_clear_of_holes", lambda *a, **k: True)
         monkeypatch.setattr(module, "fill_zones", lambda *a, **k: True)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
@@ -143,7 +145,11 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(
             module.runpy,
             "run_path",
-            lambda *a, **k: {"repair": lambda *a: None, "apply_native_floors": lambda *a: None},
+            lambda *a, **k: {
+                "repair": lambda *a: None,
+                "apply_native_floors": lambda *a: None,
+                "repair_bypass_mask_escapes": lambda *a: None,
+            },
         )
 
         lvs_called: list[bool] = []

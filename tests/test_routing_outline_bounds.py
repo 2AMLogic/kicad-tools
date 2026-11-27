@@ -114,6 +114,7 @@ def test_malformed_or_unsupported_outline_is_explicit(outline):
         '(gr_rect (start 0 0) (layer "Edge.Cuts"))',
         '(gr_line (start nan 0) (end 12 12) (layer "Edge.Cuts"))',
         '(gr_poly (pts (xy 0 0) (xy 12) (xy 12 12)) (layer "Edge.Cuts"))',
+        '(gr_poly (pts (xy 0 0) (xy 12 0) (arc (start 12 0) (end 0 12))) (layer "Edge.Cuts"))',
         '(gr_text "unsupported" (at 1 1) (layer "Edge.Cuts"))',
     ],
 )
@@ -691,3 +692,108 @@ def test_edge_cuts_gr_poly_outline_is_not_double_counted(tmp_path):
 
     router, _ = load_pcb_for_routing(path, force_python=True, validate_drc=False)
     assert router._board_bbox == (68.5, 55.0, 98.5, 75.0)
+
+
+def test_board_polygon_arc_preserves_order_and_certified_error():
+    # Radius 15 around (50,65). The authored midpoint lies before the
+    # southernmost point, so the three authored arc positions do not bound it.
+    poly = (
+        "(gr_poly (pts (xy 35 35) (xy 65 35) (xy 65 65)"
+        ' (arc (start 65 65) (mid 59 77) (end 35 65)) (xy 35 65)) (layer "Edge.Cuts"))'
+    )
+    root = parse_string(f"(kicad_pcb {poly})")
+    assert board_outline_bounds(root) == pytest.approx((35, 35, 65, 80))
+    pcb = PCB(root)
+    assert pcb.board_origin == (35, 35)
+    for chain, centre, offset in (
+        (board_outline_segments(root), (50, 65), 0),
+        (pcb.get_board_outline_segments(), (15, 30), 35),
+    ):
+        assert chain[0] == ((35 - offset, 35 - offset), (65 - offset, 35 - offset))
+        assert chain[1] == ((65 - offset, 35 - offset), (65 - offset, 65 - offset))
+        assert chain[-1] == ((35 - offset, 65 - offset), (35 - offset, 35 - offset))
+        assert all(a[1] == b[0] for a, b in zip(chain, chain[1:], strict=False))
+        assert 0 < chain.max_error_mm <= 0.0001
+        for a, b in chain[2:-1]:
+            assert a != b
+            halfway = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            assert abs(15 - math.dist(centre, halfway)) <= chain.max_error_mm + 1e-9
+    outline = pcb.get_board_outline()
+    assert outline[0] == outline[-1]
+    assert max(y for _, y in outline) == pytest.approx(45, abs=0.0001)
+
+
+def test_small_board_polygon_arc_keeps_its_closed_outline():
+    # The arc tessellation has chords shorter than the 0.01 mm tolerance for
+    # joining independent Edge.Cuts graphics. Its authored ring is already joined.
+    pcb = PCB(
+        parse_string(
+            "(kicad_pcb (gr_poly (pts (xy 0 0) (xy 40 0) (xy 40 20)"
+            " (arc (start 20.04 20) (mid 20 20.04) (end 19.96 20))"
+            ' (xy 0 20)) (layer "Edge.Cuts")))'
+        )
+    )
+    outline = pcb.get_board_outline()
+    assert outline[0] == outline[-1] == (0, 0)
+    assert max(y for _, y in outline) == pytest.approx(20.04, abs=0.0001)
+
+
+def test_plain_board_polygon_keeps_exact_segment_order():
+    poly = '(gr_poly (pts (xy 35 35) (xy 65 35) (xy 65 65) (xy 35 65)) (layer "Edge.Cuts"))'
+    silk = (
+        "(gr_poly (pts (xy 90 90) (arc (start 92 90) (mid 93 91) (end 92 92))"
+        ' (xy 90 92)) (layer "F.SilkS"))'
+    )
+    root = parse_string(f"(kicad_pcb {poly} {silk})")
+    pcb = PCB(root)
+    vertices = [(35, 35), (65, 35), (65, 65), (35, 65), (35, 35)]
+    relative = [(x - 35, y - 35) for x, y in vertices]
+    for segments, points in (
+        (board_outline_segments(root), vertices),
+        (pcb.get_board_outline_segments(), relative),
+    ):
+        assert segments == list(zip(points[:-1], points[1:], strict=True))
+        assert segments.max_error_mm == 0
+    assert pcb.get_board_outline() == relative
+    (silk_graphic,) = pcb.graphics_on_layer("F.SilkS")
+    assert silk_graphic.points == [(90, 90), (90, 92)]
+
+
+@pytest.mark.parametrize(
+    "layer", ["F.SilkS", "B.SilkS", "F.Mask", "F.Fab", "Dwgs.User", "F.Cu", "Edge.Cuts"]
+)
+@pytest.mark.parametrize("owner", ["board", "footprint"])
+def test_curved_polygon_points_and_manufactured_boundary(layer, owner):
+    from shapely.geometry import Point, Polygon
+
+    from kicad_tools.validate.rules.physical_gap import _fp_poly_geometry
+    from kicad_tools.validate.rules.silkscreen import _mask_graphic_geometry, _stroke_geometry
+
+    chain = "(pts (xy 90 90) (arc (start 92 90) (mid 93 91) (end 92 92)) (xy 90 92))"
+    style = f'(fill solid) (layer "{layer}")'
+    if owner == "board":
+        pcb = PCB(parse_string(f"(kicad_pcb (gr_poly {chain} {style}))"))
+        (graphic,) = pcb.graphics_on_layer(layer)
+    else:
+        pcb = PCB(
+            parse_string(
+                f'(kicad_pcb (footprint "Test:Lobe" (layer "F.Cu") (fp_poly {chain} {style})))'
+            )
+        )
+        (graphic,) = pcb.footprints[0].graphics
+    if owner == "board" and layer == "Edge.Cuts":
+        assert graphic.points == graphic.boundary_points
+    else:
+        assert graphic.points == [(90, 90), (90, 92)]
+
+    # The straight strip is 2 by 2 mm with a semicircle of radius 1 on its right.
+    boundary = Polygon(graphic.boundary_points)
+    assert boundary.area == pytest.approx(4 + math.pi / 2, abs=0.0003)
+    assert boundary.covers(Point(92.75, 91))
+    assert not boundary.covers(Point(93.1, 91))
+    if layer.endswith("SilkS"):
+        assert _stroke_geometry(graphic, None).equals(boundary)
+    elif layer == "F.Mask":
+        assert _mask_graphic_geometry(graphic, None).equals(boundary)
+    elif owner == "footprint" and layer == "F.Cu":
+        assert _fp_poly_geometry(graphic, lambda point: point).equals(boundary)

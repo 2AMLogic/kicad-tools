@@ -11,6 +11,7 @@ from that same fixture.
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
 import sys
 from pathlib import Path
 from unittest import mock
@@ -216,6 +217,39 @@ def test_catalog_lookup_normalizes_and_missing(catalog_db: Path):
     assert catalog.lookup("C999999") is None
 
 
+def test_catalog_lookup_with_status_separates_unusable_from_miss(tmp_path: Path, catalog_db):
+    """Issue #10386: a search that found nothing is not a catalog it could not read.
+
+    ``lookup`` answers ``None`` for all four of these, so evidence built on it
+    could not tell a host with no catalog from a catalog lacking the part.
+    """
+    garbage = tmp_path / "not-a-database.sqlite3"
+    garbage.write_bytes(b"SQLite format 3\x00truncated" * 8)
+    other_schema = sqlite3.connect(tmp_path / "other-schema.sqlite3")
+    other_schema.execute("CREATE TABLE something_else (x)")
+    other_schema.close()
+    empty = _builder.build_fixture(tmp_path / "no-rows.sqlite3", rows=[])
+
+    catalog = JlcpartsCatalog(catalog_db)
+    hit = catalog.lookup_with_status("c25804")
+    assert (hit.status, hit.part.lcsc_part) == ("hit", "C25804")
+    # ``lookup`` stays the part-only view of the same search.
+    assert catalog.lookup("c25804").mfr_part == hit.part.mfr_part
+    assert (catalog.lookup_with_status("C999999").status, catalog.lookup("C999999")) == (
+        "miss",
+        None,
+    )
+
+    for path, status in (
+        (tmp_path / "absent.sqlite3", "missing"),
+        (garbage, "unreadable"),
+        (tmp_path / "other-schema.sqlite3", "unreadable"),
+        (empty, "miss"),
+    ):
+        result = JlcpartsCatalog(path).lookup_with_status("C25804")
+        assert (result.status, result.part) == (status, None), path
+
+
 def test_catalog_library_type_mapping(catalog_db: Path):
     catalog = JlcpartsCatalog(catalog_db)
     preferred = catalog.lookup("C100")
@@ -288,7 +322,8 @@ def test_catalog_search_ranks_basic_before_extended(catalog_db: Path):
     assert [p.lcsc_part for p in results] == ["C8734"]
 
 
-def test_catalog_search_library_type_ordering_multi(catalog_db: Path, tmp_path: Path):
+@pytest.mark.parametrize("source_db_v2", [True, False], ids=["source-db-v2", "legacy"])
+def test_catalog_search_library_type_ordering_multi(tmp_path: Path, source_db_v2: bool):
     """With multiple library_types matching one term, basic sorts first."""
     # Build a fixture where a shared description term spans basic/preferred/
     # extended so the ORDER BY is observable.
@@ -339,10 +374,26 @@ def test_catalog_search_library_type_ordering_multi(catalog_db: Path, tmp_path: 
         },
     ]
     db = _builder.build_fixture(tmp_path / "ranked.sqlite3", rows=rows)
+    if source_db_v2:
+        with sqlite3.connect(db) as conn:
+            conn.execute("ALTER TABLE jlc_components ADD COLUMN preferred INTEGER")
+            conn.execute(
+                "UPDATE jlc_components SET preferred = (library_type = 'preferred'), "
+                "library_type = CASE WHEN library_type = 'basic' THEN 'base' ELSE 'expand' END"
+            )
     catalog = JlcpartsCatalog(db)
     results = catalog.search("WIDGET")
-    # basic (stock DESC among basics) first, then preferred, then extended.
-    assert [p.lcsc_part for p in results] == ["C4", "C3", "C2", "C1"]
+    expected = ["C4", "C3", "C2", "C1"]
+    assert [p.lcsc_part for p in results] == expected
+    assert [p.lcsc_part for p in catalog.search("WIDGET", limit=2)] == expected[:2]
+
+    bulk = catalog.lookup_many(expected)
+    for part in results:
+        flags = (part.lcsc_part in ("C4", "C3"), part.lcsc_part == "C2")
+        single = catalog.lookup(part.lcsc_part)
+        assert single is not None
+        for found in (part, bulk[part.lcsc_part], single):
+            assert (found.is_basic, found.is_preferred) == flags
 
 
 def test_catalog_search_min_stock_filter(catalog_db: Path):
@@ -1424,3 +1475,32 @@ def test_cli_sync_catalog_json_reports_coverage_warning(
     payload = json.loads(capsys.readouterr().out)
     assert payload["count"] == 4
     assert "C17414" in payload["coverage_warning"]
+
+
+def test_public_package_search_offline(catalog_db, monkeypatch, capsys):
+    import json
+
+    from kicad_tools.cli import main
+
+    # Both descriptions satisfy the same keyword query in different packages.
+    with sqlite3.connect(catalog_db) as db:
+        db.execute(
+            "UPDATE jlc_components SET description='test transistor' WHERE lcsc IN (100, 8734)"
+        )
+    client = LCSCClient(use_cache=False, catalog_path=catalog_db)
+    monkeypatch.setattr("kicad_tools.parts.LCSCClient", lambda: client)
+    monkeypatch.setattr(client, "_make_request", mock.Mock(side_effect=LCSCForbiddenError("403")))
+
+    for package, ids in [("sot-23", ["C100"]), ("SOT", [])]:
+        rc = main(["parts", "search", "test transistor", "--package", package, "--format", "json"])
+        assert rc == (0 if ids else 1)
+        result = json.loads(capsys.readouterr().out)
+        assert result["coverage"] == result["source"] == "offline"
+        assert result["keyword_total"] is None
+        assert result["compatible_count"] == len(ids)
+        assert [part["lcsc_part"] for part in result["parts"]] == ids
+        assert any("snapshot" in diagnostic.lower() for diagnostic in result["diagnostics"])
+        if ids:
+            inventory = result["parts"][0]["inventory"]
+            assert inventory["source"] == "offline_catalog"
+            assert not inventory["stock_verified"]

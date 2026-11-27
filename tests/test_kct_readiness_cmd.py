@@ -225,9 +225,13 @@ class FakeEngines:
         merge_lcsc_from: Path | None = None,
         quantity: int | None = None,
         inventory_covered: frozenset[str] | None = None,
+        schematic: Path | None = None,
+        project_root: Path | None = None,
+        net_class_map: Path | None = None,
     ) -> EngineRun:
         self.calls.append("export")
         self.export_kwargs = {"quantity": quantity, "inventory_covered": inventory_covered}
+        self.export_schematic = schematic
         self.merge_lcsc_from = merge_lcsc_from
         self.pcb_bytes_at_export = pcb.read_bytes()
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -328,6 +332,97 @@ def run(board: Path, fake: FakeEngines, *extra: str) -> tuple[int, dict]:
     return code, report
 
 
+@pytest.mark.parametrize("map_in_board", [True, False], ids=["board", "project-root"])
+def test_generation_checks_the_staged_explicit_net_class_map(tmp_path, map_in_board):
+    board = make_board(tmp_path)
+    root = board if map_in_board else tmp_path
+    relative = Path("rule-inputs/approved-current.json")
+    selected = root / relative
+    selected.parent.mkdir()
+    selected.write_text('{"LED_ANODE": {"name": "Digital", "target_ampacity": 30}}')
+    (board / "output/net_class_map.json").write_text("{}")
+    checked_maps = []
+
+    class MapEngines(FakeEngines):
+        def kct_check(self, pcb, mfr, report_path, extra):
+            if "--net-class-map" in extra:
+                path = Path(extra[extra.index("--net-class-map") + 1])
+                staged_sch = Path(extra[extra.index("--schematic") + 1])
+                staged_board = staged_sch.parent.parent
+                staged_root = staged_board if map_in_board else staged_board.parent
+                checked_maps.append((path, staged_root / relative, path.read_bytes()))
+            return super().kct_check(pcb, mfr, report_path, extra)
+
+    code, report = run(
+        board,
+        MapEngines(board, drc_status="FAILED"),
+        "--project-root",
+        str(root),
+        "--net-class-map",
+        str(selected),
+    )
+
+    assert code == 1
+    assert check_status(report, "kct_check") == "failed"
+    # The candidate and both cleanup comparisons use the same staged rules.
+    assert len(checked_maps) == 3
+    for path, expected, content in checked_maps:
+        assert path == expected
+        assert path != selected
+        assert content == selected.read_bytes()
+    detail = next(check["detail"] for check in report["checks"] if check["name"] == "kct_check")
+    assert "--net-class-map rule-inputs/approved-current.json" in detail
+    assert str(checked_maps[0][0]) not in detail
+
+
+@pytest.mark.parametrize("has_sibling", [True, False])
+def test_generation_leaves_implicit_net_class_map_discovery_to_checker(tmp_path, has_sibling):
+    from kicad_tools.cli.check_cmd import _discover_net_class_map_sidecar
+
+    board = make_board(tmp_path)
+    if has_sibling:
+        (board / "output/net_class_map.json").write_text("{}")
+
+    class MapEngines(FakeEngines):
+        def kct_check(self, pcb, mfr, report_path, extra):
+            assert "--net-class-map" not in extra
+            expected = pcb.parent / "net_class_map.json" if has_sibling else None
+            assert _discover_net_class_map_sidecar(pcb) == expected
+            return super().kct_check(pcb, mfr, report_path, extra)
+
+    code, report = run(board, MapEngines(board))
+    assert code == 0, report
+    assert check_status(report, "kct_check") == "passed"
+
+
+def test_child_sheet_is_hashed_and_its_edit_stales_the_receipt(tmp_path):
+    """Issue #10107: a sub-sheet edit must not leave the release marked ready."""
+    board = make_board(tmp_path)
+    child = board / "output" / "child.kicad_sch"
+    child.write_text("(kicad_sch child)\n")
+    (board / "output" / SCH_NAME).write_text(
+        '(kicad_sch (sheet (property "Sheetfile" "child.kicad_sch")))\n'
+    )
+    fake = FakeEngines(board)
+    code, report = run(board, fake)
+    assert code == 0
+    assert "output/child.kicad_sch" in report["inputs"]
+    assert fake.export_schematic is not None
+    assert fake.export_schematic.name == SCH_NAME
+    assert read_readiness(board)["status"] == "ready"
+
+    child.write_text("(kicad_sch child edited)\n")
+    assert read_readiness(board)["status"] == "unverified"
+
+    # An older receipt that never listed the child is refused, not trusted.
+    receipt = board / "output" / "readiness.json"
+    data = json.loads(receipt.read_text())
+    data["inputs"].pop("output/child.kicad_sch")
+    receipt.write_text(json.dumps(data))
+    result = read_readiness(board)
+    assert result["status"] == "unverified"
+
+
 def check_status(report: dict, name: str) -> str | None:
     for check in report.get("checks", []):
         if check["name"] == name:
@@ -350,6 +445,8 @@ def test_clean_assembly_board_is_ready_and_round_trips(tmp_path):
     assert report["status"] == "ready"
     assert report["blockers"] == []
     assert report["mode"] == "assembly"
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "JLCPCB placement preview" in readme
     # The four checks read_readiness() demands by name are all present + passed.
     for name in ("kct_check", "native_drc", "artifacts", "bom"):
         assert check_status(report, name) == "passed", name
@@ -370,6 +467,8 @@ def test_pcb_only_mode_makes_no_assembly_claim(tmp_path):
     assert "assembly not included" in bom["detail"]
     # No BOM/CPL were produced, and none were demanded.
     assert not list((board / "output" / "manufacturing").glob("bom*.csv"))
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "JLCPCB placement preview" not in readme
     assert read_readiness(board)["status"] == "ready"
 
 
@@ -458,6 +557,35 @@ def test_manifest_covers_every_bundle_file_including_late_drawings(tmp_path):
     assert "assembly-front.pdf" in manifest["files"]
     assert "README.txt" in manifest["files"]
     assert manifest["warning_counts_by_rule"] == {}
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [(), ("--skip-fiducials",), ("--skip-board-info",), ("--skip-fiducials", "--skip-board-info")],
+)
+def test_manifest_and_archive_record_assembly_prep(tmp_path, flags):
+    board = make_board(tmp_path)
+    pcb = board_no_hv_source().replace(
+        '(paper "A4")', '(paper "A4") (title_block (title "Demo") (rev "A") (date "2026-11-21"))'
+    )
+    (board / "output" / PCB_NAME).write_text(pcb)
+    code, report = run(board, FakeEngines(board), "--pcb-only", *flags)
+
+    assert code == 0, report.get("blockers")
+    expected = {
+        "fiducials": "skipped (--skip-fiducials)" if "--skip-fiducials" in flags else "applied",
+        "board_info": "skipped (--skip-board-info)" if "--skip-board-info" in flags else "applied",
+    }
+    assert report["metrics"]["assembly_prep"] == expected
+    bundle = board / "output" / "manufacturing"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["assembly_prep"] == expected
+    readme = (bundle / "README.txt").read_bytes()
+    assert hashlib.sha256(readme).hexdigest() == manifest["files"]["README.txt"]["sha256"]
+    for operation, outcome in expected.items():
+        assert f"  {operation}: {outcome}" in readme.decode().splitlines()
+    with zipfile.ZipFile(board / "output" / "manufacturing.zip") as archive:
+        assert json.loads(archive.read("manufacturing/manifest.json")) == manifest
 
 
 def test_waivers_sidecar_is_hash_bound_in_report_inputs(tmp_path):
@@ -647,6 +775,60 @@ def test_acknowledged_warnings_pass_and_become_accepted_risk_lines(tmp_path):
         "silk_over_copper": 31,
         "trace_width_advisory": 4,
     }
+
+
+def test_tht_smd_spacing_warning_requires_ack_in_assembly_mode(tmp_path):
+    """Issue #10172: warning-band tht_smd_spacing blocks assembly sign-off until acknowledged."""
+    board = make_board(tmp_path)
+    fake = FakeEngines(board, warnings={"tht_smd_spacing": 1})
+
+    # No acknowledgement -> warning_review fails.
+    code, report = run(board, fake, "--assembly")
+    assert code != 0
+    assert check_status(report, "warning_review") == "failed"
+    assert any("tht_smd_spacing=1" in blocker for blocker in report["blockers"])
+
+    # Unrelated acknowledgement -> warning_review still fails.
+    fake_unrelated = FakeEngines(board, warnings={"tht_smd_spacing": 1})
+    code, report = run(board, fake_unrelated, "--assembly", "--ack-warnings", "silk_over_copper")
+    assert code != 0
+    assert check_status(report, "warning_review") == "failed"
+    assert any("tht_smd_spacing=1" in blocker for blocker in report["blockers"])
+
+    # Matching acknowledgement -> warning_review passes and records accepted risk.
+    fake_acked = FakeEngines(board, warnings={"tht_smd_spacing": 1})
+    code, report = run(board, fake_acked, "--assembly", "--ack-warnings", "tht_smd_spacing")
+    assert code == 0
+    assert check_status(report, "warning_review") == "passed"
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "ACCEPTED RISK: tht_smd_spacing (1 warning(s))" in readme
+
+
+def test_tht_smd_spacing_error_fails_gate_1_even_when_acknowledged(tmp_path):
+    """Issue #10172: error-band tht_smd_spacing still fails Gate 1 with --ack-warnings."""
+    board = make_board(tmp_path)
+    fake = FakeEngines(board, check_errors=1)
+    real_kct_check = fake.kct_check
+
+    def kct_check_with_tht_error(pcb, mfr, report_path, extra):
+        result = real_kct_check(pcb, mfr, report_path, extra)
+        data = json.loads(report_path.read_text())
+        data["violations"] = [
+            {
+                "rule_id": "tht_smd_spacing",
+                "severity": "error",
+                "message": "THT/via to SMD pad (J1.1 to R1.1) spacing 1.8500mm < 2.032mm",
+            }
+        ]
+        report_path.write_text(json.dumps(data, indent=2))
+        return result
+
+    fake.kct_check = kct_check_with_tht_error
+
+    code, report = run(board, fake, "--assembly", "--ack-warnings", "tht_smd_spacing")
+    assert code != 0
+    assert report["status"] == "blocked"
+    assert check_status(report, "kct_check") == "failed"
 
 
 # -- Baseline comparison (Issue #8664) ---------------------------------------
@@ -908,8 +1090,8 @@ def test_partial_package_is_detected_by_the_manifest_gate(tmp_path):
     fake = FakeEngines(board)
     original_export = fake.export
 
-    def export_then_delete(pcb, mfr, output_dir, assembly):
-        result = original_export(pcb, mfr, output_dir, assembly)
+    def export_then_delete(pcb, mfr, output_dir, assembly, **kw):
+        result = original_export(pcb, mfr, output_dir, assembly, **kw)
         # A file listed by the export that vanishes before packaging.
         (output_dir / "report.md").unlink()
         return result

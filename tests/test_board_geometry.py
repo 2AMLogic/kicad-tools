@@ -395,3 +395,82 @@ class TestEdgeCases:
         assert min_y == pytest.approx(10.0)
         assert max_x == pytest.approx(50.0)
         assert max_y == pytest.approx(40.0)
+
+
+# -----------------------------------------------------------------------
+# Large interior cutouts (Issue #10590)
+# -----------------------------------------------------------------------
+
+
+class TestLargeInteriorCutout:
+    @staticmethod
+    def _pcb_from_edge_cuts(edge_body: str):
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.sexp import parse_string
+
+        return PCB(
+            parse_string(
+                '(kicad_pcb (version 20241229) (generator "kicad_tools")\n'
+                '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
+                f'  (net 0 "")\n  {edge_body}\n)'
+            )
+        )
+
+    @pytest.mark.parametrize("cutout_left", [23, 22])
+    @pytest.mark.parametrize("cutout_first", [False, True])
+    def test_large_rect_cutout_keeps_outer_exterior_and_hole(
+        self, cutout_left: int, cutout_first: bool
+    ):
+        """A cutout larger than the remaining material must stay a hole (#10590)."""
+        outer = (
+            "(gr_rect (start 0 0) (end 50 40) (stroke (width 0.05) (type default))"
+            ' (fill none) (layer "Edge.Cuts"))'
+        )
+        cutout = (
+            f"(gr_rect (start {cutout_left} 1) (end 49 39)"
+            ' (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts"))'
+        )
+        edge_body = f"{cutout}\n  {outer}" if cutout_first else f"{outer}\n  {cutout}"
+        geom = BoardGeometry.from_pcb(self._pcb_from_edge_cuts(edge_body))
+
+        expected_material = 50.0 * 40.0 - (49.0 - cutout_left) * 38.0
+        assert geom.bounds == pytest.approx((0.0, 0.0, 50.0, 40.0))
+        assert geom.area == pytest.approx(expected_material)
+        assert len(geom.polygon.interiors) == 1
+        assert geom.contains_point(10.0, 20.0) is True
+        assert geom.contains_point(35.0, 20.0) is False
+
+        outline = geom.to_board_outline()
+        assert (outline.min_x, outline.min_y, outline.max_x, outline.max_y) == pytest.approx(
+            (0.0, 0.0, 50.0, 40.0)
+        )
+
+    def test_multiple_cutouts_exceeding_half_area_keep_all_holes(self):
+        """Two cutouts each larger than the remaining laminate keep the outer board."""
+        edge_body = (
+            '(gr_rect (start 0 0) (end 50 40) (layer "Edge.Cuts"))\n'
+            '  (gr_rect (start 2 1) (end 22 39) (layer "Edge.Cuts"))\n'
+            '  (gr_rect (start 28 1) (end 48 39) (layer "Edge.Cuts"))'
+        )
+        geom = BoardGeometry.from_pcb(self._pcb_from_edge_cuts(edge_body))
+
+        assert geom.bounds == pytest.approx((0.0, 0.0, 50.0, 40.0))
+        assert geom.area == pytest.approx(50.0 * 40.0 - 2 * (20.0 * 38.0))
+        assert len(geom.polygon.interiors) == 2
+        assert geom.contains_point(25.0, 20.0) is True
+        assert geom.contains_point(12.0, 20.0) is False
+        assert geom.contains_point(38.0, 20.0) is False
+
+    def test_large_circular_cutout_keeps_outer_exterior_and_hole(self):
+        """A circular opening larger than half the board area stays an interior ring."""
+        edge_body = (
+            '(gr_rect (start 0 0) (end 50 40) (layer "Edge.Cuts"))\n'
+            '  (gr_circle (center 25 20) (end 43 20) (layer "Edge.Cuts"))'
+        )
+        geom = BoardGeometry.from_pcb(self._pcb_from_edge_cuts(edge_body))
+
+        assert geom.bounds == pytest.approx((0.0, 0.0, 50.0, 40.0))
+        assert geom.area == pytest.approx(50.0 * 40.0 - math.pi * 18.0**2, rel=1e-2)
+        assert len(geom.polygon.interiors) == 1
+        assert geom.contains_point(3.0, 20.0) is True
+        assert geom.contains_point(25.0, 20.0) is False

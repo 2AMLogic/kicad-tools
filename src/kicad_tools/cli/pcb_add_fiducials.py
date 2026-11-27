@@ -1,9 +1,9 @@
 """Place global fiducials on a PCB.
 
 ``kct pcb add-fiducials`` searches each requested board side for copper-free
-sites near the board corners, outside every courtyard and at least
+sites near the board corners, clear of same-side silkscreen, outside every courtyard and at least
 ``--edge-margin`` from the board edge, then inserts stock ``Fiducial``
-footprints flagged ``board_only`` / ``exclude_from_bom`` /
+footprints with unprinted silk references and flags ``board_only`` / ``exclude_from_bom`` /
 ``exclude_from_pos_files`` so BOM, CPL and schematic parity stay clean.
 
 Zone fills are not treated as obstacles (a fiducial inside a pour gets a
@@ -110,10 +110,12 @@ def _build_obstacles(pcb, side: str, keepout: float):
     from shapely.geometry import LineString, Point, Polygon, box  # type: ignore[import-untyped]
 
     from kicad_tools.geometry.courtyard import _courtyard_polygon
+    from kicad_tools.router.rule_area_resolve import all_rule_area_zones
+    from kicad_tools.validate.rules.silkscreen import _iter_silk_geometries
     from kicad_tools.validate.rules.via_pad_geometry import pad_absolute_bbox
 
     cu, short = _side_layers(side)
-    geoms = []
+    geoms = [geom for silk_side, geom, *_ in _iter_silk_geometries(pcb) if silk_side == short]
     for fp in pcb.footprints:
         if _is_fiducial(fp) and fp.layer == cu:
             # Existing fiducials are obstacles on their real side (courtyard-exempt).
@@ -132,14 +134,19 @@ def _build_obstacles(pcb, side: str, keepout: float):
             geoms.append(LineString([seg.start, seg.end]).buffer(seg.width / 2))
     for via in pcb.vias:
         geoms.append(Point(via.position).buffer(via.size / 2))
-    for zone in pcb.zones:
-        ko = getattr(zone, "keepout", None)
+    for zone in all_rule_area_zones(pcb):
+        ko = zone.keepout
         if ko is None or len(zone.polygon) < 3:
             continue
         zone_layers = set(zone.layers or [zone.layer])
         if not ({cu, "F&B.Cu", "*.Cu"} & zone_layers):
             continue
-        if not (ko.copperpour_allowed and ko.tracks_allowed and ko.footprints_allowed):
+        if not (
+            ko.pads_allowed
+            and ko.footprints_allowed
+            and ko.copperpour_allowed
+            and ko.tracks_allowed
+        ):
             geoms.append(Polygon(zone.polygon).buffer(0))
     return geoms
 
@@ -352,6 +359,10 @@ def run_add_fiducials(
                 for x, y in sites:
                     ref = next(ref_iter)
                     fp = pcb.add_footprint(lib_id, ref, x, y, layer=layer, value="Fiducial")
+                    if any(
+                        t.text_type == "reference" and t.layer.endswith(".SilkS") for t in fp.texts
+                    ):
+                        pcb.set_reference_visibility(ref, visible=False)
                     fp.exclude_from_bom = True
                     fp.exclude_from_pos_files = True
                     if "board_only" not in fp._attr_unknown_tokens:

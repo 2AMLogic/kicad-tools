@@ -2,7 +2,7 @@
 
 import csv
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -58,6 +58,8 @@ class MockFootprint:
     exclude_from_pos_files: bool = False
     attr: str = "smd"
     dnp: bool = False
+    exclude_from_bom: bool = False
+    properties: dict[str, str] = field(default_factory=dict)
 
     @property
     def sheet_position(self) -> tuple:

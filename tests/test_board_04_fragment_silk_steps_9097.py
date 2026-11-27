@@ -166,23 +166,27 @@ def test_merge_fragment_runs_names_the_reason_for_a_boundary_run(
 def test_main_wires_fragment_merge_and_silk_gate_before_the_refill() -> None:
     """Source-pin: the merge and the silk-vs-hole gate run after the staircase pass
     and before ``fill_zones``; the via slide runs ahead of every copper-tidy pass
-    (Issue #9455), and no step edits footprint silk (#5744)."""
+    (Issue #9455). The final reference positions are checked before refill."""
     source = RECIPE.read_text()
     main_body = source[source.index("def main()") :]
     order = [
         main_body.index(call)
         for call in (
+            "quantize_escapes(routed_path)",
+            "if not fill_zones(routed_path)",
+            'process["repair"](routed_path)',
             "compress_staircases(routed_path)",
             "merge_fragment_runs(routed_path)",
+            "finalize_silkscreen(routed_path)",
             "check_silk_clear_of_holes(routed_path)",
-            "fill_zones(routed_path)",
+            "fill_success = fill_zones(routed_path)",
         )
     ]
     assert order == sorted(order)
     assert main_body.index("slide_vias_off_silk(routed_path)") < main_body.index(
         "quantize_escapes(routed_path)"
     )
-    assert "repair_silkscreen import" not in source  # nothing edits footprint silk
+    assert "repair_silkscreen import" not in source  # use the shared exporter pass
 
 
 # --- slide_vias_off_silk / check_silk_clear_of_holes behaviour (Issue #9540) ---

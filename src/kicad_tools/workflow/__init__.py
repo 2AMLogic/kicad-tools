@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -183,6 +184,12 @@ class PCBFromSchematic:
         self._pcb: PCB | None = None
         self._components: list[ComponentInfo] | None = None
 
+    @cached_property
+    def _symbol_paths(self) -> dict[str, set[str]]:
+        from ..sync.instance_links import collect_symbol_instances
+
+        return collect_symbol_instances(self.schematic_path).paths_by_reference
+
     @property
     def netlist(self) -> Netlist:
         """Get the netlist, exporting from schematic if needed."""
@@ -284,7 +291,7 @@ class PCBFromSchematic:
             return None
 
         try:
-            return self._pcb.add_footprint(
+            footprint = self._pcb.add_footprint(
                 library_id=comp.footprint,
                 reference=reference,
                 x=x,
@@ -296,6 +303,16 @@ class PCBFromSchematic:
             )
         except (FileNotFoundError, ValueError):
             return None
+        if footprint is None:
+            return None
+        if "board_only" in footprint.attr_flags:
+            footprint.path = ""
+        else:
+            # Only the placed schematic may supply the link, including on Python fallback.
+            footprint.path = comp.symbol_path or min(
+                self._symbol_paths.get(reference, ()), default=""
+            )
+        return footprint
 
     def place_component(
         self,
@@ -422,12 +439,12 @@ class PCBFromSchematic:
                 columns = max_cols
                 fitted = self._shrink_spacing_to_fit(n, usable_width, usable_height, columns)
                 if fitted is not None:
-                    spacing = fitted
                     result.warnings.append(
                         f"{n} components do not fit within "
                         f"{board_w:.1f}x{board_h:.1f} mm at {spacing:.1f} mm "
                         f"spacing; auto-shrank spacing to {fitted:.2f} mm to fit."
                     )
+                    spacing = fitted
                 else:
                     result.warnings.append(
                         f"{n} components cannot fit within "

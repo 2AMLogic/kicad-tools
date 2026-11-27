@@ -14,11 +14,19 @@ from __future__ import annotations
 
 import datetime
 import re
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Literal
 
 try:
-    from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+    from pydantic import (
+        BaseModel,
+        ConfigDict,
+        Field,
+        ValidationInfo,
+        field_validator,
+        model_validator,
+    )
 except ImportError as e:
     raise ImportError(
         "pydantic is required for the spec module. "
@@ -49,6 +57,14 @@ __all__ = [
     "Suggestions",
     "ComponentSuggestion",
     "BOMEntry",
+    "PurchasingEntry",
+    "TerminalAssignment",
+    "LeadProfile",
+    "WireTermination",
+    "SmdLandPattern",
+    "MountingHoleDeclaration",
+    "DimensionLimits",
+    "FinishedHoleGuarantee",
     "Decision",
     "Progress",
     "PhaseProgress",
@@ -601,9 +617,110 @@ class EscalationPolicy(SpecModel):
         return self
 
 
+class DimensionLimits(SpecModel):
+    """Inclusive lower and upper limit of one linear drawing dimension, in millimetres."""
+
+    min_mm: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Smallest allowed value, in millimetres (inclusive).",
+    )
+    max_mm: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Largest allowed value, in millimetres (inclusive).",
+    )
+
+    @model_validator(mode="after")
+    def _validate_order(self) -> DimensionLimits:
+        if self.min_mm > self.max_mm:
+            raise ValueError("limits require min_mm <= max_mm")
+        return self
+
+
+class FinishedHoleGuarantee(SpecModel):
+    """A finished-hole interval the fabricator documented for selected holes (Issue #10476).
+
+    An order-specific guarantee: the fabricator confirmed that the holes of
+    *refs* will finish between :attr:`min_mm` and :attr:`max_mm`, inclusive.
+    Assembly preflight uses it instead of the general order tolerance for
+    those holes, and only for the spec's target fab; :attr:`source` must
+    name the order note, email or quote that documents it.
+    """
+
+    refs: list[str] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Reference designators or dash-separated ranges (e.g. 'C1' or "
+            "'C1-C4') whose mounting holes the guarantee covers."
+        ),
+    )
+    min_mm: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Guaranteed smallest finished-hole diameter, in millimetres (inclusive).",
+    )
+    max_mm: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Guaranteed largest finished-hole diameter, in millimetres (inclusive).",
+    )
+    source: str = Field(
+        ...,
+        description=(
+            "Where the fabricator documented it: an order note, email or quote reference."
+        ),
+    )
+
+    @field_validator("refs", mode="before")
+    @classmethod
+    def _wrap_single_ref(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return [value]
+        return value
+
+    @field_validator("refs")
+    @classmethod
+    def _validate_refs(cls, refs: list[str]) -> list[str]:
+        if any(not ref.strip() for ref in refs):
+            raise ValueError("finished-hole guarantee requires non-empty refs")
+        return refs
+
+    @field_validator("source")
+    @classmethod
+    def _validate_source(cls, source: str) -> str:
+        if not source.strip():
+            raise ValueError(
+                "finished-hole guarantee requires a source (order note, email or quote reference)"
+            )
+        return source
+
+    @model_validator(mode="after")
+    def _validate_interval(self) -> FinishedHoleGuarantee:
+        if self.min_mm > self.max_mm:
+            raise ValueError("limits require min_mm <= max_mm")
+        return self
+
+
 class ManufacturingRequirements(SpecModel):
     """Manufacturing requirements and constraints."""
 
+    order_thickness_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Nominal finished PCB thickness selected for purchase, in millimetres.",
+    )
     layers: dict[str, int] | None = Field(
         default=None, description="Layer count (preferred, min, max)"
     )
@@ -652,6 +769,67 @@ class ManufacturingRequirements(SpecModel):
             "before reporting refusal."
         ),
     )
+    finished_hole_tolerance_mm: float | None = Field(
+        default=None,
+        le=0,
+        allow_inf_nan=False,
+        strict=True,
+        description=(
+            "Issue #10299: the fabricator's applicable *lower* "
+            "finished-hole tolerance, in millimetres -- the most the "
+            "finished (plated) hole may fall below the nominal drill.  "
+            "Sign convention: zero or negative; a positive value is "
+            "rejected because it would claim the hole only grows.  "
+            "Worked example: -0.08 means a 2.20 mm nominal hole may "
+            "finish at 2.12 mm minimum, so a lead needing 2.10 mm "
+            "still clears by +0.02 mm at worst.  Assembly preflight "
+            "uses it for the tolerance-adjusted lead-fit margin.  "
+            "Requires ``finished_hole_tolerance_source``."
+        ),
+    )
+    finished_hole_tolerance_source: str | None = Field(
+        default=None,
+        validate_default=True,
+        description=(
+            "Issue #10299: where the finished-hole tolerance was published "
+            "(e.g. 'JLCPCB capabilities, through-hole tolerances').  "
+            "Required when ``finished_hole_tolerance_mm`` or "
+            "``finished_hole_tolerance_upper_mm`` is set."
+        ),
+    )
+    finished_hole_tolerance_upper_mm: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        strict=True,
+        description=(
+            "Issue #10476: the fabricator's applicable *upper* "
+            "finished-hole tolerance, in millimetres -- the most the "
+            "finished (plated) hole may exceed the nominal drill.  "
+            "Sign convention: zero or positive; a negative value is "
+            "rejected because it would claim the hole only shrinks.  "
+            "Worked example: 0.13 means a 2.00 mm nominal hole may "
+            "finish at 2.13 mm maximum, so a mounting drawing's 2.10 mm "
+            "limit is overrun by 0.03 mm.  Assembly preflight compares "
+            "each evidenced end of the finished-hole interval with a "
+            "declared mounting drawing; a missing bound leaves that "
+            "side unassessed.  Requires ``finished_hole_tolerance_source``."
+        ),
+    )
+    finished_hole_guarantees: list[FinishedHoleGuarantee] | None = Field(
+        default=None,
+        description=(
+            "Issue #10476: order-specific finished-hole intervals the "
+            "fabricator documented for selected references.  For the "
+            "holes each one covers it takes precedence over the general "
+            "``finished_hole_tolerance_mm`` / ``finished_hole_tolerance_upper_mm``; "
+            "other holes keep the general tolerance, and where several "
+            "cover one reference the first declared applies.  Like the "
+            "general tolerance it applies only to the spec's target fab, "
+            "and it is read by the ``assembly_mounting_hole_fit`` preflight "
+            "check."
+        ),
+    )
 
     @field_validator("copper_weight", mode="before")
     @classmethod
@@ -660,6 +838,31 @@ class ManufacturingRequirements(SpecModel):
         if v is None:
             return None
         return _parse_copper_weight_oz(v)
+
+    @field_validator("finished_hole_tolerance_source")
+    @classmethod
+    def validate_finished_hole_tolerance_source(
+        cls, source: str | None, info: ValidationInfo
+    ) -> str | None:
+        if info.data.get("finished_hole_tolerance_mm") is not None and not (source or "").strip():
+            raise ValueError(
+                "a declared finished-hole tolerance requires a non-empty finished_hole_tolerance_source"
+            )
+        return source
+
+    @field_validator("finished_hole_tolerance_upper_mm")
+    @classmethod
+    def validate_finished_hole_tolerance_upper(
+        cls, upper: float | None, info: ValidationInfo
+    ) -> float | None:
+        if (
+            upper is not None
+            and not (info.data.get("finished_hole_tolerance_source") or "").strip()
+        ):
+            raise ValueError(
+                "a declared finished-hole tolerance requires a non-empty finished_hole_tolerance_source"
+            )
+        return upper
 
     @field_validator("silkscreen_min_reference_height_mm", mode="before")
     @classmethod
@@ -801,6 +1004,343 @@ class BOMSuggestions(SpecModel):
     cost_target: str | None = Field(default=None, description="Target BOM cost")
 
 
+class LeadProfile(SpecModel):
+    """Verified maximum lead dimensions for a part assignment (Issue #10299).
+
+    Assembly preflight compares these against the *finished* plated hole
+    of each matching reference's through-hole pads, so the values must be
+    verified **maxima** -- taken from the part datasheet's package drawing
+    or a measurement record -- and :attr:`source` must say which.  A
+    round lead needs its maximum diameter; a rectangular lead needs its
+    maximum width and thickness (preflight derives the required hole
+    diameter from their diagonal via :meth:`required_diameter_mm`).
+    """
+
+    shape: Literal["round", "rectangular"] = Field(..., description="Lead cross-section shape")
+    diameter_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Maximum lead diameter for a round lead, in millimetres.",
+    )
+    width_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Maximum lead width for a rectangular lead, in millimetres.",
+    )
+    thickness_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Maximum lead thickness for a rectangular lead, in millimetres.",
+    )
+    source: str = Field(
+        ...,
+        description=(
+            "Where the dimensions were verified: a drawing/page reference or "
+            "measurement record, e.g. 'STW70N60DM2 datasheet package drawing "
+            "and dimensions, pp. 9-10'"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_dimensions(self) -> LeadProfile:
+        """Each shape takes exactly its own dimensions; source must be non-blank."""
+        if self.shape == "round":
+            if self.diameter_mm is None:
+                raise ValueError("lead shape 'round' requires diameter_mm")
+            if self.width_mm is not None or self.thickness_mm is not None:
+                raise ValueError(
+                    "lead shape 'round' takes diameter_mm only; "
+                    "width_mm/thickness_mm belong to shape 'rectangular'"
+                )
+        else:
+            if self.width_mm is None or self.thickness_mm is None:
+                raise ValueError("lead shape 'rectangular' requires width_mm and thickness_mm")
+            if self.diameter_mm is not None:
+                raise ValueError(
+                    "lead shape 'rectangular' takes width_mm and thickness_mm; "
+                    "diameter_mm belongs to shape 'round'"
+                )
+        if not (self.source and self.source.strip()):
+            raise ValueError(
+                "lead dimensions require a source (drawing/page reference or measurement record)"
+            )
+        return self
+
+    def required_diameter_mm(self) -> float:
+        """Diameter of the smallest round hole the centred lead can pass through.
+
+        A round lead needs its maximum diameter; a rectangular lead needs the
+        diagonal of its maximum width and thickness -- a centred rectangle
+        only fits a round hole whose diameter clears that diagonal.
+        """
+        return float(self.required_diameter_decimal_mm())
+
+    def required_diameter_decimal_mm(self) -> Decimal:
+        """Calculate clearance against decimal hole and tolerance dimensions."""
+        dimensions = [Decimal(str(x)) for x in self.max_dimensions_mm()]
+        if self.shape == "round":
+            return dimensions[0]
+        width, thickness = dimensions
+        return (width**2 + thickness**2).sqrt()
+
+    def max_dimensions_mm(self) -> tuple[float, ...]:
+        """The declared maximum dimensions, in declaration order."""
+        if self.shape == "round":
+            return (float(self.diameter_mm or 0.0),)
+        return (float(self.width_mm or 0.0), float(self.thickness_mm or 0.0))
+
+
+class WireTermination(SpecModel):
+    """A soldered wire or ferrule landing on one plated through-hole pad (Issue #10473).
+
+    A wire land has no placed part, so there is no ``bom_entries`` MPN whose
+    lead could stand in for what enters the hole.  The designer names the pad
+    by its exact KiCad reference and pad number and declares the maximum
+    outside diameter of the prepared end that enters the hole: the widest
+    part of the tinned conductor, or the ferrule barrel when one is fitted.
+    Assembly preflight compares it with the finished hole like a round lead.
+    The conductor's cross-sectional area, the insulation (jacket) diameter
+    and a footprint's nominal wire description are not that dimension.
+
+    A landing may be declared before its end is measured: without
+    ``diameter_mm`` the pad stays unassessed.
+    """
+
+    ref: str = Field(
+        ...,
+        description=(
+            "Exact KiCad reference designator of the landing footprint (e.g. 'J1'); not a range"
+        ),
+    )
+    pad: str = Field(..., description="Exact KiCad pad number (e.g. '1' or 'A1')")
+    diameter_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description=(
+            "Maximum outside diameter of the prepared end that enters the "
+            "hole, in millimetres: the tinned conductor at its widest, or the "
+            "ferrule barrel when one is fitted.  Unset until verified."
+        ),
+    )
+    source: str | None = Field(
+        default=None,
+        validate_default=True,
+        description=(
+            "Where the diameter was verified: a drawing/page reference or "
+            "measurement record.  Required when ``diameter_mm`` is set."
+        ),
+    )
+
+    @field_validator("ref")
+    @classmethod
+    def validate_reference(cls, ref: str) -> str:
+        if not ref.strip():
+            raise ValueError("a wire termination requires a reference designator")
+        return ref.strip()
+
+    @field_validator("pad", mode="before")
+    @classmethod
+    def normalize_pad(cls, value: Any) -> Any:
+        """Accept the pad number as a string or integer, like ``BOMEntry.pad_leads`` keys."""
+        if type(value) is int:
+            value = str(value)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("a wire termination requires a pad number (string or integer)")
+        return value.strip()
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, source: str | None, info: ValidationInfo) -> str | None:
+        if info.data.get("diameter_mm") is not None and not (source or "").strip():
+            raise ValueError(
+                "a declared prepared diameter requires a non-empty source "
+                "(drawing/page reference or measurement record)"
+            )
+        return source
+
+
+class SmdLandPattern(SpecModel):
+    """Source-attributed two-terminal SMD land pattern for an exact BOM MPN (Issue #10505).
+
+    Assembly preflight compares these target copper dimensions against the placed
+    two-terminal SMD footprint after undoing placement rotation and front-to-back
+    mirroring.  Either ``pitch_mm`` (center-to-center spacing), ``outer_span_mm``
+    (outer copper-to-copper extent along the terminal axis), or both may be
+    declared: for two equal pads along the terminal axis,
+    ``outer_span_mm = pitch_mm + pad_depth_mm``.  ``source`` must identify the
+    manufacturer drawing and page.
+    """
+
+    pad_shape: Literal["rect", "roundrect", "oval", "circle"] = Field(
+        ...,
+        description="Expected copper pad shape for both terminals (e.g. 'rect', 'roundrect').",
+    )
+    pad_depth_mm: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Expected pad extent along the terminal axis, in millimetres.",
+    )
+    pad_width_mm: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Expected transverse pad width perpendicular to the terminal axis, in mm.",
+    )
+    pitch_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description=(
+            "Expected center-to-center pad pitch along the terminal axis, in millimetres. "
+            "Derived as ``outer_span_mm - pad_depth_mm`` when omitted."
+        ),
+    )
+    outer_span_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description=(
+            "Expected outer copper-to-copper span along the terminal axis, in millimetres. "
+            "Derived as ``pitch_mm + pad_depth_mm`` when omitted."
+        ),
+    )
+    source: str = Field(
+        ...,
+        description=(
+            "Manufacturer drawing and page reference where the land pattern was taken, "
+            "e.g. 'Stackpole RHC series, page 2'."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_land_pattern(self) -> SmdLandPattern:
+        """Require non-blank source, valid span/pitch geometry and non-overlapping pads."""
+        if not (self.source and self.source.strip()):
+            raise ValueError(
+                "SMD land pattern requires a non-empty source (manufacturer drawing and page)"
+            )
+        if self.pitch_mm is None and self.outer_span_mm is None:
+            raise ValueError("SMD land pattern requires pitch_mm, outer_span_mm, or both")
+
+        depth = Decimal(str(self.pad_depth_mm))
+        width = Decimal(str(self.pad_width_mm))
+        if self.pad_shape == "circle" and abs(depth - width) > Decimal("0.001"):
+            raise ValueError(
+                f"SMD land pattern with pad_shape 'circle' requires equal pad_depth_mm "
+                f"({self.pad_depth_mm}) and pad_width_mm ({self.pad_width_mm})"
+            )
+
+        if self.pitch_mm is not None and self.outer_span_mm is not None:
+            implied_outer = Decimal(str(self.pitch_mm)) + depth
+            declared_outer = Decimal(str(self.outer_span_mm))
+            if abs(declared_outer - implied_outer) > Decimal("0.001"):
+                raise ValueError(
+                    f"outer_span_mm ({self.outer_span_mm}) is inconsistent with "
+                    f"pitch_mm + pad_depth_mm ({float(implied_outer):.3f})"
+                )
+
+        pitch = self.resolved_pitch_decimal_mm()
+        if pitch <= depth:
+            raise ValueError(
+                "pitch_mm must exceed pad_depth_mm (outer_span_mm must exceed "
+                "2 * pad_depth_mm) so the two pads do not overlap"
+            )
+        return self
+
+    def resolved_pitch_decimal_mm(self) -> Decimal:
+        """Exact decimal center-to-center pad pitch along the terminal axis."""
+        if self.pitch_mm is not None:
+            return Decimal(str(self.pitch_mm))
+        return Decimal(str(self.outer_span_mm)) - Decimal(str(self.pad_depth_mm))
+
+    def resolved_outer_span_decimal_mm(self) -> Decimal:
+        """Exact decimal outer copper span along the terminal axis."""
+        if self.outer_span_mm is not None:
+            return Decimal(str(self.outer_span_mm))
+        return Decimal(str(self.pitch_mm)) + Decimal(str(self.pad_depth_mm))
+
+    def resolved_pitch_mm(self) -> float:
+        """Center-to-center pad pitch along the terminal axis, in millimetres."""
+        return float(self.resolved_pitch_decimal_mm())
+
+    def resolved_outer_span_mm(self) -> float:
+        """Outer copper span along the terminal axis, in millimetres."""
+        return float(self.resolved_outer_span_decimal_mm())
+
+
+class MountingHoleDeclaration(SpecModel):
+    """A manufacturer's PC-board mounting-hole pattern for a part assignment (Issue #10476).
+
+    A snap-in or similar termination is specified by the finished holes its
+    package drawing requires, not by a lead a hole must clear.  The
+    declaration names the two numbered plated through-hole pads, the
+    inclusive finished-hole diameter limits and -- when the drawing gives
+    them -- the inclusive limits of the two holes' centre-to-centre pitch.
+    :attr:`source` must cite the drawing.  Assembly preflight compares the
+    nominal drill and each evidenced end of the fabricator's finished-hole
+    interval with the diameter limits, and the nominal pitch between the
+    two holes with the pitch limits, independently of ``lead``.
+    """
+
+    pads: list[str] = Field(
+        ...,
+        min_length=2,
+        max_length=2,
+        description="The two KiCad pad numbers (e.g. ['1', '2']) whose holes the drawing specifies.",
+    )
+    hole_diameter: DimensionLimits = Field(
+        ..., description="Allowed finished-hole diameter of each pad, in millimetres (inclusive)."
+    )
+    pitch: DimensionLimits | None = Field(
+        default=None,
+        description=(
+            "Allowed centre-to-centre distance of the two holes, in millimetres "
+            "(inclusive).  Omit it when the drawing gives no pitch tolerance; "
+            "the pitch is then not assessed."
+        ),
+    )
+    source: str = Field(
+        ...,
+        description="Where the hole pattern was verified: the package drawing's document and page.",
+    )
+
+    @field_validator("pads", mode="before")
+    @classmethod
+    def _normalize_pad_numbers(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        return [str(item) if type(item) is int else item for item in value]
+
+    @field_validator("pads")
+    @classmethod
+    def _validate_pads(cls, pads: list[str]) -> list[str]:
+        if any(not isinstance(pad, str) or not pad.strip() for pad in pads):
+            raise ValueError("mounting_holes pads must be two non-empty pad numbers")
+        if pads[0] == pads[1]:
+            raise ValueError("mounting_holes requires two distinct pad numbers")
+        return pads
+
+    @field_validator("source")
+    @classmethod
+    def _validate_source(cls, source: str) -> str:
+        if not source.strip():
+            raise ValueError("mounting_holes requires a source (drawing document and page)")
+        return source
+
+
 class BOMEntry(SpecModel):
     """Per-reference BOM mapping for explicit part assignment.
 
@@ -826,6 +1366,53 @@ class BOMEntry(SpecModel):
     exempt_reason: str | None = Field(
         default=None, description="Why the ref is exempt (required when 'exempt' is set)"
     )
+    lead: LeadProfile | None = Field(
+        default=None,
+        description=(
+            "Issue #10299: verified maximum lead dimensions for this part "
+            "assignment, compared by assembly preflight against the finished "
+            "plated hole of every matching reference's through-hole pads."
+        ),
+    )
+    pad_leads: dict[str, LeadProfile] | None = Field(
+        default=None,
+        description=(
+            "Issue #10299: per-pad-number lead overrides for packages with "
+            "mixed leads, keyed by KiCad pad number (e.g. '2').  Takes "
+            "precedence over ``lead`` for that pad number only."
+        ),
+    )
+    land_pattern: SmdLandPattern | None = Field(
+        default=None,
+        description=(
+            "Issue #10505: source-attributed manufacturer SMD land pattern for "
+            "this exact BOM MPN, compared by assembly preflight against placed "
+            "two-terminal SMD copper pads."
+        ),
+    )
+    mounting_holes: MountingHoleDeclaration | None = Field(
+        default=None,
+        description=(
+            "Issue #10476: the package drawing's mounting-hole pattern for "
+            "this part assignment.  Assembly preflight checks each matching "
+            "reference's declared plated holes against it, independently of "
+            "``lead``."
+        ),
+    )
+
+    @field_validator("pad_leads", mode="before")
+    @classmethod
+    def normalize_pad_numbers(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = {}
+        for key, profile in value.items():
+            if type(key) is int:
+                key = str(key)
+            if not isinstance(key, str) or key in normalized:
+                raise ValueError("pad numbers must be unique strings or integers")
+            normalized[key] = profile
+        return normalized
 
     @model_validator(mode="after")
     def _validate_exemption(self) -> BOMEntry:
@@ -841,6 +1428,225 @@ class BOMEntry(SpecModel):
             raise ValueError(
                 f"bom_entries '{self.ref}': an exempt entry must not set lcsc "
                 f"(a part with an LCSC number is verified, not exempted)"
+            )
+        return self
+
+
+class TerminalAssignment(SpecModel):
+    """One terminal of a purchased part and the board landing it wires to (Issue #10514).
+
+    ``terminal`` is the project's own declaration of the part's terminal
+    number, read by hand from the datasheet; nothing derives it from the part
+    number. ``ref``, ``pad`` and ``net`` name the landing on the board and the
+    net it is expected to carry, which ``kct export`` checks against the PCB. A
+    terminal that is deliberately left unconnected sets ``unused`` and names no
+    landing.
+    """
+
+    terminal: str = Field(
+        ...,
+        description="Terminal of the purchased part, numbered as its datasheet numbers it",
+    )
+    ref: str | None = Field(
+        default=None, description="Board designator of the landing this terminal wires to"
+    )
+    pad: str | None = Field(default=None, description="Pad number of that landing")
+    net: str | None = Field(
+        default=None,
+        description="Net the landing is expected to carry; compared with the PCB at export",
+    )
+    unused: bool = Field(
+        default=False, description="True when the terminal is deliberately left unconnected"
+    )
+
+    @field_validator("terminal", "ref", "pad", "net", mode="before")
+    @classmethod
+    def _number_as_text(cls, value: Any) -> Any:
+        """Keep a pad or terminal number written as a bare YAML integer as text."""
+        if type(value) is int:
+            return str(value)
+        return value
+
+    @field_validator("terminal", "ref", "pad", "net")
+    @classmethod
+    def _text_not_blank(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError(f"{info.field_name} must be non-blank when set")
+        return value
+
+    @model_validator(mode="after")
+    def _landing_or_unused(self) -> TerminalAssignment:
+        if self.unused:
+            if self.ref is not None or self.pad is not None or self.net is not None:
+                raise ValueError(
+                    f"terminal '{self.terminal}' is both mapped to a landing and unused"
+                )
+            return self
+        if self.ref is None or self.pad is None or self.net is None:
+            raise ValueError(f"terminal '{self.terminal}' needs ref, pad and net, or unused: true")
+        return self
+
+    @property
+    def landing(self) -> tuple[str, str, str] | None:
+        """The ``(ref, pad, net)`` this terminal wires to; ``None`` for an unused one."""
+        if self.ref is None or self.pad is None or self.net is None:
+            return None
+        return self.ref, self.pad, self.net
+
+
+class PurchasingEntry(SpecModel):
+    """One supplementary procurement row: something to buy that is not placed (Issue #10431).
+
+    Accessories and off-board parts a complete assembly needs but that have no
+    KiCad placement of their own -- a fuse-holder cover, a cartridge bought
+    separately, chassis resistors wired to land footprints. They never enter the
+    fabricator BOM or CPL; the manufacturing export writes them beside those as a
+    per-board purchasing list, which the submission handoff scales by the board
+    quantity.
+
+    A selected row may add ``terminals`` when the part wires to board landings
+    and its terminal numbers differ from the pad numbers (Issue #10514).
+    """
+
+    description: str = Field(..., description="What to buy")
+    quantity: int = Field(
+        ...,
+        description="Units per board; already covers every linked designator",
+    )
+    refs: list[str] | None = Field(
+        default=None,
+        description="Board designators the item belongs to (wire lands included); omit for none",
+    )
+    manufacturer: str | None = Field(default=None, description="Manufacturer of the selected part")
+    mpn: str | None = Field(
+        default=None,
+        description="Manufacturer Part Number of the selected part; quote it when it starts with a digit",
+    )
+    pending: str | None = Field(
+        default=None,
+        description="Set to what is still undecided instead of manufacturer/mpn: the part is not selected yet",
+    )
+    terminals: list[TerminalAssignment] | None = Field(
+        default=None,
+        description="Map of the selected part's terminals to board landings; omit for none",
+    )
+
+    @field_validator("description")
+    @classmethod
+    def _description_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("purchasing rows need a non-blank description")
+        return value
+
+    @field_validator("quantity", mode="before")
+    @classmethod
+    def _quantity_not_boolean(cls, value: Any) -> Any:
+        if type(value) is bool:
+            raise ValueError("quantity must be a positive whole number of units per board")
+        return value
+
+    @field_validator("quantity")
+    @classmethod
+    def _quantity_positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("quantity must be a positive whole number of units per board")
+        return value
+
+    @field_validator("refs")
+    @classmethod
+    def _refs_not_blank(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        refs = []
+        for ref in value:
+            if not isinstance(ref, str) or not ref.strip():
+                raise ValueError("refs must list non-blank designators")
+            ref = ref.strip()
+            if ref in refs:
+                raise ValueError(f"refs must not repeat a designator: {ref}")
+            refs.append(ref)
+        return refs
+
+    @field_validator("manufacturer", "mpn", "pending")
+    @classmethod
+    def _optional_text_not_blank(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError(f"{info.field_name} must be non-blank when set")
+        return value
+
+    @model_validator(mode="after")
+    def _selection_is_complete(self) -> PurchasingEntry:
+        if self.pending is not None:
+            if self.manufacturer is not None or self.mpn is not None:
+                raise ValueError("a pending row must not set manufacturer or mpn")
+            return self
+        if self.manufacturer is None or self.mpn is None:
+            raise ValueError(
+                "a selected row needs both manufacturer and mpn; "
+                "otherwise pending must say what is still to be selected"
+            )
+        return self
+
+    @field_validator("terminals")
+    @classmethod
+    def _terminals_distinct(
+        cls, value: list[TerminalAssignment] | None
+    ) -> list[TerminalAssignment] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("terminals must list at least one terminal of the part")
+        seen: dict[str, str] = {}
+        for assignment in value:
+            landing = (
+                "unused"
+                if assignment.unused
+                else f"{assignment.ref} pad {assignment.pad} ({assignment.net})"
+            )
+            if assignment.terminal in seen:
+                raise ValueError(
+                    f"terminal '{assignment.terminal}' is declared more than once: "
+                    f"{seen[assignment.terminal]} and {landing}"
+                )
+            seen[assignment.terminal] = landing
+        return value
+
+    @model_validator(mode="after")
+    def _terminals_need_a_selected_part(self) -> PurchasingEntry:
+        if self.pending is not None and self.terminals is not None:
+            raise ValueError(
+                "a pending row must not declare terminals: the part is not selected yet"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _terminal_landings_are_declared_refs(self) -> PurchasingEntry:
+        """Keep a mapped landing within the designators the row declares (Issue #10582).
+
+        A nonempty ``refs`` is the buyer's declaration of the designators the
+        row belongs to, wire lands included, so a terminal wired to another
+        footprint must have that footprint listed too. Without this a ``ref``
+        typo that names a different real footprint passes the PCB check at
+        export and is frozen under the wrong part. An omitted or empty ``refs``
+        declares nothing to compare against and keeps its optional behaviour.
+        """
+        if not self.refs or not self.terminals:
+            return self
+        for assignment in self.terminals:
+            landing = assignment.landing
+            if landing is None or landing[0] in self.refs:
+                continue
+            raise ValueError(
+                f"terminal '{assignment.terminal}' maps to {landing[0]}, which is not among "
+                f"the row's declared refs ({', '.join(self.refs)}); correct the terminal's ref "
+                f"or add {landing[0]} to refs"
             )
         return self
 
@@ -935,7 +1741,18 @@ class ProjectSpec(SpecModel):
         default=None,
         description="Per-reference BOM part mappings (MPN, LCSC)",
     )
+    purchasing: list[PurchasingEntry] | None = Field(
+        default=None,
+        description="Supplementary per-board procurement rows for accessories and off-board parts",
+    )
     decisions: list[Decision] | None = Field(default=None, description="Design decisions")
+    wire_terminations: list[WireTermination] | None = Field(
+        default=None,
+        description=(
+            "Issue #10473: wire or ferrule landings that assembly preflight "
+            "assesses without a bom_entries part assignment, one per pad."
+        ),
+    )
     progress: Progress | None = Field(default=None, description="Progress tracking")
     validation: Validation | None = Field(default=None, description="Validation results")
 

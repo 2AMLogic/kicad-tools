@@ -35,24 +35,34 @@ when the optimizer moves or rotates it.
 
 from __future__ import annotations
 
+import dataclasses
 import math
+from collections import Counter, defaultdict
+from collections.abc import Collection
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Mapping, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence
 
 if TYPE_CHECKING:
+    from kicad_tools.schema import Schematic
+
     from .cost import ComponentPlacement, Net, PlacementCostConfig, PlacementScore
     from .vector import PlacementVector
 
 __all__ = [
     "DecouplingCap",
     "DecouplingGroup",
+    "SchematicCapAssociation",
     "SnapMove",
     "SupplyPin",
+    "apply_cap_associations",
     "assign_caps_to_pins",
     "compute_decoupling_distance",
     "compute_pin_coverage",
     "decoupling_pairs",
     "identify_decoupling_groups",
+    "parse_capacitance_farads",
+    "schematic_cap_associations",
     "snap_decoupling_caps",
 ]
 
@@ -85,12 +95,201 @@ class SupplyPin:
 
 
 @dataclass(frozen=True)
+class SchematicCapAssociation:
+    """One drawn decoupling cap, including caps without a defensible target."""
+
+    cap: DecouplingCap
+    net: str
+    sheet: str
+    pin: SupplyPin | None
+    source: Literal["derived", "overridden", "unassociated"]
+    reason: str
+
+
+# A labelled cap elsewhere on the page is not a local bypass designation.
+_SCHEMATIC_PROXIMITY_MM = 25.4
+_TARGET_FIELD = "KCT_Decouples"
+
+
+@dataclass(frozen=True)
+class _DrawnPin:
+    sheet: str
+    position: tuple[float, float]
+    wire: tuple[int, int] | None
+
+
+def _drawn_wire_groups(schematic: Schematic) -> dict[tuple[int, int], tuple[int, int]]:
+    """Physical wire groups on one drawing, before joining equal label names."""
+    from kicad_tools.cli.sch_connectivity import build_wire_graph
+
+    edges, _ = build_wire_graph(schematic)
+    groups = {}
+    for start, adjacent in edges.items():
+        if not adjacent or start in groups:
+            continue
+        groups[start] = start
+        pending = [start]
+        while pending:
+            for node in edges[pending.pop()]:
+                if node not in groups:
+                    groups[node] = start
+                    pending.append(node)
+    return groups
+
+
+def _associate_drawn_cap(
+    cap: DecouplingCap,
+    net: str,
+    site: _DrawnPin,
+    targets: dict[SupplyPin, _DrawnPin],
+    override: str,
+) -> SchematicCapAssociation:
+    if override:
+        ref, _, pad = override.rpartition(".")
+        target = SupplyPin(ref, pad)
+        if target in targets:
+            return SchematicCapAssociation(
+                cap, net, site.sheet, target, "overridden", _TARGET_FIELD
+            )
+        return SchematicCapAssociation(
+            cap,
+            net,
+            site.sheet,
+            None,
+            "unassociated",
+            f"{_TARGET_FIELD}={override} does not name a supply pin on {net}",
+        )
+    ranked = []
+    for pin, other in targets.items():
+        if other.sheet != site.sheet:
+            continue
+        distance = math.dist(site.position, other.position)
+        if distance <= _SCHEMATIC_PROXIMITY_MM:
+            wired = site.wire is not None and site.wire == other.wire
+            ranked.append((not wired, distance, pin))
+    ranked.sort(key=lambda entry: entry[:2])
+    if not ranked:
+        reason = "No nearby same-sheet supply pin on this net"
+    elif (
+        len(ranked) > 1
+        and ranked[0][0] == ranked[1][0]
+        and math.isclose(ranked[0][1], ranked[1][1], abs_tol=0.001)
+    ):
+        reason = "Equally close supply pins on this net"
+    else:
+        label_only, distance, selected = ranked[0]
+        evidence = "matching net" if label_only else "shared drawn wire"
+        return SchematicCapAssociation(
+            cap, net, site.sheet, selected, "derived", f"{evidence}, {distance:.2f} mm on sheet"
+        )
+    return SchematicCapAssociation(cap, net, site.sheet, None, "unassociated", reason)
+
+
+def _drawn_decoupling_cap(
+    ref: str, pins: dict[str, tuple[str, _DrawnPin]]
+) -> tuple[DecouplingCap, str, _DrawnPin] | None:
+    from kicad_tools.router.net_class import is_ground_rail_name
+
+    if len(pins) != 2:
+        return None
+    first, second = pins
+    first_ground = is_ground_rail_name(pins[first][0])
+    if first_ground == is_ground_rail_name(pins[second][0]):
+        return None
+    supply, ground = (second, first) if first_ground else (first, second)
+    net, site = pins[supply]
+    return DecouplingCap(ref, supply, ground), net, site
+
+
+def schematic_cap_associations(path: str | Path) -> list[SchematicCapAssociation]:
+    """Associate each supply-to-ground cap with the power pin its schematic designates.
+
+    Pin and net identities are hierarchy-aware. The drawn inference stays on
+    the same sheet, while an explicit cap symbol property can name any actual
+    same-net supply pin in the design. This function never reads PCB positions.
+    """
+    from kicad_tools.cli.sch_connectivity import snap_coord, to_coord
+    from kicad_tools.lvs.board_lvs import _schematic_pin_to_net
+    from kicad_tools.router.net_class import (
+        is_ground_rail_name,
+        is_power_rail_name,
+        is_power_rail_pin,
+    )
+    from kicad_tools.schema import Schematic
+    from kicad_tools.schema.hierarchy import build_hierarchy
+
+    nets = _schematic_pin_to_net(Path(path))
+    sheets = build_hierarchy(str(path)).all_nodes()
+    multiplicity = Counter(node.path for node in sheets)
+    targets: dict[str, dict[SupplyPin, _DrawnPin]] = defaultdict(dict)
+    caps = []
+    for node in sheets:
+        schematic = Schematic.load(node.path)
+        sheet = node.get_path_string()
+        wire_groups = _drawn_wire_groups(schematic)
+        wire_nodes = set(wire_groups)
+        for symbol in schematic.symbols:
+            ref = symbol.reference
+            if multiplicity[node.path] > 1:
+                ref = symbol.instance_reference(node.instance_path) or ref
+            lib = schematic.get_lib_symbol_resolved(symbol.lib_id)
+            if lib is None:
+                continue
+            prefix = lib.properties.get("Reference", "")
+            is_cap = _is_capacitor(ref) or prefix == "C"
+            if not (
+                is_cap
+                or _is_ic(ref)
+                or prefix in ("U", "IC")
+                or symbol.lib_id.startswith("Oscillator:")
+            ):
+                continue
+            unit_pins = lib.get_pins_for_unit(symbol.unit)
+            if is_cap and len({pin.number for pin in unit_pins}) != 2:
+                continue
+            positions = lib.get_all_pin_positions(
+                instance_pos=symbol.position,
+                instance_rot=symbol.rotation,
+                mirror=symbol.mirror,
+                unit=symbol.unit,
+            )
+            cap_pins = {}
+            for pin in unit_pins:
+                net = nets.get((ref, pin.number))
+                if not net or pin.number not in positions:
+                    continue
+                pos = positions[pin.number]
+                wire = wire_groups.get(snap_coord(to_coord(*pos), wire_nodes))
+                site = _DrawnPin(sheet, pos, wire)
+                if is_cap:
+                    cap_pins[pin.number] = (net, site)
+                elif is_power_rail_pin(pin.type, pin.name) and not is_ground_rail_name(net):
+                    targets[net][SupplyPin(ref, pin.number)] = site
+            if is_cap and (cap := _drawn_decoupling_cap(ref, cap_pins)):
+                caps.append((*cap, (symbol.get_property(_TARGET_FIELD) or "").strip()))
+    return [
+        _associate_drawn_cap(cap, net, site, targets.get(net, {}), override)
+        for cap, net, site, override in sorted(
+            caps, key=lambda entry: (entry[2].sheet, entry[0].reference)
+        )
+        if net in targets or is_power_rail_name(net) or override
+    ]
+
+
+@dataclass(frozen=True)
 class DecouplingGroup:
     """The decoupling caps and IC supply pins that share one supply net."""
 
     net: str
     caps: tuple[DecouplingCap, ...]
     pins: tuple[SupplyPin, ...]
+    associated: tuple[tuple[str, SupplyPin], ...] = ()
+    """``(cap reference, pin)`` pairs the schematic designates (issue #10142).
+
+    :func:`assign_caps_to_pins` gives these caps their designated pin directly
+    and runs its distance-greedy pairing only on the rest. Empty: the pairing
+    is purely by distance, as before.
+    """
 
 
 def _is_capacitor(reference: str) -> bool:
@@ -187,6 +386,44 @@ def identify_decoupling_groups(
     return groups
 
 
+def apply_cap_associations(
+    groups: Sequence[DecouplingGroup],
+    associations: Sequence[SchematicCapAssociation],
+) -> list[DecouplingGroup]:
+    """Attach the schematic's cap -> pin designations to *groups* (issue #10142).
+
+    Only associations that name a pin (``derived`` or ``overridden``) are used,
+    and only when that pin is one of the group's own supply pins and the cap is
+    one of its caps; anything else stays unassociated and keeps the
+    distance-greedy pairing. Caps are matched by reference, so net names that
+    differ between schematic and board (hierarchical labels) do not matter.
+    """
+    named = {a.cap.reference: a.pin for a in associations if a.pin is not None}
+    if not named:
+        return list(groups)
+    out: list[DecouplingGroup] = []
+    for group in groups:
+        pins = set(group.pins)
+        pairs = tuple(
+            (cap.reference, named[cap.reference])
+            for cap in group.caps
+            if named.get(cap.reference) in pins
+        )
+        out.append(dataclasses.replace(group, associated=pairs) if pairs else group)
+    return out
+
+
+def parse_capacitance_farads(value: str) -> float | None:
+    """Capacitance of a footprint value string (``100nF``, ``4u7``) in farads.
+
+    ``None`` when the value is not a capacitance. The snap pass uses it to put
+    the smallest cap on a pin closest to that pin (issue #10142).
+    """
+    from kicad_tools.explain.checks.decoupling import _capacitance_farads
+
+    return _capacitance_farads(value)
+
+
 def _position(
     reference: str,
     pad: str,
@@ -213,6 +450,11 @@ def assign_caps_to_pins(
     remaining pins go without. Rounds stop at *max_per_pin* (``None``: until
     every cap is placed); caps left over are not assigned.
 
+    Caps listed in ``group.associated`` (the schematic's own cap -> pin
+    designation, issue #10142) are paired first, directly, and count toward
+    their pin's load; only the other caps go through the greedy rounds. A group
+    with no associations behaves exactly as the greedy pairing alone.
+
     Args:
         group: The supply net's caps and pins.
         positions: ``(reference, pad) -> (x, y)`` for every cap supply pad and
@@ -227,16 +469,31 @@ def assign_caps_to_pins(
     if not caps or not pins:
         return []
 
-    pairs: list[tuple[float, int, int]] = []
-    for ci, cap in enumerate(caps):
-        cx, cy = positions[(cap.reference, cap.supply_pad)]
-        for pi, pin in enumerate(pins):
-            px, py = positions[(pin.reference, pin.pad)]
-            pairs.append((math.hypot(cx - px, cy - py), ci, pi))
-    pairs.sort()
+    def distance(ci: int, pi: int) -> float:
+        cx, cy = positions[(caps[ci].reference, caps[ci].supply_pad)]
+        px, py = positions[(pins[pi].reference, pins[pi].pad)]
+        return math.hypot(cx - px, cy - py)
 
     assigned: dict[int, tuple[int, float]] = {}
     load = [0] * len(pins)
+
+    # Caps the schematic designates take their pin directly (issue #10142);
+    # a designation whose pin has no position falls through to the greedy pairing.
+    designated = dict(group.associated)
+    pin_index = {(p.reference, p.pad): pi for pi, p in enumerate(pins)}
+    for ci, cap in enumerate(caps):
+        target = designated.get(cap.reference)
+        pi = pin_index.get((target.reference, target.pad)) if target else None
+        if pi is not None:
+            assigned[ci] = (pi, distance(ci, pi))
+            load[pi] += 1
+    free = [ci for ci in range(len(caps)) if ci not in assigned]
+
+    pairs: list[tuple[float, int, int]] = [
+        (distance(ci, pi), ci, pi) for ci in free for pi in range(len(pins))
+    ]
+    pairs.sort()
+
     level = 0
     while len(assigned) < len(caps) and (max_per_pin is None or level < max_per_pin):
         for dist, ci, pi in pairs:
@@ -442,6 +699,9 @@ def snap_decoupling_caps(
     yard_gap_mm: float = 0.15,
     escape_mm: float = 3.0,
     escape_halo_mm: float = 0.35,
+    cap_values: Mapping[str, float] | None = None,
+    allow_flip: bool | Collection[str] = False,
+    fixed_refs: Collection[str] = (),
 ) -> tuple[PlacementVector, list[SnapMove]]:
     """Move each decoupling cap to the nearest free spot beside its pin.
 
@@ -466,15 +726,16 @@ def snap_decoupling_caps(
       blocks the trace that has to leave that pin; pads on the cap's own
       supply net, on ground, or on no net have nothing to escape; and
     * adds no hard-constraint violation under *score_fn* (overlap, DRC,
-      boundary, block, creepage), lowers the decoupling term, and does not
-      worsen :func:`compute_pin_coverage` -- moving a cap onto its assigned
-      pin must not strand a neighbouring pin it was already serving.
+      boundary, block, creepage). Ordinary moves lower the decoupling term
+      and preserve :func:`compute_pin_coverage`.
+
+    With *allow_flip*, a cap can move onto its IC's side. A collection limits
+    flips to the named caps. With *cap_values*, caps sharing a pin are snapped
+    smallest first. Fixing a required side or value order can increase distance.
 
     Wirelength is deliberately not a gate: a cap that moves onto its pin
     stretches the ground net's bounding box a little, and that trade is the
-    point of the rule. A cap only ever moves closer to its pin; one with no
-    such candidate stays where it is, so the pass never adds a violation
-    and never undoes a tight hand placement.
+    point of the rule. A cap stays in place when no legal candidate is found.
 
     Args:
         vector: :class:`~kicad_tools.placement.vector.PlacementVector`.
@@ -503,6 +764,10 @@ def snap_decoupling_caps(
         grid_mm: Placement grid the cap centre is rounded to (``0`` keeps
             the exact position). An off-grid cap next to a fine-pitch
             package is harder for the router to reach.
+        cap_values: ``cap reference -> farads``. Enables the smallest-closest
+            ordering; caps missing from the map are not ordered.
+        allow_flip: Allow all caps, or only the named caps, to flip to their IC side.
+        fixed_refs: Leave these caps in place and include them in value ordering.
 
     Returns:
         ``(new_vector, moves)``.
@@ -518,6 +783,9 @@ def snap_decoupling_caps(
     from .wirelength import build_pad_position_map
 
     index = {c.reference: i for i, c in enumerate(components)}
+    designated = {ref for group in groups for ref, _ in group.associated}
+    if isinstance(allow_flip, bool):
+        allow_flip = set(index) if allow_flip else set()
     data = vector.data.copy()
     current = PlacementVector(data=data.copy())
     best_score = score_fn(current)
@@ -539,12 +807,34 @@ def snap_decoupling_caps(
         decoupling_pairs(groups, placements, build_pad_position_map(placed)),
         key=lambda t: (t[3], t[1].reference),
     )
+    if cap_values:
+        # Smallest value first among the caps sharing a pin: it gets the
+        # nearest free spot. Each pin's caps keep the slots they already had.
+        slots: dict[SupplyPin, list[int]] = defaultdict(list)
+        for i, t in enumerate(pairs):
+            slots[t[2]].append(i)
+        reordered = list(pairs)
+        for idxs in slots.values():
+            ordered = sorted(
+                (pairs[i] for i in idxs),
+                key=lambda t: cap_values.get(t[1].reference, math.inf),
+            )
+            for i, t in zip(idxs, ordered, strict=True):
+                reordered[i] = t
+        pairs = reordered
+    # Seed value ordering with the caps that cannot move.
+    handled: dict[SupplyPin, list[tuple[float, float]]] = defaultdict(list)
 
-    radii = [i * step_mm for i in range(int(round(max_radius_mm / step_mm)) + 1)]
+    for _, cap, pin, distance in pairs:
+        if cap.reference in fixed_refs and cap_values and cap.reference in cap_values:
+            handled[pin].append((cap_values[cap.reference], distance))
+
     angles = [2 * math.pi * k / directions for k in range(directions)]
     moves: list[SnapMove] = []
 
     for net, cap, pin, before in pairs:
+        if cap.reference in fixed_refs:
+            continue
         ci = index.get(cap.reference)
         pin_i = index.get(pin.reference)
         if ci is None or pin_i is None:
@@ -608,9 +898,35 @@ def snap_decoupling_caps(
 
         base = ci * FIELDS_PER_COMPONENT
         side = int(round(float(data[base + 3])))
+        ic_side = int(round(float(data[pin_i * FIELDS_PER_COMPONENT + 3])))
+        flip = side != ic_side and cap.reference in allow_flip
+        if flip:
+            side = ic_side
+        value = cap_values.get(cap.reference) if cap_values else None
+        # A larger cap never ends nearer to the pin than a smaller one on it.
+        floor = max(
+            (dist for v, dist in handled[pin] if value is not None and v < value),
+            default=None,
+        )
+        ceiling = min(
+            (dist for v, dist in handled[pin] if value is not None and v > value),
+            default=None,
+        )
+        named = cap.reference in designated
+        # Meeting a required side or value order can mean moving farther away.
+        move_outward = flip or (named and floor is not None and before <= floor + 1e-6)
         accepted = False
-        for d in radii:
-            if d >= before:
+        final = before
+        # No legal supply pad lies beyond the farthest corner of the board.
+        # Bound the search even when the CLI radius is a very large finite value.
+        farthest = math.hypot(
+            max(abs(pin_pad.x - board.min_x), abs(pin_pad.x - board.max_x)),
+            max(abs(pin_pad.y - board.min_y), abs(pin_pad.y - board.max_y)),
+        )
+        search_radius = min(max_radius_mm, farthest + grid_mm)
+        for step in range(round(search_radius / step_mm) + 1):
+            d = step * step_mm
+            if d >= before and not move_outward:
                 break
             for rot_idx, rot in enumerate(ROTATION_STEPS):
                 off = _transform_pad(supply, 0.0, 0.0, rot, side ^ cap_def.side)
@@ -621,7 +937,13 @@ def snap_decoupling_caps(
                         cx = round(cx / grid_mm) * grid_mm
                         cy = round(cy / grid_mm) * grid_mm
                     after = math.hypot(cx + off.x - pin_pad.x, cy + off.y - pin_pad.y)
-                    if after >= before:
+                    if named and after > max_radius_mm + 1e-9:
+                        continue
+                    if after >= before and not move_outward:
+                        continue
+                    if floor is not None and after <= floor + 1e-6:
+                        continue
+                    if ceiling is not None and after >= ceiling - 1e-6:
                         continue
                     bb = _pad_bbox(
                         [_transform_pad(p, cx, cy, rot, side ^ cap_def.side) for p in cap_def.pads]
@@ -631,23 +953,31 @@ def snap_decoupling_caps(
                         continue
                     trial = data.copy()
                     trial[base], trial[base + 1], trial[base + 2] = cx, cy, float(rot_idx)
+                    trial[base + 3] = float(side)
                     score = score_fn(PlacementVector(data=trial))
                     violation = _violation(score, config)
-                    if (
-                        violation <= best_violation
-                        and score.breakdown.decoupling < best_score.breakdown.decoupling
-                        and (cov := coverage(trial)) <= best_coverage + 1e-9
-                    ):
+                    improved = (
+                        score.breakdown.decoupling <= best_score.breakdown.decoupling
+                        if flip
+                        else score.breakdown.decoupling < best_score.breakdown.decoupling
+                    )
+                    if violation > best_violation or not (improved or (named and move_outward)):
+                        continue
+                    cov = coverage(trial)
+                    if (named and move_outward) or cov <= best_coverage + 1e-9:
                         data, best_score, best_violation = trial, score, violation
                         best_coverage = cov
                         accepted = True
                         moves.append(
                             SnapMove(cap.reference, f"{pin.reference}.{pin.pad}", before, after)
                         )
+                        final = after
                         break
                 if accepted:
                     break
             if accepted:
                 break
+        if value is not None:
+            handled[pin].append((value, final if accepted else before))
 
     return PlacementVector(data=data), moves

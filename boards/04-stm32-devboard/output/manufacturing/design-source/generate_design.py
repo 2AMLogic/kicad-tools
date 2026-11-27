@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids, uuids_in_file
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.core.schematic_uuids import UuidSequence
 from kicad_tools.dev import warn_if_stale
@@ -915,16 +916,23 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     # move west instead (U1's courtyard leaves it only 0.07 mm of slack), so
     # the crystal moves 1 mm east, leaving a 0.22 mm courtyard gap to C2.
     Y1_POS = (BOARD_ORIGIN_X + 23, BOARD_ORIGIN_Y + 10)  # 8MHz crystal
+    # C11 sits at y=+15.1 (not +16) so the two +3.3V bypass caps C15/C16
+    # (Issue #10194) fit between it and U2's pin-1 corner.
     C10_POS = (BOARD_ORIGIN_X + 19, BOARD_ORIGIN_Y + 16)  # OSC_IN load cap
-    C11_POS = (BOARD_ORIGIN_X + 25, BOARD_ORIGIN_Y + 16)  # OSC_OUT load cap
+    C11_POS = (BOARD_ORIGIN_X + 25, BOARD_ORIGIN_Y + 15.1)  # OSC_OUT load cap
 
     # MCU decoupling caps (cluster below MCU footprint, near VSS/VDD pins)
     # Spaced 4mm apart to keep pad-pad clearance well above 0.127mm.
     C12_POS = (BOARD_ORIGIN_X + 26, BOARD_ORIGIN_Y + 32)  # 100nF (VDD/1)
     C13_POS = (BOARD_ORIGIN_X + 31, BOARD_ORIGIN_Y + 32)  # 100nF (VDD/24)
     C14_POS = (BOARD_ORIGIN_X + 36, BOARD_ORIGIN_Y + 32)  # 100nF (VDD/48)
-    C15_POS = (BOARD_ORIGIN_X + 26, BOARD_ORIGIN_Y + 36)  # 100nF (VDDA/9)
-    C16_POS = (BOARD_ORIGIN_X + 31, BOARD_ORIGIN_Y + 36)  # 4.7uF bulk
+    # C15/C16 are the caps the schematic designates for U2 pin 1 (+3.3V), so
+    # they sit in the open corner west of pin 1, rotated 180 deg so their
+    # +3.3V pad 1 faces U2 (Issue #10194; bypass_distance max 3.0 mm).
+    # Leave 0.30 mm between C15's pad envelope and the MCU pad envelope.
+    C15_POS = (BOARD_ORIGIN_X + 24.3, BOARD_ORIGIN_Y + 17.1)  # 100nF (U2.1)
+    C16_POS = (BOARD_ORIGIN_X + 23.0, BOARD_ORIGIN_Y + 19.1)  # 4.7uF bulk (U2.1)
+    CAP_PIN1_ROT = 180  # pad 1 (+3.3V) on the east side, toward U2
 
     # Right column (x=46..50): user LED + BOOT0 pull-down
     R1_POS = (BOARD_ORIGIN_X + 47, BOARD_ORIGIN_Y + 8)  # LED current-limiting R (3.3V to LED_K)
@@ -1037,9 +1045,14 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (pad "2" smd rect (at 3.15 0) (size 2 3.8) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
   )"""
 
-    def generate_cap_0805(ref: str, pos: tuple, value: str, net1: str, net2: str) -> str:
-        """Generate 0805 capacitor footprint."""
+    def generate_cap_0805(
+        ref: str, pos: tuple, value: str, net1: str, net2: str, rotation: float = 0
+    ) -> str:
+        """Generate 0805 capacitor footprint (pad 1 on the west side at rotation 0)."""
         x, y = pos
+        at = f"{x:g} {y:g}"
+        if rotation:
+            at += f" {rotation:g}"
         net1_num = NETS.get(net1, 0)
         net2_num = NETS.get(net2, 0)
         # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x +-1.70,
@@ -1049,7 +1062,7 @@ def create_stm32_pcb(output_dir: Path) -> Path:
         return f"""  (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
-    (at {x} {y})
+    (at {at})
     (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -1390,11 +1403,11 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     parts.append(generate_cap_0805("C12", C12_POS, "100nF", "+3.3V", "GND"))
     parts.append(generate_cap_0805("C13", C13_POS, "100nF", "+3.3V", "GND"))
     parts.append(generate_cap_0805("C14", C14_POS, "100nF", "+3.3V", "GND"))
-    parts.append(generate_cap_0805("C15", C15_POS, "100nF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C15", C15_POS, "100nF", "+3.3V", "GND", CAP_PIN1_ROT))
     print("   C12-C15 (100nF MCU bypass)")
 
     # C16: Bulk decoupling cap (4.7uF)
-    parts.append(generate_cap_0805("C16", C16_POS, "4.7uF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C16", C16_POS, "4.7uF", "+3.3V", "GND", CAP_PIN1_ROT))
     print(f"   C16 (4.7uF bulk decoupling) at {C16_POS}")
 
     # R1: LED current-limiting resistor (3.3V -> LED_K).  D1 pulls LED_K
@@ -2221,11 +2234,14 @@ def compress_staircases(routed_path: Path) -> bool:
             super().__init__()
             self.flagged: list[tuple[list[Any], str, str]] = []
 
-        def _report_staircase(self, chain, label, layer, results):  # type: ignore[no-untyped-def]
+        def _report_staircase(  # type: ignore[no-untyped-def]
+            self, chain, label, layer, results, terminal_shapes
+        ):
             before = len(results.violations)
-            super()._report_staircase(chain, label, layer, results)
+            reported = super()._report_staircase(chain, label, layer, results, terminal_shapes)
             if len(results.violations) > before:
                 self.flagged.append((chain, label, layer))
+            return reported
 
     print("\n" + "=" * 60)
     print("Compressing track staircases (issue #8844)...")
@@ -3004,6 +3020,7 @@ def fill_zones(routed_path: Path) -> bool:
     print("Re-pouring zones (kct zones fill --net GND)...")
     print("=" * 60)
 
+    authored_uuids = uuids_in_file(routed_path)
     cmd = [
         sys.executable,
         "-m",
@@ -3026,6 +3043,10 @@ def fill_zones(routed_path: Path) -> bool:
         print(f"\n   FAILED: kct zones fill exited {result.returncode}")
         return False
 
+    # KiCad supplies missing footprint fields when it saves the refilled board.
+    # Give those fields reproducible IDs while preserving every authored ID.
+    if uuids_in_file(routed_path) - authored_uuids:
+        canonicalize_pcb_file_uuids(routed_path, keep=authored_uuids)
     print("\n   SUCCESS: kct zones fill completed")
     return True
 
@@ -3043,6 +3064,14 @@ Gerbers: gerbers/gerbers.zip. Editable sources: kicad_project.zip. Engineering r
 """
 
 
+def finalize_silkscreen(routed_path: Path) -> bool:
+    """Apply the exporter's artwork edits before any evidence binds the routed PCB."""
+    from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+
+    result = run_default_silk_pass(routed_path, mfr="jlcpcb-tier1")
+    return result is not None and result["applied"]
+
+
 def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
     """Export the assembly bundle with the reviewed paid-drill native rules."""
     from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
@@ -3050,6 +3079,7 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
 
     process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
     process["validate_process"](routed_path)
+    process["validate_bypass_mask_escapes"](routed_path)
 
     print("\n" + "=" * 60)
     print("Generating manufacturing artifacts (reviewed paid drilling)...")
@@ -3387,6 +3417,11 @@ def main() -> int:
         # BEFORE fill_zones (so the re-pour backs the GND plane off any dogleg
         # bulge); copper-LVS stays 0/0.
         quantize_success = quantize_escapes(routed_path)
+        # The reviewed via repair checks alternate escapes against the complete
+        # physical net. Refill the planes after stitching and quantization so
+        # stale GND copper cannot appear to join an oscillator pad.
+        if not fill_zones(routed_path):
+            raise RuntimeError("Could not refill the planes before checking via escapes")
         # File-relative loading also works for importlib-based recipe callers.
         process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
         process["repair"](routed_path)
@@ -3439,6 +3474,11 @@ def main() -> int:
         # a track does not need a hand-edited artifact.
         if not merge_fragment_runs(routed_path):
             raise RuntimeError("merge_fragment_runs did not pass (#9097)")
+        # Keep the rerouted GND, USER_LED and oscillator copper clear of the
+        # front mask openings introduced or affected by the bypass move (#10194).
+        process["repair_bypass_mask_escapes"](routed_path)
+        if not finalize_silkscreen(routed_path):
+            raise RuntimeError("Could not finalize Board 04 silkscreen")
         if not check_silk_clear_of_holes(routed_path):
             raise RuntimeError("check_silk_clear_of_holes did not pass (#9455)")
 

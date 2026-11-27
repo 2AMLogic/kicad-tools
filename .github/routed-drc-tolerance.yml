@@ -52,7 +52,11 @@ manufacturers:
 # pinned toolchain (KCT_KICAD_DOCKER=1, kicad-cli 10.0.6), keyed with
 # identity_allowance.violation_identity:
 #   01: 2 errors / 1 signature   02: 29 / 8    03: 78 / 23
+#   (02's entry was removed when #9467 cleared its copper to 0 errors.)
 #   05: 83 / 21                  06: 48 / 14   07: 67 / 16
+#   Board 07's six-layer reissue in #8604 cleared all 16 release signatures.
+#   Board 01's repaired VOUT vias cleared its remaining identity in #9058.
+#   Board 05's revision-B reissue in #9921 cleared all 21 signatures.
 # Board 00 measures 0 mask_to_copper errors and board 04's native path
 # dispatches to the reviewed paid-drill validator whose rule selection does
 # not include mask_to_copper, so neither carries an entry.  The per-board
@@ -62,19 +66,6 @@ manufacturers:
 # carrying a NEW mask error still fails the gate.  Verify with:
 #   KCT_KICAD_DOCKER=1 uv run python scripts/ci/check_routed_drc.py <pcb>
 identity_allowances:
-  boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb:
-    mask_to_copper:
-      VOUT: 8858
-  boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb:
-    mask_to_copper:
-      GND: 8858
-      LINE_A: 8858
-      NODE_A: 8858
-      NODE_B: 8858
-      NODE_C: 8858
-      NODE_D: 8858
-      RESET: 8858
-      VCC: 8858
   boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb:
     mask_to_copper:
       AREF: 8858
@@ -100,44 +91,3 @@ identity_allowances:
       VBUS: 8858
       VCC: 8858
       XTAL1: 8858
-  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb:
-    mask_to_copper:
-      +5V: 8858
-      AREF: 8858
-      CPH: 8858
-      CPL: 8858
-      DRIVER_SLEEP: 8858
-      GND: 8858
-      GND_SENSE: 8858
-      HALL_A: 8858
-      HALL_B: 8858
-      HALL_C: 8858
-      IREF: 8858
-      LED_A: 8858
-      MOSI: 8858
-      PG_DELAY: 8858
-      RESET: 8858
-      RUN: 8858
-      SPEED: 8858
-      STATUS_LED: 8858
-      V3P3: 8858
-      VCP: 8858
-      VM: 8858
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb:
-    mask_to_copper:
-      +3V3: 8858
-      +5V: 8858
-      BOOT0: 8858
-      DQ13: 8858
-      DQ7: 8858
-      GND: 8858
-      LDQM: 8858
-      LED_FAIL_A: 8858
-      LED_PASS_A: 8858
-      NRST: 8858
-      SWDIO: 8858
-      SWO: 8858
-      UART_RX: 8858
-      UART_TX: 8858
-      UDQM: 8858
-      VCAP1: 8858

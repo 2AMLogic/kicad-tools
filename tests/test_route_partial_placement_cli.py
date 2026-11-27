@@ -223,7 +223,11 @@ def test_partial_placement_cli_preserves_and_reports(
     assert board.read_bytes() == original
     _reject_deadline_expiry(output, result.stdout + result.stderr)
     assert output.is_file(), result.stdout + result.stderr
-    if selection == "complete_partial" or (extra_options and selection == "mixed"):
+    if selection in {"skip_invalid", "valid_only"}:
+        # All requested nets completed, but whole-board DRC still finds the
+        # preserved off-board footprint, its stranded copper, and a singleton net.
+        assert result.returncode == 3
+    elif selection == "complete_partial" or (extra_options and selection == "mixed"):
         # The retained off-board trace can also trigger the DRC exit (3).
         # Placement must preserve that stronger failure, never turn it into success.
         assert result.returncode in {2, 3}
@@ -404,10 +408,7 @@ def test_json_attempt_summary_includes_placement_on_all_outcomes(
     rc = outer_main(["route", *argv]) if entry == "outer" else inner_main(argv)
     stdout = capfd.readouterr().out
     _reject_deadline_expiry(output, stdout)
-    # Existing progress output can precede JSON. The final object is the
-    # attempt summary, not an inferred success from a prior routing diagnostic.
-    start = stdout.rfind("\n{") + 1 if "\n{" in stdout else 0
-    summary = json.loads(stdout[start:])
+    summary = json.loads(stdout)
     assert summary["exit_code"] == rc
     assert summary["output_written"] is (selection != "all_invalid")
     placement = summary["placement_disposition"]
@@ -419,3 +420,48 @@ def test_json_attempt_summary_includes_placement_on_all_outcomes(
         assert placement["completed_nets"] == []
     else:
         assert any(s.net_name == "GOOD" for s in PCB.load(output).segments)
+
+
+@pytest.mark.parametrize(
+    "layer_args",
+    [
+        [],
+        ["--no-auto-layers"],
+        ["--auto-layers", "--adaptive-rules"],
+        ["--no-auto-layers", "--adaptive-rules"],
+    ],
+    ids=["default", "direct", "adaptive-layers", "adaptive-fixed-layers"],
+)
+def test_placement_report_keeps_verified_drc_reason(tmp_path, capfd, layer_args):
+    from kicad_tools.cli import main as outer_main
+
+    source = tmp_path / "mixed.kicad_pcb"
+    source.write_text(board_text())
+    output = tmp_path / "routed.kicad_pcb"
+
+    rc = outer_main(
+        [
+            "route",
+            str(source),
+            "-o",
+            str(output),
+            "--skip-nets",
+            "BAD",
+            "--format",
+            "json",
+            *layer_args,
+        ]
+    )
+
+    report = json.loads(capfd.readouterr().out)
+    assert rc == report["exit_code"] == 3
+    assert report["output_written"] and output.is_file()
+    assert report["summary"]["failure_reason"] == "post_route_drc"
+    assert report["summary"]["verdict"] == "failed"
+    placement = report["placement_disposition"]
+    assert placement["requested_blocked_nets"] == []
+    assert (
+        set(placement["completed_nets"])
+        == set(placement["requested_nets"])
+        == {"GOOD", "PARTNER", "PLANE"}
+    )

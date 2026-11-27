@@ -20,21 +20,6 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # directory name.  Each entry cites the issue that owns the refresh; remove the
 # entry when that lands (strict xfail turns an unexpected pass into a failure).
 EXPECTED_STALE: dict[str, str] = {
-    # Issue #9058: board 01's recipe now slides the two VOUT vias out of
-    # R1.2/R2.1's mask apertures and re-fills the pours after the
-    # fiducials land (plus UUID canonicalization), so a fresh regen no
-    # longer carries the 2 via pass-through errors and is byte-stable
-    # across runs.  The re-pin itself still waits on the operator's
-    # review of the five same-net own-pour zone findings (J1.2/J2.2
-    # front+back, R2.2) -- declaration review per the operator ruling,
-    # not a rule change.  Remove the entry when the re-pin lands.
-    "01-voltage-divider": (
-        "Issue #9058: board 01 evidence is stale against the "
-        "recipe-repaired copper (vias slid out of the R1.2/R2.1 mask "
-        "apertures, pours refilled post-fiducials); the re-pin waits on "
-        "the operator's review of the 5 same-net own-pour "
-        "mask_to_copper findings."
-    ),
     # PR #9177 (issue #9143) landed the fiducials + board-ID silk on board 03
     # and refreshed its evidence, but deliberately did NOT re-issue the
     # readiness receipt: every fresh board-03 receipt is blocked (385
@@ -48,47 +33,21 @@ EXPECTED_STALE: dict[str, str] = {
         "pending ready/demote decision owns the re-pin. Remove when #9144 "
         "lands."
     ),
-    # Issue #8937 (PR #8955) re-emitted the routed ``.kicad_dru`` of the
-    # boards whose recipes byte-reproduce it (01/05/06; the recipe-replay
-    # tests pin the committed sidecar to the current emitter, so reverting
-    # the DRU is not an option).  Board 06's evidence was re-pinned on the
-    # pinned toolchain; board 01's is covered by its #9058 entry above.
-    # Board 05 could not be re-pinned: its ``kct check`` refuses
-    # on the unaccepted physical_copper_gap/redundant-copper/silk warning
-    # flood board 07's entry cites (the #8399/#8938-era stalemate,
-    # reproduced with main's code on pristine main boards).  That work owns
-    # the re-pin; remove the entry when it lands.
-    #
-    # Since #9057 the recipe itself is also ahead of the committed copper:
-    # the three sharp_trace_corner wedges (RESET, HALL_B, HALL_C) are fixed
-    # in ``redesign/routing.json`` and ``redesign/build.py`` now adds the
-    # #8532 fiducials + board-ID silk, but the committed routed PCB and
-    # ``readiness.json`` predate both (the strict gate still refuses on the
-    # physical_copper_gap/silk_hole_overlap/mask_to_copper flood, so
-    # ``build.py`` cannot publish).  Issue #9068 (the gate-pass split of
-    # #9057) owns the rebuild + re-pin; remove the entry when it lands.
-    "05-bldc-motor-controller": (
-        "Issue #8937/#8399: PR #8955 re-emitted the routed .kicad_dru "
-        "(zone-clearance rules); `refresh_readiness.py` refuses to re-pin while "
-        "physical_copper_gap/redundant-copper/silk warnings remain unaccepted. "
-        "The #8399 warning-flood work owns the re-pin. Since #9057 the recipe "
-        "(wedge fix + #8532 fiducials/board-ID) is ahead of the committed "
-        "copper too; the gate-pass rebuild owns the re-pin."
-    ),
     # Issue #9097 (PR #9131) added recipe passes to board 04's
     # ``generate_design.py``; #9455 landed the via slide + silk-hole gate, and
     # #9536 regenerated the committed copper/evidence from that recipe on the
     # pinned toolchain (readiness re-pinned ``ready``).  Removed from this
     # dict by #9536.
-    "07-matchgroup-test": (
-        "Issue #8399: the #8602 copper prune changed board 07's authored/reviewed "
-        "sources; `refresh_readiness.py` refuses to re-pin while redundant_copper_* "
-        "warnings remain (kct check allowance is 0). The last child of #8399 owns the re-pin."
-    ),
     # Board 09's entry (issue #9495 / #9519) was removed when #9519
     # regenerated board 09's output and receipt via the #9469 pinned
     # Docker toolchain workflow after #9502 moved both producers under
     # run_on_evidence_toolchain.
+    #
+    "02-charlieplex-led": (
+        "Issue #9800: the shared silk pass leaves five via-only warnings "
+        "(#9112/#9033). The publisher also binds carried-forward renders to "
+        "the PCB in the previous project ZIP. Re-pin after both gates pass."
+    ),
 }
 
 BOARDS = sorted(p.parent.parent for p in BOARDS_DIR.glob("*/output/readiness.json"))

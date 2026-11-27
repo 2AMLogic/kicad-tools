@@ -468,6 +468,8 @@ class DrillClearanceRepairer:
         new_x: float,
         new_y: float,
         design_rules: DesignRules,
+        *,
+        before_refill: bool = False,
     ) -> str | None:
         """Return a reason string if moving the via at ``(via_x, via_y)`` to
         ``(new_x, new_y)`` would violate clearance; ``None`` when the target is
@@ -487,6 +489,11 @@ class DrillClearanceRepairer:
         from kicad_tools.schema.pcb import PCB
 
         pcb = PCB(self.doc)
+        if before_refill:
+            # This private PCB view models fixed copper. The caller must refill
+            # and verify the saved board before publishing a move into a pour.
+            for zone in pcb.zones:
+                zone.filled_polygons.clear()
         # The repairer works in ABSOLUTE file coordinates, but a PCB view is
         # board-relative (``_detect_board_origin``).  Convert the pre- and
         # post-move points into the view's frame before matching / checking.

@@ -89,6 +89,7 @@ class PackageInfo:
         height: Package height in mm (if available)
         exposed_pad: Exposed pad dimensions as (width, height) in mm
         source_page: Page number where package info was found
+        pitch_inferred: Pitch was supplied by a package-family default
         confidence: Confidence score (0-1) for the extraction
     """
 
@@ -102,6 +103,7 @@ class PackageInfo:
     exposed_pad: tuple[float, float] | None = None
     source_page: int = 0
     confidence: float = 0.0
+    pitch_inferred: bool = False
 
     def to_dict(self) -> dict:
         """Convert to dictionary representation."""
@@ -112,6 +114,7 @@ class PackageInfo:
             "body_width": self.body_width,
             "body_length": self.body_length,
             "pitch": self.pitch,
+            "pitch_inferred": self.pitch_inferred,
             "height": self.height,
             "exposed_pad": list(self.exposed_pad) if self.exposed_pad else None,
             "source_page": self.source_page,
@@ -180,11 +183,36 @@ def parse_package_name(name: str) -> dict:
         result["body_size"] = (width, length)
 
     # Try to extract pitch from name (e.g., "P0.5", "_0.5mm")
-    pitch_match = re.search(r"[Pp_]?(\d+\.?\d*)\s*mm", name)
-    if pitch_match and result["pitch"] is None:
+    pitch_match = re.search(r"(?:(?<![A-Za-z0-9])[Pp]|_)(\d+(?:\.\d+)?)\s*mm\b", name)
+    if pitch_match:
         result["pitch"] = float(pitch_match.group(1))
 
     return result
+
+
+_PITCH_UNITS = ("mm", "millimeter", "millimeters", "millimetre", "millimetres", "mil", "mils")
+
+
+def _pitch_token_unit(tail: str) -> str | None:
+    """Classify the text that follows a pitch number.
+
+    Returns the lower-cased unit ("" when none), or None when a letter or underscore glued
+    onto the number or its unit makes the token incomplete (``1.27B``,
+    ``1.27mmA``, ``1.27 mmA``).
+    """
+    # Scan the entire Unicode suffix so an unsupported unit like µm stays intact.
+    word = re.match(r"(\s*)([^\W\d]*)", tail)
+    assert word is not None
+    gap, suffix = word.group(1), word.group(2)
+    lowered = suffix.lower()
+    if lowered in _PITCH_UNITS:
+        rest = tail[word.end() :]
+        return None if rest[:1].isdigit() else lowered
+    if not suffix:
+        return ""
+    if gap and not lowered.startswith(("mm", "mil")):
+        return ""  # a separate word, not part of the measurement
+    return None
 
 
 def extract_dimension_from_text(text: str) -> dict[str, float]:
@@ -206,7 +234,12 @@ def extract_dimension_from_text(text: str) -> dict[str, float]:
     )
 
     for match in labeled_pattern.finditer(text):
-        label = match.group(1).upper()
+        # JEDEC uses uppercase E for body length and lowercase e for pitch.
+        label = "PITCH" if match.group(1) == "e" else match.group(1).upper()
+        if label == "PITCH":
+            # Only the pitch-specific parser below may set PITCH, so a token
+            # it rejects (e.g. "e=1.27mmA") cannot slip in through here.
+            continue
         value = float(match.group(2))
         unit = match.group(3)
 
@@ -226,14 +259,33 @@ def extract_dimension_from_text(text: str) -> dict[str, float]:
         dimensions["D"] = float(body_match.group(1))
         dimensions["E"] = float(body_match.group(2))
 
-    # Pattern for pitch (e.g., "pitch: 0.5mm", "e = 0.5")
-    pitch_pattern = re.compile(
-        r"(?:pitch|[Ee]\s*[=:])\s*(\d+\.?\d*)\s*(mm)?",
-        re.IGNORECASE,
+    # Pattern for pitch (e.g., "pitch: 0.5mm", "e = 0.5"). The number is
+    # validated for a complete token below: a letter glued onto the number or
+    # its unit makes the candidate ambiguous and the search moves on. A bare
+    # "P0.5mm" (no "=" / ":") needs its unit, so "P48" is never a pitch.
+    pitch_prefix = re.compile(
+        r"(?<![A-Za-z0-9])(?:(?i:pitch|p)\s*[=:]?|e\s*[=:])\s*(\d+(?:\.\d+)?)"
     )
-    pitch_match = pitch_pattern.search(text)
-    if pitch_match:
-        dimensions["PITCH"] = float(pitch_match.group(1))
+    for pitch_match in pitch_prefix.finditer(text):
+        unit = _pitch_token_unit(text[pitch_match.end() :])
+        if unit is None:
+            continue
+        bare_p = re.fullmatch(r"(?i:p)\s*", text[pitch_match.start() : pitch_match.start(1)])
+        if bare_p and not unit:
+            continue
+        value = float(pitch_match.group(1))
+        dimensions["PITCH"] = value * 0.0254 if unit in ("mil", "mils") else value
+        return dimensions
+    # Trailing-label form ("0.8 mm pitch"). A "pitch" that is itself followed by
+    # a number labels that number (a rejected candidate above), not the one
+    # before it ("7 x 7 mm pitch = 0.65mmX").
+    trailing_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*((?i:mm|mils?))\s+(?i:pitch)\b(?!\s*[=:]?\s*\d)", text
+    )
+    if trailing_match:
+        value = float(trailing_match.group(1))
+        unit = trailing_match.group(2).lower()
+        dimensions["PITCH"] = value * 0.0254 if unit in ("mil", "mils") else value
 
     return dimensions
 

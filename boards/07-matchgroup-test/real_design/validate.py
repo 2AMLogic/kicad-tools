@@ -20,6 +20,7 @@ from shapely.ops import unary_union  # type: ignore[import-untyped]
 
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
 from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
+from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids, uuids_in_file
 from kicad_tools.lvs.recipe import write_lvs_report
 from kicad_tools.manufacturers import get_profile
 from kicad_tools.manufacturers.project_generator import write_drc_constraints
@@ -385,6 +386,17 @@ def router_net_classes(board_path: Path, net_class_map: Path) -> dict:
     return effective
 
 
+def write_reviewed_rules(board_path: Path, net_class_map: Path) -> None:
+    """Declare the six-layer production rules used for native fill and DRC."""
+    write_drc_constraints(
+        board_path,
+        get_profile("jlcpcb").get_design_rules(layers=6),
+        manufacturer_id="jlcpcb",
+        layers=6,
+        router_net_classes=router_net_classes(board_path, net_class_map),
+    )
+
+
 def kct_design_gate_passes(report: dict, returncode: int, manifest_present: bool) -> bool:
     """Allow only an explicitly absent export after every design gate passes."""
     meta = report.get("meta_checks", {})
@@ -468,13 +480,7 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
     # Fill with the final native project AND custom rules before any copper
     # measurements. A later .dru clearance can change plane fills even when
     # the project minima are preserved (#5023).
-    write_drc_constraints(
-        board_path,
-        get_profile("jlcpcb").get_design_rules(layers=6),
-        manufacturer_id="jlcpcb",
-        layers=6,
-        router_net_classes=router_net_classes(board_path, source / "net_class_map.json"),
-    )
+    write_reviewed_rules(board_path, source / "net_class_map.json")
     subprocess.run(
         [
             "kicad-cli",
@@ -489,22 +495,27 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
         check=True,
         timeout=120,
     )
-    subprocess.run(
-        [
-            "kicad-cli",
-            "pcb",
-            "drc",
-            "--refill-zones",
-            "--save-board",
-            "--format",
-            "json",
-            "-o",
-            str(evidence / "native-drc.json"),
-            str(board_path),
-        ],
-        check=True,
-        timeout=120,
-    )
+    refill = [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--refill-zones",
+        "--save-board",
+        "--format",
+        "json",
+        "-o",
+        str(evidence / "native-drc.json"),
+        str(board_path),
+    ]
+    authored_ids = uuids_in_file(candidate)
+    subprocess.run(refill, check=True, timeout=120)
+    # KiCad supplies Datasheet and Description on the stock fiducials during
+    # its first save. Keep every input UUID and stabilize the new field IDs
+    # before collecting the native report and saving the actual release bytes.
+    if uuids_in_file(board_path) - authored_ids and canonicalize_pcb_file_uuids(
+        board_path, keep=authored_ids
+    ):
+        subprocess.run(refill, check=True, timeout=120)
     native = json.loads((evidence / "native-drc.json").read_text())
     erc = json.loads((evidence / "erc.json").read_text())
     errors = [

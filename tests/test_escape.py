@@ -16,7 +16,7 @@ from kicad_tools.router.escape import (
 )
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.primitives import Pad, Segment
+from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
 
 # ==============================================================================
@@ -698,6 +698,66 @@ class TestEscapeRouter:
 
         # Should have escape for each pad
         assert len(escapes) == 16
+
+    def test_selected_bga_pad_keeps_its_physical_ring(self, grid_and_rules):
+        """A single-net reroute still sees the balls surrounding an inner pad."""
+        from dataclasses import replace
+
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules, component_holes=())
+        pads = create_bga_pads(7, 7, pitch=1.27)
+        target = pads[9]  # B3, one row in from the perimeter
+        complete = router.generate_escapes(router.analyze_package(pads))
+        reference = next(escape for escape in complete if escape.pad.net == target.net)
+        assert reference.ring_index > 0
+
+        selected = [pad if pad is target else replace(pad, net=0) for pad in pads]
+        (actual,) = router.generate_escapes(router.analyze_package(selected))
+        assert actual.pad.net == target.net
+        assert actual.ring_index == reference.ring_index
+        assert actual.escape_layer == reference.escape_layer
+        assert actual.via_pos == reference.via_pos
+
+    @pytest.mark.parametrize("all_blocked", [False, True])
+    def test_bga_via_avoids_retained_copper(self, grid_and_rules, all_blocked):
+        from dataclasses import replace
+
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules, component_holes=())
+        pads = [
+            replace(pad, x=pad.x + 20, y=pad.y + 20, net=pad.net if idx == 9 else 0)
+            for idx, pad in enumerate(create_bga_pads(7, 7, pitch=1.27))
+        ]
+        target = pads[9]
+        for pad in pads:
+            grid.add_pad(pad)
+        package = router.analyze_package(pads)
+        (radial,) = router.generate_escapes(package)
+        assert radial.via is not None and radial.escape_layer == Layer.B_CU
+
+        # Leave room under the ball, but put a B.Cu track across the outer
+        # tail of every diagonal dogbone. A wider F.Cu blocker obstructs
+        # every via approach in the negative control.
+        x, y = target.x, target.y
+        retained = [
+            Segment(x - 3, y + dy, x + 3, y + dy, 0.2, Layer.B_CU, 80) for dy in (-1.4, 1.4)
+        ]
+        if all_blocked:
+            retained.append(Segment(x - 2, y, x + 2, y, 2, Layer.F_CU, 80))
+        grid.mark_route(Route(net=80, net_name="retained", segments=retained))
+
+        escapes = router.generate_escapes(package)
+        if all_blocked:
+            assert escapes == []
+        else:
+            (escape,) = escapes
+            assert escape.via is not None and escape.via_pos != radial.via_pos
+            assert escape.escape_point == escape.via_pos
+            assert len(escape.segments) == 1
+            assert grid.validate_segment_clearance(escape.segments[0], target.net)[0]
+            assert grid.validate_via_clearance(escape.via, target.net)[0]
+            (stub,) = router.apply_escape_routes(escapes)
+            assert stub.is_escape
 
     def test_bga_rings_skip_plane_net_pads(self, grid_and_rules):
         """BGA ring escape skips net=0 (plane/skipped) pads (Issue #3419).

@@ -7,8 +7,10 @@ Creates complete manufacturing packages including BOM, CPL, and Gerbers.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 
@@ -46,6 +48,9 @@ from .rotation_overrides import (
     review_rotations,
 )
 
+if TYPE_CHECKING:
+    from ..schema.bom import BOMItem
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +75,10 @@ class AssemblyConfig:
     include_gerbers: bool = True
     gerbers_subdir: str = "gerbers"
     gerber_config: GerberConfig | None = None
+    # Issue #10174: UTC time stamped into the Gerbers instead of the plot time
+    # (callers needing a reproducible upload ZIP); ``None`` follows
+    # ``SOURCE_DATE_EPOCH``.
+    gerber_source_date_epoch: datetime | None = None
 
     # LCSC auto-matching
     auto_lcsc: bool = True
@@ -171,7 +180,7 @@ class AssemblyPackageResult:
         if review.sidecar:
             lines.append(
                 f"Rotation overrides: {Path(review.sidecar).name} "
-                f"({sum(1 for a in review.applied if a['source'] != 'footprint_glob')}"
+                f"({sum(1 for a in review.applied if a['source'] in ('by_reference', 'by_lcsc'))}"
                 " row(s) corrected)"
             )
         if review.unreviewed:
@@ -375,6 +384,8 @@ class AssemblyPackage:
         # Generate CPL
         if self.config.include_pnp:
             try:
+                if not self.config.include_bom and self.fab_family == "jlcpcb":
+                    self._prepare_assembly_parts(out_dir, result, placement_only=True)
                 result.pnp_path = self._generate_pnp(out_dir, result)
             except Exception as e:
                 result.errors.append(f"CPL generation failed: {e}")
@@ -390,32 +401,21 @@ class AssemblyPackage:
 
         return result
 
-    def _generate_bom(self, output_dir: Path, result: AssemblyPackageResult | None = None) -> Path:
-        """Generate BOM file.
+    def _prepare_assembly_parts(
+        self,
+        output_dir: Path,
+        result: AssemblyPackageResult | None,
+        *,
+        placement_only: bool = False,
+    ) -> list[BOMItem]:
+        """Resolve the selected parts and footprint names used by the BOM and CPL.
 
-        When ``auto_lcsc`` is enabled (the default) and the target
-        manufacturer is ``jlcpcb``, missing LCSC part numbers are
-        populated automatically via :func:`enrich_bom_lcsc` before
-        the BOM CSV is written.
-
-        The ``bom_source`` config field controls where BOM data is
-        sourced from:
-
-        - ``"schematic"`` (default): extract from schematic symbols
-        - ``"pcb"``: extract from PCB footprints (no schematic needed)
-        - ``"auto"``: use schematic by default, fall back to PCB when
-          reference sets diverge significantly
-
-        Args:
-            output_dir: Directory to write the BOM CSV into.
-            result: Optional result object to attach enrichment report.
-
-        Returns:
-            Path to the written BOM CSV.
+        A placement-only export reads the available source, project assignments and
+        existing BOM. It can run without a schematic or a catalog search for new parts.
         """
         bom_source = self.config.bom_source
 
-        if bom_source == "pcb":
+        if bom_source == "pcb" or (placement_only and self.schematic_path is None):
             from ..schema.bom import extract_bom_from_pcb
 
             bom = extract_bom_from_pcb(str(self.pcb_path))
@@ -486,9 +486,9 @@ class AssemblyPackage:
                     # Auto-detect from schematic/PCB directory
                     spec_file = find_spec_file(self.pcb_path.parent)
                 if spec_file is not None:
-                    from ..spec.parser import load_spec
+                    from .bom_spec_overlay import load_assembly_spec
 
-                    spec = load_spec(spec_file)
+                    spec, _ = load_assembly_spec(spec_file)
                     if spec.bom_entries:
                         overlay_report = apply_spec_overlay(items, spec.bom_entries)
                         if result is not None:
@@ -607,7 +607,7 @@ class AssemblyPackage:
         logger.info(merge_source)
 
         # LCSC auto-matching for JLCPCB exports
-        if self.config.auto_lcsc and self.fab_family == "jlcpcb":
+        if not placement_only and self.config.auto_lcsc and self.fab_family == "jlcpcb":
             try:
                 enrichment = enrich_bom_lcsc(
                     items,
@@ -653,7 +653,11 @@ class AssemblyPackage:
             if getattr(i, "lcsc", "") and i.lcsc.strip() and not getattr(i, "is_virtual", False)
         }
 
-        # Generate BOM
+        return items
+
+    def _generate_bom(self, output_dir: Path, result: AssemblyPackageResult | None = None) -> Path:
+        """Prepare the selected parts and write their manufacturing BOM."""
+        items = self._prepare_assembly_parts(output_dir, result)
         bom_config = self.config.bom_config or BOMExportConfig()
         bom_csv = export_bom(items, self.fab_family, bom_config)
         if result is not None:
@@ -770,6 +774,7 @@ class AssemblyPackage:
                 formatter.apply_transforms,
                 rotation_corrections,
                 rotation_overrides,
+                formatter.catalog_corrections,
             )
             result.pnp_placement_count = len(placements)
             sides = {p.layer for p in placements}
@@ -828,10 +833,15 @@ class AssemblyPackage:
             # opt-in (Issue #6193) still applies on top of it.
             gc = self.config.gerber_config
             return exporter.export_for_manufacturer(
-                self.fab_family, gerber_dir, vscore_layers=gc.vscore_layers if gc else None
+                self.fab_family,
+                gerber_dir,
+                vscore_layers=gc.vscore_layers if gc else None,
+                source_date_epoch=self.config.gerber_source_date_epoch,
             )
         else:
             config = self.config.gerber_config or GerberConfig()
+            if self.config.gerber_source_date_epoch is not None:
+                config = replace(config, source_date_epoch=self.config.gerber_source_date_epoch)
             return exporter.export(config, gerber_dir)
 
     def _resolve_auto_bom_source(self) -> list:
@@ -906,6 +916,39 @@ def profile_rotation_corrections(manufacturer: str) -> dict[str, float] | None:
     except (ValueError, ImportError):
         pass
     return None
+
+
+def plot_use_aux_origin(fab_family: str, config: AssemblyConfig) -> bool:
+    """The ``GerberConfig.use_aux_origin`` an assembly package plots its Gerbers with.
+
+    The resolution :meth:`AssemblyPackage._generate_gerbers` applies: a
+    manufacturer preset owns the Gerber options, anything else plots with the
+    caller's ``gerber_config`` or the defaults. A measurement of the shipped
+    archive must register the drill files in this frame (Issue #10357).
+    """
+    if fab_family in MANUFACTURER_PRESETS:
+        return MANUFACTURER_PRESETS[fab_family].config.use_aux_origin
+    return (config.gerber_config or GerberConfig()).use_aux_origin
+
+
+def resolve_gerber_config(fab_family: str, config: AssemblyConfig) -> GerberConfig:
+    """The Gerber options :meth:`AssemblyPackage._generate_gerbers` plots a package with.
+
+    A manufacturer preset owns the options; only an explicit V-score layer
+    opt-in (Issue #6193) and a caller's plot time (Issue #10174) apply on top
+    of it. Anything else plots with the caller's ``gerber_config`` or the
+    defaults. A second plot that must match the package's -- the reviewed
+    copper reference of Issue #10492 -- is made with the same options.
+    """
+    if fab_family in MANUFACTURER_PRESETS:
+        resolved = MANUFACTURER_PRESETS[fab_family].config
+        if config.gerber_config is not None and config.gerber_config.vscore_layers:
+            resolved = replace(resolved, vscore_layers=list(config.gerber_config.vscore_layers))
+    else:
+        resolved = config.gerber_config or GerberConfig()
+    if config.gerber_source_date_epoch is not None:
+        resolved = replace(resolved, source_date_epoch=config.gerber_source_date_epoch)
+    return resolved
 
 
 def resolve_pnp_config(
@@ -985,7 +1028,13 @@ def review_cpl_rotations(
     placements = formatter.filter_placements(
         extract_placements(footprints, formatter.config, lcsc_by_reference=lcsc_by_reference)
     )
-    return review_rotations(placements, formatter.apply_transforms, corrections, overrides)
+    return review_rotations(
+        placements,
+        formatter.apply_transforms,
+        corrections,
+        overrides,
+        formatter.catalog_corrections,
+    )
 
 
 def create_assembly_package(

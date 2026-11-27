@@ -446,7 +446,7 @@ class TestRouteRegionCLI:
 
         The outside SIG_B trace is NOT passed with an explicit
         --preserve-existing flag; region mode must imply it so the trace
-        survives (default route mode would strip skipped-net copper).
+        survives an explicitly scoped reroute.
         """
         outside_copper = (
             '  (segment (start 130 130) (end 138 130) (width 0.2) (layer "F.Cu") (net 2))'

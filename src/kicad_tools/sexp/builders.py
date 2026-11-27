@@ -22,13 +22,13 @@ from .parser import SExp
 logger = logging.getLogger(__name__)
 
 
-def fmt(val: float) -> int | float:
-    """Format coordinate with 2 decimal precision.
+def fmt(val: float, digits: int = 2) -> int | float:
+    """Format a coordinate at the requested decimal precision.
 
-    Rounds to 2 decimal places. Returns int if no fractional part
+    Defaults to 2 decimal places. Returns int if no fractional part
     for cleaner output (e.g., 10 instead of 10.0).
     """
-    rounded = round(val, 2)
+    rounded = round(val, digits)
     if rounded == int(rounded):
         return int(rounded)
     return rounded
@@ -358,6 +358,8 @@ def segment_node(
     net: int,
     uuid_str: str,
     net_name: str | None = None,
+    *,
+    coordinate_digits: int = 2,
 ) -> SExp:
     """Build a PCB track segment S-expression.
 
@@ -368,6 +370,7 @@ def segment_node(
         layer: Copper layer (e.g., "F.Cu", "B.Cu")
         net: Net number
         uuid_str: Unique identifier
+        coordinate_digits: Decimal places for start and end coordinates in mm.
         net_name: Optional net name (issue #4416).  When supplied (and
             non-empty) the net reference is emitted in KiCad-10 name-only
             ``(net "name")`` dialect so copper appended to a name-based
@@ -385,8 +388,8 @@ def segment_node(
     """
     return SExp.list(
         "segment",
-        SExp.list("start", fmt(start_x), fmt(start_y)),
-        SExp.list("end", fmt(end_x), fmt(end_y)),
+        SExp.list("start", fmt(start_x, coordinate_digits), fmt(start_y, coordinate_digits)),
+        SExp.list("end", fmt(end_x, coordinate_digits), fmt(end_y, coordinate_digits)),
         SExp.list("width", fmt(width)),
         SExp.list("layer", layer),
         _net_node(net, net_name),
@@ -404,6 +407,8 @@ def via_node(
     uuid_str: str,
     via_type: str | None = None,
     net_name: str | None = None,
+    *,
+    coordinate_digits: int = 2,
 ) -> SExp:
     """Build a PCB via S-expression.
 
@@ -414,6 +419,7 @@ def via_node(
         layers: Tuple of layer names (e.g., ("F.Cu", "B.Cu"))
         net: Net number
         uuid_str: Unique identifier
+        coordinate_digits: Decimal places for the via centre coordinates in mm.
         via_type: Optional via type: ``"micro"``, ``"blind"`` or
             ``"buried"`` (KiCad emits ``(via micro ...)`` etc.), or
             ``"through"`` for an explicit through via.  When *None* (the
@@ -463,7 +469,7 @@ def via_node(
         return SExp.list(
             "via",
             SExp.atom(type_token),
-            SExp.list("at", fmt(x), fmt(y)),
+            SExp.list("at", fmt(x, coordinate_digits), fmt(y, coordinate_digits)),
             SExp.list("size", fmt(size)),
             SExp.list("drill", fmt(drill)),
             layers_node,
@@ -472,7 +478,7 @@ def via_node(
         )
     return SExp.list(
         "via",
-        SExp.list("at", fmt(x), fmt(y)),
+        SExp.list("at", fmt(x, coordinate_digits), fmt(y, coordinate_digits)),
         SExp.list("size", fmt(size)),
         SExp.list("drill", fmt(drill)),
         layers_node,

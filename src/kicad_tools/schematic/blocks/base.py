@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.core.symbol_transform import symbol_to_sheet_offset
+from kicad_tools.schematic.blocks.decoupling_defaults import DefaultValue
 from kicad_tools.schematic.grid import DEFAULT_GRID, snap_point
 from kicad_tools.schematic.models.schematic import SnapMode
 
@@ -171,6 +172,34 @@ class CircuitBlock:
         self._ports: dict[str, tuple[float, float]] = _GridSnappedPorts(self)
         self.typed_ports: dict[str, Port] = {}
         self.components: dict[str, SymbolInstance] = {}
+
+        self._decoupling_source: str | None = None
+
+    def _add_decoupling_cap(
+        self,
+        symbol: str,
+        x: float,
+        y: float,
+        ref: str,
+        value: str,
+        *,
+        owner: str = "",
+        role: str = "bypass",
+        **symbol_options: Any,
+    ) -> SymbolInstance:
+        """Place a supply cap and record which instance selected its value."""
+        from_default = isinstance(value, DefaultValue)
+        cap = self.schematic.add_symbol(
+            symbol, x, y, ref, str(value) if from_default else value, **symbol_options
+        )
+        if self._decoupling_source is None:
+            # The first cap ref also distinguishes blocks sharing a multi-unit IC.
+            anchor = f"{owner} ({ref})" if owner else ref
+            self._decoupling_source = f"{type(self).__name__} {anchor}"
+        self.schematic.register_decoupling_cap(
+            cap, self._decoupling_source, role, from_default=from_default
+        )
+        return cap
 
     @property
     def ports(self) -> dict[str, tuple[float, float]]:

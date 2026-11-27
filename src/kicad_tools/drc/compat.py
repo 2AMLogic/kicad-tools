@@ -59,6 +59,7 @@ def drc_results_to_report(
                 locations=loc_list,
                 items=list(v.items),
                 nets=list(v.nets),
+                witnesses=list(v.witnesses),
                 required_value_mm=v.required_value,
                 actual_value_mm=v.actual_value,
             )
@@ -76,4 +77,5 @@ def drc_results_to_report(
         created_at=None,
         pcb_name=pcb_name,
         violations=violations,
+        mask_copper_assessments=list(results.mask_copper_assessments),
     )

@@ -100,6 +100,8 @@ def run_fix_vias_command(args) -> int:
         sub_argv.append("--skip-if-clearance-violation")
     if getattr(args, "relocate_in_pad", False):
         sub_argv.append("--relocate-in-pad")
+    if getattr(args, "even_if_supported", False):
+        sub_argv.append("--even-if-supported")
     if getattr(args, "search_alternatives", False):
         sub_argv.append("--search-alternatives")
     for net in getattr(args, "nets", None) or []:
@@ -239,6 +241,23 @@ def run_fix_drc_command(args) -> int:
         sub_argv.append("--no-connectivity-check")
     if getattr(args, "verify", False):
         sub_argv.append("--verify")
+    if getattr(args, "no_new_warnings", False):
+        sub_argv.append("--no-new-warnings")
+    if getattr(args, "voltage_map", None):
+        for voltage_map in args.voltage_map:
+            sub_argv.extend(["--voltage-map", voltage_map])
+        sub_argv.extend(
+            [
+                "--creepage-standard",
+                args.creepage_standard,
+                "--pollution-degree",
+                str(args.pollution_degree),
+                "--material-group",
+                args.material_group,
+                "--hv-threshold",
+                str(args.hv_threshold),
+            ]
+        )
     if getattr(args, "transactional", False):
         sub_argv.append("--transactional")
     if args.format != "text":
@@ -382,6 +401,10 @@ def run_check_command(args) -> int:
     # guard in tests/test_cli_parser_drift.py now pins all three.
     if getattr(args, "refill_zones", False):
         sub_argv.append("--refill-zones")
+    # Issue #10137: forward the pour-stub proof opt-in (inner parser only
+    # otherwise; the parser-drift guard pins it).
+    if getattr(args, "prove_pour_stubs", False):
+        sub_argv.append("--prove-pour-stubs")
     if getattr(args, "courtyard_waivers", None):
         sub_argv.extend(["--courtyard-waivers", args.courtyard_waivers])
     if getattr(args, "waivers", None):
@@ -396,6 +419,9 @@ def run_check_command(args) -> int:
         sub_argv.append("--pad-grid-strict")
     if getattr(args, "pad_grid_tolerance", None) is not None:
         sub_argv.extend(["--pad-grid-tolerance", str(args.pad_grid_tolerance)])
+    # Issue #10141: forward the bypass_distance maximum (None -> inner default).
+    if getattr(args, "bypass_max_distance", None) is not None:
+        sub_argv.extend(["--bypass-max-distance", str(args.bypass_max_distance)])
     # Issue #4595: forward the sch_fields lint threshold.  The outer parser
     # defaults it to None so the inner check_cmd parser's default (15.0mm)
     # stays the single source of truth.
@@ -415,6 +441,9 @@ def run_check_command(args) -> int:
 
 def run_validate_command(args) -> int:
     """Handle validate command."""
+    if getattr(args, "channel_intent", None) or getattr(args, "validate_netlist", None):
+        return _run_channel_intent(args)
+
     # Route to connectivity validation if --connectivity flag is set
     if getattr(args, "connectivity", False):
         return run_validate_connectivity_command(args)
@@ -433,7 +462,10 @@ def run_validate_command(args) -> int:
 
     # Default to sync validation
     if not args.sync:
-        print("Usage: kicad-tools validate --sync [options] <project>")
+        print(
+            "Usage: kicad-tools validate --channel-intent <intent.json> <schematic|netlist> <pcb>"
+        )
+        print("       kicad-tools validate --sync [options] <project>")
         print("       kicad-tools validate --sync [options] <schematic> <pcb>")
         print("       kicad-tools validate --connectivity [options] <pcb>")
         print("       kicad-tools validate --consistency [options] <project>")
@@ -472,6 +504,52 @@ def run_validate_command(args) -> int:
     if getattr(args, "validate_verbose", False):
         sub_argv.append("--verbose")
     return validate_sync_main(sub_argv)
+
+
+def _run_channel_intent(args) -> int:
+    import json
+    import sys
+    from dataclasses import asdict
+    from pathlib import Path
+
+    from kicad_tools.exceptions import KiCadToolsError
+    from kicad_tools.validate.channel_intent import check_channel_intent
+
+    if not args.channel_intent or any(
+        (args.sync, args.connectivity, args.consistency, args.lvs, args.placement)
+    ):
+        print("Select --channel-intent as the sole validation mode", file=sys.stderr)
+        return 2
+    designs = [path for path in (args.validate_schematic, args.validate_netlist) if path]
+    boards = [args.validate_pcb] if args.validate_pcb else []
+    for path in args.validate_files:
+        if Path(path).suffix == ".kicad_pcb":
+            boards.append(path)
+        else:
+            designs.append(path)
+    if len(designs) != 1 or len(boards) != 1:
+        print("Provide one .kicad_sch or exported netlist and one .kicad_pcb", file=sys.stderr)
+        return 2
+
+    try:
+        findings = check_channel_intent(
+            Path(args.channel_intent), Path(designs[0]), Path(boards[0])
+        )
+    except (ValueError, OSError, RuntimeError, KiCadToolsError) as exc:
+        print(f"Channel intent check failed: {exc}", file=sys.stderr)
+        return 2
+    if args.validate_format == "json":
+        print(json.dumps({"findings": [asdict(f) for f in findings]}, indent=2, ensure_ascii=False))
+    else:
+        if args.validate_format != "summary":
+            for f in findings:
+                target = f"pin {f.pin}" if f.pin is not None else f.field
+                observed = "missing" if f.observed is None else repr(f.observed)
+                print(
+                    f"{f.source} {f.instance} {f.reference} {target}: expected {f.expected!r}, observed {observed}"
+                )
+        print(f"Channel intent: {len(findings)} mismatches")
+    return int(bool(findings))
 
 
 def run_validate_connectivity_command(args) -> int:

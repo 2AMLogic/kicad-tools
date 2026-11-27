@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -214,17 +215,73 @@ def test_write_targets_never_adds_files(mod, tmp_path):
         mod._write_targets(tmp_path, ("new.json",), b"x")
 
 
+# --------------------------------------------------------------------------- Issue #9955
+#: ``real_design/build.py``'s routing-stage summary, verbatim: both staging
+#: copies (``build.json`` and ``status.json``) carry these bytes.
+BOARD07_STAGE_SUMMARY = {
+    "status": "validated routing",
+    "parts": 43,
+    "bound_pads": 216,
+    "pcb": "sdram_demo_routed.kicad_pcb",
+    "evidence": "validation/validation.json",
+    "routing_method": "reviewed artifact; independently regenerated circuit and fresh gates",
+    "hardware_tested": False,
+    "routed": True,
+    "manufacturing_complete": False,
+    "manufacturing_export_required": True,
+}
+
+
+def _routing_stage_summaries(directory: Path) -> None:
+    """Write the staging builder's two identical summary copies (read-only input)."""
+    data = (json.dumps(BOARD07_STAGE_SUMMARY, indent=2) + "\n").encode()
+    (directory / "build.json").write_bytes(data)
+    (directory / "status.json").write_bytes(data)
+
+
 def _fake_build(root: Path, dru: str) -> Path:
     build = root / "build"
     validation = build / "validation"
     validation.mkdir(parents=True)
-    (build / "build.json").write_text("{}")
+    _routing_stage_summaries(build)
     (validation / "validation.json").write_text(json.dumps({"status": "pass", "errors": []}))
     for directory, stem in ((build, "sdram_demo_routed"), (validation, "checked")):
         (directory / f"{stem}.kicad_pcb").write_text(PCB)
         (directory / f"{stem}.kicad_pro").write_text("{}")
         (directory / f"{stem}.kicad_dru").write_text(dru)
     return build
+
+
+def test_board07_package_follows_the_checked_board(mod):
+    board = REPO / "boards/07-matchgroup-test"
+    cfg = mod.rr.BOARDS[board.name]
+    routed = board / cfg.routed_pcb
+    mfg = board / "output/manufacturing"
+    manifest = json.loads((mfg / "manifest.json").read_bytes())
+    preflight = {entry["name"]: entry for entry in manifest["preflight"]}
+    assert preflight["pcb_file"]["details"] == "Footprints: 49"
+    assert [preflight[key]["status"] for key in ("drc", "erc")] == ["OK", "OK"]
+    patch = "engineering/assembly-fiducials.patch"
+    source_patch = (board / "real_design" / patch).read_bytes()
+    with zipfile.ZipFile(mfg.parent / "manufacturing.zip") as outer:
+        assert outer.read(patch) == (mfg / patch).read_bytes() == source_patch
+        for name in ("kicad_project.zip", "design-source.zip", "bom_jlcpcb.csv", "cpl_jlcpcb.csv"):
+            assert outer.read(name) == (mfg / name).read_bytes()
+        positions = mod.cpl_frame.read_cpl(outer.read("cpl_jlcpcb.csv"))
+        assert len({row["Designator"] for row in positions}) == 43
+        assert mod.cpl_frame.coordinate_mismatches(positions, routed) == []
+    with zipfile.ZipFile(mfg / "kicad_project.zip") as project:
+        for suffix in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
+            member = routed.with_suffix(suffix)
+            assert project.read(member.name) == member.read_bytes()
+    receipt = json.loads((mfg.parent / "readiness.json").read_bytes())
+    patch_sha = mod.sha256(mfg / patch)
+    assert receipt["inputs"][f"output/manufacturing/{patch}"] == patch_sha
+    assert manifest["files"][patch]["sha256"] == patch_sha
+    with zipfile.ZipFile(mfg / "design-source.zip") as source:
+        for name in cfg.additional_design_sources:
+            assert name in receipt["inputs"]
+            assert source.read(name) == (board / name).read_bytes()
 
 
 def test_board07_evidence_refuses_evidence_under_other_rules(mod, tmp_path):
@@ -250,7 +307,240 @@ def test_board07_evidence_kept_when_current(mod, tmp_path):
         shutil.copyfile(build / "validation" / f"checked{suffix}", readiness / f"checked{suffix}")
     (readiness / "checked.kicad_sch").write_text("sch")
     (build / "validation" / "checked.kicad_sch").write_text("sch")
+    # Issue #9955: an otherwise-current bundle may still carry the routing-stage
+    # summaries; the evidence stage repairs them in the staged copy.
+    _routing_stage_summaries(board / "output")
     assert mod.stage_board07_evidence(board, cfg, build) == []
+    derived = mod._published_board07_summary(BOARD07_STAGE_SUMMARY, cfg)
+    assert (board / "output" / "build.json").read_bytes() == derived
+    assert (board / "output" / "status.json").read_bytes() == derived
+    # The staging build's own summaries are only ever read.
+    assert (build / "build.json").read_bytes() != derived
+    assert json.loads((build / "build.json").read_text()) == BOARD07_STAGE_SUMMARY
+
+
+def test_board07_published_summary_describes_the_gated_release(mod):
+    """The derived summary keeps the routing facts and points at the release.
+
+    Every reference must resolve from ``output/`` in the committed board, and
+    the completion flags must describe the verified package (Issue #9955).
+    """
+    cfg = mod.rr.BOARDS["07-matchgroup-test"]
+    out = REPO / "boards/07-matchgroup-test/output"
+
+    summary = json.loads(mod._published_board07_summary(dict(BOARD07_STAGE_SUMMARY), cfg))
+
+    for fact in ("parts", "bound_pads", "routing_method", "hardware_tested", "routed"):
+        assert summary[fact] == BOARD07_STAGE_SUMMARY[fact]
+    assert summary["pcb"] == "matchgroup_test_routed.kicad_pcb"
+    assert summary["evidence"] == "readiness/validation.json"
+    assert summary["readiness"] == "readiness.json"
+    assert summary["manufacturing_package"] == "manufacturing.zip"
+    assert summary["manufacturing_complete"] is True
+    assert summary["manufacturing_export_required"] is False
+    assert summary["status"] == "released"
+    for reference in (
+        summary["pcb"],
+        summary["evidence"],
+        summary["readiness"],
+        summary["manufacturing_package"],
+    ):
+        assert (out / reference).is_file(), reference
+
+
+def test_board07_published_summary_is_pure_and_deterministic(mod):
+    cfg = mod.rr.BOARDS["07-matchgroup-test"]
+    stage = dict(BOARD07_STAGE_SUMMARY)
+    first = mod._published_board07_summary(stage, cfg)
+    assert stage == BOARD07_STAGE_SUMMARY  # the staging summary is not mutated
+    assert first == mod._published_board07_summary(dict(BOARD07_STAGE_SUMMARY), cfg)
+    assert first == mod._published_board07_summary(BOARD07_STAGE_SUMMARY, cfg)
+
+
+def test_board07_fresh_publication_includes_the_gated_summaries(mod, tmp_path):
+    """A changed-evidence publish rewrites the summaries with the evidence."""
+    board, cfg = _staged(tmp_path)
+    routed = board / cfg.routed_pcb
+    routed.with_suffix(".kicad_pro").write_text("{}")
+    routed.with_suffix(".kicad_dru").write_text("(rule class)")
+    build = _fake_build(tmp_path, "(rule class)")
+    validation = build / "validation"
+    for name, targets in mod.BOARD07_EVIDENCE.items():
+        # ``validation.json`` and ``checked.kicad_pcb`` keep the bytes the
+        # gates compare; every other evidence file is a fresh placeholder.
+        if name not in ("validation.json", "checked.kicad_pcb"):
+            (validation / name).write_text(f"fresh {name}")
+        for target in targets:
+            path = board / target
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("old evidence")
+    # No committed evidence: everything, including the summaries, is rewritten.
+    _routing_stage_summaries(board / "output")
+    written = mod.stage_board07_evidence(board, cfg, build)
+    assert set(mod.BOARD07_SUMMARY_TARGETS) <= set(written)
+    derived = mod._published_board07_summary(BOARD07_STAGE_SUMMARY, cfg)
+    assert (board / "output" / "build.json").read_bytes() == derived
+    assert (board / "output" / "status.json").read_bytes() == derived
+    assert json.loads((build / "build.json").read_text()) == BOARD07_STAGE_SUMMARY
+
+
+# The full staged transaction: repin_staged's gates stubbed, board 07's
+# evidence stage real, replaying a validated staging build through --build-dir.
+BOARD07_BUNDLE_CHECKED_AT = "2026-11-23T00:00:00+00:00"
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def _board07_release_board(
+    mod, tmp_path: Path, monkeypatch, *, readiness: dict | None = None
+) -> tuple[Path, Path]:
+    """A current Board 07 bundle with stale public summaries; gates stubbed.
+
+    The committed evidence already describes the staging build, so only the
+    two public summaries are out of date -- exactly the repaired-release case
+    of Issue #9955.  The staging build replays through ``--build-dir``.
+    """
+    board = tmp_path / "07-fake-release"
+    out = board / "output"
+    out.mkdir(parents=True)
+    routed = out / "board_routed.kicad_pcb"
+    routed.write_text(PCB)
+    routed.with_suffix(".kicad_pro").write_text("{}")
+    routed.with_suffix(".kicad_dru").write_text("(rule class)")
+    (out / "board.kicad_sch").write_text("sch")
+    build = _fake_build(tmp_path, "(rule class)")
+    (build / "validation" / "checked.kicad_sch").write_text("sch")
+    readiness_dir = out / "readiness"
+    readiness_dir.mkdir()
+    for suffix in (".kicad_pcb", ".kicad_pro", ".kicad_dru", ".kicad_sch"):
+        shutil.copyfile(
+            build / "validation" / f"checked{suffix}", readiness_dir / f"checked{suffix}"
+        )
+    # The shipped design preflight keeps describing its own scope.
+    (readiness_dir / "validation.json").write_text(
+        json.dumps(
+            {
+                "validation_scope": "design preflight; manufacturing is a separate gate",
+                "manufacturing_complete": False,
+            }
+        )
+        + "\n"
+    )
+    _routing_stage_summaries(out)  # the stale public copies under repair
+    (out / "manufacturing").mkdir()
+    (out / "manufacturing" / "manifest.json").write_text(
+        json.dumps({"version": "1.0", "files": {}}) + "\n"
+    )
+    report = (
+        readiness
+        if readiness is not None
+        else {
+            "status": "ready",
+            "blockers": [],
+            "metrics": {},
+            "inputs": {},
+            "checked_at": BOARD07_BUNDLE_CHECKED_AT,
+        }
+    )
+    (out / "readiness.json").write_text(json.dumps(report, indent=2) + "\n")
+
+    cfg = mod.rr.BoardConfig(
+        routed_pcb="output/board_routed.kicad_pcb",
+        schematic="output/board.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+        archives=(),
+    )
+    monkeypatch.setitem(mod.rr.BOARDS, board.name, cfg)
+    monkeypatch.setitem(
+        mod.BUNDLES,
+        board.name,
+        mod.BundleConfig(
+            manufacturer="jlcpcb",
+            evidence="board07",
+            export_members=(),
+            assembly_pdfs=(),
+            schematic_pdfs=(),
+            renders=None,
+            fill_consistency=(),
+            check_reports=(),
+        ),
+    )
+    monkeypatch.setattr(
+        mod, "stage_refill", lambda s, c: {"changed": False, "fill_identical": True}
+    )
+    monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
+    monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
+    monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda archive, search, **kwargs: [])
+    monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"refilled": true}'))
+    monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
+    monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
+    monkeypatch.setattr(mod.rr, "gate_sync", lambda *a: None)
+    import kicad_tools.cli.board_readiness as br
+
+    monkeypatch.setattr(br, "read_readiness", lambda p: {"status": "ready", "metrics": {}})
+    return board, build
+
+
+def test_board07_stale_summaries_repaired_on_a_current_bundle(mod, tmp_path, monkeypatch):
+    """Dry run names the two files; publish repairs exactly them; repeat is clean."""
+    board, build = _board07_release_board(mod, tmp_path, monkeypatch)
+    cfg = mod.rr.BOARDS[board.name]
+    stale = (json.dumps(BOARD07_STAGE_SUMMARY, indent=2) + "\n").encode()
+    before = _snapshot(board)
+
+    would = mod.refresh_bundle(board, BOARD07_BUNDLE_CHECKED_AT, build_dir=build, dry_run=True)
+    assert would == ["output/build.json", "output/status.json"]
+    assert _snapshot(board) == before  # a dry run writes nothing
+
+    published = mod.refresh_bundle(board, BOARD07_BUNDLE_CHECKED_AT, build_dir=build)
+    assert published == ["output/build.json", "output/status.json"]
+    after = _snapshot(board)
+    assert sorted(name for name in after if after[name] != before[name]) == [
+        "output/build.json",
+        "output/status.json",
+    ]
+    derived = mod._published_board07_summary(BOARD07_STAGE_SUMMARY, cfg)
+    assert (board / "output" / "build.json").read_bytes() == derived
+    assert (board / "output" / "status.json").read_bytes() == derived
+    # The staging build's own summaries and the design preflight stay as they were.
+    assert (build / "build.json").read_bytes() == stale
+    assert (
+        json.loads((board / "output" / "readiness" / "validation.json").read_text())[
+            "manufacturing_complete"
+        ]
+        is False
+    )
+
+    assert mod.refresh_bundle(board, BOARD07_BUNDLE_CHECKED_AT, build_dir=build) == []
+
+
+def test_board07_rules_refusal_preserves_the_release_byte_for_byte(mod, tmp_path, monkeypatch):
+    board, build = _board07_release_board(mod, tmp_path, monkeypatch)
+    # The replayed build validated other rules than the published sidecar.
+    (build / "sdram_demo_routed.kicad_dru").write_text("(rule drifted)")
+    before = _snapshot(board)
+    with pytest.raises(mod.GateFailure, match="different \\.kicad_dru"):
+        mod.refresh_bundle(board, BOARD07_BUNDLE_CHECKED_AT, build_dir=build)
+    assert _snapshot(board) == before
+    assert json.loads((board / "output" / "build.json").read_text()) == BOARD07_STAGE_SUMMARY
+
+
+def test_board07_readiness_refusal_preserves_the_release_byte_for_byte(mod, tmp_path, monkeypatch):
+    board, build = _board07_release_board(
+        mod,
+        tmp_path,
+        monkeypatch,
+        readiness={"status": "unverified", "blockers": ["stale"], "metrics": {}, "inputs": {}},
+    )
+    before = _snapshot(board)
+    with pytest.raises(mod.GateFailure, match="not a ready report"):
+        mod.refresh_bundle(board, BOARD07_BUNDLE_CHECKED_AT, build_dir=build)
+    assert _snapshot(board) == before
+    assert json.loads((board / "output" / "status.json").read_text()) == BOARD07_STAGE_SUMMARY
 
 
 def test_board07_validate_fills_under_the_published_router_classes(mod, tmp_path):
@@ -334,7 +624,7 @@ def test_bundle_unpacks_gate_native_drc_tuple(mod, tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
     monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
     monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
-    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda *a: [])
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda archive, search, **kwargs: [])
     monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"native": true}'))
     monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
     monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
@@ -391,7 +681,7 @@ def _repin_board(mod, tmp_path, monkeypatch, *, warnings: int | None = None) -> 
     monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
     monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
     monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
-    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda *a: [])
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda archive, search, **kwargs: [])
     monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"refilled": true}'))
     monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
     monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
@@ -545,6 +835,128 @@ def test_replot_plots_schematic_pdf_from_the_published_schematic(mod, tmp_path, 
 
 
 # --------------------------------------------------------------------------- board 04 (#7357)
+def test_board04_published_drc_preflight_matches_the_final_report(mod):
+    from kicad_tools.export.preflight import PreflightChecker
+
+    board = REPO / "boards/04-stm32-devboard"
+    cfg = mod.rr.BOARDS[board.name]
+    routed = board / cfg.routed_pcb
+    report = json.loads((routed.parent / "drc_report.json").read_bytes())
+    assert report["pcb_sha256"] == mod.sha256(routed)
+    expected = PreflightChecker(routed, manufacturer=cfg.tier)._check_drc().to_dict()
+    manifest = routed.parent / "manufacturing/manifest.json"
+    with zipfile.ZipFile(routed.parent / "manufacturing.zip") as archive:
+        for raw in (manifest.read_bytes(), archive.read("manifest.json")):
+            entries = json.loads(raw)["preflight"]
+            assert [entry for entry in entries if entry["name"] == "drc"] == [expected]
+
+
+def test_board04_bundle_recognizes_the_delivered_project_names(mod, tmp_path):
+    from kicad_tools.export.manufacturing import ManufacturingPackage, ManufacturingResult
+
+    board = tmp_path / "04-stm32-devboard"
+    shutil.copytree(REPO / "boards" / board.name, board)
+    cfg = mod.rr.BOARDS[board.name]
+    routed = board / cfg.routed_pcb
+    package = ManufacturingPackage(routed, board / cfg.schematic, manufacturer=cfg.tier)
+    output = routed.parent / "manufacturing"
+    result = ManufacturingResult(output_dir=output)
+    package._generate_project_zip(output, result)
+    assert result.project_zip_path == output / "kicad_project.zip", result.errors
+    assert not mod.bundle_is_stale(board, cfg)
+    routed.write_bytes(routed.read_bytes() + b"\n")
+    assert mod.bundle_is_stale(board, cfg)
+
+
+def test_board04_stale_report_cannot_validate_its_own_preflight(mod, tmp_path):
+    from kicad_tools.export.preflight import PreflightChecker
+
+    board = REPO / "boards/04-stm32-devboard"
+    cfg = mod.rr.BOARDS[board.name]
+    routed = tmp_path / cfg.routed_pcb
+    routed.parent.mkdir()
+    shutil.copyfile(board / cfg.routed_pcb, routed)
+    current_report = (board / "output/drc_report.json").read_bytes()
+    (routed.parent / "drc_report.json").write_bytes(current_report)
+    checked_pcb = routed.read_bytes()
+    routed.write_bytes(checked_pcb + b"\n")
+    manifest = routed.parent / "manufacturing/manifest.json"
+    manifest.parent.mkdir()
+    stale = PreflightChecker(routed, manufacturer=cfg.tier)._check_drc().to_dict()
+    assert "stale" in stale["message"]
+    erc = {"name": "erc", "status": "OK", "message": "ERC passed"}
+    manifest.write_text(json.dumps({"preflight": [erc, stale]}))
+    assert not mod.check_recipe_drc_preflight(tmp_path, cfg, refresh=True)
+    assert json.loads(manifest.read_bytes())["preflight"] == [erc, stale]
+
+    routed.write_bytes(checked_pcb)
+    assert not mod.check_recipe_drc_preflight(tmp_path, cfg)
+    assert mod.check_recipe_drc_preflight(tmp_path, cfg, refresh=True)
+    expected = PreflightChecker(routed, manufacturer=cfg.tier)._check_drc().to_dict()
+    assert json.loads(manifest.read_bytes())["preflight"] == [erc, expected]
+    before = manifest.read_bytes()
+    assert mod.check_recipe_drc_preflight(tmp_path, cfg, refresh=True)
+    assert manifest.read_bytes() == before
+
+
+def test_board04_refresh_finalizes_silk_before_export_preflight(mod, tmp_path, monkeypatch):
+    from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightChecker
+
+    board = tmp_path / "04-stm32-devboard"
+    shutil.copytree(REPO / "boards" / board.name, board)
+    cfg = mod.rr.BOARDS[board.name]
+    routed = board / cfg.routed_pcb
+    # Exercise the older package even after the repaired artwork is published.
+    old = '(property "Reference" "C11"\n\t\t\t(at -5.5 4.73 0)'
+    new = old.replace("-5.5 4.73", "-5.25 4.48")
+    artwork = routed.read_text().replace(new, old)
+    assert artwork.count(old) == 1
+    routed.write_text(artwork)
+    report = json.loads((routed.parent / "drc_report.json").read_bytes())
+
+    def refill(staged, cfg):
+        assert new in (staged / cfg.routed_pcb).read_text()
+        return {}
+
+    def measure(command, **kwargs):
+        pcb = Path(command[-1])
+        report["pcb_sha256"] = mod.sha256(pcb)
+        report["meta_checks"]["manifest"]["status"] = "FAILED"  # pre-export
+        (pcb.parent / "drc_report.json").write_text(json.dumps(report))
+        return subprocess.CompletedProcess(command, 0, stdout="run_drc: False", stderr="")
+
+    class PreflightReached(Exception):
+        pass
+
+    def preflight(package):
+        pcb = package.pcb_path
+        entry = PreflightChecker(pcb, manufacturer=package.manufacturer)._check_drc().to_dict()
+        assert report["pcb_sha256"] == mod.sha256(pcb), entry
+        assert new in pcb.read_text()
+        assert "DRC passed" in entry["message"]
+        assert run_default_silk_pass(pcb, mfr=cfg.tier)["total_fixed"] == 0
+        raise PreflightReached
+
+    def export(staged, cfg, bundle):
+        package = ManufacturingPackage(
+            pcb_path=staged / cfg.routed_pcb,
+            manufacturer=cfg.tier,
+            config=ManufacturingConfig(emit_drc_constraints=False),
+        )
+        package.export(staged / "output/manufacturing")
+
+    monkeypatch.setattr(mod, "stage_refill", refill)
+    monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda *a: b"{}")
+    monkeypatch.setattr(mod, "gate_parity_drc", lambda *a: None)
+    monkeypatch.setattr(mod, "run", measure)
+    monkeypatch.setattr(mod, "stage_recipe_manufacturing", export)
+    monkeypatch.setattr(ManufacturingPackage, "_run_preflight", preflight)
+    with pytest.raises(PreflightReached):
+        mod.refresh_bundle(board, "2026-11-25T13:37:00+00:00", force_replot=True)
+
+
 def test_board04_config_reuses_the_shared_pipeline(mod):
     bundle, cfg = mod.BUNDLES["04-stm32-devboard"], mod.rr.BOARDS["04-stm32-devboard"]
     # The board-local check hook is what repin_staged's gate runs, not bare kct check.

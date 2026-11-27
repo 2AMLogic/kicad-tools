@@ -4,6 +4,7 @@ import warnings
 from typing import TYPE_CHECKING
 
 from ..grid import DEFAULT_GRID, snap_point
+from . import decoupling_defaults as defaults
 from ._pins import first_pin_position, output_pin_position
 from ._stub_helpers import _emit_pin_net_stub
 from .base import CircuitBlock
@@ -623,7 +624,7 @@ class CurrentSenseShunt(CircuitBlock):
         # Current sense amplifier (optional)
         if amplifier:
             if bypass_caps is None:
-                bypass_caps = ["100nF"]
+                bypass_caps = defaults.default_bank(defaults.CURRENT_SENSE_BYPASS)
 
             amp_ref = f"{amplifier_ref}{amp_ref_start}"
             amp_x = x + 30
@@ -660,7 +661,9 @@ class CurrentSenseShunt(CircuitBlock):
                 cap_ref = f"C{cap_ref_start + i}"
                 cap_x = amp_x + 15 + i * 10
                 cap_y = amp_y - 10
-                cap = sch.add_symbol("Device:C", cap_x, cap_y, cap_ref, cap_value)
+                cap = self._add_decoupling_cap(
+                    "Device:C", cap_x, cap_y, cap_ref, cap_value, owner=amp_ref
+                )
                 self.bypass_caps.append(cap)
                 self.components[f"C_BYPASS{i + 1}"] = cap
 
@@ -1075,7 +1078,7 @@ class GateDriverBlock(CircuitBlock):
         self.driver_type = driver_type
 
         if bypass_caps is None:
-            bypass_caps = ["10uF", "100nF"]
+            bypass_caps = defaults.default_bank(defaults.GATE_DRIVER_BYPASS)
 
         # Select symbol based on driver type
         if driver_symbol is None:
@@ -1148,7 +1151,9 @@ class GateDriverBlock(CircuitBlock):
             cap_ref = f"C{bypass_start + i}"
             cap_x = x + 20 + i * 10
             cap_y = y - 15
-            cap = sch.add_symbol("Device:C", cap_x, cap_y, cap_ref, cap_value, **bypass_add_kwargs)
+            cap = self._add_decoupling_cap(
+                "Device:C", cap_x, cap_y, cap_ref, cap_value, owner=ref, **bypass_add_kwargs
+            )
             self.bypass_caps.append(cap)
             self.components[f"C_BYPASS{i + 1}"] = cap
 
@@ -1978,8 +1983,8 @@ class UCC27211GateDriver(CircuitBlock):
         hb_net: str | None = None,
         hs_net: str | None = None,
         bootstrap_cap_value: str = "100nF",
-        vcc_bulk_cap_value: str = "10uF",
-        vcc_bypass_cap_value: str = "100nF",
+        vcc_bulk_cap_value: str = defaults.DefaultValue(defaults.BULK),
+        vcc_bypass_cap_value: str = defaults.DefaultValue(defaults.BYPASS),
         driver_symbol: str | None = None,
         driver_footprint: str = "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
         cap_ref_prefix: str = "C",
@@ -2097,11 +2102,18 @@ class UCC27211GateDriver(CircuitBlock):
         c_bulk_x = x - 20
         c_bypass_x = x - 10
         c_y = y - 15
-        self.c_vcc_bulk = sch.add_symbol(
-            "Device:C", c_bulk_x, c_y, c_bulk_ref, vcc_bulk_cap_value, rotation=0
+        self.c_vcc_bulk = self._add_decoupling_cap(
+            "Device:C",
+            c_bulk_x,
+            c_y,
+            c_bulk_ref,
+            vcc_bulk_cap_value,
+            owner=ref,
+            role="bulk",
+            rotation=0,
         )
-        self.c_vcc_bypass = sch.add_symbol(
-            "Device:C", c_bypass_x, c_y, c_bypass_ref, vcc_bypass_cap_value, rotation=0
+        self.c_vcc_bypass = self._add_decoupling_cap(
+            "Device:C", c_bypass_x, c_y, c_bypass_ref, vcc_bypass_cap_value, owner=ref, rotation=0
         )
         self.components["C_VCC_BULK"] = self.c_vcc_bulk
         self.components["C_VCC_BYPASS"] = self.c_vcc_bypass

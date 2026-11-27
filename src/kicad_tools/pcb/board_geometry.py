@@ -349,13 +349,11 @@ class BoardGeometry:
                     ctrl = [(p[0] - ox, p[1] - oy) for p in g.pts]
                     lines.append(_linearize_bezier(ctrl))
 
-        # --- footprint-local Edge.Cuts (board outline per KiCad) ---
-        # The shared core reader re-emits fp_* Edge.Cuts graphics as
-        # board-frame gr_* nodes; an outline drawn inside a footprint (e.g.
-        # SparkFun's IoT RedBoard ESP32-P4) participates like any other.
-        from ..core.board_outline import footprint_outline_graphics, outline_node_points
+        # Footprint graphics and board polygons with arcs contribute their
+        # board-frame primitives alongside the in-memory graphics above.
+        from ..core.board_outline import outline_graphics, outline_node_points
 
-        for node in footprint_outline_graphics(pcb._sexp):
+        for node in outline_graphics(pcb._sexp, expanded_only=True):
             tag = node.tag or ""
             if tag == "gr_line":
                 (sx, sy), (ex, ey) = outline_node_points(node)
@@ -400,10 +398,17 @@ class BoardGeometry:
         if len(result) == 1:
             polygon = result[0]
         else:
-            # Multiple polygons -- use the largest as the board outline
-            # (smaller ones are likely mounting-hole cutouts)
-            result.sort(key=lambda p: p.area, reverse=True)
-            polygon = result[0]
+            # Polygonization produces both the outer board face (with cutouts
+            # attached as interior rings, so ``p.area`` is net material area)
+            # and a separate face for each interior opening.  When an opening
+            # exceeds half the exterior area, sorting by ``p.area`` selects
+            # the opening instead of the board.  Select by enclosed exterior
+            # ring area (using net area as tie-breaker) so the outer boundary
+            # wins while keeping its interior rings (#10590).
+            polygon = max(
+                result,
+                key=lambda p: (ShapelyPolygon(p.exterior).area, p.area),
+            )
 
         return cls(polygon=polygon, origin=origin)
 

@@ -1,6 +1,8 @@
 """PCB (pcb) subcommand handlers."""
 
+import contextlib
 import json
+import stat
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -34,14 +36,24 @@ def _sheet_reporters(
         for key in ("start", "end", "position"):
             if key in out:
                 out[key] = sheet(out[key])
-        if out.get("blocking_branches"):
-            out["blocking_branches"] = [
-                {**b, "start": sheet(b["start"]), "end": sheet(b["end"])}
-                for b in out["blocking_branches"]
-            ]
+        for key in ("blocking_branches", "loop_branches"):
+            if out.get(key):
+                out[key] = [
+                    {**b, "start": sheet(b["start"]), "end": sheet(b["end"])} for b in out[key]
+                ]
         return out
 
     return origin_x, origin_y, sheet, sheet_witness
+
+
+def _unresolved_anchor_clause(u: Any) -> str:
+    """What reinforce did with an unusable declared path (#8742, #9725)."""
+    if u.anchored_segments:
+        return (
+            f"only its {u.anchored_segments} loop-free segment(s) between the endpoints "
+            "are offered for anchors; the looped part is unhandled"
+        )
+    return "it gets no anchors"
 
 
 def _carry_sidecars(src: Path, dst: Path) -> None:
@@ -826,11 +838,31 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     holds over those body-touching neighbours. Collinear grid-step runs are
     not merged (tracked in issue #8236).
     """
+    with contextlib.ExitStack() as files:
+        return _prune(args, pcb_path, files)
+
+
+def _prune(args, pcb_path: Path, files: contextlib.ExitStack) -> int:
     from kicad_tools.pcb_prune import prune_board
 
     output_format = getattr(args, "format", "text")
     dry_run = getattr(args, "dry_run", False)
     output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
+
+    def refuse(message: str, *, creepage: dict | None = None, code: int = 1) -> int:
+        print(message, file=sys.stderr)
+        if output_format == "json":
+            error: dict[str, Any] = {
+                "input": str(pcb_path),
+                "output": None,
+                "error": message,
+                "saved": False,
+                "success": False,
+            }
+            if creepage is not None:
+                error["creepage"] = creepage
+            print(json.dumps(error, indent=2))
+        return code
 
     # Issue #9747: the sidecar a `kct check` on this board would load -- an
     # explicit --current-paths wins, else auto-discovery like `kct check`
@@ -842,14 +874,12 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     specs: list | None = None
     explicit_sidecar = getattr(args, "current_paths", None)
     if explicit_sidecar is not None and getattr(args, "no_current_paths", False):
-        print(
+        return refuse(
             "Error: --no-current-paths cannot be combined with "
             f"--current-paths {explicit_sidecar!r}: one disables sidecar "
             "auto-discovery, the other names a sidecar to load. Pass exactly "
-            "one of them.",
-            file=sys.stderr,
+            "one of them."
         )
-        return 1
     sidecar = Path(explicit_sidecar) if explicit_sidecar else None
     if sidecar is None and not getattr(args, "no_current_paths", False):
         from kicad_tools.router.current_paths import discover_current_paths_sidecar
@@ -862,8 +892,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             specs, declared_nets, required_widths = current_path_declarations(pcb_path, sidecar)
         except Exception as e:
             if explicit_sidecar:
-                print(f"Error loading current paths: {e}", file=sys.stderr)
-                return 1
+                return refuse(f"Error loading current paths: {e}")
             # Same degrade-gracefully contract as `kct check`'s auto-discovered
             # sidecar: warn and prune without declarations.
             print(
@@ -882,23 +911,61 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     if getattr(args, "nets", None):
         nets = [n.strip() for n in args.nets.split(",") if n.strip()]
         if not nets:
-            print("Error: --nets requires at least one net name", file=sys.stderr)
-            return 1
+            return refuse("Error: --nets requires at least one net name")
         try:
             from kicad_tools.schema.pcb import PCB as _PCB
 
             known = {n.name for n in _PCB.load(pcb_path).nets.values()}
         except Exception as e:
-            print(f"Error loading PCB: {e}", file=sys.stderr)
-            return 1
+            return refuse(f"Error loading PCB: {e}")
         unknown = sorted(set(nets) - known)
         if unknown:
-            print(f"Error: unknown net(s) in --nets: {', '.join(unknown)}", file=sys.stderr)
-            return 1
+            return refuse(f"Error: unknown net(s) in --nets: {', '.join(unknown)}")
     region, region_err = _parse_region_arg(getattr(args, "region", None))
     if region_err:
-        print(region_err, file=sys.stderr)
-        return 1
+        return refuse(region_err)
+
+    # Issue #9640: with --voltage-map each net's plan is also vetted by the
+    # whole-board creepage audit, against the board as it was handed in (so
+    # successive passes cannot ratchet a pair under its requirement).
+    creepage_kwargs: dict[str, Any] = {}
+    candidate = output_path
+    if getattr(args, "voltage_map", None):
+        import io
+        import tempfile
+
+        from kicad_tools.cli.route_cmd import _preload_voltage_map
+        from kicad_tools.creepage.output_audit import CreepageAudit, staged_board
+
+        diagnostics = io.StringIO()
+        with contextlib.redirect_stderr(diagnostics):
+            rc = _preload_voltage_map(args)
+        if rc:
+            return refuse(diagnostics.getvalue().strip(), code=rc)
+        if diagnostics.getvalue():
+            print(diagnostics.getvalue(), end="", file=sys.stderr)
+        try:
+            if dry_run:
+                scratch = files.enter_context(
+                    tempfile.TemporaryDirectory(prefix="kct_prune_creep_")
+                )
+                candidate = Path(scratch) / pcb_path.name
+            else:
+                candidate = files.enter_context(staged_board(pcb_path, output_path))
+        except OSError as exc:
+            return refuse(f"Error staging PCB: {exc}")
+        _audit = CreepageAudit(
+            voltage_map=args.voltage_map,
+            standard=getattr(args, "creepage_standard", "iec60664"),
+            pollution_degree=getattr(args, "pollution_degree", 2),
+            material_group=getattr(args, "material_group", "IIIa"),
+            hv_threshold=getattr(args, "hv_threshold", 30.0),
+        )
+        creepage_kwargs = {
+            "creepage_audit": _audit,
+            "creepage_baseline_text": pcb_path.read_text(),
+            "creepage_required_pairs": _audit.required_pairs(),
+        }
 
     from dataclasses import replace as _replace
 
@@ -912,7 +979,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         # Issue #8730: one invocation iterates to a fixed point -- a pass can
         # expose more redundant copper (a split container's piece is frozen
         # for the rest of its own pass), so re-plan on the edited board until
-        # a pass changes nothing.  Intermediate passes go to the output file.
+        # a pass changes nothing. In a gated run all passes stay in scratch.
         for pass_no in range(_PRUNE_MAX_PASSES):
             pcb, step = prune_board(
                 src_path,
@@ -926,6 +993,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
                 project=getattr(args, "project", None),
                 allow_default_rules=getattr(args, "allow_default_rules", False),
                 current_paths=specs,
+                **creepage_kwargs,
             )
             if res is None:
                 res = step
@@ -935,8 +1003,13 @@ def _run_prune_command(args, pcb_path: Path) -> int:
                     stats[key] = stats.get(key, 0) + val
                 res = _replace(
                     step,
+                    # A final pass with no edits has nothing to verify. Keep
+                    # the DRC result for every edit actually included in the output.
+                    drc_verified=res.drc_verified and (step.drc_verified or not step.accepted),
+                    drc_note=step.drc_note if res.drc_verified and step.accepted else res.drc_note,
                     plans=[*res.plans, *step.plans],
                     accepted=[*res.accepted, *step.accepted],
+                    creepage_rejected=[*res.creepage_rejected, *step.creepage_rejected],
                     stats=stats,
                 )
             step_changed = (
@@ -948,14 +1021,65 @@ def _run_prune_command(args, pcb_path: Path) -> int:
                 break
             if pass_no + 1 == _PRUNE_MAX_PASSES:
                 break
-            pcb.save(output_path)
-            if output_path != pcb_path:
+            pcb.save(candidate)
+            if candidate == output_path and output_path != pcb_path:
                 _carry_sidecars(pcb_path, output_path)
-            src_path = output_path
+            src_path = candidate
     except Exception as e:
-        print(f"Error pruning PCB: {e}", file=sys.stderr)
-        return 1
+        return refuse(f"Error pruning PCB: {e}")
     assert res is not None  # _PRUNE_MAX_PASSES >= 1, so the loop ran at least once
+
+    changed = (
+        res.stats["segments_removed"]
+        or res.stats.get("vias_removed", 0)
+        or res.stats["ends_snapped"]
+    )
+    # Compare the full run, including every fixed-point pass, to the original.
+    # Publish this exact staged serialization only once the census has succeeded.
+    if creepage_kwargs:
+        from kicad_tools.creepage.output_audit import audit_summary, worse_pairs
+
+        audit = creepage_kwargs["creepage_audit"]
+        before = creepage_kwargs["creepage_baseline_text"]
+        after = before
+        if changed:
+            after_pcb = pcb
+            if dry_run:
+                from kicad_tools.pcb_prune import apply_plans
+                from kicad_tools.schema.pcb import PCB
+
+                after_pcb = PCB.load(pcb_path)
+                apply_plans(after_pcb, res.accepted)
+            try:
+                after_pcb.save(candidate)
+                after = candidate.read_text()
+            except OSError as exc:
+                return refuse(f"Error staging final PCB: {exc}")
+        summary = audit_summary(audit, before, after, creepage_kwargs["creepage_required_pairs"])
+        excess = worse_pairs(audit, before, after)
+        unavailable = "unverifiable" in excess or summary["creepage_pairs_checked"] is None
+        whole_run = {
+            "creepage_gate": "active",
+            "creepage_audit": "unavailable" if unavailable else "ran",
+            **summary,
+        }
+        if unavailable:
+            return refuse(
+                "Refusing to write: the final creepage census could not run. "
+                "Run kct creepage to diagnose.",
+                creepage=whole_run,
+            )
+        if excess:
+            whole_run.update(
+                audit_summary(audit, before, before, creepage_kwargs["creepage_required_pairs"])
+            )
+            whole_run["rejected_pairs"] = sorted(excess)
+            return refuse(
+                "Refusing to write: the final board worsens creepage for "
+                + ", ".join(sorted(excess)),
+                creepage=whole_run,
+            )
+        res = _replace(res, creepage=whole_run)
 
     # Quote sheet positions like the sibling commands and kct check (#8954);
     # the library's plans and uncut loops stay board-relative.
@@ -1001,11 +1125,6 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             ]
         return out
 
-    changed = (
-        res.stats["segments_removed"]
-        or res.stats.get("vias_removed", 0)
-        or res.stats["ends_snapped"]
-    )
     result: dict[str, Any] = {
         "input": str(pcb_path),
         "output": str(output_path) if not dry_run else None,
@@ -1027,9 +1146,10 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         },
         "region_skipped": [_net(p) for p in res.region_skipped],
     }
-    if output_format == "json":
-        print(json.dumps(result, indent=2))
-    else:
+    if res.creepage is not None:
+        result["creepage"] = res.creepage
+        result["rejected_by_creepage"] = [_net(p) for p in res.creepage_rejected]
+    if output_format != "json":
         print(f"PCB Prune {'(dry run)' if dry_run else ''}")
         print(f"  Input:  {pcb_path}")
         print(f"  DRC:    {res.drc_note}")
@@ -1054,33 +1174,48 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         for n in result["rejected_by_drc"]:
             why = n.get("reject_reason") or "edit would add DRC violations"
             print(f"    {n['net']}: kept ({why})")
+        for n in result.get("rejected_by_creepage", []):
+            print(f"    {n['net']}: kept ({n.get('reject_reason') or 'creepage'})")
+        if res.creepage is not None:
+            print(
+                f"  Creepage: audit {res.creepage['creepage_audit']}, "
+                f"{len(res.creepage_rejected)} net(s) kept as-is"
+            )
         for n in result["region_skipped"]:
             print(f"    {n['net']}: region_skipped (edits extend outside --region)")
-        for u in res.uncut_loops:
+        for u in result["uncut_loops"]:
             print(
                 f"    {u['net']}: loop left in place ({u.get('reason', 'all segments >= --wide')}, "
                 f"min width {u['min_width']} mm, {len(u['segments'])} segments)"
             )
+            for segment in u["segments"]:
+                print(f"      {segment}")
 
-    if not dry_run and changed and not res.drc_verified and not getattr(args, "unverified", False):
-        # Never write an unverified edit by default (issue #8216 review).
-        print(
+    if not dry_run and changed and not res.drc_verified and not unverified:
+        return refuse(
             "Refusing to write: edits were not verified with kicad-cli DRC "
             f"({res.drc_note}). Re-run with kicad-cli available, or pass "
-            "--unverified to write anyway.",
-            file=sys.stderr,
+            "--unverified to write anyway."
         )
-        return 1
 
-    if not dry_run and changed:
+    saved = bool(not dry_run and changed)
+    if saved:
         try:
-            pcb.save(output_path)
-            _carry_sidecars(pcb_path, output_path)
+            if creepage_kwargs:
+                from kicad_tools.creepage.output_audit import publish_board
+
+                _carry_sidecars(pcb_path, output_path)
+                publish_board(candidate, output_path)
+            else:
+                pcb.save(output_path)
+                _carry_sidecars(pcb_path, output_path)
             if output_format == "text":
                 print(f"\n  Saved to: {output_path}")
         except Exception as e:
-            print(f"Error saving PCB: {e}", file=sys.stderr)
-            return 1
+            return refuse(f"Error saving PCB: {e}")
+    if output_format == "json":
+        result.update(success=True, saved=saved, written_to=str(output_path) if saved else None)
+        print(json.dumps(result, indent=2))
 
     if changed:
         # Issue #9331: a collinear merge or snap moves copper that waiver keys
@@ -1199,28 +1334,26 @@ def _print_clear_lines(clear_outcome, origin_x: float, origin_y: float, dry_run:
 
 
 def _load_sidecar_wires(pcb_path: Path) -> list | None:
-    """The board's wire-list sidecar records, or None when absent/unreadable (#8747)."""
-    from kicad_tools.pcb.reinforcement_sidecar import load_wires, sidecar_path
+    """The board's wire-list sidecar records, or None when absent/unreadable (#8747).
+
+    An entry that is not a JSON object (Issue #10401), or a record whose
+    coordinate data is malformed (Issue #10559), is not passed over with that
+    warning: it raises ``ValueError`` for the caller to refuse the command.
+    Falling back to the size rule would edit the board without the anchors
+    the list names.
+    """
+    from kicad_tools.pcb.reinforcement_sidecar import check_wire_records, load_wires, sidecar_path
 
     path = sidecar_path(pcb_path)
     if not path.is_file():
         return None
     try:
-        return load_wires(path)
+        wires = load_wires(path)
     except (OSError, ValueError) as e:
         print(f"Warning: ignoring unreadable {path}: {e}", file=sys.stderr)
         return None
-
-
-def _drop_cleared_wires(output_path: Path, clear_outcome, origin_x: float, origin_y: float) -> int:
-    """Remove the sidecar wire records whose anchors were cleared (#8747)."""
-    from kicad_tools.pcb.reinforcement_sidecar import drop_wires, sidecar_path
-
-    removed = [(a.x + origin_x, a.y + origin_y) for a in clear_outcome.removed]
-    copies = [c.key for c in getattr(clear_outcome, "copies_removed", [])]
-    if not removed and not copies:
-        return 0
-    return drop_wires(sidecar_path(output_path), clear_outcome.net_name, removed, copies)
+    check_wire_records(path, wires)
+    return wires
 
 
 def _cleared_anything(clear_outcome) -> bool:
@@ -1292,19 +1425,97 @@ def _opening_entries(openings, origin_x: float, origin_y: float) -> list:
     ]
 
 
+def _publish_reinforce_outputs(
+    pcb, pcb_path: Path, output_path: Path, plan, *, will_save: bool
+) -> bool:
+    """Publish staged reinforcement sidecar and PCB together; preserve both on failure."""
+    from kicad_tools.pcb.reinforcement_sidecar import stage_record_update
+    from kicad_tools.sidecars import carry_project_rules
+
+    action = "updating reinforcement sidecar"
+    try:
+        with stage_record_update(plan, pcb_output=output_path if will_save else None) as commit:
+            with contextlib.ExitStack() as publication:
+                if will_save:
+                    action = "saving PCB"
+                    publication.enter_context(carry_project_rules(pcb_path, output_path))
+                    pcb.save(output_path)
+                action = "updating reinforcement sidecar"
+                commit()
+    except Exception as e:
+        print(f"Error {action}: {e}", file=sys.stderr)
+        return False
+    return True
+
+
+def _check_clear_destination(destination: Path) -> None:
+    """Read the wire records before a clear or replacement writes any files."""
+    from kicad_tools.pcb.reinforcement_sidecar import load_wire_records
+
+    try:
+        mode = destination.lstat().st_mode
+    except FileNotFoundError:
+        return  # No directory entry, so there are no records to drop.
+    if stat.S_ISLNK(mode):
+        mode = destination.stat().st_mode
+    if not stat.S_ISREG(mode):
+        raise ValueError("expected a regular reinforcement sidecar file")
+    load_wire_records(destination)
+
+
 def _finish_reinforce_clear(
-    args, pcb, pcb_path: Path, output_path: Path, clear_outcome, dry_run: bool, output_format: str
+    args,
+    pcb,
+    pcb_path: Path,
+    output_path: Path,
+    clear_outcome,
+    dry_run: bool,
+    output_format: str,
+    verify_source: Callable[[], None],
 ) -> int:
     """Report and (unless ``--dry-run``) save a ``pcb reinforce --clear`` pass (#8747)."""
     origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    saved = not dry_run and _cleared_anything(clear_outcome)
+    dropped = 0
+    if saved:
+        from kicad_tools.pcb.reinforcement_sidecar import (
+            alias_export_conflict,
+            edit_seed_record,
+            prepare_record_update,
+            saved_record_path,
+        )
+
+        # The inventory of the PCB being edited, not of whatever the output name resolves to.
+        conflict = alias_export_conflict(pcb_path, output_path, True, False)
+        if conflict:
+            print(f"Error: {conflict}", file=sys.stderr)
+            return 1
+        seed_record = edit_seed_record(pcb_path, output_path)
+        was_alias = output_path.is_symlink()
+        record = saved_record_path(output_path, True)
+        removed = [(a.x + origin_x, a.y + origin_y) for a in clear_outcome.removed]
+        copies = [c.key for c in getattr(clear_outcome, "copies_removed", [])]
+        try:
+            plan = prepare_record_update(
+                seed_record,
+                record,
+                carry=True,
+                detach=was_alias,
+                drop=(clear_outcome.net_name, removed, copies),
+            )
+        except (OSError, ValueError) as e:
+            print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+            return 1
+        verify_source()
+        if not _publish_reinforce_outputs(pcb, pcb_path, output_path, plan, will_save=True):
+            return 1
+        dropped = plan.dropped
     if output_format == "json":
         print(
             json.dumps(
                 {
                     "input": str(pcb_path),
-                    "output": str(output_path)
-                    if not dry_run and _cleared_anything(clear_outcome)
-                    else None,
+                    "output": str(output_path) if saved else None,
                     "dry_run": dry_run,
                     "clear": True,
                     "net": clear_outcome.net_name,
@@ -1343,34 +1554,31 @@ def _finish_reinforce_clear(
             print("  Nothing to clear: no anchor-sized same-net vias found.")
         else:
             _print_clear_lines(clear_outcome, origin_x, origin_y, dry_run)
-        if not dry_run and _cleared_anything(clear_outcome):
+        if saved:
             print()
             print("  NOTE: refill zone pours afterward (e.g. `kicad-cli pcb drc --refill-zones`).")
-
-    if not dry_run and _cleared_anything(clear_outcome):
-        try:
-            pcb.save(output_path)
-            _carry_sidecars(pcb_path, output_path)
-            if output_format == "text":
-                print()
-                print(f"  Saved to: {output_path}")
-        except Exception as e:
-            print(f"Error saving PCB: {e}", file=sys.stderr)
-            return 1
-        try:
-            dropped = _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y)
-        except (OSError, ValueError) as e:
-            print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
-            return 1
-        if dropped and output_format == "text":
-            print(f"  Sidecar:  dropped {dropped} wire record(s)")
+            print()
+            print(f"  Saved to: {output_path}")
+            if dropped:
+                print(f"  Sidecar:  dropped {dropped} wire record(s)")
     return 0
 
 
 def _run_reinforce_list_wires(args, pcb_path: Path, net_name: str | None) -> int:
-    """``pcb reinforce --list-wires``: print the sidecar's wires (#8744)."""
+    """``pcb reinforce --list-wires``: print the sidecar's wires (#8744).
+
+    Only an unfiltered JSON dump prints the file as it stands. A JSON listing
+    with ``--net`` only filters the entries, so it refuses no more than an
+    entry that is not a JSON object (Issue #10401). The text listing formats
+    the points, so it reads the entries as records and a non-object entry or
+    a malformed coordinate is refused with
+    :func:`~kicad_tools.pcb.reinforcement_sidecar.load_wire_records`
+    (Issues #10401, #10559).
+    """
     from kicad_tools.pcb.reinforcement_sidecar import (
+        check_wire_objects,
         format_wire_list,
+        load_wire_records,
         load_wires,
         sidecar_path,
     )
@@ -1379,14 +1587,21 @@ def _run_reinforce_list_wires(args, pcb_path: Path, net_name: str | None) -> int
     if not path.is_file():
         print(f"Error: no reinforcement sidecar at {path}", file=sys.stderr)
         return 1
+    as_json = getattr(args, "format", "text") == "json"
     try:
-        wires = load_wires(path)
+        if not as_json:
+            wires = load_wire_records(path)
+        else:
+            wires = load_wires(path)
+            if net_name:
+                check_wire_objects(path, wires)
     except (OSError, ValueError) as e:
-        print(f"Error reading {path}: {e}", file=sys.stderr)
+        reason = str(e).removeprefix(f"{path}: ")
+        print(f"Error reading {path}: {reason}", file=sys.stderr)
         return 1
     if net_name:
         wires = [w for w in wires if w.get("net") == net_name]
-    if getattr(args, "format", "text") == "json":
+    if as_json:
         print(json.dumps({"sidecar": str(path), "wires": wires}, indent=2))
     else:
         print(format_wire_list(wires))
@@ -1400,11 +1615,15 @@ def _run_reinforce_adopt(args, pcb_path: Path, net_name: str | None) -> int:
     ``<board>.reinforcement.json``. Nothing on the board moves and the board is
     not written; wires the sidecar already records are kept as they are, so a
     re-run is a no-op.
+
+    An existing sidecar is read as records: an entry that is not a JSON
+    object (Issue #10401), or a record whose coordinate data is malformed
+    (Issue #10559), refuses the adoption before anything is written.
     """
     from kicad_tools.pcb.reinforcement_sidecar import (
         adopt_wire_records,
         already_recorded,
-        load_wires,
+        load_wire_records,
         sidecar_path,
         write_sidecar,
     )
@@ -1420,9 +1639,10 @@ def _run_reinforce_adopt(args, pcb_path: Path, net_name: str | None) -> int:
         return 1
     path = sidecar_path(pcb_path)
     try:
-        existing = load_wires(path) if path.is_file() else []
+        existing = load_wire_records(path) if path.is_file() else []
     except (OSError, ValueError) as e:
-        print(f"Error reading {path}: {e}", file=sys.stderr)
+        reason = str(e).removeprefix(f"{path}: ")
+        print(f"Error reading {path}: {reason}", file=sys.stderr)
         return 1
     adopted = adopt_wire_records(pcb, net_name)
     fresh = [r for r in adopted.records if not already_recorded(existing, r)]
@@ -1469,6 +1689,22 @@ def _run_reinforce_adopt(args, pcb_path: Path, net_name: str | None) -> int:
 
 
 def _run_reinforce_command(args, pcb_path: Path) -> int:
+    from kicad_tools.core.package_publication import PublicationBusy
+    from kicad_tools.pcb.reinforcement_sidecar import reinforce_publication
+
+    if getattr(args, "list_wires", False) or getattr(args, "dry_run", False):
+        return _reinforce(args, pcb_path, lambda: None)
+    output = getattr(args, "output", None)
+    dest = pcb_path if getattr(args, "adopt", False) or not output else Path(output)
+    try:
+        with reinforce_publication(pcb_path, dest) as verify_source:
+            return _reinforce(args, pcb_path, verify_source)
+    except (PublicationBusy, ValueError, OSError) as e:
+        print(f"Error publishing reinforcement: {e}", file=sys.stderr)
+        return 1
+
+
+def _reinforce(args, pcb_path: Path, verify_source: Callable[[], None]) -> int:
     """Handle the 'pcb reinforce' command (Unit A of #4218; issues #4220, #8742).
 
     Post-route pass that walks a routed net's segments into ordered
@@ -1611,7 +1847,14 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 standard_id=getattr(args, "creepage_standard", "iec60664"),
                 pollution_degree=getattr(args, "pollution_degree", 2),
                 material_group=getattr(args, "material_group", "IIIa"),
-                hv_threshold=getattr(args, "hv_threshold", 30.0),
+                # Issue #10015: never floor the table by ``--hv-threshold``.
+                # ``kct creepage`` derives a requirement for every mapped pair
+                # (any non-zero |dV|), so a threshold here accepted anchors the
+                # gate then failed (a 15 V pair under the default 30 V). The
+                # table is only consulted per target<->obstacle net, so
+                # keeping every pair costs nothing. Same-potential pairs
+                # (|dV| == 0) still carry no requirement.
+                hv_threshold=0.0,
                 pair_bounds=load_pair_bounds(vm_path) or None,
                 net_intervals=load_voltage_intervals(vm_path),
             )
@@ -1625,9 +1868,13 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     clear_outcome = None
     # Issue #8916: the records are also how a parallel re-run tells its own
     # earlier copper from copper that predates the tool.
-    prior_wires = (
-        _load_sidecar_wires(pcb_path) if (clear_only or replace or strategy != "wire") else None
-    )
+    try:
+        prior_wires = (
+            _load_sidecar_wires(pcb_path) if (clear_only or replace or strategy != "wire") else None
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
     if clear_only or replace:
         try:
             clear_outcome = clear_anchors(
@@ -1639,9 +1886,28 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         except ReinforceError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
+        if not dry_run and _cleared_anything(clear_outcome):
+            from kicad_tools.pcb.reinforcement_sidecar import sidecar_path
+
+            destination = sidecar_path(output_path)
+            try:
+                _check_clear_destination(destination)
+            except (OSError, ValueError) as exc:
+                reason = str(exc).removeprefix(f"{destination}: ")
+                print(
+                    f"Error reading {destination}: {reason} -- nothing was written", file=sys.stderr
+                )
+                return 1
         if clear_only:
             return _finish_reinforce_clear(
-                args, pcb, pcb_path, output_path, clear_outcome, dry_run, output_format
+                args,
+                pcb,
+                pcb_path,
+                output_path,
+                clear_outcome,
+                dry_run,
+                output_format,
+                verify_source,
             )
 
     try:
@@ -1780,7 +2046,13 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             for leg in outcome.legs
         ],
         "unresolved_paths": [
-            {"path": u.path, "status": u.status, "reason": why}
+            {
+                "path": u.path,
+                "status": u.status,
+                "reason": why,
+                # Issue #9725: loop-free segments still offered for anchors.
+                "anchored_segments": u.anchored_segments,
+            }
             for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True)
         ],
         # Issue #8743: solder-mask openings (additive).
@@ -1835,6 +2107,22 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             for r in outcome.refused_copies
         ],
     }
+    # The save below replaces a board symlink with its own file, so the record
+    # is chosen as the pair of the PCB that will exist, not of the alias target.
+    from kicad_tools.pcb.reinforcement_sidecar import (
+        alias_export_conflict,
+        build_wire_records,
+        edit_seed_record,
+        prepare_record_update,
+        saved_record_path,
+    )
+
+    will_save = bool(
+        outcome.placed_count
+        or outcome.copies
+        or (clear_outcome is not None and _cleared_anything(clear_outcome))
+    )
+    wire_records = build_wire_records(outcome, origin_x, origin_y)
     if clear_outcome is not None:
         result["replace"] = True
         result["anchors_cleared"] = clear_outcome.removed_count
@@ -1847,35 +2135,55 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             clear_outcome.openings_removed, origin_x, origin_y
         )
         result["copies_cleared"] = _cleared_copy_entries(clear_outcome)
-        if not dry_run:
-            try:
-                _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y)
-            except (OSError, ValueError) as e:
-                print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
-                return 1
 
     # Issue #8744: wire list sidecar (ends mode only; never on a dry run).
-    from kicad_tools.pcb.reinforcement_sidecar import build_wire_records, write_sidecar
-
-    wire_records = build_wire_records(outcome, origin_x, origin_y)
     result["wires"] = wire_records
     result["wire_sidecar"] = None
-    if not dry_run and wire_records:
-        try:
-            result["wire_sidecar"] = str(write_sidecar(output_path, wire_records))
-        except (OSError, ValueError) as e:
-            print(f"Error writing reinforcement sidecar: {e}", file=sys.stderr)
+    if not dry_run:
+        conflict = alias_export_conflict(pcb_path, output_path, will_save, bool(wire_records))
+        if conflict:
+            print(f"Error: {conflict}", file=sys.stderr)
             return 1
-    elif not dry_run and outcome.anchor_mode == "spaced":
-        print(
-            "Note: spaced mode has no per-wire legs; no reinforcement sidecar written",
-            file=sys.stderr,
-        )
+        seed_record = edit_seed_record(pcb_path, output_path)
+        was_alias = output_path.is_symlink()
+        record = saved_record_path(output_path, will_save)
+        drop = None
+        if clear_outcome is not None:
+            removed = [(a.x + origin_x, a.y + origin_y) for a in clear_outcome.removed]
+            copies = [c.key for c in getattr(clear_outcome, "copies_removed", [])]
+            if removed or copies:
+                drop = (clear_outcome.net_name, removed, copies)
+        # Detach the inventory whenever the save detaches the PCB, even when this
+        # pass writes no wire records (e.g. spaced mode). Stage the sidecar and
+        # publish it only after the PCB save succeeds so a failed save leaves the
+        # prior PCB, symlink, and wire inventory intact.
+        try:
+            plan = prepare_record_update(
+                seed_record,
+                record,
+                carry=will_save,
+                detach=was_alias,
+                drop=drop,
+                new_wires=wire_records,
+            )
+        except (OSError, ValueError) as e:
+            print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+            return 1
+        verify_source()
+        if not _publish_reinforce_outputs(pcb, pcb_path, output_path, plan, will_save=will_save):
+            return 1
+        if wire_records:
+            result["wire_sidecar"] = str(record)
+        elif outcome.anchor_mode == "spaced":
+            print(
+                "Note: spaced mode has no per-wire legs; no reinforcement sidecar written",
+                file=sys.stderr,
+            )
 
     for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True):
         print(
             f"Warning: declared current path {u.path!r} on net {outcome.net_name!r} is "
-            f"{u.status}: {why} -- it gets no anchors",
+            f"{u.status}: {why} -- {_unresolved_anchor_clause(u)}",
             file=sys.stderr,
         )
 
@@ -1921,9 +2229,9 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             )
         if outcome.unresolved_paths:
             print()
-            print("  Unresolved current paths (no anchors):")
+            print("  Unresolved current paths (looped copper gets no anchors):")
             for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True):
-                print(f"    {u.path}: {u.status} -- {why}")
+                print(f"    {u.path}: {u.status} -- {why} -- {_unresolved_anchor_clause(u)}")
         if outcome.anchor_mode == "ends":
             _print_reinforce_legs(outcome, origin_x, origin_y)
         else:
@@ -2002,21 +2310,9 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             else:
                 print("  NOTE: mask openings are off; anchors inherit the board's via tenting.")
 
-    # Save unless dry-run and at least one anchor or copy was placed (or cleared).
-    if not dry_run and (
-        outcome.placed_count
-        or outcome.copies
-        or (clear_outcome is not None and _cleared_anything(clear_outcome))
-    ):
-        try:
-            pcb.save(output_path)
-            _carry_sidecars(pcb_path, output_path)
-            if output_format == "text":
-                print()
-                print(f"  Saved to: {output_path}")
-        except Exception as e:
-            print(f"Error saving PCB: {e}", file=sys.stderr)
-            return 1
+    if not dry_run and will_save and output_format == "text":
+        print()
+        print(f"  Saved to: {output_path}")
 
     return 0
 

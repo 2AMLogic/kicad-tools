@@ -6,11 +6,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import shapely  # type: ignore[import-untyped]
-from shapely import affinity
+from shapely.affinity import translate  # type: ignore[import-untyped]
 from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 from shapely.strtree import STRtree  # type: ignore[import-untyped]
 
 from kicad_tools.core.types import copper_layers_in_span
+from kicad_tools.geometry.copper import pad_gate_polygon
 
 from .connectivity import _UnionFind
 from .kelvin_obstacles import _pad_outline
@@ -22,41 +23,32 @@ if TYPE_CHECKING:
     from .primitives import Pad, Route, Segment, Via
 
 
-def _contact_outline(pad: Pad):
+def _contact_outline(pad: Pad, *, plotted: bool = False):
     """Copper a conductor may touch to connect ``pad``, never larger than the pad.
 
-    Rounded rectangles lack corner-radius metadata on :class:`Pad`, and
-    ``_pad_outline(contact=True)`` models them as the inscribed *circle* --
-    safe for Kelvin contact selection, but far too small for connectivity:
-    board 03's U1.3 (0.55 x 1.475 mm) is fed by a trace ending 0.51 mm from
-    its centre, inside the copper yet outside that circle (Issue #6371).
-    KiCad caps ``roundrect_rratio`` at 0.5, and every such roundrect contains
-    the stadium inscribed in its bounding box (the box minus the radius-r
-    corners contains the box minus radius-min(w,h)/2 corners), so the stadium
-    is still a lower bound on the real copper.
+    Use the authored corner radius for a roundrect. When the radius is
+    missing, connectivity uses 0.5 for the stadium contained in
+    every roundrect of those dimensions (issue #6371).
     """
+    dx, dy = pad.copper_offset
     if pad.shape != "roundrect":
-        return _pad_outline(pad, contact=True)
-    w, h = pad.width, pad.height
-    radius = min(w, h) / 2
-    delta = abs(w - h) / 2
-    if delta <= 0:
-        shape = Point(0, 0).buffer(radius)
-    else:
-        ends = [(-delta, 0), (delta, 0)] if w >= h else [(0, -delta), (0, delta)]
-        shape = LineString(ends).buffer(radius)
-    # Same rotation convention as ``_pad_outline``.
-    return affinity.translate(affinity.rotate(shape, -pad.rotation), pad.x, pad.y)
+        outline = _pad_outline(pad, contact=True)
+        return translate(outline, dx, dy) if dx or dy else outline
+    cx, cy = pad.x + dx, pad.y + dy
+    chamfer = (pad.mask_chamfered_outline if plotted else ()) or pad.chamfered_outline
+    if chamfer:
+        return shapely.Polygon([(cx + x, cy + y) for x, y in chamfer])
+    ratio = pad.roundrect_rratio if pad.roundrect_rratio is not None else (0.25 if plotted else 0.5)
+    shape = pad_gate_polygon(cx, cy, pad.width, pad.height, pad.shape, pad.rotation, ratio)
+    return shape if shape is not None else shapely.Polygon()
 
 
 def physical_pad_components(pads: list[Pad], routes: list[Route]) -> list[int]:
     """Return copper-component IDs, preserving a node for each physical pad.
 
     Contacts require intersecting copper on a shared layer. PTH pads and vias
-    bridge only the layers their barrels span. Rounded rectangles use the
-    inscribed stadium (see :func:`_contact_outline`) because Pad lacks
-    corner-radius metadata; a missing corner contact must not become a false
-    completion.
+    bridge only the layers their barrels span. Pad contact uses the authored
+    copper outline and its offset from the drill anchor.
     """
     return physical_copper_components(
         pads,

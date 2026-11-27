@@ -1,48 +1,120 @@
 {
-  "scope": "Illustrative single-aggressor quasi-TEM scenarios, not a PCB-wide or IBIS corner qualification. Assumed parallel length deliberately uses whole longest package escape; actual paths bend. Rise times are explicit assumptions, not verified driver minima.",
-  "width_mm": 0.18,
-  "gap_mm": 0.32,
-  "parallel_length_mm": 5.119899,
-  "layer": "F.Cu",
+  "pcb_sha256": "45943c244519945ee5d51c4b58a28a901cf67b092129c64dcd2ea90a11d2bc84",
+  "scope": "Illustrative single-aggressor estimates on the board stack for parallel non-clock data/control trace spans on F.Cu within 5 mm. Pair totals add modeled magnitudes. Vias, bends, pads, other layers, package parasitics and simultaneous aggressors are outside this estimate. Rise times are assumptions.",
   "scenarios": [
     {
-      "assumed_rise_time_ns": 1,
-      "next_coefficient": 0.00030375925809242836,
-      "fext_coefficient": 0.0006075185161848567,
-      "next_db": -70.34940953192654,
-      "fext_db": -64.32880961864691,
-      "next_percent": 0.030375925809242837,
-      "fext_percent": 0.060751851618485675,
-      "coupled_length_mm": 5.119899,
-      "saturation_length_mm": 84.27560417668131,
-      "severity": "acceptable",
-      "recommendation": null
+      "assumed_rise_time_ns": 1.0,
+      "worst_span": {
+        "data": "DQ4",
+        "control": "A11",
+        "data_track": [
+          [
+            36.75,
+            50.662
+          ],
+          [
+            36.75,
+            52.9
+          ]
+        ],
+        "control_track": [
+          [
+            36.25,
+            50.662
+          ],
+          [
+            36.25,
+            53.724
+          ]
+        ],
+        "gap_mm": 0.32,
+        "parallel_mm": 2.238,
+        "next_percent": 0.069992,
+        "fext_percent": 0.139985,
+        "severity": "acceptable"
+      },
+      "worst_pair": {
+        "data": "DQ4",
+        "control": "A11",
+        "sum_next_percent": 0.078508,
+        "sum_fext_percent": 0.157016
+      }
     },
     {
       "assumed_rise_time_ns": 0.1,
-      "next_coefficient": 0.0030375925809242835,
-      "fext_coefficient": 0.006075185161848567,
-      "next_db": -50.34940953192654,
-      "fext_db": -44.328809618646915,
-      "next_percent": 0.3037592580924284,
-      "fext_percent": 0.6075185161848567,
-      "coupled_length_mm": 5.119899,
-      "saturation_length_mm": 8.427560417668131,
-      "severity": "acceptable",
-      "recommendation": null
+      "worst_span": {
+        "data": "DQ4",
+        "control": "A11",
+        "data_track": [
+          [
+            36.75,
+            50.662
+          ],
+          [
+            36.75,
+            52.9
+          ]
+        ],
+        "control_track": [
+          [
+            36.25,
+            50.662
+          ],
+          [
+            36.25,
+            53.724
+          ]
+        ],
+        "gap_mm": 0.32,
+        "parallel_mm": 2.238,
+        "next_percent": 0.699924,
+        "fext_percent": 1.399848,
+        "severity": "acceptable"
+      },
+      "worst_pair": {
+        "data": "DQ4",
+        "control": "A11",
+        "sum_next_percent": 0.785082,
+        "sum_fext_percent": 1.570165
+      }
     },
     {
       "assumed_rise_time_ns": 0.05,
-      "next_coefficient": 0.004999999999999975,
-      "fext_coefficient": 0.012150370323697134,
-      "next_db": -46.02059991327967,
-      "fext_db": -38.3082097053673,
-      "next_percent": 0.4999999999999975,
-      "fext_percent": 1.2150370323697135,
-      "coupled_length_mm": 5.119899,
-      "saturation_length_mm": 4.2137802088340655,
-      "severity": "acceptable",
-      "recommendation": null
+      "worst_span": {
+        "data": "DQ4",
+        "control": "A11",
+        "data_track": [
+          [
+            36.75,
+            50.662
+          ],
+          [
+            36.75,
+            52.9
+          ]
+        ],
+        "control_track": [
+          [
+            36.25,
+            50.662
+          ],
+          [
+            36.25,
+            53.724
+          ]
+        ],
+        "gap_mm": 0.32,
+        "parallel_mm": 2.238,
+        "next_percent": 1.399848,
+        "fext_percent": 2.799696,
+        "severity": "acceptable"
+      },
+      "worst_pair": {
+        "data": "DQ4",
+        "control": "A11",
+        "sum_next_percent": 1.570165,
+        "sum_fext_percent": 3.14033
+      }
     }
   ]
 }

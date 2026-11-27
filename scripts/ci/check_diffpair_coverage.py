@@ -287,51 +287,12 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # In run 44811568469 boards 00/01 passed and board 07 had only its 54 allowed
 # mask errors. Boards 02-05 remained red (THT/SMD spacing, mask exposure,
 # reviewed drill validation and manufacturer checks, respectively).
-DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("physical_copper_gap", "GND"): 8962,
-    ("physical_copper_gap", "MIPI_CLK+"): 8962,
-    # Issue #8858 (measured 2026-11-18 at main 304c70e2c, pinned image
-    # kicad/kicad@sha256:18693567 -- the digest CI's KICAD_IMAGE pins): the
-    # seed-42 regeneration of this board carries 200 ``mask_to_copper``
-    # errors (122 same-net pass-throughs, 78 same-net own-pad entries; the
-    # #9326/#9332 repair path's population) across the 22 net signatures
-    # listed below.  Two independent regenerations reproduced every
-    # signature and per-net count exactly, so the entries are keyed by NET
-    # SIGNATURE like the #8957 slits (mask_to_copper's items are
-    # opening/conductor UUIDs, re-minted by every regeneration; the rule
-    # now names ``nets`` on each finding).  A net that starts carrying
-    # mask errors still fails the gate; a net the router stops exposing
-    # goes stale and forces its entry out.  Each entry's value is the
-    # tracking issue number (#8858), the same convention as the
-    # physical_copper_gap entries' 8962 -- the gate judges identity,
-    # never count; the measured per-net populations are recorded in the
-    # research note.  Verify with:
-    #   KCT_KICAD_DOCKER=1 uv run kct check \
-    #     boards/06-diffpair-test/regression-output/diffpair_test_routed.kicad_pcb \
-    #     --mfr jlcpcb --errors-only --format json
-    ("mask_to_copper", "+1V2"): 8858,
-    ("mask_to_copper", "+3V3"): 8858,
-    ("mask_to_copper", "GND"): 8858,
-    ("mask_to_copper", "MIPI_CLK+"): 8858,
-    ("mask_to_copper", "MIPI_CLK-"): 8858,
-    ("mask_to_copper", "MIPI_D0+"): 8858,
-    ("mask_to_copper", "MIPI_D0-"): 8858,
-    ("mask_to_copper", "MIPI_RST"): 8858,
-    ("mask_to_copper", "PCIE_RX+"): 8858,
-    ("mask_to_copper", "PCIE_RX-"): 8858,
-    ("mask_to_copper", "PCIE_TX+"): 8858,
-    ("mask_to_copper", "PCIE_TX-"): 8858,
-    ("mask_to_copper", "USB2_D+"): 8858,
-    ("mask_to_copper", "USB2_D-"): 8858,
-    ("mask_to_copper", "USB3_RX1+"): 8858,
-    ("mask_to_copper", "USB3_RX1-"): 8858,
-    ("mask_to_copper", "USB3_RX2+"): 8858,
-    ("mask_to_copper", "USB3_RX2-"): 8858,
-    ("mask_to_copper", "USB3_TX1-"): 8858,
-    ("mask_to_copper", "USB3_TX2+"): 8858,
-    ("mask_to_copper", "USB_CC1"): 8858,
-    ("mask_to_copper", "USB_CC2"): 8858,
-}
+# The #9019 taper repair removed the MIPI_CLK+ slit at U4.1. The #9846
+# stitcher repair removes both GND stub slits at U2.B4 and U3.48.
+# The combined seed-42 fixture had zero physical copper gaps and 153
+# identity-allowed mask findings. Either recurring gap must fail the gate.
+# The USB2 connector exits (#10258) and the TX2+ exit (#10294) clear the last mask findings.
+DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {}
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
 #: absent here has no allowance at all: every blocking finding counts.

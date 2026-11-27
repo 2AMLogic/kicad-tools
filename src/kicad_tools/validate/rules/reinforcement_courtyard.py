@@ -12,7 +12,8 @@ sidecar's anchor list) and checks two things:
   wire terminates at. A footprint with no courtyard on that side falls back to
   its fab-layer bounding box. On the side *opposite* a through-hole part only
   its pins protrude, so there the envelope is checked against foreign-net pads
-  (pad radius + :data:`HOLE_FILLET_MM`); own-net pins may be soldered to.
+  (pad radius + :data:`HOLE_FILLET_MM`). Same-net lands may be soldered to,
+  but the fitted wire must clear other component lead holes.
 * **end hole** -- each anchor hole's envelope (annulus radius +
   :data:`HOLE_FILLET_MM`) against courtyards on *both* sides of the board: the
   hole is a through hole, so the tail and fillet exit opposite the run. A
@@ -33,7 +34,9 @@ from .reinforcement_incomplete import (
     ANCHOR_ON_LEG_SLACK_MM,
     DRILL_TOLERANCE_MM,
     ReinforcementIncompleteRule,
+    WiredLeg,
     _Leg,
+    _poly_between,
 )
 
 if TYPE_CHECKING:
@@ -81,7 +84,7 @@ def _body_polygon(fp: Footprint, side: str, Polygon: Any, box: Any) -> Any | Non
     for g in fp.graphics:
         if g.layer != fab:
             continue
-        raw = [g.start, g.end, *g.points]
+        raw = [g.start, g.end, *g.boundary_points]
         if g.center is not None and g.radius:
             raw += [
                 (g.center[0] - g.radius, g.center[1] - g.radius),
@@ -243,11 +246,110 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
         # from the mask strip and anchor holes. "No wire" / unlocatable paths
         # are reported by that rule, not here.
         plan = self._plan(pcb, rf, reinforcement_path_resolutions(pcb, self.specs))
+        # Use board-verified wire spans only with a matching assembly record.
+        # Without a record this rule also checks prospective wire placement.
+        # A parallel copy exempts copper from requiring a wire, but can coexist
+        # with one. Verify wire geometry using the wire records and their gauges.
+        wire_records = [r for r in self.wires if r.get("strategy", "wire") == "wire"]
+        end_offset = (
+            self.end_offset_mm if self.end_offset_mm is not None else rf.DEFAULT_END_OFFSET_MM
+        )
         for net in sorted(set(plan.resolved) | set(plan.located)):
+            wired: list[WiredLeg] = []
+            if any(r.get("net") == net for r in wire_records):
+                self._check_net(
+                    pcb,
+                    rf,
+                    net,
+                    plan.resolved.get(net, []),
+                    end_offset,
+                    DRCResults(),
+                    located=plan.located.get(net),
+                    row_barrels=plan.row_barrels.get(net),
+                    collector=wired,
+                    include_parallel_wires=True,
+                )
             self._check_net_bodies(
-                pcb, rf, net, plan.resolved.get(net, []), results, located=plan.located.get(net)
+                pcb,
+                rf,
+                net,
+                plan.resolved.get(net, []),
+                results,
+                located=plan.located.get(net),
+                fitted=[leg for leg in wired if self._record_matches_wire(leg)],
             )
+        self._check_component_bores(pcb, design_rules, results)
         return results
+
+    def _record_matches_wire(self, leg: WiredLeg) -> bool:
+        """Match the assembly record to both independently verified hole locations."""
+        if leg.anchor_centers is None:
+            return False
+        actual = [self._abs(center) for center in leg.anchor_centers]
+        for record in self.wires:
+            if record.get("strategy", "wire") != "wire":
+                continue
+            if record.get("status") not in ("full", "adopted"):
+                continue
+            if (record.get("net"), record.get("layer")) != (leg.net, leg.layer):
+                continue
+            if self._matches_ends(actual, record.get("anchors")):
+                return True
+        return False
+
+    def _check_component_bores(
+        self, pcb: PCB, design_rules: DesignRules, results: DRCResults
+    ) -> None:
+        """Keep the fitted span clear of same-net lead holes on the other side."""
+        from shapely.geometry import LineString
+        from shapely.ops import nearest_points, substring  # type: ignore[import-untyped]
+
+        from kicad_tools.physics.wire_gauge import bare_copper_diameter_mm
+
+        from .factory_clearance import _hole_geometry
+
+        net_numbers = {net.name: number for number, net in pcb.nets.items()}
+        for leg in self.fully_wired_legs(pcb, design_rules):
+            if leg.anchor_arc is None:
+                continue
+            side = _side_of_layer(leg.layer)
+            centreline = LineString(leg.points)
+            fitted = substring(centreline, *leg.anchor_arc)
+            diameter = bare_copper_diameter_mm(leg.gauge)
+            radius = diameter / 2
+            for fp in pcb.footprints:
+                if _fp_side(fp) == side:
+                    continue
+                for pad in fp.pads:
+                    if pad.type != "thru_hole" or pad.net_number != net_numbers.get(leg.net):
+                        continue
+                    if id(pad) in leg.anchor_pad_ids:
+                        continue
+                    bore = _hole_geometry(pad, fp)
+                    if bore is None:
+                        continue
+                    gap = fitted.distance(bore)
+                    if gap >= radius - 1e-6:
+                        continue
+                    point = nearest_points(fitted, bore)[0]
+                    qualifier = "at least " if gap == 0 else ""
+                    results.add(
+                        DRCViolation(
+                            rule_id=self.rule_id,
+                            severity="error",
+                            message=(
+                                f"Wire run overlaps component drill [run] on {leg.layer}: "
+                                f"{fp.reference}.{pad.number} on {leg.net!r} has {qualifier}{radius - gap:.4f} mm "
+                                f"interference (centreline to bore {gap:.4f} mm, wire diameter {diameter:.4f} mm)"
+                            ),
+                            location=(point.x, point.y),
+                            layer=leg.layer,
+                            actual_value=gap,
+                            required_value=radius,
+                            items=(leg.net, fp.reference, pad.number),
+                            nets=(leg.net,),
+                        )
+                    )
 
     # ------------------------------------------------------------- per net
 
@@ -258,6 +360,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
         net: str,
         resolutions: list,
         results: DRCResults,
+        fitted: list[WiredLeg],
         located: dict[str, list] | None = None,
     ) -> None:
         from shapely.geometry import LineString, Point, Polygon, box
@@ -265,6 +368,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
         from kicad_tools.core.geometry import rotate_pad_offset
         from kicad_tools.physics.wire_gauge import anchor_drill_for_awg, bare_copper_diameter_mm
 
+        records = [r for r in self.wires if r.get("net") == net]
         seen: set[int] = set()
         by_layer: dict[str, list] = {}
         for layer, segs in (located or {}).items():
@@ -272,7 +376,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                 seen.add(id(seg))
                 by_layer.setdefault(layer, []).append(seg)
         for res in resolutions:
-            for seg in res.segments:
+            for seg in res.covered_segments if records else res.segments:
                 if id(seg) in seen or rf._seg_length(seg) <= 1e-9:
                     continue
                 seen.add(id(seg))
@@ -285,13 +389,18 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
             v[0] for res in resolutions for ch in res.layer_changes for v in ch.vias
         ]
 
+        fitted_holes = {p for wire in fitted for p in wire.anchor_centers or ()}
+
         def is_change_via(p: _Point) -> bool:
-            return any(math.dist(p, q) < 0.05 for q in change_vias)
+            return p not in fitted_holes and any(math.dist(p, q) < 0.05 for q in change_vias)
 
         legs: list[_Leg] = []
         original_ids: dict[int, int] = {}
         for layer in sorted(by_layer):
-            for cand in rf._derive_legs(by_layer[layer], layer, original_ids):
+            spans = by_layer[layer]
+            if records and resolutions:
+                spans = rf._declared_leg_spans(spans, resolutions, {})
+            for cand in rf._derive_legs(spans, layer, original_ids):
                 if cand.status is not None:
                     continue
                 pts = rf._run_points(cand.run)
@@ -311,20 +420,45 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                 cache[key] = _body_polygon(fp, side, Polygon, box)
             return cache[key]
 
+        installed_spans = {}
+        for wire in fitted:
+            assert wire.anchor_arc is not None
+            span_points = _poly_between(list(wire.points), *wire.anchor_arc)
+            installed_spans[wire.layer, wire.points] = span_points
+            installed_spans[wire.layer, wire.points[::-1]] = span_points
+        # Attribute a shared plated hole to its fitted wire first.
+        legs.sort(key=lambda leg: (leg.layer, tuple(leg.points)) not in installed_spans)
+
         reported_holes: set[tuple[int, int, str]] = set()
         for leg in legs:
             side = _side_of_layer(leg.layer)
+            span = installed_spans.get((leg.layer, tuple(leg.points)))
             wire_r = bare_copper_diameter_mm(leg.gauge) / 2.0
             drill = anchor_drill_for_awg(leg.gauge)
             tol = leg.width / 2.0 + ANCHOR_ON_LEG_SLACK_MM
-            line = LineString(leg.points)
-            desc = f"run {self._fmt(leg.points[0])} -> {self._fmt(leg.points[-1])}"
+            evidence, wire_ends = self._wire_evidence(pcb, leg)
+            anchors = self._leg_holes(
+                holes,
+                leg,
+                drill,
+                tol,
+                lambda p: is_change_via(p) and not self._at_wire_end(p, wire_ends),
+                rotate_pad_offset,
+            )
+            if span is not None:
+                wire_points = span
+            elif evidence or (not fitted and not self._parallel_reinforced(pcb, leg)):
+                wire_points = leg.points
+            else:
+                wire_points = []
 
             # ---- run vs same-side bodies / opposite-side THT pins ----------
-            if side is not None:
+            if wire_points and side is not None:
+                line = LineString(wire_points)
+                desc = f"run {self._fmt(wire_points[0])} -> {self._fmt(wire_points[-1])}"
                 inflate = wire_r + RUN_CLEARANCE_MM
                 for fp, length in run_courtyard_overlaps(
-                    leg.points, side, pcb.footprints, inflate, body
+                    wire_points, side, pcb.footprints, inflate, body
                 ):
                     poly = body(fp, side)
                     hit = line.intersection(poly.buffer(inflate)) if poly is not None else None
@@ -354,9 +488,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                                 break
 
             # ---- end holes vs courtyards on both sides ---------------------
-            for pos, radius, owner in self._leg_holes(
-                holes, leg, drill, tol, is_change_via, rotate_pad_offset
-            ):
+            for pos, radius, owner in anchors:
                 for fp, hside in hole_courtyard_overlaps(
                     pos, radius, pcb.footprints, net_number, body, owner
                 ):

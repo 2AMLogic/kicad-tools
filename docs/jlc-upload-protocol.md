@@ -90,8 +90,8 @@ operator rulings of 2026-11-16 and 2026-11-17 on #8935 it may request
 operator approves the exact total for that order**; `/api` and the part-matching
 exports stay disallowed. No monthly budget, unattended, scheduled or batch
 checkout exists, and nothing pays without an approval naming that order's exact
-total. Its selectors and confirmation-page recognition are unverified until an
-attended run (#8478).
+total. The checkout selectors and confirmation-page recognition await an
+attended rehearsal. [Checkout verification](https://github.com/2AMLogic/kicad-tools/issues/9240)
 
 ## Website automation: terms finding (#8467, part 2/3 of #8465)
 
@@ -135,8 +135,10 @@ own signed-in Chrome on a dedicated CDP profile, with the operator watching. It
 goes one action at a time, never requests a robots.txt-disallowed path (the
 operator downloads the part-matching export), and stops at the saved cart.
 `--guided` stays as the fallback and kill switch. If JLCPCB objects or restricts
-an account, the driver is disabled, not patched. Its selectors are unverified
-against the live site until the first attended run (#8478).
+an account, the driver is disabled, not patched. The first attended run
+found that the v0.28.1 quote-page selectors did not match. The shipped
+driver still needs a verified end-to-end run through the saved cart.
+[Live findings](https://github.com/2AMLogic/kicad-tools/issues/8629) · [Driver verification](https://github.com/2AMLogic/kicad-tools/issues/8478)
 
 ### Browser-tooling prerequisite and credentials
 

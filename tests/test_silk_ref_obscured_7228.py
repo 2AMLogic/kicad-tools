@@ -39,8 +39,9 @@ def test_hidden_reference_is_flagged(rules):
     pcb = PCB.load(BOARD02)
     _ref(pcb, "D1").hidden = True
     found = check_silk_ref_obscured(pcb, rules).violations
+    # #9798: an error under the jlcpcb profiles (operator ruling on #9795).
     assert [(v.rule_id, v.severity, v.items) for v in found] == [
-        ("silk_ref_obscured", "warning", ("D1 (reference)", "hidden"))
+        ("silk_ref_obscured", "error", ("D1 (reference)", "hidden"))
     ]
 
 
@@ -108,6 +109,56 @@ def test_board_only_exclude_from_pos_files_attr_exempts_fiducial(rules, tmp_path
 def test_single_attr_flag_still_flagged(rules, tmp_path, attr):
     found = check_silk_ref_obscured(_attr_board(attr, tmp_path), rules).violations
     assert [v.items for v in found] == [("FID1 (reference)", "hidden")]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "hole",
+        "renamed",
+        "placed",
+        "purchased",
+        "plated",
+        "connector",
+        "netted",
+        "named_net",
+        "numbered",
+    ],
+)
+def test_hidden_reference_on_unpopulated_mechanical_hole(rules, tmp_path, case):
+    attributes = "exclude_from_bom exclude_from_pos_files"
+    if case == "placed":
+        attributes = "exclude_from_bom"
+    elif case == "purchased":
+        attributes = "exclude_from_pos_files"
+    hole = (
+        '(pad "" np_thru_hole circle (at 0 0) (size 3.2 3.2) (drill 3.2) (layers "*.Cu" "*.Mask"))'
+    )
+    if case == "plated":
+        hole = hole.replace("np_thru_hole", "thru_hole")
+    elif case == "netted":
+        hole = hole[:-1] + ' (net 1 "GND"))'
+    elif case == "named_net":
+        # KiCad 10 pads carry a net name; a top-level (net 1 "GND") can leave
+        # the number 0 on a pad named CHASSIS (#10350).
+        hole = hole[:-1] + ' (net "CHASSIS"))'
+    elif case == "numbered":
+        hole = hole.replace('pad ""', 'pad "1"')
+    elif case == "connector":
+        hole += '(pad "1" smd rect (at 3 0) (size 1 1) (layers "F.Cu"))'
+    footprint_name = (
+        "Mechanical:M3_Clearance" if case == "renamed" else ("MountingHole:MountingHole_3.2mm_M3")
+    )
+    path = tmp_path / "mount.kicad_pcb"
+    path.write_text(f"""(kicad_pcb (version 20240108) (generator "test") (net 1 "GND")
+        (footprint "{footprint_name}" (layer "F.Cu") (at 10 10)
+        (attr {attributes})
+        (property "Reference" "H1" (at 0 0) (layer "F.SilkS") (hide yes))
+        {hole}))""")
+    found = check_silk_ref_obscured(PCB.load(path), rules).violations
+    assert [v.items for v in found] == (
+        [] if case in ("hole", "renamed") else [("H1 (reference)", "hidden")]
+    )
 
 
 # --- hidden reference replaced by a function label (#9435) -------------------

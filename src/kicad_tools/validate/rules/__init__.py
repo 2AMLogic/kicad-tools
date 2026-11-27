@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .base import DRC_TOLERANCE, DRCRule
     from .board_id import BoardIdRule
+    from .bypass_distance import BypassDistanceRule
     from .clearance import ClearanceRule, SegmentZoneClearanceRule, ViaZoneClearanceRule
     from .connector_access import ConnectorEdgeAccessRule
     from .dangling_copper import DanglingCopperRule
@@ -36,8 +37,10 @@ if TYPE_CHECKING:
         check_all_silkscreen,
         check_silk_edge_clearance,
         check_silk_hole_overlap,
+        check_silk_in_keepout,
         check_silk_over_copper,
         check_silk_over_mask_opening,
+        check_silk_under_body,
         check_silkscreen_line_width,
         check_silkscreen_over_pads,
         check_silkscreen_text_height,
@@ -66,6 +69,7 @@ _EXPORT_MODULES: dict[str, str] = {
     "DiffPairRoutingContinuityRule": ".diffpair_routing_continuity",
     "DiffPairUncoupledLengthRule": ".diffpair_uncoupled_length",
     "BoardIdRule": ".board_id",
+    "BypassDistanceRule": ".bypass_distance",
     "FiducialsRule": ".fiducials",
     "DimensionRules": ".dimensions",
     "EdgeClearanceRule": ".edge",
@@ -83,8 +87,10 @@ _EXPORT_MODULES: dict[str, str] = {
     "check_all_silkscreen": ".silkscreen",
     "check_silk_edge_clearance": ".silkscreen",
     "check_silk_hole_overlap": ".silkscreen",
+    "check_silk_in_keepout": ".silkscreen",
     "check_silk_over_copper": ".silkscreen",
     "check_silk_over_mask_opening": ".silkscreen",
+    "check_silk_under_body": ".silkscreen",
     "check_silkscreen_line_width": ".silkscreen",
     "check_silkscreen_over_pads": ".silkscreen",
     "check_silkscreen_text_height": ".silkscreen",
@@ -114,6 +120,7 @@ __all__ = [
     "DimensionRules",
     "EdgeClearanceRule",
     "BoardIdRule",
+    "BypassDistanceRule",
     "FiducialsRule",
     "ImpedanceRule",
     "IsolatedCopperRule",
@@ -136,8 +143,10 @@ __all__ = [
     "check_schematic_wire_symbol",
     "check_silk_edge_clearance",
     "check_silk_hole_overlap",
+    "check_silk_in_keepout",
     "check_silk_over_copper",
     "check_silk_over_mask_opening",
+    "check_silk_under_body",
     "check_silkscreen_line_width",
     "check_silkscreen_over_pads",
     "check_silkscreen_text_height",

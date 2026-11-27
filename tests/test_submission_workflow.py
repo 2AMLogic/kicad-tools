@@ -305,6 +305,113 @@ def write_receipt(
     return path
 
 
+@pytest.fixture
+def render_receipt(env):
+    """Mirror a generated receipt that delegates render coverage to its manufacturing manifest."""
+    from kicad_tools.cli.board_readiness import readiness_input_hash
+
+    bundle = env["bundle"]
+    renders = bundle / "renders"
+    renders.mkdir()
+    (renders / "pcb-front.svg").write_text("<svg/>")
+    (renders / "assembly.csv").write_text("Ref,Part\nR1,example\n")
+    export_shaped_manifest(env)
+    manifest = bundle / "manifest.json"
+    receipt = write_receipt(env)
+    record = json.loads(receipt.read_bytes())
+    del record["inputs"][(renders / "pcb-front.svg").relative_to(env["src"]).as_posix()]
+    key = manifest.relative_to(env["src"]).as_posix()
+    record["inputs"][key] = readiness_input_hash(key, manifest.read_bytes())
+    receipt.write_text(json.dumps(record))
+    return receipt
+
+
+@pytest.mark.parametrize("canonical", [True, False], ids=["canonical", "legacy-raw"])
+def test_signoff_binds_render_through_recorded_manifest(env, render_receipt, canonical):
+    from kicad_tools.cli import main as kct
+
+    bundle = env["bundle"]
+    board = env["src"] / "b.kicad_pcb"
+    manifest = bundle / "manifest.json"
+    if not canonical:
+        record = json.loads(render_receipt.read_bytes())
+        record["inputs"][manifest.relative_to(env["src"]).as_posix()] = sha(manifest.read_bytes())
+        render_receipt.write_text(json.dumps(record))
+
+    args = [
+        "tapeout-sign-off",
+        str(bundle),
+        "--board",
+        str(board),
+        "--readiness",
+        str(render_receipt),
+        "--reviewer",
+        "unit test",
+    ]
+    assert kct(args) == 0
+    tapeout = wf.preflight(bundle, board).manifest["tapeout"]
+    assert tapeout["human_signoff"]["reviewer"] == "unit test"
+    assert tapeout["readiness_sha256"] == sha(render_receipt.read_bytes())
+    if canonical:
+        assert kct(args) == 0
+
+
+@pytest.mark.parametrize("missing", ["gerbers.zip", "bom.csv", "cpl.csv", "renders/assembly.csv"])
+def test_signoff_still_requires_direct_fabrication_coverage(env, render_receipt, missing):
+    bundle = env["bundle"]
+    manifest = bundle / "manifest.json"
+    original = manifest.read_bytes()
+    record = json.loads(render_receipt.read_bytes())
+    del record["inputs"][(bundle / missing).relative_to(env["src"]).as_posix()]
+    render_receipt.write_text(json.dumps(record))
+
+    with pytest.raises(wf.WorkflowError, match="does not cover bundle files"):
+        wf.sign_off_bundle(
+            bundle, env["src"] / "b.kicad_pcb", "unit test", readiness=render_receipt
+        )
+    assert manifest.read_bytes() == original
+
+
+@pytest.mark.parametrize("condition", ["missing", "different-digest", "other-path"])
+def test_indirect_render_coverage_requires_the_selected_manifest(env, render_receipt, condition):
+    bundle = env["bundle"]
+    manifest = bundle / "manifest.json"
+    original = manifest.read_bytes()
+    record = json.loads(render_receipt.read_bytes())
+    key = manifest.relative_to(env["src"]).as_posix()
+    del record["inputs"][key]
+    if condition == "different-digest":
+        record["inputs"][key] = sha(b"different revision")
+    elif condition == "other-path":
+        archive = env["src"] / "previous/manufacturing/manifest.json"
+        archive.parent.mkdir(parents=True)
+        archive.write_bytes(original)
+        record["inputs"][archive.relative_to(env["src"]).as_posix()] = sha(original)
+    render_receipt.write_text(json.dumps(record))
+
+    with pytest.raises(wf.WorkflowError, match="does not cover bundle files"):
+        wf.sign_off_bundle(
+            bundle, env["src"] / "b.kicad_pcb", "unit test", readiness=render_receipt
+        )
+    assert manifest.read_bytes() == original
+
+
+@pytest.mark.parametrize("regenerate_manifest", [False, True])
+def test_new_render_needs_a_matching_release_receipt(env, render_receipt, regenerate_manifest):
+    bundle = env["bundle"]
+    (bundle / "renders/pcb-front.svg").write_text("<svg>updated board</svg>")
+    if regenerate_manifest:
+        export_shaped_manifest(env)
+    manifest = bundle / "manifest.json"
+    original = manifest.read_bytes()
+
+    with pytest.raises(wf.WorkflowError, match="sha256|does not cover bundle files"):
+        wf.sign_off_bundle(
+            bundle, env["src"] / "b.kicad_pcb", "unit test", readiness=render_receipt
+        )
+    assert manifest.read_bytes() == original
+
+
 def test_export_bundle_plus_signoff_passes_preflight_and_dry_run(env):
     (env["bundle"] / "gerbers").mkdir()
     (env["bundle"] / "gerbers" / "gerbers.zip").write_bytes(b"PK\x03\x04gerber")
@@ -715,3 +822,188 @@ def test_fab_dfm_not_required_by_fab_review(env):
     board = _released(env)
     wf.sign_off_bundle(env["bundle"], board, "Bob", stage="fab-review")
     assert wf.preflight(env["bundle"], board).fab_dfm is None
+
+
+# --- Issue #10431: the supplementary purchasing list, export through review page ---
+
+
+class AskingSource(Source):
+    """A stock source that records which catalog ids it is asked about."""
+
+    def __init__(self, stock):
+        super().__init__(stock)
+        self.asked = []
+
+    def get_component_inventory(self, codes):
+        self.asked.append(list(codes))
+        return super().get_component_inventory(codes)
+
+
+def test_purchasing_list_flows_from_export_to_the_review_page(env, tmp_path, monkeypatch):
+    from kicad_tools.export import assembly
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightConfig
+    from tests.test_manufacturing_package import FUSE_PURCHASING, _fuse_assembly_export
+
+    src, bundle = env["src"], env["bundle"]
+    for name in ("bom.csv", "cpl.csv"):
+        (bundle / name).unlink()
+    spec = src / "project.kct"
+    monkeypatch.setattr(assembly.AssemblyPackage, "export", _fuse_assembly_export)
+
+    def export(rows):
+        spec.write_text("kct_version: '1.0'\nproject:\n  name: Fuse bench controller\n" + rows)
+        result = ManufacturingPackage(
+            pcb_path=src / "b.kicad_pcb",
+            schematic_path=src / "b.kicad_sch",
+            manufacturer="jlcpcb",
+            config=ManufacturingConfig(
+                output_dir=bundle,
+                include_project_zip=False,
+                include_report=False,
+                include_gerbers=False,
+                silk_fix=False,
+                emit_drc_constraints=False,
+                auto_lcsc=False,
+                preflight=PreflightConfig(skip_all=True),
+            ),
+        ).export()
+        assert result.success, result.errors
+        write_manifest(env)
+
+    def submit(label, quantity):
+        env["out"] = tmp_path / f"out-{label}-{quantity}"
+        source = AskingSource({"C7000001": 500, "C7000002": 500})
+        result = run(env, source, quantity=quantity, dry_run=True)
+        assert not result.stock.blocked
+        return source, result
+
+    export(FUSE_PURCHASING)
+    # The list is frozen with the bundle: edit it after the export and the
+    # handoff refuses it, as it would an edited BOM or Gerber.
+    frozen = (bundle / "purchasing.json").read_bytes()
+    (bundle / "purchasing.json").write_bytes(frozen.replace(b"SYN-COVER-1", b"SYN-COVER-9"))
+    with pytest.raises(wf.WorkflowError, match="purchasing.json"):
+        submit("edited", 2)
+    assert not (tmp_path / "out-edited-2").exists()
+    (bundle / "purchasing.json").write_bytes(frozen)
+
+    source, two = submit("pending", 2)
+    _, one = submit("pending", 1)
+    section = (two.page.directory / "index.md").read_text().split("## Purchasing list", 1)[1]
+
+    assert "| Snap-on cover for the 5 x 20 mm fuse holder | 3 | 6 | F1, F2, F3 |" in section
+    assert "| 5 x 20 mm cartridge, AC | 1 | 2 | F1 |" in section
+    assert "- 5 x 20 mm cartridge, DC: 4 for this build (2 per board), linked F2, F3" in section
+    assert (
+        "| Snap-on cover for the 5 x 20 mm fuse holder | 3 | 3 |"
+        in (one.page.directory / "index.md").read_text()
+    )
+    assert json.loads((two.page.directory / "purchasing.json").read_bytes())["items"][2] == {
+        "description": "5 x 20 mm cartridge, DC",
+        "per_board": 2,
+        "required": 4,
+        "refs": ["F2", "F3"],
+        "status": "pending",
+        "pending": "DC rating and breaking capacity still to be chosen",
+    }
+    # The fabricator side never learns of a supplementary row.
+    assert source.asked == [["C7000001", "C7000002"]]
+    plan = json.loads(two.plan.plan_bytes)
+    assert [row["catalog_id"] for row in plan["demand"]] == ["C7000001", "C7000002"]
+    matches = json.loads((two.plan.directory / "expected-matches.json").read_bytes())
+    assert [match["reference"] for match in matches] == ["F1", "F2", "F3", "J2"]
+
+    export(
+        FUSE_PURCHASING.replace(
+            "    pending: DC rating and breaking capacity still to be chosen\n",
+            "    manufacturer: Example Fuse Co\n    mpn: SYN-CART-DC\n",
+        )
+    )
+    _, resolved = submit("resolved", 2)
+    section = (resolved.page.directory / "index.md").read_text().split("## Purchasing list", 1)[1]
+
+    assert "Outstanding selections: none" in section and "PENDING" not in section
+    assert "| 5 x 20 mm cartridge, DC | 2 | 4 | F2, F3 | Example Fuse Co SYN-CART-DC |" in section
+
+
+def test_terminal_map_flows_from_the_project_to_the_review_page(env, tmp_path, monkeypatch):
+    """A declared terminal map reaches the assembler's page from a real export (Issue #10514).
+
+    A terminal edited after the export is refused even when the bundle manifest
+    agrees with the edited bytes, and the board quantity scales only the
+    purchase.
+    """
+    from kicad_tools.export import assembly
+    from kicad_tools.export import submission_plan as sp
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightConfig
+    from tests.test_manufacturing_package import (
+        SWITCH_ITEM,
+        SWITCH_LAND,
+        SWITCH_MAP,
+        SWITCH_ROW,
+        _fuse_assembly_export,
+    )
+    from tests.test_submission_review import switch_associations
+
+    src, bundle = env["src"], env["bundle"]
+    for name in ("bom.csv", "cpl.csv"):
+        (bundle / name).unlink()
+    (src / "b.kicad_pcb").write_text(SWITCH_LAND)
+    (src / "project.kct").write_text(
+        "kct_version: '1.0'\nproject:\n  name: Fuse bench controller\n"
+        "purchasing:\n" + SWITCH_ROW + SWITCH_MAP
+    )
+    monkeypatch.setattr(assembly.AssemblyPackage, "export", _fuse_assembly_export)
+    exported = ManufacturingPackage(
+        pcb_path=src / "b.kicad_pcb",
+        schematic_path=src / "b.kicad_sch",
+        manufacturer="jlcpcb",
+        config=ManufacturingConfig(
+            output_dir=bundle,
+            include_project_zip=False,
+            include_report=False,
+            include_gerbers=False,
+            silk_fix=False,
+            emit_drc_constraints=False,
+            auto_lcsc=False,
+            preflight=PreflightConfig(skip_all=True),
+        ),
+    ).export()
+    assert exported.success, exported.errors
+    write_manifest(env)
+    frozen = (bundle / "purchasing.json").read_bytes()
+    assert json.loads(frozen)["items"] == [SWITCH_ITEM]
+
+    def submit(label):
+        env["out"] = tmp_path / f"out-{label}"
+        result = run(env, AskingSource({"C7000001": 500, "C7000002": 500}), quantity=2)
+        assert not result.stock.blocked
+        return result
+
+    (bundle / "purchasing.json").write_bytes(frozen.replace(b'"terminal": "3"', b'"terminal": "4"'))
+    write_manifest(env)
+    with pytest.raises(sp.SubmissionError, match="exported contents"):
+        submit("edited")
+    assert not (tmp_path / "out-edited" / "handoff").exists()
+    (bundle / "purchasing.json").write_bytes(frozen)
+    write_manifest(env)
+
+    reviewed = submit("reviewed")
+    section = (reviewed.page.directory / "index.md").read_text().split("## Purchasing list", 1)[1]
+    for association in switch_associations():
+        assert association in section
+    scaled = [SWITCH_ITEM | {"required": 2}]
+    assert json.loads((reviewed.page.directory / "purchasing.json").read_bytes())["items"] == scaled
+    assert json.loads(reviewed.plan.plan_bytes)["purchasing"]["items"] == scaled
+
+    # A manifest-listed map without the export checksum is the buyer's own
+    # claim, never the exporter's PCB check: refuse it before any handoff.
+    unmarked = json.loads(frozen)
+    unmarked.pop("kct_export_sha256")
+    (bundle / "purchasing.json").write_text(json.dumps(unmarked, indent=2) + "\n")
+    write_manifest(env)
+    with pytest.raises(sp.SubmissionError, match="requires the export checksum"):
+        submit("unmarked")
+    assert not (tmp_path / "out-unmarked" / "handoff").exists()

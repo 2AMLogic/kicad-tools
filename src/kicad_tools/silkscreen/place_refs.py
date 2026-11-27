@@ -39,7 +39,7 @@ from __future__ import annotations
 import contextlib
 import math
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -88,6 +88,15 @@ ASSOCIATION_MARGIN_MM = 0.4
 #: the 0.225 mm margin established by the C22/LED4 pad probes (#8628).
 #: The Gerber measurements in #9515 calibrate ink extents only.
 KICAD_TEXT_EXTENT_SLACK_MM = 0.225
+
+#: Rounds ``SilkRefPlacer.plan(settle=True)`` may run, the first pass included
+#: (Issue #9957).  The loop stops on its own when a round moves nothing, so
+#: this only bounds a board that never settles.  A fixed count rather than one
+#: per reference: a per-reference cap loosens exactly on the large boards
+#: where a round is the most expensive.  Measured at introduction: the boards
+#: in this repository settle within 3 rounds, and lattices of up to 169
+#: references, packed until most labels are low-association, within 8.
+_SETTLE_MAX_ROUNDS = 32
 
 
 def _iter_npth_apertures(pcb: PCB, mask_clearance_mm: float):
@@ -785,6 +794,10 @@ class PlaceSilkRefsResult:
     #: Board-level ``gr_text`` sitting over a mask opening. Report-only: the
     #: text is never moved (Issue #8862).
     fixed_text_conflicts: list[FixedTextConflict] = field(default_factory=list)
+    #: References still waiting for a retry round when ``plan(settle=True)``
+    #: ran out of rounds (Issue #9957).  Empty unless that happened.  Each is
+    #: still placed, at the position its last round chose.
+    unsettled_refs: list[str] = field(default_factory=list)
 
     @property
     def moved(self) -> list[RefPlacement]:
@@ -1043,6 +1056,7 @@ class SilkRefPlacer:
         allow_rotate: bool = False,
         only: Collection[str] | None = None,
         include_via_obstacles: bool = True,
+        settle: bool = False,
     ) -> PlaceSilkRefsResult:
         """Compute a per-reference move plan without mutating the tree.
 
@@ -1050,13 +1064,19 @@ class SilkRefPlacer:
             clearance_mm: Required spacing between a reference's text box
                 and any pad aperture or other silk element.
             edge_clearance_mm: Required spacing to the board outline.
-            mask_clearance_mm: Solder-mask margin used to size pad/via
-                apertures (matches ``DesignRules.min_solder_mask_clearance_mm``).
+            mask_clearance_mm: Fallback mask margin for pad and untented-via
+                openings when the board declares no clearance. A local pad or
+                footprint margin takes precedence. Also sizes NPTH keepouts.
             max_offset_mm: How far from the component body to search.
             step_mm: Search ring spacing.
             allow_rotate: If True, also try each candidate with the text
                 rotated 90 degrees about its anchor when the
                 original orientation does not fit.
+            settle: Retry blocked or poorly associated references after their
+                neighbours move. Report each move from its original position.
+                At most ``_SETTLE_MAX_ROUNDS`` rounds, the first pass included;
+                references still waiting for a round when they run out are
+                listed in :attr:`PlaceSilkRefsResult.unsettled_refs`.
             only: If given, plan only the references of these footprints
                 (issue #6256). Every other visible reference is left out of
                 the result -- never moved -- but still blocks the planned
@@ -1177,7 +1197,7 @@ class SilkRefPlacer:
         # Deterministic processing order.
         entries.sort(key=lambda e: e["footprint"].reference)
 
-        for entry in entries:
+        def place(entry) -> RefPlacement:
             footprint = entry["footprint"]
             ref = footprint.reference
             side = entry["side"]
@@ -1185,11 +1205,6 @@ class SilkRefPlacer:
             geom0 = entry["geom0"]
             original_center = entry["original_center"]
             old_rotation = entry["old_rotation"]
-            if only is not None and ref not in only:
-                # Outside the requested set: never planned or moved, but its
-                # text stays in the pool as an obstacle for the others.
-                continue
-
             pool = dynamic[side]
             with contextlib.suppress(ValueError):
                 pool.remove((geom0, ref))
@@ -1234,6 +1249,10 @@ class SilkRefPlacer:
             chosen_margin: float | None = None
             last_reason = ""
             for point in ordered:
+                if settle and point != original_center:
+                    # Evaluate the position KiCad will read from the saved local coordinates.
+                    lx, ly = entry["inverse"](point)
+                    point = _fp_transform(footprint)((round(lx, 6), round(ly, 6)))
                 trials = [(old_rotation, 0)]
                 if allow_rotate:
                     trials.append((old_rotation + 90.0, 1))
@@ -1270,20 +1289,17 @@ class SilkRefPlacer:
                 own_poly = own_courtyard.get((id(footprint), side))
                 fallback = own_poly is not None and geom0.intersects(own_poly)
                 status = "under_component_fallback" if fallback else "unplaceable"
-                result.placements.append(
-                    RefPlacement(
-                        footprint_ref=ref,
-                        layer=ref_text.layer,
-                        old_position=original_center,
-                        new_position=original_center,
-                        old_rotation=old_rotation,
-                        new_rotation=old_rotation,
-                        status=status,
-                        reason=last_reason or "no collision-free candidate within search radius",
-                        origin=placement_origin,
-                    )
+                return RefPlacement(
+                    footprint_ref=ref,
+                    layer=ref_text.layer,
+                    old_position=original_center,
+                    new_position=original_center,
+                    old_rotation=old_rotation,
+                    new_rotation=old_rotation,
+                    status=status,
+                    reason=last_reason or "no collision-free candidate within search radius",
+                    origin=placement_origin,
                 )
-                continue
 
             dynamic[side].append((chosen_geom, ref))
             low_assoc = chosen_margin is not None and chosen_margin < ASSOCIATION_MARGIN_MM
@@ -1301,39 +1317,65 @@ class SilkRefPlacer:
             )
             if moved:
                 local = entry["inverse"](chosen_point)
-                result.placements.append(
-                    RefPlacement(
-                        footprint_ref=ref,
-                        layer=ref_text.layer,
-                        old_position=original_center,
-                        new_position=chosen_point,
-                        old_rotation=old_rotation,
-                        new_rotation=chosen_rotation,
-                        status="moved",
-                        reason=assoc_reason,
-                        new_local_position=local,
-                        association_margin_mm=chosen_margin,
-                        low_association=low_assoc,
-                        origin=placement_origin,
-                    )
+                entry.update(
+                    geom0=chosen_geom, original_center=chosen_point, old_rotation=chosen_rotation
                 )
-            else:
-                result.placements.append(
-                    RefPlacement(
-                        footprint_ref=ref,
-                        layer=ref_text.layer,
-                        old_position=original_center,
-                        new_position=original_center,
-                        old_rotation=old_rotation,
-                        new_rotation=old_rotation,
-                        status="unchanged",
-                        reason=assoc_reason,
-                        association_margin_mm=chosen_margin,
-                        low_association=low_assoc,
-                        origin=placement_origin,
-                    )
-                )
+            return RefPlacement(
+                footprint_ref=ref,
+                layer=ref_text.layer,
+                old_position=original_center,
+                new_position=chosen_point if moved else original_center,
+                old_rotation=old_rotation,
+                new_rotation=chosen_rotation,
+                status="moved" if moved else "unchanged",
+                reason=assoc_reason,
+                new_local_position=local if moved else None,
+                association_margin_mm=chosen_margin,
+                low_association=low_assoc,
+                origin=placement_origin,
+            )
 
+        pending = [e for e in entries if only is None or e["footprint"].reference in only]
+        final: dict[str, RefPlacement] = {}
+        # Bounded (Issue #9957).  Every candidate is tested against the other
+        # references' *current* boxes, so a move never lands on a position that
+        # already clears, and a candidate's courtyard margin is fixed for the
+        # whole call: a clear reference moves only to a strictly larger margin,
+        # at most once per candidate.  The cap covers what that leaves open.
+        # ``clears`` buffers the candidate alone, so for two labels drawn at
+        # different angles the test is not exactly symmetric within about two
+        # microns of the clearance boundary, and a reference could be
+        # displaced to a lower margin there.
+        for _round in range(_SETTLE_MAX_ROUNDS):
+            retry = []
+            moved_this_round = False
+            for entry in pending:
+                placement = place(entry)
+                ref = placement.footprint_ref
+                if placement.status == "moved":
+                    moved_this_round = True
+                    if ref in final:
+                        placement = replace(
+                            placement,
+                            old_position=final[ref].old_position,
+                            old_rotation=final[ref].old_rotation,
+                        )
+                    final[ref] = placement
+                elif ref not in final or final[ref].status != "moved":
+                    final[ref] = placement
+                if placement.low_association or placement.status in (
+                    "unplaceable",
+                    "under_component_fallback",
+                ):
+                    retry.append(entry)
+            if not settle or not moved_this_round:
+                break
+            pending = retry
+        else:
+            # Ran out of rounds while references were still moving.
+            if pending:
+                result.unsettled_refs = [e["footprint"].reference for e in pending]
+        result.placements = list(final.values())
         return result
 
     def refs_blocked_by(

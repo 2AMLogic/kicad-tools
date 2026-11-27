@@ -61,6 +61,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from kicad_tools.drc.geometric import GeometricDRCResult
     from kicad_tools.drc.violation import DRCViolation
+    from kicad_tools.router.link_router import _BoardModel
+    from kicad_tools.schema.pcb import PCB
 
 __all__ = [
     "DEFAULT_ORACLE_ROUNDS",
@@ -1336,6 +1338,44 @@ def _pad_size(pcb: Any, ref: str, number: str) -> tuple[float, float] | None:
     return None
 
 
+def _split_pour_via_link(
+    pcb: PCB, model: _BoardModel, net: str, number: int, main: dict, stranded: dict
+) -> OracleLink | None:
+    """Join two filled islands through barrels already bonded on the same layer."""
+    from shapely.geometry import MultiPoint, Point  # type: ignore[import-untyped]
+    from shapely.ops import nearest_points, unary_union  # type: ignore[import-untyped]
+
+    sites = [
+        Point(via.position)
+        for via in pcb.vias_in_net(number)
+        if via.via_type in (None, "through") and set(via.layers) == {"F.Cu", "B.Cu"}
+    ]
+    if len(sites) < 2:
+        return None
+    pairs = []
+    for layer in sorted(main.keys() & stranded.keys()):
+        fills = [geom for owner, geom in model.fills.get(layer, ()) if owner == number]
+        if len(fills) < 2:
+            continue
+        filled = unary_union(fills)
+        bonded = [site for site in sites if filled.covers(site)]
+        starts = sorted((p.x, p.y) for p in bonded if stranded[layer].covers(p))
+        ends = sorted((p.x, p.y) for p in bonded if main[layer].covers(p))
+        if starts and ends:
+            a, b = nearest_points(MultiPoint(starts), MultiPoint(ends))
+            pairs.append((a.distance(b), (a.x, a.y), (b.x, b.y)))
+    if not pairs:
+        return None
+    _, start, end = min(pairs)
+    ox, oy = pcb.board_origin
+
+    def endpoint(xy: tuple[float, float]) -> OracleEndpoint:
+        x, y = xy[0] + ox, xy[1] + oy
+        return OracleEndpoint(f"Via [{net}] at ({x:.6f}, {y:.6f})", "via", net, x, y)
+
+    return OracleLink(net, endpoint(start), endpoint(end))
+
+
 @dataclass
 class PourLinkCloser:
     """Close pour-net links: weld the named pads into their planes, route the rest.
@@ -1387,6 +1427,8 @@ class PourLinkCloser:
     #: route`` reserved for pour pads before signal routing.  The weld tries
     #: them first; ``None`` leaves it unchanged.
     preferred_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None
+    #: Pads for which the last applicable stitch search exhausted its via sites.
+    exhausted_stitch_pads: set[str] = field(default_factory=set, init=False)
     #: Issue #7602: ``run_stitch``'s ``pad_edge_gap`` -- the mask-dam floor a weld
     #: via keeps from every SMD pad (the router's ``min_via_pad_edge_gap``).
     #: ``0`` disables the guard.
@@ -1456,9 +1498,7 @@ class PourLinkCloser:
         self, pcb_path: Path, links: Sequence[OracleLink], banned: frozenset[str]
     ) -> ClosureAttempt:
         attempt = ClosureAttempt()
-        links = canonical_links(links)
-        if self.canonical_clusters:
-            links = self._cluster_links(pcb_path, links, attempt)
+        links = self.canonical_stranded_links(pcb_path, links, attempt)
         # Issue #6671: footprints the loop withdrew wholesale.
         dropped = banned_footprints(banned)
 
@@ -1518,14 +1558,27 @@ class PourLinkCloser:
         else KiCad's own located endpoints; zone ends are outline corners
         and are skipped.  Used to find kept copper that fenced them in.
         """
-        links = canonical_links(links)
-        if self.canonical_clusters:
-            links = self._cluster_links(pcb_path, links, ClosureAttempt())
+        links = self.canonical_stranded_links(pcb_path, links)
         return [
             (lk.net, end.x, end.y) for lk in links for end in (lk.a, lk.b) if end.kind != "zone"
         ]
 
     # -- canonical clusters (Issue #5934) ---------------------------------------
+
+    def canonical_stranded_links(
+        self, pcb_path: Path, links: Sequence[OracleLink], attempt: ClosureAttempt | None = None
+    ) -> list[OracleLink]:
+        """Use the same stranded pads for welding and for a subsequent reservation.
+
+        KiCad can name a zone at either end of a pad-bearing copper island.
+        Reconstruct its pad only when the physical and native island counts agree.
+        """
+        ordered = canonical_links(links)
+        if self.canonical_clusters:
+            return self._cluster_links(
+                pcb_path, ordered, attempt if attempt is not None else ClosureAttempt()
+            )
+        return ordered
 
     def _cluster_links(
         self, pcb_path: Path, links: Sequence[OracleLink], attempt: ClosureAttempt
@@ -1610,6 +1663,13 @@ class PourLinkCloser:
                     f"reports {counts[net] + 1}; closing KiCad's links as named"
                 )
                 continue
+            # A pad already bonded to one half of a split pour cannot reach
+            # the other half by adding another weld into the same fill.
+            if len(comps) == 2 and clusters == [0, 1]:
+                link = _split_pour_via_link(pcb, model, net, net_number, comps[0], comps[1])
+                if link is not None:
+                    rebuilt[net] = [link]
+                    continue
             # ``comps`` is sorted largest first, so ``comps[0]`` holds the plane.
             # When the plane carries no pad (a pour no pad reaches yet), every
             # pad cluster is stranded from it and all of them are closed.
@@ -1911,6 +1971,11 @@ class PourLinkCloser:
                     for seg in trace_to_track_segments(trace):
                         caps.append((seg.start_x, seg.start_y, seg.end_x, seg.end_y, seg.width / 2))
                 attempt.applied += 1
+        self.exhausted_stitch_pads.difference_update(only)
+        if passes[-1].pads_skipped:
+            self.exhausted_stitch_pads.update(
+                f"{pad.reference}.{pad.pad_number}" for pad, _ in passes[-1].skip_details
+            )
         for pad, reason in passes[-1].pads_skipped:
             attempt.notes.append(f"{pad.net_name} {pad.reference}.{pad.pad_number}: {reason}")
         return {
@@ -1939,7 +2004,7 @@ class PourLinkCloser:
         so a kept ``#plane`` route that left its link reported makes the next
         round try the ``#island`` join -- the intended "try something else".
         """
-        from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
+        from shapely.geometry import LineString, Point
 
         from kicad_tools.router.link_router import (
             LinkRouteRules,

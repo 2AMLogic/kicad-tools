@@ -24,18 +24,22 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, router_cpp
 from kicad_tools.router.grid import RoutingGrid
+from kicad_tools.router.io import load_pads_for_analysis, merge_routes_into_pcb
 from kicad_tools.router.layers import Layer, LayerDefinition, LayerStack, LayerType
-from kicad_tools.router.neck_down import band_safe_width
+from kicad_tools.router.neck_down import band_safe_taper, band_safe_width
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 from kicad_tools.router.via_clearance import same_net_segment_pad_gap_acceptable
+from kicad_tools.schema.pcb import PCB
 
 EDGE = 0.15  # jlcpcb pad_spacing detection edge (#9016)
 WIDTH = 0.2
@@ -425,6 +429,274 @@ def _assert_band_safe_taper(route, c: Pad) -> None:
     assert any(s.width < WIDTH for s in clear), "the taper must still narrow off the pad"
 
 
+def _endpoint_board(
+    tmp_path: Path,
+    endpoints: list[tuple[str, float, float, Layer]],
+    size: tuple[float, float],
+    pitch: float | None = None,
+) -> Path:
+    """Two SMD footprints with optional neighbouring pads for pitch measurement."""
+    footprints = []
+    for index, (ref, x, y, layer) in enumerate(endpoints, 1):
+        copper = layer.kicad_name
+        pad_shape = f'(size {size[0]} {size[1]}) (layers "{copper}")'
+        neighbour = (
+            f'(pad "2" smd rect (at 0 {pitch}) {pad_shape} (net 2 "OTHER"))'
+            if pitch is not None
+            else ""
+        )
+        footprints.append(f'''(footprint "Test:Endpoint" (layer "{copper}") (at {x} {y})
+            (uuid "00000000-0000-4000-8000-{index:012d}")
+            (property "Reference" "{ref}" (at 0 -2) (layer "F.SilkS"))
+            (pad "1" smd rect (at 0 0) {pad_shape} (net 1 "SIG"))
+            {neighbour})''')
+    board = tmp_path / "endpoints.kicad_pcb"
+    board.write_text(f"""(kicad_pcb (version 20240108) (generator "test")
+        (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+        (net 0 "") (net 1 "SIG") (net 2 "OTHER")
+        {" ".join(footprints)}
+        (gr_rect (start 0 0) (end 15 10) (stroke (width 0.05) (type solid))
+            (fill none) (layer "Edge.Cuts")))""")
+    return board
+
+
+class TestConversionSegmentParity:
+    """Python and C++ route conversions emit identical segment bytes (#9851).
+
+    The native adapter used to taper each per-cell segment independently
+    while the Python converter merged collinear steps into straight runs
+    and tapered each run once (#972/#1018), so identical A* paths emitted
+    different cut positions, piece counts and widths near every fine-pitch
+    pad (43 vs 57 pieces on this fixture at `7d95adab3`).  Byte-compare
+    the ordered ``Segment.to_sexp`` output of the two converters over the
+    same vertex list -- sorting, or the collinear-merging ``_signature``,
+    would hide exactly that defect.  The fixture is fine-pitch at both
+    ends and the guard off, so the taper (and nothing else) drives the
+    difference.
+    """
+
+    BASE_W = 0.225
+    MIN_W = 0.1016
+
+    def _rules(self) -> DesignRules:
+        return DesignRules(
+            trace_width=self.BASE_W,
+            trace_clearance=0.15,
+            min_trace_width=self.MIN_W,
+            grid_resolution=0.05,
+        )
+
+    def _vertices(self) -> list[tuple[float, float]]:
+        """A 20-step row east from (1, 3.1), then a 10-step 45-degree leg.
+
+        The reproduction shape from the #9851 curation: coordinates on the
+        0.05 mm grid, each rounded to two decimals.
+        """
+        verts = [(1.0, 3.1)]
+        for _ in range(20):
+            x, y = verts[-1]
+            verts.append((round(x + 0.05, 2), y))
+        for _ in range(10):
+            x, y = verts[-1]
+            verts.append((round(x + 0.05, 2), round(y + 0.05, 2)))
+        return verts
+
+    @staticmethod
+    def _sexps(route) -> list[str]:
+        return [s.to_sexp(uuid=f"parity-{i}") for i, s in enumerate(route.segments)]
+
+    @pytest.mark.requires_router_cpp
+    @pytest.mark.parametrize("end_ref", ["U2", "U1"], ids=["distinct-references", "same-reference"])
+    def test_same_path_emits_identical_ordered_segments(self, tmp_path: Path, end_ref: str) -> None:
+        rules = self._rules()
+        grid = RoutingGrid(8, 8, rules, layer_stack=LayerStack.two_layer())
+        board = _endpoint_board(
+            tmp_path,
+            [("U1", 1.0, 3.1, Layer.F_CU), (end_ref, 2.5, 3.6, Layer.F_CU)],
+            (0.7, 0.3),
+            pitch=0.5,
+        )
+        pads = load_pads_for_analysis(board)
+        a, b = sorted((pad for pad in pads if pad.net_name == "SIG"), key=lambda p: p.x)
+        assert a.ref == "U1" and b.ref == end_ref
+        assert a.component_key != b.component_key
+        for pad in pads:
+            grid.add_pad(pad)
+        verts = self._vertices()
+        py_route = _new_route(a)
+        Router(grid, rules)._convert_path_to_route(
+            [(x, y, 0, False) for x, y in verts], py_route, a, b
+        )
+
+        native_grid = CppGrid.from_routing_grid(grid)
+        cpp_finder = CppPathfinder(native_grid, rules)
+        gx, gy = native_grid.world_to_grid(b.x, b.y)
+        segments = [
+            SimpleNamespace(x1=p[0], y1=p[1], x2=q[0], y2=q[1], layer=0, net=NET)
+            for p, q in zip(verts, verts[1:], strict=False)
+        ]
+        cpp_route = cpp_finder._convert_result_to_route(
+            SimpleNamespace(segments=segments, vias=[], goal_gx=gx, goal_gy=gy), a, b, None
+        )
+
+        py_sexps = self._sexps(py_route)
+        assert py_sexps, "the fixture must emit segments"
+        assert len(py_route.segments) > 4, "the fixture must produce multiple taper pieces"
+        assert len({round(s.width, 6) for s in py_route.segments}) > 1, (
+            "the fixture must actually exercise the taper (multiple widths)"
+        )
+        assert self._sexps(cpp_route) == py_sexps
+        assert cpp_finder._narrowest_emit_width(a, b, self.BASE_W) == pytest.approx(self.MIN_W)
+
+    @pytest.mark.requires_router_cpp
+    @pytest.mark.parametrize(
+        "dx,dy,first_end",
+        [
+            (0.0, 0.0, (8.1, 8.0)),
+            (0.006, 0.0, (8.106, 8.0)),
+            (0.0, 0.006, (8.006, 8.0)),
+            (0.006, 0.006, (8.012, 8.0)),
+            (0.01, 0.0, (8.11, 8.0)),
+            (0.0101, 0.0, (8.0, 8.0)),
+            (0.010051, 0.0, (8.0, 8.0)),
+        ],
+        ids=[
+            "centred",
+            "axial",
+            "transverse",
+            "diagonal",
+            "threshold",
+            "above-threshold",
+            "rounds-above",
+        ],
+    )
+    def test_public_route_from_off_grid_source(
+        self, tmp_path: Path, dx: float, dy: float, first_end: tuple[float, float]
+    ) -> None:
+        # Both searches traverse the straight row from (80, 80) to (110, 80).
+        # Only the source pad's displacement from the first grid vertex varies.
+        board = _endpoint_board(
+            tmp_path,
+            [("U1", 8 + dx, 8 + dy, Layer.F_CU), ("U2", 11, 8, Layer.F_CU)],
+            (0.2, 0.2),
+            pitch=0.5,
+        )
+        rules = DesignRules(
+            trace_width=self.BASE_W,
+            min_trace_width=self.MIN_W,
+            trace_clearance=0.12,
+            grid_resolution=0.1,
+        )
+        grid = RoutingGrid(15, 10, rules, layer_stack=LayerStack.two_layer())
+        pads = load_pads_for_analysis(board)
+        for pad in pads:
+            grid.add_pad(pad)
+        start, end = (p for p in pads if p.net_name == "SIG")
+        py = Router(grid, rules, diagonal_routing=True)
+        native = CppPathfinder(CppGrid.from_routing_grid(grid), rules, diagonal_routing=True)
+        for a, b in ((start, end), (end, start)):
+            py_route = py.route(a, b, per_net_timeout=5)
+            native_route = native.route(a, b, per_net_timeout=5)
+            assert py_route is not None and native_route is not None
+            assert self._sexps(py_route) == self._sexps(native_route)
+            assert not py_route.vias and not native_route.vias
+            if a is start:
+                first = py_route.segments[0]
+                assert (first.x1, first.y1) == (round(a.x, 4), round(a.y, 4))
+                assert (first.x2, first.y2) == pytest.approx(first_end)
+                assert round(first.width, 4) == self.MIN_W
+
+    @pytest.mark.requires_router_cpp
+    def test_unidentified_programmatic_pads_keep_the_base_width(self) -> None:
+        rules = self._rules()
+        grid = RoutingGrid(8, 8, rules, layer_stack=LayerStack.two_layer())
+        start = replace(_pad(1.0, 3.0), ref="")
+        end = replace(start, x=3.0)
+        for pad in (start, end, replace(start, y=3.5, pin="2")):
+            grid.add_pad(pad)
+        assert grid.compute_component_pitches() == {"": 0.5}
+        native = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+        route = native.route(start, end, per_net_timeout=5)
+        assert route is not None
+        assert {segment.width for segment in route.segments} == {self.BASE_W}
+        assert native._narrowest_emit_width(start, end, self.BASE_W) == self.BASE_W
+
+    @pytest.mark.requires_router_cpp
+    @pytest.mark.parametrize(
+        "start_layer,end_layer", [(Layer.F_CU, Layer.B_CU), (Layer.B_CU, Layer.F_CU)]
+    )
+    @pytest.mark.parametrize(
+        "via_x,end_x",
+        [(9, 9.47), (8, 9.47), (9, 9.0)],
+        ids=["terminal-via", "earlier-via", "centred-destination"],
+    )
+    def test_written_route_reaches_pad_on_outgoing_via_layer(
+        self, tmp_path: Path, start_layer: Layer, end_layer: Layer, via_x: int, end_x: float
+    ) -> None:
+        board = _endpoint_board(
+            tmp_path, [("U1", 2, 4, start_layer), ("U2", end_x, 4, end_layer)], (0.23, 0.23)
+        )
+        start, end = load_pads_for_analysis(board)
+        rules = DesignRules(
+            trace_width=0.25,
+            trace_clearance=0.15,
+            via_diameter=0.6,
+            via_drill=0.3,
+            via_clearance=0.15,
+            grid_resolution=1.0,
+        )
+        grid = RoutingGrid(15, 10, rules, layer_stack=LayerStack.two_layer())
+        grid.add_pad(start)
+        grid.add_pad(end)
+        native_grid = CppGrid.from_routing_grid(grid)
+        # Only the vicinity of (via_x, 4) allows vias. The pad at 9.47 is
+        # beyond the ring at 9, so only a tail on its own layer connects it.
+        cols, rows = native_grid.cols, native_grid.rows
+        gx, gy = native_grid.world_to_grid(via_x, 4)
+        blocked = [
+            y * cols + x
+            for y in range(rows)
+            for x in range(cols)
+            if (x - gx) ** 2 + (y - gy) ** 2 > 1
+        ]
+        native_grid._impl.add_rule_area_keepout(
+            False, True, [0, 1], 0, 0, cols, rows, blocked, False, [], []
+        )
+        route = CppPathfinder(native_grid, rules).route(start, end, per_net_timeout=5)
+        assert route is not None
+
+        board.write_text(merge_routes_into_pcb(board.read_text(), route.to_sexp()))
+        saved = PCB.load(board)
+        [via] = saved.vias
+        assert via.position == (via_x, 4)
+        expected = [(start_layer.kicad_name, (2, 4), via.position)]
+        if end_x != via_x:
+            expected.append((end_layer.kicad_name, via.position, (end_x, 4)))
+        assert [(s.layer, s.start, s.end) for s in saved.segments] == expected
+
+    @pytest.mark.requires_router_cpp
+    @pytest.mark.parametrize(
+        "tail_x,tail_net", [(2.25, NET), (2.0, NET + 1)], ids=["coordinate-gap", "different-net"]
+    )
+    def test_tail_cannot_extend_an_unconnected_run(self, tail_x: float, tail_net: int) -> None:
+        rules = self._rules()
+        grid = RoutingGrid(8, 8, rules, layer_stack=LayerStack.two_layer())
+        start, end = _pad(1, 3), _pad(2.47, 3)
+        native = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+        result = SimpleNamespace(
+            segments=[
+                SimpleNamespace(x1=1.0, y1=3.0, x2=2.0, y2=3.0, layer=0, net=NET),
+                SimpleNamespace(x1=tail_x, y1=3.0, x2=end.x, y2=3.0, layer=0, net=tail_net),
+            ],
+            vias=[],
+        )
+        route = native._convert_result_to_route(result, start, end, None)
+        assert [(s.x1, s.x2, s.net) for s in route.segments] == [
+            (1, 2, NET),
+            (tail_x, end.x, tail_net),
+        ]
+
+
 class TestBandFallbackRetry:
     """The gate-off retry fires only on gate-caused failures, and is counted
     (#9019 review, section 3).
@@ -643,3 +915,147 @@ class TestBandFallbackRetry:
         assert getattr(cpp, "_own_net_band_fallbacks", 0) == 1
         assert sum("gate suspended" in r.message for r in caplog.records) == 1
         assert len(fallback_calls) == 1
+
+
+class TestDiagonalCornerFuse:
+    """``band_safe_taper``: a taper piece no width can lift out of the band
+    is fused into one that reaches the pad (board 06 U4.1, #9019).
+
+    The board 06 seed-42 grid route approaches U4.1 (0.7 x 0.3 mm, MIPI_CLK+)
+    on a 45-degree diagonal past the pad's corner.  The #1018 taper cuts that
+    diagonal into 0.025 mm pieces; the one ending at (125.15, 115.15) is
+    0.200 mm from the pad and sits in ``(0, 0.15)`` at the taper width 0.1627
+    AND at the base width 0.225, and since it does not itself touch the pad
+    the fab view grades its end cap as a 0.14229 mm slit.
+    """
+
+    U41 = [(125.15, 115.35, 125.85, 115.65)]
+    # (start, end, width) as the seed-42 C++ conversion emitted them.
+    PIECES = [
+        ((125.1, 115.1), (125.125, 115.125), 0.167),
+        ((125.125, 115.125), (125.15, 115.15), 0.1627),
+        ((125.15, 115.15), (125.175, 115.175), 0.1583),
+        ((125.175, 115.175), (125.2, 115.2), 0.154),
+        ((125.2, 115.2), (125.225, 115.225), 0.1496),
+        ((125.225, 115.225), (125.275, 115.275), 0.225),
+        ((125.275, 115.275), (125.3, 115.3), 0.1365),
+        ((125.3, 115.3), (125.325, 115.325), 0.1321),
+        ((125.325, 115.325), (125.35, 115.35), 0.1278),
+    ]
+
+    def _ok(self, a, b, w) -> bool:
+        return same_net_segment_pad_gap_acceptable(a, b, w / 2, self.U41, EDGE)
+
+    def test_u41_pieces_are_fused_out_of_the_band(self) -> None:
+        a, b, w = self.PIECES[1]
+        assert not self._ok(a, b, w), "taper width must sit in the band"
+        assert not self._ok(a, b, 0.225), "base width must sit in the band too"
+        out = band_safe_taper(list(self.PIECES), self.U41, EDGE)
+        assert all(self._ok(s, e, w) for s, e, w in out)
+        # Contiguous and covering the same centerline.
+        assert out[0][0] == self.PIECES[0][0] and out[-1][1] == self.PIECES[-1][1]
+        assert all(x[1] == y[0] for x, y in zip(out, out[1:], strict=False))
+        # The fused piece is never wider than the pieces it replaced.
+        assert out[0] == ((125.1, 115.1), (125.3, 115.3), 0.1365)
+
+    def test_clean_taper_is_unchanged(self) -> None:
+        pieces = [((0.0, 3.0), (0.05, 3.0), 0.2), ((0.05, 3.0), (0.1, 3.0), 0.15)]
+        assert band_safe_taper(pieces, self.U41, EDGE) == pieces
+        assert band_safe_taper(pieces, None, EDGE) == pieces
+        assert band_safe_taper(pieces, self.U41, 0.0) == pieces
+
+    def test_fuse_never_crosses_a_corner(self) -> None:
+        # The in-band piece's only touching neighbour is round a corner:
+        # fusing across it would change the centerline, so it stands.
+        bent = [self.PIECES[1], ((125.15, 115.15), (125.15, 115.4), 0.1583)]
+        assert band_safe_taper(bent, self.U41, EDGE) == bent
+
+    # A conversion-level copy of the U4.1 shape, so a call site that drops
+    # the fuse fails here on both backends.
+    def _conv_rules(self) -> DesignRules:
+        return DesignRules(
+            trace_width=0.225,
+            trace_clearance=0.15,
+            min_trace_width=0.1016,
+            grid_resolution=0.05,
+            same_net_pad_gap_band_edge_mm=EDGE,
+        )
+
+    def _conv_pads(self) -> tuple[Pad, Pad, Pad]:
+        # End pad B: 0.7 x 0.3 like U4.1, with a fine-pitch neighbour B2.
+        a = _pad(1.0, 3.1, 0.3, 0.3)
+        b = _pad(5.5, 3.5, 0.7, 0.3)
+        b2 = Pad(
+            x=5.5, y=4.1, width=0.7, height=0.3, net=NET + 1, net_name="N2",
+            layer=Layer.F_CU, ref="U1", pin="2",
+        )  # fmt: skip
+        return a, b, b2
+
+    def _conv_path(self) -> list[tuple[float, float, int, bool]]:
+        row = [(round(1.0 + 0.05 * i, 2), 3.1, 0, False) for i in range(83)]  # to x=5.1
+        diag = [(round(5.1 + 0.05 * i, 2), round(3.1 + 0.05 * i, 2), 0, False) for i in range(1, 9)]
+        return row + diag
+
+    def _assert_fused(self, route, b: Pad) -> None:
+        box = [(b.x - b.width / 2, b.y - b.height / 2, b.x + b.width / 2, b.y + b.height / 2)]
+        diagonal = [s for s in route.segments if s.x1 != s.x2 and s.y1 != s.y2]
+        assert any(s.width < 0.225 for s in diagonal), "fixture must exercise the taper"
+        for s in route.segments:
+            assert same_net_segment_pad_gap_acceptable(
+                (s.x1, s.y1), (s.x2, s.y2), s.width / 2, box, EDGE
+            ), f"segment {s.x1},{s.y1}->{s.x2},{s.y2} w{s.width} sits in the band"
+
+    def _python_route(self):
+        rules = self._conv_rules()
+        grid = RoutingGrid(width=8.0, height=6.0, rules=rules, layer_stack=LayerStack.two_layer())
+        a, b, b2 = self._conv_pads()
+        for p in (a, b, b2):
+            grid.add_pad(p)
+        router = Router(grid, rules, diagonal_routing=True)
+        assert router.rules.should_apply_neck_down(b.ref, 0.6), "fixture must be fine-pitch"
+        route = _new_route(a)
+        router._convert_path_to_route(self._conv_path(), route, a, b)
+        return route, b
+
+    def test_python_conversion_fuses_the_corner_piece(self) -> None:
+        route, b = self._python_route()
+        self._assert_fused(route, b)
+
+    @pytest.mark.requires_router_cpp
+    def test_cpp_conversion_fuses_across_cells(self) -> None:
+        py_route, b = self._python_route()
+        self._assert_fused(py_route, b)
+        rules = self._conv_rules()
+        a, b, b2 = self._conv_pads()
+        pitches = {"U1": 0.6}
+        finder = SimpleNamespace(
+            _rules=rules,
+            _grid=SimpleNamespace(
+                num_layers=1,
+                index_to_layer=lambda i: (Layer.F_CU.value, Layer.B_CU.value)[i],
+                resolution=0.05,
+                _py_grid=SimpleNamespace(_pads=[a, b, b2]),
+            ),
+            _get_component_pitches=lambda: pitches,
+        )
+        # The native adapter passes one segment per grid cell (the Python
+        # router merges collinear steps first): the fuse must span cells.
+        cells = [(x, y) for x, y, _layer, _via in self._conv_path()]
+        result = SimpleNamespace(
+            segments=[
+                SimpleNamespace(x1=p[0], y1=p[1], x2=q[0], y2=q[1], layer=0, net=NET)
+                for p, q in zip(cells, cells[1:], strict=False)
+            ],
+            vias=[],
+        )
+        cpp_route = CppPathfinder._convert_result_to_route(finder, result, a, b, None)
+        self._assert_fused(cpp_route, b)
+        # The fuse spans grid cells: one diagonal piece longer than a cell.
+        cell = math.hypot(0.05, 0.05)
+        assert any(
+            s.x1 != s.x2 and s.y1 != s.y2 and math.hypot(s.x2 - s.x1, s.y2 - s.y1) > cell + 1e-6
+            for s in cpp_route.segments
+        ), "the in-band piece must be fused across cells"
+        # Byte parity is not asserted: the native adapter tapers per cell and
+        # Python per merged run, so the taper cut positions differ (#9851).
+        # Both must clear the band, checked above.

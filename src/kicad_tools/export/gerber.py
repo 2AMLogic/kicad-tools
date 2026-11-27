@@ -79,7 +79,7 @@ def _pcb_has_filled_zones(pcb_path: Path) -> bool:
 # ordinal distinguishes these from per-pad/per-via ``(layers "F.Cu" ...)``
 # lists, and the type token guards against ``(net 4 "...")`` entries.
 _COPPER_LAYER_DEF_RE = re.compile(
-    r'\(\s*\d+\s+"((?:F|B|In\d+)\.Cu)"\s+(?:signal|power|mixed|jumper)\b'
+    r'\(\s*\d+\s+(?:"((?:F|B|In\d+)\.Cu)"|((?:F|B|In\d+)\.Cu))\s+(?:signal|power|mixed|jumper)\b'
 )
 
 
@@ -153,7 +153,7 @@ def _pcb_copper_layers(pcb_path: Path) -> list[str]:
         )
         return fallback
 
-    found = set(_COPPER_LAYER_DEF_RE.findall(text))
+    found = {m[1] or m[2] for m in _COPPER_LAYER_DEF_RE.finditer(text)}
     if not found:
         logger.warning(
             "No copper layer definitions found in %s; assuming 2-layer (F.Cu, B.Cu)",
@@ -236,13 +236,15 @@ def _source_date_epoch() -> datetime | None:
         return None
 
 
-def _normalize_gerber_timestamps(output_dir: Path) -> list[str]:
-    """Rewrite ``%TF.CreationDate`` stamps to ``SOURCE_DATE_EPOCH`` when set.
+def _normalize_gerber_timestamps(output_dir: Path, epoch: datetime | None = None) -> list[str]:
+    """Rewrite ``%TF.CreationDate`` stamps to *epoch* (or ``SOURCE_DATE_EPOCH``).
 
-    Returns the file names rewritten.  Without ``SOURCE_DATE_EPOCH`` nothing
-    is touched, so an ordinary export keeps its real plot times.
+    Returns the file names rewritten.  With neither an explicit *epoch* nor
+    ``SOURCE_DATE_EPOCH`` nothing is touched, so an ordinary export keeps its
+    real plot times.
     """
-    epoch = _source_date_epoch()
+    if epoch is None:
+        epoch = _source_date_epoch()
     if epoch is None:
         return []
     stamp = epoch.strftime("%Y-%m-%dT%H:%M:%S+00:00")
@@ -666,6 +668,11 @@ class GerberConfig:
     # drill files after creating the zip archive so only the zip remains.
     clean_after_zip: bool = True
 
+    # Issue #10174: explicit UTC time to stamp into the Gerbers' creation-date
+    # attributes (and to switch the zip to fixed member metadata).  ``None``
+    # defers to ``SOURCE_DATE_EPOCH``; with neither, real plot times are kept.
+    source_date_epoch: datetime | None = None
+
     # Issue #6078: kicad-cli plots the zone fill SAVED in the board (we do
     # not pass ``--check-zones``).  Before plotting, check that the saved
     # copper is no less connected than a fresh fill, and refuse to export a
@@ -939,7 +946,10 @@ class GerberExporter:
         # Issue #9536: with SOURCE_DATE_EPOCH anchored, rewrite the Gerber
         # CreationDate stamps before any hashing or zipping sees them, so a
         # repeated export writes byte-identical members.
-        _normalize_gerber_timestamps(out_dir)
+        # Issue #10174: an explicit ``config.source_date_epoch`` (readiness
+        # supplies one) takes precedence over the environment.
+        epoch = config.source_date_epoch or _source_date_epoch()
+        _normalize_gerber_timestamps(out_dir, epoch)
 
         # Create zip if requested
         if config.create_zip:
@@ -947,7 +957,7 @@ class GerberExporter:
                 if not progress_callback(current_step / total_steps, "Creating zip archive", True):
                     return out_dir
             zip_path = out_dir / config.zip_name
-            self._create_zip(out_dir, zip_path)
+            self._create_zip(out_dir, zip_path, reproducible=epoch is not None)
 
             # Clean up individual files after zipping when requested
             if config.clean_after_zip:
@@ -971,6 +981,7 @@ class GerberExporter:
         layers: list[str] | None = None,
         generate_drill: bool | None = None,
         create_zip: bool | None = None,
+        source_date_epoch: datetime | None = None,
     ) -> Path:
         """
         Export Gerbers using manufacturer preset.
@@ -993,6 +1004,9 @@ class GerberExporter:
             create_zip: ``False`` leaves the loose Gerber/drill files in
                 ``output_dir`` and returns the directory; ``True`` zips them.
                 ``None`` keeps the preset value (zip, loose files removed).
+            source_date_epoch: Aware UTC time stamped into the Gerbers instead
+                of the plot time (Issue #10174); ``None`` follows
+                ``SOURCE_DATE_EPOCH``.
 
         Returns:
             Path to the zip file when zipping, otherwise the output directory
@@ -1025,6 +1039,8 @@ class GerberExporter:
             config = replace(config, generate_drill=generate_drill)
         if create_zip is not None:
             config = replace(config, create_zip=create_zip)
+        if source_date_epoch is not None:
+            config = replace(config, source_date_epoch=source_date_epoch)
         return self.export(config, output_dir, progress_callback=progress_callback)
 
     def _export_gerbers(self, config: GerberConfig, output_dir: Path) -> None:
@@ -1103,6 +1119,21 @@ class GerberExporter:
                     "Compare `kicad-cli pcb drc` with and without --refill-zones on the board",
                 ],
             )
+
+    def plot_saved(self, config: GerberConfig, output_dir: Path) -> None:
+        """Plot the copper exactly as the board saves it, with ``config``'s options.
+
+        The same plot command ``export`` runs, and nothing else: no safety-net
+        fill of outlined zones (issue #2516) and no saved-fill check (#6078),
+        because a reviewed-copper reference must show the copper that was saved,
+        not what an export would make of it (Issue #10492). Only the Gerber
+        plot runs; drill files are not compared.
+        """
+        output_dir.mkdir(parents=True, exist_ok=True)
+        self._export_gerbers_impl(config, output_dir, self.pcb_path)
+        # The same stamping ``export`` applies, so a recorded reference digest
+        # is reproducible under SOURCE_DATE_EPOCH like the package's own.
+        _normalize_gerber_timestamps(output_dir, config.source_date_epoch or _source_date_epoch())
 
     def _export_gerbers_impl(
         self,
@@ -1379,13 +1410,19 @@ class GerberExporter:
                 logger.debug(f"Cleaned up: {file.name}")
         logger.info(f"Cleaned individual gerber files, kept {zip_path.name}")
 
-    def _create_zip(self, source_dir: Path, zip_path: Path) -> None:
-        """Create zip file from directory contents."""
+    def _create_zip(
+        self, source_dir: Path, zip_path: Path, reproducible: bool | None = None
+    ) -> None:
+        """Create zip file from directory contents.
+
+        ``reproducible`` writes fixed member metadata; ``None`` follows
+        ``SOURCE_DATE_EPOCH``.
+        """
         # Remove existing zip
         if zip_path.exists():
             zip_path.unlink()
 
-        repro = _source_date_epoch() is not None
+        repro = _source_date_epoch() is not None if reproducible is None else reproducible
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for file in sorted(source_dir.iterdir(), key=lambda p: p.name):
                 if file.is_file() and file != zip_path:

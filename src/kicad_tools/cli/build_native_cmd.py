@@ -454,7 +454,11 @@ def _extension_build_hint(source_dir: Path | None) -> str:
     ``CMakeLists.txt`` and that extension's C++ source are both present;
     otherwise the command cannot help and the Python fallback is in use.
     """
-    if source_dir is not None and _get_project_root() is not None:
+    if _get_project_root() is None:
+        return (
+            "optional, using Python fallback. Native build requires a kicad-tools source checkout"
+        )
+    if source_dir is not None:
         return "build with: kct build-native"
     return "optional; Python fallback in use"
 
@@ -573,6 +577,7 @@ def build_native(
     """
     result = BuildResult(success=False)
     router_dir = _get_package_root() / "router"
+    project_root = _get_project_root()
 
     # Check if already installed (unless force).
     #
@@ -593,10 +598,9 @@ def build_native(
                 # this command silently never installed placement_cpp (and
                 # never even built drc_cpp) in the first place.
                 router_stale = _is_so_stale(router_dir)
-                if (
-                    router_stale
-                    or not _placement_backend_up_to_date()
-                    or not _drc_backend_up_to_date()
+                if router_stale or (
+                    project_root is not None
+                    and (not _placement_backend_up_to_date() or not _drc_backend_up_to_date())
                 ):
                     if verbose:
                         print("C++ source is newer than the installed extension -- rebuilding.")
@@ -658,7 +662,6 @@ def build_native(
 
     # Step 3: Find source directory
     # Try to find root CMakeLists.txt first (development checkout)
-    project_root = _get_project_root()
     source_dir: Path
 
     if project_root:
@@ -841,9 +844,8 @@ def build_native(
                 f"DRC C++ extension was built but could not be installed: {type(e).__name__}: {e}"
             )
 
-        # Issue #8519: say so when placement/DRC source exists but no
-        # extension was installed (router-only fallback build, or a silent
-        # compile failure) instead of leaving ``--check`` to report it later.
+        # A checkout's root CMake project builds both optional targets.
+        # Missing output from a configured target is a real build warning.
         for label, so_path, failed, src_dir in (
             (
                 "Placement",
@@ -853,14 +855,11 @@ def build_native(
             ),
             ("DRC", result.drc_so_path, drc_install_failed, _get_drc_cpp_source_dir()),
         ):
-            if so_path is not None or failed or src_dir is None:
+            if project_root is None or so_path is not None or failed or src_dir is None:
                 continue
-            if project_root is None:
-                reason = "no root CMakeLists.txt was found, so only the router was built"
-            else:
-                reason = "the CMake build produced no extension (check the compiler output)"
             result.warnings.append(
-                f"{label} C++ extension was not built: {reason}. "
+                f"{label} C++ extension was not built: the CMake build produced no extension "
+                "(check the compiler output). "
                 f"The pure-Python {label.lower()} fallback will be used."
             )
 
@@ -1138,6 +1137,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result.to_dict(), indent=2))
     else:
         print(format_result_text(result))
+        if result.success and _get_project_root() is None:
+            print(
+                "Building the optional placement and DRC extensions requires a kicad-tools "
+                "source checkout. Their Python fallbacks are available in the installed package."
+            )
 
     return 0 if result.success else 1
 

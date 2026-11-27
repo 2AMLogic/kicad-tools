@@ -18,11 +18,15 @@ import argparse
 import contextlib
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kicad_tools.cli.format_options import FORMAT_JSON, add_format_flag, emit_json
 
+if TYPE_CHECKING:
+    from kicad_tools.creepage.output_audit import CreepageAudit
 
-def _fail(as_json: bool, pcb: str, message: str, *, text: str | None = None) -> int:
+
+def _fail(as_json: bool, pcb: str, message: str, *, text: str | None = None, **details) -> int:
     """Report an optimize-traces failure as a document (JSON) or prose (text).
 
     ``text`` overrides the conventional ``Error: <message>`` prose for the one
@@ -37,6 +41,7 @@ def _fail(as_json: bool, pcb: str, message: str, *, text: str | None = None) -> 
                 "error": message,
                 "saved": False,
                 "success": False,
+                **details,
             }
         )
     else:
@@ -222,58 +227,24 @@ def _make_drc_verifier(rules_from: Path):
     return verify
 
 
-def _make_creepage_verifier(args):
-    """Board-text -> ``{"netA|netB|layer": 1}`` for un-waived failing pairs.
+def _make_creepage_verifier(args) -> "CreepageAudit":
+    """Board-text -> ``{"netA|netB|layer": shortfall units}`` for un-waived failing pairs.
 
     Runs the same audit as ``kct creepage`` (same voltage map, standard,
     pollution degree and material group; same-footprint and attach-zone
-    waivers on) on the candidate board (Issue #8632).  ``None`` if it cannot run.
+    waivers on) on the candidate board (Issue #8632).  Counts are per-pair
+    shortfall, so a rewrite that deepens an already-failing pair is a
+    regression too (Issue #9640).  ``None`` if it cannot run.
     """
-    import contextlib
-    import io
-    import json
-    import tempfile
-    from types import SimpleNamespace
+    from kicad_tools.creepage.output_audit import CreepageAudit
 
-    from kicad_tools.cli.commands.creepage import run_creepage_command
-
-    def verify(board_text: str) -> dict[str, int] | None:
-        try:
-            with tempfile.TemporaryDirectory(prefix="kct_optcreep_") as td:
-                board = Path(td) / "creep.kicad_pcb"
-                board.write_text(board_text)
-                ns = SimpleNamespace(
-                    pcb=str(board),
-                    format="json",
-                    min=None,
-                    standard=args.creepage_standard,
-                    working_voltage=None,
-                    pollution_degree=args.pollution_degree,
-                    material_group=args.material_group,
-                    voltage_map=args.voltage_map,
-                    census_threshold=args.hv_threshold,
-                    waive_same_footprint=True,
-                    waive_attach_zone=True,
-                    witness=False,
-                    net_class="HV",
-                    net_class_map=None,
-                )
-                out, err = io.StringIO(), io.StringIO()
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    run_creepage_command(ns)
-                data = json.loads(out.getvalue())
-        except Exception:
-            return None
-        pairs = data.get("pairs")
-        if pairs is None:
-            return None
-        return {
-            f"{p['net_a']}|{p['net_b']}|{p.get('layer')}": 1
-            for p in pairs
-            if not p.get("pass", True) and not p.get("waived")
-        }
-
-    return verify
+    return CreepageAudit(
+        voltage_map=args.voltage_map,
+        standard=args.creepage_standard,
+        pollution_degree=args.pollution_degree,
+        material_group=args.material_group,
+        hv_threshold=args.hv_threshold,
+    )
 
 
 def _kicad_cli_drc_summary(before: dict | None, after: dict | None, has_dru: bool) -> dict:
@@ -301,27 +272,39 @@ def _kicad_cli_drc_summary(before: dict | None, after: dict | None, has_dru: boo
 
 
 def _drc_summary_suffix(stats, cli_drc: dict | None) -> str:
-    """Suffix for the ``DRC errors:`` summary line (Issues #8322, #8419)."""
+    """Suffix for the ``DRC errors:`` summary line (Issues #8322, #8419, #9748)."""
     delta = stats.drc_errors_after - stats.drc_errors_before
     cli_regressed = bool(cli_drc and cli_drc["regression"])
     cli_unchecked = bool(cli_drc and cli_drc["dru_not_evaluated"])
+    # Issue #9748: the line may never claim bare "no regressions" while the
+    # referee was blind to ``mask_to_copper``.  "screened": the conservative
+    # geometric screen ran and its count is inside the totals above;
+    # "not_evaluated": the pure snapshot could not model this board, so the
+    # totals say nothing about mask exposure.  "off" (no cited policy for
+    # this --mfr) changes nothing: ``kct check --mfr`` runs no mask check
+    # for that manufacturer either.
+    mask_note = {
+        "screened": "incl. mask_to_copper screen",
+        "not_evaluated": "mask_to_copper not evaluated",
+    }.get(getattr(stats, "drc_mask_screen", "off"))
+    tail = f"; {mask_note}" if mask_note else ""
     if cli_regressed:
         # Never claim "no regressions" on the in-process referee alone.
-        return "(in-process referee only; see kicad-cli line below)"
+        return f"(in-process referee only; see kicad-cli line below{tail})"
     if cli_unchecked:
-        return "(DRC referee does not evaluate project .kicad_dru rules)"
+        return f"(DRC referee does not evaluate project .kicad_dru rules{tail})"
     if delta > 0 and cli_drc and cli_drc["available"]:
         # kicad-cli arbitrated and found no regression: the in-process delta
         # is advisory only, never "N new errors".
         return (
             f"(in-process advisory: {delta} more; kicad-cli reports no regression, "
-            f"{stats.nets_rolled_back} nets rolled back)"
+            f"{stats.nets_rolled_back} nets rolled back{tail})"
         )
     if delta > 0:
-        return f"({delta} new errors, {stats.nets_rolled_back} nets rolled back)"
+        return f"({delta} new errors, {stats.nets_rolled_back} nets rolled back{tail})"
     if stats.nets_rolled_back > 0:
-        return f"(no regressions, {stats.nets_rolled_back} nets rolled back)"
-    return "(no regressions)"
+        return f"(no regressions, {stats.nets_rolled_back} nets rolled back{tail})"
+    return f"(no regressions{tail})"
 
 
 def _kicad_cli_drc_counts(board: Path, rules_from: Path | None = None) -> dict[str, int] | None:
@@ -373,22 +356,11 @@ def _run_pour_slot_pass(written: Path, rules_from: Path | None, pack: bool = Fal
     import tempfile
 
     from kicad_tools.optim.pour_slot_cleanup import cleanup_pour_slots
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
     from kicad_tools.schema.pcb import PCB
 
     pcb = PCB.load(str(written))
-    clearances: dict[str, float] = {}
-    try:
-        from kicad_tools.core.project_clearance import authored_netclass_clearances
-        from kicad_tools.validate.rules.netclass_clearance_copper import load_project
-
-        project = load_project(written)
-        if project is not None:
-            names = [n.name for n in pcb.nets.values() if n.name]
-            clearances = {
-                n: v.clearance for n, v in authored_netclass_clearances(project, names).items()
-            }
-    except Exception:  # advisory-grade input: fall back to the zone clearance
-        clearances = {}
+    clearances = BoardClearanceRules.from_board(rules_from or written)
 
     def referee(candidate):
         with tempfile.TemporaryDirectory(prefix="kct_slotref_") as td:
@@ -400,19 +372,39 @@ def _run_pour_slot_pass(written: Path, rules_from: Path | None, pack: bool = Fal
     summary = result.to_dict()
     if result.changed:
         pcb.save(str(written))
-        _refill_written_board(written)
+        _refill_written_board(written, rules_from=rules_from)
     return summary
 
 
-def _refill_written_board(written: Path) -> tuple[bool, str | None]:
+def _refill_written_board(written: Path, rules_from: Path | None = None) -> tuple[bool, str | None]:
     """Refill zones in the written board; never raises (Issue #8286).
+
+    With ``rules_from`` the refill runs on a scratch copy beside that project's
+    ``.kicad_pro``/``.kicad_dru`` (the rules the DRC referee uses) and the
+    refilled board is copied back, so the saved fill matches the selected
+    project rather than whatever sits beside the board (Issue #10121).
 
     Returns ``(refilled, error)``; ``error`` is None on success.
     """
+    import shutil
+    import tempfile
+
     from kicad_tools.cli.runner import run_refill_zones
 
     try:
-        result = run_refill_zones(written)
+        if rules_from is None:
+            result = run_refill_zones(written)
+        else:
+            with tempfile.TemporaryDirectory(prefix="kct_refill_") as td:
+                stage = Path(td) / written.name
+                shutil.copy2(written, stage)
+                for suffix in (".kicad_pro", ".kicad_dru"):
+                    src = rules_from.with_suffix(suffix)
+                    if src.exists():
+                        shutil.copy2(src, stage.with_suffix(suffix))
+                result = run_refill_zones(stage)
+                if result.success:
+                    shutil.copy2(stage, written)
     except Exception as e:  # degrade like check_cmd: warn, exit code unchanged
         return False, str(e)
     if result.success:
@@ -420,7 +412,7 @@ def _refill_written_board(written: Path) -> tuple[bool, str | None]:
     return False, result.stderr.strip() or "unknown error"
 
 
-def _build_collision_checker(pcb_path: Path):
+def _build_collision_checker(pcb_path: Path, project_path: Path | None = None):
     """Build a collision checker plus a grid-synced optimize function factory.
 
     Loads the board (existing routes included, netclass / ``.kicad_dru``
@@ -438,6 +430,7 @@ def _build_collision_checker(pcb_path: Path):
     with contextlib.redirect_stdout(sys.stderr):
         router, _net_map = load_pcb_for_routing(
             str(pcb_path),
+            project_path=project_path,
             rules=_declared_design_rules(pcb_path),
             router_class_floors=False,
             validate_drc=False,
@@ -536,14 +529,43 @@ def _creepage_keys(args, stats) -> dict:
     }
 
 
-def _make_grid_synced_optimize_fn(router, optimizer):
+def _project_netclass_widths(
+    pcb_path: Path,
+    project_arg: str | None,
+    net_names,
+) -> dict[str, float]:
+    """Resolve non-``Default`` project netclass ``track_width`` values (#10189)."""
+    import json
+
+    from kicad_tools.core.project_clearance import authored_netclass_widths
+
+    base = Path(project_arg) if project_arg else pcb_path
+    pro_path = base.with_suffix(".kicad_pro")
+    if not pro_path.is_file():
+        return {}
+    project = json.loads(pro_path.read_text(encoding="utf-8"))
+    resolved = authored_netclass_widths(project, net_names)
+    return {name: nw.width for name, nw in resolved.items() if nw.width > 0}
+
+
+def _make_grid_synced_optimize_fn(
+    router,
+    optimizer,
+    project_widths: dict[str, float] | None = None,
+    checker=None,
+):
     """Return ``(optimize, commit)`` wrapping ``optimizer.optimize_segments``.
 
-    * ``optimize``: net identity (Issue #8214 review).  The file parser yields
+    * ``optimize``: net identity (Issue #8214 review) and project netclass
+      ``track_width`` application (Issue #10189).  The file parser yields
       net id 0 for every segment on a KiCad-10 name-only board, while the grid
       carries the loader's dialect-normalized ids.  The optimizer excludes
       ``seg.net`` as "own net", so the segments are re-keyed to the grid id
       (looked up by net *name*) for the optimization and restored afterwards.
+      When ``project_widths`` supplies a non-``Default`` class ``track_width``
+      for the net (and at least one optimization pass is enabled), segments are
+      updated to that width -- checking ``checker.path_is_clear`` before
+      widening any segment so tight clearances / pad escapes cannot short.
       It does **not** touch the grid.
     * ``commit(net_name, original, kept)``: static grid (Issue #8214 review).
       Nets are optimized in turn, so net B must be checked against net A's
@@ -561,16 +583,41 @@ def _make_grid_synced_optimize_fn(router, optimizer):
     grid = router.grid
     base_optimize = optimizer.optimize_segments
     by_name = {r.net_name: i for i, r in enumerate(router.existing_routes) if r.net > 0}
+    effective_widths = project_widths if optimizer.config.track_pass_enabled else None
+
+    def _apply_width(items, target_w: float, exclude_net: int):
+        updated = []
+        for s in items:
+            if abs(s.width - target_w) <= 1e-6:
+                updated.append(s)
+            elif (
+                target_w < s.width
+                or checker is None
+                or checker.path_is_clear(s.x1, s.y1, s.x2, s.y2, s.layer, target_w, exclude_net)
+            ):
+                updated.append(replace(s, width=target_w))
+            else:
+                updated.append(s)
+        return updated
 
     def optimize(segs):
         if not segs:
             return base_optimize(segs)
-        idx = by_name.get(segs[0].net_name)
+        net_name = segs[0].net_name
+        target_w = effective_widths.get(net_name) if effective_widths else None
+        idx = by_name.get(net_name)
         if idx is None:
             # Net has no copper in the grid (or neutralised ownership).
-            return base_optimize(segs)
+            work = _apply_width(segs, target_w, -1) if target_w is not None else segs
+            out = base_optimize(work)
+            return _apply_width(out, target_w, -1) if target_w is not None else out
         gid = router.existing_routes[idx].net
-        out = base_optimize([replace(s, net=gid) for s in segs])
+        work = [replace(s, net=gid) for s in segs]
+        if target_w is not None:
+            work = _apply_width(work, target_w, gid)
+        out = base_optimize(work)
+        if target_w is not None:
+            out = _apply_width(out, target_w, gid)
         return [replace(s, net=segs[0].net) for s in out]
 
     def commit(net_name, original, kept):
@@ -654,6 +701,24 @@ def resolve_board_stackup(
     return layers, copper_oz
 
 
+def add_pour_slot_args(parser: argparse.ArgumentParser) -> None:
+    """Register pour-slot cleanup options for both optimize-traces entry points."""
+    parser.add_argument(
+        "--pour-slots",
+        action="store_true",
+        help="Spread parallel different-net tracks that leave a slot in a copper pour "
+        "(the kct check pour_slot advisory). Requires kicad-cli. Each edit is checked "
+        "after zone refill and reverted if any DRC or unconnected count rises.",
+    )
+    parser.add_argument(
+        "--pour-slots-pack",
+        action="store_true",
+        help="With --pour-slots, also pack a pair when spreading it fails. Packing "
+        "reduces the gap to the clearance limit and removes the ground strip "
+        "between the tracks, so no fillable strip (and no pour slot) remains.",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for trace optimization CLI.
 
@@ -685,6 +750,16 @@ Examples:
     kct optimize-traces board.kicad_pcb -o optimized.kicad_pcb --no-45
     kct optimize-traces board.kicad_pcb --dry-run
     kct optimize-traces board.kicad_pcb --drc-aware --mfr jlcpcb --layers 4
+
+Shaped-on-purpose copper (Issue #9640):
+    Lock a track in KiCad to mark a run as shaped on purpose (e.g. a stub held
+    off a high-voltage neighbour).  optimize-traces leaves every net that owns
+    a locked track completely untouched and lists it as locked_nets_skipped.
+    It does not look at pads, vias, zones or footprints, and it never edits a
+    locked track's net even when only some of its segments are locked.  With
+    --voltage-map, unlocked nets are additionally rolled back if the rewrite
+    leaves any pair further under its creepage requirement.  `kct pcb prune`
+    also skips locked tracks (individually, not per net).
 """,
     )
 
@@ -789,24 +864,7 @@ Examples:
         help="Project whose rules (.kicad_pro and sibling .kicad_dru) DRC verification "
         "uses (default: the files beside the board)",
     )
-    parser.add_argument(
-        "--pour-slots",
-        dest="pour_slots",
-        action="store_true",
-        help="After optimizing, spread or pack parallel different-net tracks that leave "
-        "a slot in a copper pour (the `kct check` pour_slot advisory).  Every edit is "
-        "refereed by kicad-cli (--refill-zones) and reverted if any DRC or unconnected "
-        "count rises; refuses without kicad-cli.  Spreads only unless --pour-slots-pack "
-        "is given.  Default: off",
-    )
-    parser.add_argument(
-        "--pour-slots-pack",
-        dest="pour_slots_pack",
-        action="store_true",
-        help="With --pour-slots, also pack pairs that cannot be spread (tighten the gap "
-        "to clearance).  Packing removes the slot by removing the ground strip between "
-        "the tracks, and packed pairs still raise the pour_slot advisory.  Default: off",
-    )
+    add_pour_slot_args(parser)
     parser.add_argument(
         "--allow-default-rules",
         action="store_true",
@@ -838,7 +896,12 @@ Examples:
             "JSON per-net voltage map (same format and semantics as kct route). "
             "A candidate edit that would bring a net pair below its pairwise "
             "creepage requirement is rejected on its own; other edits on the "
-            "net are still applied. Absent, behaviour is unchanged"
+            "net are still applied. The whole board is then re-audited like "
+            "`kct creepage`, and a net whose rewrite leaves any pair further under "
+            "its requirement (a new failure, or a deeper shortfall on one that "
+            "already failed, e.g. under a range map) is rolled back. The JSON "
+            "lists creepage_pairs_checked and creepage_pairs_unchecked. Absent, "
+            "behaviour is unchanged"
         ),
     )
     parser.add_argument(
@@ -873,6 +936,11 @@ Examples:
     add_format_flag(parser)
 
     args = parser.parse_args(argv)
+    with contextlib.ExitStack() as files:
+        return _run_optimization(args, files)
+
+
+def _run_optimization(args: argparse.Namespace, files: contextlib.ExitStack) -> int:
     as_json = args.format == FORMAT_JSON
 
     # Validate DRC-aware arguments
@@ -1012,15 +1080,32 @@ Examples:
         # Issue #8720: any kicad-cli rule count rising (project .kicad_dru
         # included) rolls the offending nets back.
         config.output_verifiers["drc"] = _make_drc_verifier(verifier_rules)
+    creepage_audit = None
     if args.voltage_map is not None:
-        config.output_verifiers["creepage"] = _make_creepage_verifier(args)
+        creepage_audit = _make_creepage_verifier(args)
+        config.output_verifiers["creepage"] = creepage_audit
 
     # Issue #8214: collision-check every rewrite against the board's own
     # copper instead of relying on whole-net ``--drc-aware`` rollback.  A grid
     # that cannot be built is reported, never silently downgraded to unchecked
     # rewrites.
     try:
-        router, checker = _build_collision_checker(pcb_path)
+        from kicad_tools.router.optimizer.pcb import parse_segments as _parse_opt_segments
+
+        router, checker = _build_collision_checker(
+            pcb_path,
+            **(
+                {"project_path": Path(args.project).with_suffix(".kicad_pro")}
+                if args.project
+                else {}
+            ),
+        )
+        _segment_nets = set(_parse_opt_segments(pcb_path.read_text(encoding="utf-8")).keys())
+        project_widths = _project_netclass_widths(
+            pcb_path,
+            args.project,
+            sorted(_segment_nets | set(router.net_names.values())),
+        )
     except Exception as e:
         return _fail(
             as_json,
@@ -1130,18 +1215,47 @@ Examples:
 
     zone_pcb = ZonePCB.load(str(pcb_path))
     origin_x, origin_y = getattr(zone_pcb, "_board_origin", (0.0, 0.0))
+    # Issue #9748: with a manufacturer mask policy (jlcpcb), a rewrite may
+    # not carry new copper into the mask-clearance band around an opening
+    # either -- the same policy floor ``kct check --mfr`` enforces.
+    from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+    # Only ``--drc-aware`` runs with a manufacturer are in scope; every other
+    # mode keeps the pre-#9748 guard (``None``).
+    mask_clearance: float | None = None
+    if args.drc_aware and args.mfr:
+        mask_request = default_request_for_manufacturer(args.mfr)
+        if mask_request is not None and mask_request.policy is not None:
+            mask_clearance = mask_request.policy.clearance_mm
     optimizer.set_pad_zones(
         [
             dataclasses.replace(zone, x=zone.x + origin_x, y=zone.y + origin_y)
             for zone in pad_mask_zones_from_pcb(zone_pcb)
-        ]
+        ],
+        danger_clearance=mask_clearance,
     )
+
+    if project_widths and config.track_pass_enabled and zone_pcb.arcs:
+        from kicad_tools.router.optimizer.arc_widths import project_arc_width_edits
+
+        def plan_arc_widths(board_text, locked_nets):
+            return project_arc_width_edits(
+                board_text,
+                router,
+                checker,
+                project_widths,
+                net_filter=args.net,
+                net_pattern=args.net_pattern,
+                protected_nets=locked_nets | kelvin_names if kelvin is not None else locked_nets,
+            )
+
+        config.plan_arc_widths = plan_arc_widths
 
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
     # through the grid-synced wrapper (see its docstring).  optimize_pcb has no
     # optimize_fn hook, so the instance method is deliberately rebound.
     optimizer.optimize_segments, commit_net = _make_grid_synced_optimize_fn(  # type: ignore[method-assign]
-        router, optimizer
+        router, optimizer, project_widths=project_widths, checker=checker
     )
 
     if not quiet:
@@ -1182,12 +1296,22 @@ Examples:
             pcb_path, **({"rules_from": Path(args.project)} if args.project else {})
         )
 
-    # Run optimization
+    destination = Path(args.output or pcb_path)
+    candidate = destination
+    input_bytes = None
+    # Run post-processing on scratch copper. An exception or unavailable census
+    # can then leave both an in-place input and an existing -o file untouched.
     try:
+        if creepage_audit is not None:
+            from kicad_tools.creepage.output_audit import staged_board
+
+            input_bytes = pcb_path.read_bytes()
+            if not args.dry_run:
+                candidate = files.enter_context(staged_board(pcb_path, destination))
         with spinner("Optimizing traces...", quiet=quiet), _deterministic_uuids(pcb_path, args.net):
             stats = optimizer.optimize_pcb(
                 str(pcb_path),
-                output_path=args.output,
+                output_path=str(candidate) if candidate != destination else args.output,
                 net_filter=args.net,
                 net_pattern=args.net_pattern,
                 dry_run=args.dry_run,
@@ -1202,7 +1326,7 @@ Examples:
             text=f"Error during optimization: {e}",
         )
 
-    if args.output and not args.dry_run:
+    if args.output and not args.dry_run and candidate == destination:
         # Issue #8366: the written board keeps the input's project rules.
         from kicad_tools.sidecars import copy_project_sidecars
 
@@ -1217,7 +1341,9 @@ Examples:
     zones_refilled: bool | None = None
     refill_error: str | None = None
     if not args.dry_run:
-        zones_refilled, refill_error = _refill_written_board(Path(args.output or pcb_path))
+        zones_refilled, refill_error = _refill_written_board(
+            candidate, rules_from=Path(args.project) if args.project else None
+        )
         # --quiet suppresses progress, not a warning that the written file is
         # inconsistent; JSON mode reports it via ``zones_refilled`` instead.
         if zones_refilled is False and not as_json:
@@ -1233,11 +1359,93 @@ Examples:
 
     pour_slots: dict | None = None
     if args.pour_slots and not args.dry_run:
-        pour_slots = _run_pour_slot_pass(
-            Path(args.output or pcb_path),
-            Path(args.project) if args.project else None,
-            pack=args.pour_slots_pack,
-        )
+        try:
+            pour_slots = _run_pour_slot_pass(
+                candidate, Path(args.project) if args.project else None, pack=args.pour_slots_pack
+            )
+        except Exception as exc:
+            if candidate == destination:
+                raise
+            return _fail(
+                as_json,
+                str(pcb_path),
+                f"cannot finish candidate for creepage census: {exc}",
+                creepage_gate="active",
+                creepage_audit="unavailable",
+                written_to=None,
+            )
+
+    # Issue #9640: gate the file the caller actually receives -- after the zone
+    # refill (#8286) and the optional pour-slot pass, both of which move
+    # zone copper the pre-refill census cannot see.  Name the pairs scored
+    # (margins before/after) and the voltage-map pairs it could not.  When the
+    # finished board leaves any pair further under its requirement than the
+    # input, the optimization is discarded and the input is kept verbatim.
+    creepage_report: dict = {}
+    creepage_reverted = False
+    if creepage_audit is not None and input_bytes is not None:
+        import io
+
+        from kicad_tools.creepage.output_audit import audit_summary, publish_board, worse_pairs
+        from kicad_tools.sidecars import copy_project_sidecars
+
+        # Match read_text() newline handling used by the per-net census, but
+        # retain the exact original bytes for a measured rollback.
+        creepage_input_text = io.StringIO(input_bytes.decode(), newline=None).read()
+
+        def fail_census(reason: str) -> int:
+            return _fail(
+                as_json,
+                str(pcb_path),
+                f"{reason}; no board was written. Run kct creepage to diagnose.",
+                creepage_gate="active",
+                creepage_audit="unavailable",
+                written_to=None,
+            )
+
+        if args.dry_run:
+            if (
+                stats.output_checks.get("creepage") == "unavailable"
+                or creepage_audit(creepage_input_text) is None
+            ):
+                return fail_census("Creepage census unavailable")
+        else:
+            try:
+                final_text = candidate.read_text()
+            except (OSError, UnicodeError) as exc:
+                return fail_census(f"Cannot read final board for creepage census: {exc}")
+            excess = worse_pairs(creepage_audit, creepage_input_text, final_text)
+            if "unverifiable" in excess:
+                return fail_census("Final creepage census unavailable")
+            if excess:
+                creepage_reverted = True
+                stats.output_verify_rolled_back["creepage_final"] = sorted(excess)
+                stats.revert_to_input()
+                final_text = creepage_input_text
+                zones_refilled, refill_error, pour_slots = None, None, None
+                print(
+                    "WARNING: the finished board left creepage pairs further under their "
+                    "requirement; discarded the optimization and kept the input unchanged",
+                    file=sys.stderr,
+                )
+            creepage_report = audit_summary(
+                creepage_audit, creepage_input_text, final_text, creepage_audit.required_pairs()
+            )
+            if creepage_report["creepage_pairs_checked"] is None:
+                return fail_census("Final creepage census unavailable")
+            creepage_report.update(
+                creepage_gate="active",
+                creepage_audit="ran",
+                creepage_final_reverted_to_input=creepage_reverted,
+            )
+            try:
+                if not creepage_reverted or pcb_path.resolve() != destination.resolve():
+                    if creepage_reverted:
+                        candidate.write_bytes(input_bytes)
+                    copy_project_sidecars(pcb_path, destination)
+                    publish_board(candidate, destination)
+            except OSError as exc:
+                return _fail(as_json, str(pcb_path), f"cannot publish verified board: {exc}")
 
     cli_drc: dict | None = None
     if args.drc_aware and not args.dry_run:
@@ -1252,6 +1460,9 @@ Examples:
         cli_drc = _kicad_cli_drc_summary(cli_before, cli_after, has_dru)
     exit_code = 2 if cli_drc and cli_drc["regression"] else 0
 
+    saved = not args.dry_run and not (
+        creepage_reverted and pcb_path.resolve() == destination.resolve()
+    )
     if as_json:
         emit_json(
             {
@@ -1276,6 +1487,7 @@ Examples:
                 "copper_oz": args.copper,
                 "stack_source": getattr(args, "_stack_source", {}),
                 "output_checks": stats.output_checks,
+                "locked_nets_skipped": stats.locked_nets_skipped,
                 "output_verify_rolled_back": stats.output_verify_rolled_back,
                 "stats": {
                     "nets_optimized": stats.nets_optimized,
@@ -1299,6 +1511,7 @@ Examples:
                     "length_reduction_pct": stats.length_reduction,
                     "drc_errors_before": stats.drc_errors_before,
                     "drc_errors_after": stats.drc_errors_after,
+                    "drc_mask_screen": stats.drc_mask_screen,
                     "nets_touched": [n.net for n in stats.per_net if n.changed],
                     "per_net": [
                         {
@@ -1315,15 +1528,16 @@ Examples:
                     ],
                 },
                 "dry_run": args.dry_run,
-                "saved": not args.dry_run,
-                "written_to": None if args.dry_run else (args.output or str(pcb_path)),
+                "saved": saved,
+                "written_to": str(destination) if saved else None,
                 "zones_refilled": zones_refilled,
                 "zones_refill_error": refill_error,
                 "kicad_cli_drc": cli_drc,
                 "pour_slots": pour_slots,
-                "success": True,
+                "success": exit_code == 0,
                 # Issues #8300/#8433: creepage_gate always; the rest only with --voltage-map.
                 **_creepage_keys(args, stats),
+                **creepage_report,
             }
         )
         return exit_code
@@ -1396,6 +1610,12 @@ Examples:
             elif cli_drc:
                 why = f" ({cli_drc['reason']})" if cli_drc["reason"] else ""
                 print(f"  kicad-cli clearance cross-check unavailable{why}")
+        if stats.locked_nets_skipped:
+            shown = ", ".join(stats.locked_nets_skipped[:5])
+            more = ", ..." if len(stats.locked_nets_skipped) > 5 else ""
+            print(
+                f"  Left untouched (locked track): {len(stats.locked_nets_skipped)} ({shown}{more})"
+            )
         if args.voltage_map is not None:
             total = sum(stats.creepage_skips.values())
             print(f"  Edits skipped for creepage: {total}")
@@ -1433,6 +1653,8 @@ Examples:
 
         if args.dry_run:
             print("(Dry run - no changes written)")
+        elif not saved:
+            print(f"Kept input: {pcb_path}")
         elif args.output:
             print(f"Saved to: {args.output}")
         else:
@@ -1447,11 +1669,6 @@ Examples:
                     f"{pour_slots['left_alone']} left alone "
                     f"({pour_slots['pairs_before']} -> {pour_slots['pairs_after']} slot pairs)"
                 )
-                if pour_slots["packed"]:
-                    print(
-                        f"  Note: {pour_slots['packed']} packed pair(s) keep their pour_slot "
-                        "advisory and have no ground strip between them"
-                    )
                 for why, count in sorted(pour_slots.get("left_alone_by_reason", {}).items()):
                     print(f"  left alone: {count} x {why}")
         elif args.pour_slots and args.dry_run:

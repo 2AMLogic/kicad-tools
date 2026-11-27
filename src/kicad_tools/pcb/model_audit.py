@@ -500,8 +500,9 @@ def audit_pcb_models(
     env: str = "host",
     model_dir: Path | None = None,
     kicad_cli: Path | None = None,
+    project_dir: Path | None = None,
 ) -> ModelAuditReport:
-    """Classify every footprint of *pcb_path* under the chosen environment."""
+    """Classify the saved PCB. A snapshot can retain its original model search directory."""
     from kicad_tools.schema.pcb import _is_footprint_tag
     from kicad_tools.sexp import parse_file
 
@@ -510,8 +511,11 @@ def audit_pcb_models(
         raise ValueError("Expected kicad_pcb root for model inspection")
     from kicad_tools.cli.runner import _get_fp_reference
 
-    variables = build_environment(env, pcb_path=pcb_path, model_dir=model_dir, kicad_cli=kicad_cli)
-    pcb_dir = pcb_path.resolve().parent
+    project_pcb = project_dir / pcb_path.name if project_dir is not None else pcb_path
+    variables = build_environment(
+        env, pcb_path=project_pcb, model_dir=model_dir, kicad_cli=kicad_cli
+    )
+    pcb_dir = project_pcb.resolve().parent
     board_embedded = _embedded_names(doc)
 
     report = ModelAuditReport(pcb=str(pcb_path), env="dir" if model_dir else env)

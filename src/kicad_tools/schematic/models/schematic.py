@@ -14,11 +14,12 @@ This module composes functionality from specialized mixins:
 - SchematicNetlistMixin: Netlist extraction and connectivity queries
 """
 
+import warnings
 import weakref
 from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from kicad_tools.core.schematic_uuids import (
     UuidMinter,
@@ -47,6 +48,19 @@ from .query_mixin import SchematicQueryMixin
 from .symbol import SymbolDef, SymbolInstance
 from .validation_mixin import SchematicValidationMixin
 from .wiring_mixin import SchematicWiringMixin
+
+
+class DecouplingCap(TypedDict):
+    ref: str
+    value: str
+    source: str
+    role: str
+    from_default: bool
+
+
+class RailDecoupling(TypedDict):
+    count: int
+    caps: list[DecouplingCap]
 
 
 class SnapMode(Enum):
@@ -184,6 +198,7 @@ class Schematic(
 
         # Element collections
         self.symbols: list[SymbolInstance] = []
+        self._decoupling_caps: dict[str, tuple[str, str, object | None]] = {}
         self.power_symbols: list[PowerSymbol] = []
         self.wires: list[Wire] = []
         self.junctions: list[Junction] = []
@@ -234,6 +249,54 @@ class Schematic(
         # falling through to the stock KiCad library paths (matching
         # KiCad's own project-local library precedence).
         self.local_symbol_libs: list[Path] = list(local_symbol_libs or [])
+
+    def register_decoupling_cap(
+        self, cap: SymbolInstance, source: str, role: str, *, from_default: bool = False
+    ) -> None:
+        """Record the source and whether the current value was selected by a block."""
+        assignment = cap._value_assignment if from_default else None
+        self._decoupling_caps[cap.uuid_str] = (source, role, assignment)
+
+    def decoupling_report(self) -> dict[str | None, RailDecoupling]:
+        """Group placed supply capacitors by the current electrical net of pin 1.
+
+        Each rail contains its count and each cap's reference, value, block source,
+        role and whether the block's default assignment remains in place.
+        Floating pins appear under ``None``. Warn once per electrically connected
+        rail whose defaults come from multiple block instances.
+        The live schematic retains this block provenance during construction.
+        """
+        report: dict[str | None, RailDecoupling] = {}
+        if not self._decoupling_caps:
+            return report
+        # A local label can carry a power net to a different wire branch.
+        nets = self._pin_nets_from_graph(*self._build_connectivity_graph())
+        for cap in self.symbols:
+            provenance = self._decoupling_caps.get(cap.uuid_str)
+            if provenance is None:
+                continue
+            source, role, assignment = provenance
+            net = nets.get((cap.reference, "1"))
+            rail = report.setdefault(net, {"count": 0, "caps": []})
+            rail["caps"].append(
+                {
+                    "ref": cap.reference,
+                    "value": cap.value,
+                    "source": source,
+                    "role": role,
+                    "from_default": assignment is not None and cap._value_assignment is assignment,
+                }
+            )
+            rail["count"] += 1
+        for net, rail in report.items():
+            sources = sorted({cap["source"] for cap in rail["caps"] if cap["from_default"]})
+            if net is not None and len(sources) > 1:
+                warnings.warn(
+                    f"Default decoupling capacitors on {net} from {', '.join(sources)}",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        return report
 
     def resolve_lib_path(self, lib_name: str) -> Path | None:
         """Resolve a library name to a ``.kicad_sym`` file path.
@@ -305,7 +368,10 @@ class Schematic(
             if not is_provisional(elem.uuid_str)
         )
         for kind, elem, key in pending:
+            previous_uuid = elem.uuid_str
             elem.uuid_str = self._mint_uuid(kind, *key(elem))
+            if kind == "symbol" and previous_uuid in self._decoupling_caps:
+                self._decoupling_caps[elem.uuid_str] = self._decoupling_caps.pop(previous_uuid)
         return len(pending)
 
     def _text_note_uuid(self, text: str, x: float, y: float, seen: dict) -> str:

@@ -9,8 +9,11 @@ mix-ups between the raw-tree tools and the board-relative checks show up.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -163,6 +166,36 @@ def test_public_cli_all_legalizes_fixture(tmp_path: Path, capsys):
     assert [f for f in findings if f["severity"] in ("error", "warning")] == []
 
 
+@pytest.mark.parametrize("profile", ["jlcpcb-tier1", "jlcpcb_tier1"])
+def test_all_resolves_order_profile_and_alias(tmp_path, profile, capsys):
+    from kicad_tools.cli import main as kct_main
+    from kicad_tools.manufacturers import get_profile
+
+    path = _write(tmp_path, MAIN_BODY)
+    before = path.read_bytes()
+    args = [
+        "fix-silkscreen",
+        str(path),
+        "--all",
+        "--dry-run",
+        "--format",
+        "json",
+        "--mfr",
+        profile,
+        "--layers",
+        "4",
+        "--copper",
+        "2",
+    ]
+    with patch("kicad_tools.drc.repair_silkscreen.legalize_silk", wraps=legalize_silk) as legalize:
+        assert kct_main(args) == 0
+
+    expected = get_profile("jlcpcb-tier1").get_design_rules(layers=4, copper_oz=2)
+    legalize.assert_called_once_with(path, expected, output=None, dry_run=True)
+    assert json.loads(capsys.readouterr().out)["total_fixed"] > 0
+    assert path.read_bytes() == before
+
+
 def test_legalize_silk_report_names_every_edit(tmp_path: Path):
     path = _write(tmp_path, MAIN_BODY)
     report = legalize_silk(path, _jlcpcb_rules())
@@ -176,6 +209,8 @@ def test_legalize_silk_report_names_every_edit(tmp_path: Path):
     assert moved == ["U1"]  # only the obscured reference relocates
     assert report.unresolved == []
     assert report.output_path == str(path)
+    # The report names the exact bytes it wrote (#9990).
+    assert report.output_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
 
     # Widths, heights and thicknesses now meet the profile.
     pcb = PCB.load(path)
@@ -206,6 +241,7 @@ def test_idempotent_second_run_changes_nothing(tmp_path: Path):
     assert report.total_fixed == 0
     assert report.unresolved == []
     assert path.read_bytes() == once
+    assert report.output_sha256 == ""  # wrote nothing, bound nothing (#9990)
 
 
 def test_dry_run_reports_staged_result_and_preserves_bytes(tmp_path: Path, capsys):
@@ -238,6 +274,7 @@ def test_separate_output_preserves_original(tmp_path: Path):
     assert path.read_bytes() == before
     assert _silk_findings(out) == []
     assert report.output_path == str(out)
+    assert report.output_sha256 == hashlib.sha256(out.read_bytes()).hexdigest()
 
 
 def test_already_legal_board_is_noop(tmp_path: Path):
@@ -270,6 +307,7 @@ def test_report_distinguishes_repair_scope_from_a_clean_silk_check(tmp_path: Pat
         "silk_pad_clearance",
         "silk_hole_overlap",
         "silk_ref_obscured",
+        "silk_edge_clearance",  # Footprint line ends; this board-level graphic remains.
     }
     assert _silk_findings(path) == [("silk_edge_clearance", "warning")]
 
@@ -459,3 +497,140 @@ def test_existing_flags_keep_behaviour(tmp_path: Path, capsys):
     assert "reference_placements" not in data  # --all not given
     # No clipping happened: the pad/hole/ref findings survive.
     assert any(rule == "silk_hole_overlap" for rule, _ in _silk_findings(path))
+
+
+@pytest.mark.parametrize(("tap_layer", "edits"), [("F.SilkS", 0), ("B.SilkS", 1)])
+@pytest.mark.parametrize("kind", ["line", "text_box"])
+def test_edge_trim_preserves_a_tap_on_the_removed_length(tmp_path, tap_layer, edits, kind):
+    # A shallow diagonal can spend millimetres in the edge band. The other
+    # stroke joins that part of the diagonal, away from its original tip.
+    line = _fp("100 125", _line(0.1, 0, 0.8, 8, uid="4a4dbf83-72c0-4ebe-b574-b828df7030b9"))
+    if kind == "line":
+        tap = "(gr_line (start 100.1875 126) (end 102 126)"
+    else:
+        tap = (
+            '(gr_text_box "T" (start 100.1875 124.3) (end 102 126) '
+            "(effects (font (size 0.5 0.5) (thickness 0.1))) (border yes)"
+        )
+    tap += f' (stroke (width 0.15) (type solid)) (layer "{tap_layer}") (uuid "73180039-92de-4283-b14f-cb7ecf362dd7"))'
+    path = _write(tmp_path, line + tap)
+    report = legalize_silk(path, _jlcpcb_rules())
+    assert sum(e.action == "trimmed_edge" for e in report.footprint_line_edits) == edits
+
+
+# ---------------------------------------------------------------------------
+# A capped settle loop surfaces its unsettled references (Issue #9971)
+# ---------------------------------------------------------------------------
+
+
+def _lattice_fp(ref: str, x: float, y: float, dx: float, dy: float) -> str:
+    return _fp(
+        f"{x} {y}",
+        _ref(ref, f"{dx:.4f} {dy:.4f}") + "(fp_rect (start -0.5 -0.3) (end 0.5 0.3)"
+        ' (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd")'
+        f' (uuid "{ref}-crtyd"))',
+    )
+
+
+def _settle_lattice_body(*, with_unplaceable: bool = False) -> str:
+    """A 4x4 lattice whose labels compete for the same gaps.
+
+    One pass is not enough: a reference only sees the better candidate once
+    its neighbour has moved, so capping the settle loop after the first
+    round leaves references on the retry list (Issue #9957).  With
+    *with_unplaceable*, also add a Q1/K1 pair -- a reference boxed in by a
+    giant neighbour's courtyard on every side, which no round can place.
+    """
+    footprints = []
+    for row in range(4):
+        for col in range(4):
+            angle = math.degrees(math.atan2(2 - row, 2 - col))
+            dx = 0.6 * math.cos(math.radians(angle))
+            dy = -0.6 * math.sin(math.radians(angle))
+            footprints.append(
+                _lattice_fp(f"G{row}{col}", 108.0 + col * 2.0, 108.0 + row * 2.0, dx, dy)
+            )
+    if with_unplaceable:
+        footprints.append(
+            _fp(
+                "148 148",
+                _ref("Q1", "3 3") + "(fp_rect (start -1 -1) (end 1 1)"
+                ' (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd")'
+                ' (uuid "q1-crtyd"))',
+            )
+        )
+        footprints.append(
+            _fp(
+                "150 150",
+                '(fp_text reference "K1" (at 0 0) (layer "F.SilkS") (hide yes)'
+                " (effects (font (size 1 1) (thickness 0.15))))"
+                + "(fp_rect (start -20 -25) (end 20 25)"
+                ' (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd")'
+                ' (uuid "k1-crtyd"))',
+            )
+        )
+    return "".join(footprints)
+
+
+def test_converged_settle_leaves_no_unresolved_entries(tmp_path: Path):
+    path = _write(tmp_path, _settle_lattice_body())
+    report = legalize_silk(path, _jlcpcb_rules())
+
+    assert report.refs is not None
+    assert report.refs.unsettled_refs == []
+    assert report.unresolved == []
+
+
+def test_settle_cap_lifts_unsettled_refs_into_unresolved(tmp_path: Path, monkeypatch):
+    from kicad_tools.silkscreen import place_refs
+
+    path = _write(tmp_path, _settle_lattice_body(), name="capped.kicad_pcb")
+    monkeypatch.setattr(place_refs, "_SETTLE_MAX_ROUNDS", 1)
+
+    report = legalize_silk(path, _jlcpcb_rules())
+
+    assert report.refs is not None
+    assert report.refs.unsettled_refs, "one round is not enough for the lattice"
+    entries = [u for u in report.unresolved if u.kind == "reference_unsettled"]
+    assert sorted(u.item for u in entries) == sorted(
+        f"{ref} (reference)" for ref in report.refs.unsettled_refs
+    )
+    assert len(entries) == len({u.item for u in entries})  # one entry per reference
+    assert all("round cap" in u.detail for u in entries)
+    assert {u.kind for u in report.unresolved} == {"reference_unsettled"}
+
+
+def test_unsettled_refs_coexist_with_unplaceable_entries(tmp_path: Path, monkeypatch):
+    from kicad_tools.silkscreen import place_refs
+
+    path = _write(tmp_path, _settle_lattice_body(with_unplaceable=True))
+    monkeypatch.setattr(place_refs, "_SETTLE_MAX_ROUNDS", 1)
+
+    report = legalize_silk(path, _jlcpcb_rules())
+
+    assert report.refs is not None
+    assert "Q1" in report.refs.unsettled_refs
+    kinds = {u.kind for u in report.unresolved}
+    assert "reference" in kinds  # Q1 stays unplaceable, whatever the cap
+    assert "reference_unsettled" in kinds
+    assert any(u.kind == "reference" and u.item == "Q1 (reference)" for u in report.unresolved)
+
+
+def test_settle_cap_unsettled_refs_reach_fix_silkscreen_output(tmp_path: Path, capsys, monkeypatch):
+    from kicad_tools.silkscreen import place_refs
+
+    monkeypatch.setattr(place_refs, "_SETTLE_MAX_ROUNDS", 1)
+
+    json_path = _write(tmp_path, _settle_lattice_body(), name="json.kicad_pcb")
+    assert (
+        fix_silkscreen_main([str(json_path), "--all", "--mfr", "jlcpcb", "--format", "json"]) == 0
+    )
+    data = json.loads(capsys.readouterr().out)
+    entries = [u for u in data["unresolved"] if u["kind"] == "reference_unsettled"]
+    assert entries
+    assert all(u["item"].endswith("(reference)") and u["detail"] for u in entries)
+
+    text_path = _write(tmp_path, _settle_lattice_body(), name="text.kicad_pcb")
+    assert fix_silkscreen_main([str(text_path), "--all", "--mfr", "jlcpcb"]) == 0
+    out = capsys.readouterr().out
+    assert "[reference_unsettled] " in out

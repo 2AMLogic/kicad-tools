@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .primitives import Pad
+    from .rules import DesignRules
 
 
 def taper_points(
@@ -74,3 +80,219 @@ def band_safe_width(
     if same_net_segment_pad_gap_acceptable(a, b, base_width / 2, own_net_bboxes, edge_mm):
         return base_width
     return width
+
+
+def taper_width_fn(
+    rules: DesignRules,
+    start_pad: Pad,
+    end_pad: Pad,
+    start_pitch: float | None,
+    end_pitch: float | None,
+    base_width: float,
+) -> tuple[Callable[[float, float, float, float], float], bool, bool]:
+    """Build the per-piece Issue #1018 taper-width function.
+
+    Both route converters (``PathFinder._convert_path_to_route`` and
+    ``CppPathfinder._convert_result_to_route``) call the SAME closure
+    (#9851), so a piece's width is bit-identical whichever backend
+    converted the path: the minimum over both pads of
+    ``rules.get_neck_down_width(min endpoint distance, pitch,
+    base_width=base_width)``, gated per pad by
+    ``rules.should_apply_neck_down``.  Issue #3313: ``base_width`` is the
+    caller's net-class corridor width so the taper interpolates down from
+    the (possibly impedance-driven) per-net width, not the global default.
+
+    Returns ``(width_fn, start_needs_neckdown, end_needs_neckdown)``; the
+    flags also gate the taper-disk ``centers`` the caller builds.
+    """
+    start_needs_neckdown = rules.should_apply_neck_down(start_pad.ref, start_pitch)
+    end_needs_neckdown = rules.should_apply_neck_down(end_pad.ref, end_pitch)
+
+    def _width(x1: float, y1: float, x2: float, y2: float) -> float:
+        if not start_needs_neckdown and not end_needs_neckdown:
+            return base_width
+        min_width = base_width
+        if start_needs_neckdown:
+            min_dist_start = min(
+                math.sqrt((x1 - start_pad.x) ** 2 + (y1 - start_pad.y) ** 2),
+                math.sqrt((x2 - start_pad.x) ** 2 + (y2 - start_pad.y) ** 2),
+            )
+            min_width = min(
+                min_width,
+                rules.get_neck_down_width(min_dist_start, start_pitch, base_width=base_width),
+            )
+        if end_needs_neckdown:
+            min_dist_end = min(
+                math.sqrt((x1 - end_pad.x) ** 2 + (y1 - end_pad.y) ** 2),
+                math.sqrt((x2 - end_pad.x) ** 2 + (y2 - end_pad.y) ** 2),
+            )
+            min_width = min(
+                min_width,
+                rules.get_neck_down_width(min_dist_end, end_pitch, base_width=base_width),
+            )
+        return min_width
+
+    return _width, start_needs_neckdown, end_needs_neckdown
+
+
+def tapered_run_pieces(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    centers: list[tuple[float, float]],
+    radius: float,
+    resolution: float,
+    width_fn: Callable[[float, float, float, float], float],
+    base_width: float,
+    own_net_bboxes: list[tuple[float, float, float, float]] | None,
+    edge_mm: float,
+) -> list[tuple[tuple[float, float], tuple[float, float], float]]:
+    """Split one straight run into dogleg-aware tapered pieces with widths.
+
+    The exact pipeline the two route converters used to duplicate (#9851):
+    dogleg an off-angle run (#3532), cut each leg inside the taper disks
+    at grid resolution (:func:`taper_points`, #1018), then width each
+    piece through ``width_fn`` and hold it out of the own-net slit band
+    (:func:`band_safe_width`, #9019).  Running both backends through this
+    one function makes them emit identical segment bytes for the same
+    path.  Returns ``[((sx, sy), (ex, ey), width), ...]``; callers skip
+    zero-length pieces at emission.
+    """
+    from .quantize import dogleg_points
+
+    dogleg = dogleg_points(x1, y1, x2, y2)
+    points = [dogleg[0]]
+    for a, b in zip(dogleg, dogleg[1:], strict=False):
+        points.extend(taper_points(a, b, centers, radius, resolution)[1:])
+    pieces: list[tuple[tuple[float, float], tuple[float, float], float]] = []
+    for a, b in zip(points, points[1:], strict=False):
+        width = width_fn(a[0], a[1], b[0], b[1])
+        if own_net_bboxes:
+            width = band_safe_width(a, b, width, base_width, own_net_bboxes, edge_mm)
+        pieces.append((a, b, width))
+    return pieces
+
+
+Piece = tuple[tuple[float, float], tuple[float, float], float]
+
+
+def band_safe_taper(
+    pieces: list[Piece],
+    own_net_bboxes: list[tuple[float, float, float, float]] | None,
+    edge_mm: float,
+) -> list[Piece]:
+    """Fuse taper sub-segments that still sit in the own-net slit band (#9019).
+
+    ``pieces`` are the ``(start, end, width)`` sub-segments a route
+    conversion is about to emit on ONE layer, in path order, each width
+    already chosen by the #1018 taper and :func:`band_safe_width`.  Returns
+    the sub-segments to emit; zero-length pieces are dropped.
+
+    The taper fragments a leg into short pieces, and each piece is its own
+    copper primitive.  A piece that ends just short of the pad the leg
+    unions with -- the diagonal approach to a fine-pitch pad corner, U4.1
+    on board 06 -- sits in ``(0, edge_mm)`` of that pad at EVERY legal
+    width: its round end cap faces the pad edge across a slit, and the fab
+    view grades it because that piece itself never touches the pad (the
+    leg's union with the pad is through a LATER piece).  Neither width
+    choice can fix it, so :func:`band_safe_width` leaves it as is.
+
+    Such a piece is fused with its neighbours along the same straight run
+    (consecutive, end-to-start contiguous, same direction) into one segment
+    that reaches the pad or clears the edge, drawn at the NARROWEST width
+    of the pieces it replaces: copper never grows beyond the taper profile,
+    so clearance to other nets cannot get worse.  The smallest acceptable
+    window wins (forward first on a tie); a piece with no acceptable window
+    is emitted unchanged.  The fused segment must pass
+    :func:`~kicad_tools.router.via_clearance.same_net_segment_pad_gap_acceptable`
+    against every own-net pad box, so it cannot open a band elsewhere.
+
+    Runs are found here rather than by the caller because the two backends
+    hand the conversion different segmentations of the same path (Python
+    merges collinear grid steps before tapering; the native adapter passes
+    one segment per grid cell), and a fuse limited to one caller-side
+    segment would differ between them.  Pure and backend-agnostic, like
+    :func:`band_safe_width`.  ``edge_mm <= 0`` or no pads returns the
+    pieces unchanged.
+    """
+    pieces = [p for p in pieces if p[0] != p[1]]
+    if edge_mm <= 0 or not own_net_bboxes or len(pieces) < 2:
+        return pieces
+    out: list[Piece] = []
+    run: list[Piece] = [pieces[0]]
+    for piece in pieces[1:]:
+        if _continues_run(run[-1], piece):
+            run.append(piece)
+        else:
+            out.extend(_fuse_run(run, own_net_bboxes, edge_mm))
+            run = [piece]
+    out.extend(_fuse_run(run, own_net_bboxes, edge_mm))
+    return out
+
+
+def _continues_run(prev: Piece, piece: Piece) -> bool:
+    """``piece`` starts where ``prev`` ends and heads the same way."""
+    (ax, ay), (bx, by), _ = prev
+    (cx, cy), (dx, dy), _ = piece
+    if abs(bx - cx) > 1e-9 or abs(by - cy) > 1e-9:
+        return False
+    ux, uy = bx - ax, by - ay
+    vx, vy = dx - cx, dy - cy
+    lu, lv = math.hypot(ux, uy), math.hypot(vx, vy)
+    if lu == 0 or lv == 0:
+        return False
+    return abs(ux * vy - uy * vx) <= 1e-9 * lu * lv and ux * vx + uy * vy > 0
+
+
+def _fuse_run(
+    pieces: list[Piece],
+    own_net_bboxes: list[tuple[float, float, float, float]],
+    edge_mm: float,
+) -> list[Piece]:
+    """:func:`band_safe_taper` over one straight run of pieces."""
+    if len(pieces) < 2:
+        return pieces
+    from .via_clearance import same_net_segment_pad_gap_acceptable
+
+    def ok(a: tuple[float, float], b: tuple[float, float], width: float) -> bool:
+        return same_net_segment_pad_gap_acceptable(a, b, width / 2, own_net_bboxes, edge_mm)
+
+    out: list[Piece] = []
+    i = 0
+    n = len(pieces)
+    while i < n:
+        a, b, w = pieces[i]
+        if ok(a, b, w):
+            out.append(pieces[i])
+            i += 1
+            continue
+        best: tuple[int, str, float] | None = None  # (extra pieces, side, width)
+        # Forward: fuse pieces i..i+k.
+        narrow = w
+        for hi in range(i + 1, n):
+            narrow = min(narrow, pieces[hi][2])
+            if ok(a, pieces[hi][1], narrow):
+                best = (hi - i, "fwd", narrow)
+                break
+        # Backward: fuse the already-emitted tail out[-k:] with piece i.
+        narrow = w
+        for k in range(1, len(out) + 1):
+            if best is not None and k >= best[0]:
+                break
+            narrow = min(narrow, out[-k][2])
+            if ok(out[-k][0], b, narrow):
+                best = (k, "back", narrow)
+                break
+        if best is None:
+            out.append(pieces[i])
+            i += 1
+        elif best[1] == "fwd":
+            out.append((a, pieces[i + best[0]][1], best[2]))
+            i += best[0] + 1
+        else:
+            start = out[-best[0]][0]
+            del out[-best[0] :]
+            out.append((start, b, best[2]))
+            i += 1
+    return out

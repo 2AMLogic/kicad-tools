@@ -158,6 +158,7 @@ boards/*/*/output/*.kct.json
 .loom/api-keys-*/
 .loom/account-health.json
 .loom/account-health.lock
+.loom/account-ranking.codex
 .loom/CANARY
 .loom/*.log
 .loom/*.sock
@@ -218,6 +219,13 @@ node_modules/
 
 # DSN export revision sidecars written beside fixture boards (issue #6915)
 tests/fixtures/*.dsn-revision.json
+
+# Retained recovery copies from checked manufacturing rewrites (issue #10056):
+# `.<board>.recovery-<utc-stamp>-<random>/original` beside the live board.
+# User-recoverable data -- never deleted automatically; `kct clean` removes
+# them on request.
+boards/*/.*.recovery-*/
+boards/*/*/.*.recovery-*/
 
 # Repo Skills Codex-side machine-local install metadata (never committed)
 .agents/skills/repo/.install-local.json

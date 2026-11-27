@@ -12,14 +12,26 @@ import argparse
 import json
 import math
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import yaml
 
-from kicad_tools.core.project_file import create_minimal_project, save_project
+from kicad_tools.core.netclass_diagnostics import literal_netclass_pattern
+from kicad_tools.core.project_clearance import netclass_assignment_value
+from kicad_tools.core.project_file import (
+    add_netclass_definition,
+    add_netclass_pattern,
+    create_minimal_project,
+    save_project,
+)
 from kicad_tools.core.schematic_uuids import UuidMinter
 from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
-from kicad_tools.router.rules import NetClassRouting, net_class_map_to_dict
+from kicad_tools.router.rules import (
+    NET_CLASS_POWER,
+    NetClassRouting,
+    net_class_map_to_dict,
+)
 from kicad_tools.schematic import PinDef, PinSide, PinType, SymbolDef, generate_symbol_sexp
 from kicad_tools.schematic.models.schematic import Schematic
 from kicad_tools.sexp import parse_file, parse_string
@@ -29,6 +41,15 @@ RES = "Resistor_SMD:R_0603_1608Metric"
 CAP = "Capacitor_SMD:C_0603_1608Metric"
 HEADER = "Connector_PinHeader_2.54mm:PinHeader_1x{:02d}_P2.54mm_Vertical"
 DATASHEET = "https://www.ti.com/lit/ds/symlink/sn65lvds1.pdf"
+LVTTL_WIDTH = 0.2
+LVDS_WIDTH = 0.26
+POWER_WIDTH = 0.3
+VIA_SIZE = 0.6
+VIA_DRILL = 0.3
+
+
+def board_nets(parts):
+    return sorted({n for p in parts for n in p["pins"].values() if n})
 
 
 def components():
@@ -211,7 +232,7 @@ def make_pcb(out, parts):
         (layer "B.Cu" (type "copper") (thickness 0.035))))
       (net 0 "")
       (gr_rect (start 5 5) (end 95 75) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts")))""")
-    names = sorted({n for p in parts for n in p["pins"].values() if n})
+    names = board_nets(parts)
     nets = {n: i + 1 for i, n in enumerate(names)}
     for n, code in nets.items():
         pcb.append(parse_string(f'(net {code} "{n}")'))
@@ -283,7 +304,7 @@ def make_pcb(out, parts):
                 pad.append(parse_string(f'(net {nets[net]} "{net}")'))
         pcb.append(fp)
 
-    def trace(net, points, width=0.26, layer="F.Cu"):
+    def trace(net, points, width=LVDS_WIDTH, layer="F.Cu"):
         for start, end in zip(points, points[1:], strict=False):
             if start == end:
                 continue
@@ -318,8 +339,7 @@ def make_pcb(out, parts):
                     (62.18, middle + sign * 0.205),
                     (62.8, termination[1]),
                     termination,
-                    (64, termination[1]),
-                    (64.19, end[1]),
+                    (termination[0] + abs(end[1] - termination[1]), end[1]),
                     end,
                 ],
             )
@@ -348,10 +368,10 @@ def make_pcb(out, parts):
             need = aperture_x[(part["ref"], pin)] + 0.3 + _VIA_APERTURE_CLEARANCE_MM
             dx = math.copysign(max(abs(dx), need), dx)
             via = (x + dx, y)
-            trace(net, [(x, y), via], 0.3)
+            trace(net, [(x, y), via], POWER_WIDTH)
             pcb.append(
                 parse_string(
-                    f'(via (at {via[0]} {via[1]}) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net {nets[net]}) (uuid "{mint.mint("via", net, *via)}"))'
+                    f'(via (at {via[0]} {via[1]}) (size {VIA_SIZE}) (drill {VIA_DRILL}) (layers "F.Cu" "B.Cu") (net {nets[net]}) (uuid "{mint.mint("via", net, *via)}"))'
                 )
             )
     path = out / "diffpair_test.kicad_pcb"
@@ -425,6 +445,62 @@ def make_schematic(out, parts):
     path.write_text(doc.to_string() + "\n")
 
 
+def routing_rules():
+    """The per-net routing map every class declaration on this board derives from."""
+    rules = {}
+    for prefix in ("IN", "OUT"):
+        for i in range(1, 5):
+            rules[f"{prefix}{i}"] = NetClassRouting(
+                name="LVTTL",
+                trace_width=LVTTL_WIDTH,
+                clearance=0.15,
+                via_size=VIA_SIZE,
+                avoid_layers=[1, 2],
+            )
+    for i in range(1, 5):
+        for suffix, other in [("P", "N"), ("N", "P")]:
+            rules[f"LVDS{i}_{suffix}"] = NetClassRouting(
+                name="LVDS",
+                trace_width=LVDS_WIDTH,
+                clearance=0.15,
+                intra_pair_clearance=0.15,
+                coupled_routing=True,
+                target_diff_impedance=100,
+                impedance_tolerance_percent=15,
+                # Issue #7894: no class skew limit.  The derived LVDS budget
+                # (SN65LVDS1/2, 400 Mb/s, the protocol's operating point) applies.
+                pair_protocol="LVDS",
+                coupled_continuity_threshold=0.8,
+                diffpair_partner=f"LVDS{i}_{other}",
+            )
+    for net in ("+3V3", "GND"):
+        rules[net] = replace(NET_CLASS_POWER, trace_width=POWER_WIDTH, via_size=VIA_SIZE)
+    return rules
+
+
+def declare_net_classes(project, rules, nets):
+    """Author each routing-map class in ``project`` with its exact member nets."""
+    settings = project["net_settings"]
+    classes = {}
+    for net, routing in rules.items():
+        classes.setdefault(routing.name, (routing, []))[1].append(net)
+    for name, (routing, members) in classes.items():
+        add_netclass_definition(
+            project,
+            name,
+            track_width=routing.trace_width,
+            clearance=routing.clearance,
+            via_diameter=routing.via_size,
+            via_drill=VIA_DRILL,
+        )
+        for net in members:
+            add_netclass_pattern(project, name, literal_netclass_pattern(net, nets))
+    settings["netclass_assignments"] = {
+        net: netclass_assignment_value(settings, routing.name)
+        for net, routing in sorted(rules.items())
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
@@ -444,39 +520,15 @@ def main():
     # Only the source project is authored here.  ``kct route --output
     # diffpair_test_routed.kicad_pcb`` derives the routed sidecar from it (and
     # refuses to overwrite an unrelated pre-existing one, issue #6258).
+    rules = routing_rules()
     project = create_minimal_project("diffpair_test.kicad_pro")
     project["board"]["design_settings"]["rules"].update(
         min_copper_edge_clearance=0.3, min_clearance=0.15, min_track_width=0.15
     )
     project["net_settings"]["classes"][0]["clearance"] = 0.15
+    declare_net_classes(project, rules, set(board_nets(parts)))
     save_project(project, out / "diffpair_test.kicad_pro")
     (out / "diffpair_test_routed.kicad_pro").unlink(missing_ok=True)
-    rules = {}
-    for prefix in ("IN", "OUT"):
-        for i in range(1, 5):
-            rules[f"{prefix}{i}"] = NetClassRouting(
-                name="LVTTL",
-                trace_width=0.2,
-                clearance=0.15,
-                via_size=0.6,
-                avoid_layers=[1, 2],
-            )
-    for i in range(1, 5):
-        for suffix, other in [("P", "N"), ("N", "P")]:
-            rules[f"LVDS{i}_{suffix}"] = NetClassRouting(
-                name="LVDS",
-                trace_width=0.26,
-                clearance=0.15,
-                intra_pair_clearance=0.15,
-                coupled_routing=True,
-                target_diff_impedance=100,
-                impedance_tolerance_percent=15,
-                # Issue #7894: no class skew limit.  The derived LVDS budget
-                # (SN65LVDS1/2, 400 Mb/s, the protocol's operating point) applies.
-                pair_protocol="LVDS",
-                coupled_continuity_threshold=0.8,
-                diffpair_partner=f"LVDS{i}_{other}",
-            )
     (out / "net_class_map.json").write_text(
         json.dumps(net_class_map_to_dict(rules), indent=2) + "\n"
     )
@@ -497,7 +549,7 @@ def main():
         },
         "requirements": {
             "manufacturing": {
-                "target_fab": "jlcpcb",
+                "target_fab": "jlcpcb-tier1",
                 "layers": {"preferred": 4},
                 "assembly": "both",
             }

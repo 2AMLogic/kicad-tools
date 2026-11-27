@@ -26,8 +26,7 @@ These tests verify:
 1. Re-routing a board with ``--preserve-existing`` (skipping all-but-one net)
    leaves every skipped net's geometry byte-identical and only routes the
    requested net (AC #1, #2).
-2. The default (no ``--preserve-existing``) is unchanged: skipped-net copper
-   is still stripped (regression-safe behaviour preserved bit-for-bit, AC #5).
+2. An explicit full reroute strips skipped-net copper (#9627).
 3. ``_capture_preserved_routes`` parses existing copper (segments + standalone
    stitch vias) and ``_serialize_preserved_routes`` re-emits it with a
    defensive net-id dedupe so a re-routed net is never double-emitted
@@ -193,8 +192,7 @@ def _run_route(
         argv += ["--skip-nets", skip_nets]
     if net_class_map_path:
         argv += ["--net-class-map", net_class_map_path]
-    if preserve:
-        argv.append("--preserve-existing")
+    argv.append("--preserve-existing" if preserve else "--no-preserve-existing")
     if extra_argv:
         argv += extra_argv
 
@@ -254,14 +252,11 @@ class TestPreserveExistingCLI:
         assert "LINE_A" in out
         assert len(out["LINE_A"]) > 0
 
-    def test_default_still_strips_skipped_nets(self, tmp_path, board_text):
-        """AC #5: without the flag, behaviour is unchanged (skipped copper stripped)."""
+    def test_full_reroute_strips_skipped_nets(self, tmp_path, board_text):
+        """Opting out of preserving input copper drops the skipped nets."""
         out_text = _run_route(tmp_path, board_text, preserve=False, skip_nets=_SKIP_ALL_BUT_LINE_A)
         out = parse_segments(out_text)
 
-        # The skipped nets are NOT preserved in default mode -- their copper
-        # is stripped exactly as before this issue.  Only LINE_A (the routed
-        # net) remains.  This locks in regression-safe default behaviour.
         assert set(out) == {"LINE_A"}
 
 

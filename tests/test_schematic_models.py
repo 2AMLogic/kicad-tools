@@ -818,6 +818,28 @@ class TestSymbolInstance:
             f"Wires: {[((w.x1, w.y1), (w.x2, w.y2)) for w in parsed.wires]}"
         )
 
+    @pytest.mark.parametrize("override", [None, "~", "", 'https://new.example/a"b'])
+    @pytest.mark.parametrize("derived", [False, True])
+    def test_datasheet_inherits_and_round_trips_once(self, override, derived):
+        from kicad_tools.sexp import parse_string
+
+        url = "https://parts.example/data.pdf"
+        parent = f'(symbol "Base" (property "Datasheet" "{url}"))'
+        raw = parent + '\n(symbol "Child" (extends "Base"))' if derived else parent
+        name = "Child" if derived else "Base"
+        definition = SymbolDef(f"Parts:{name}", name, raw)
+        inst = SymbolInstance(definition, 0, 0, 0, "U1", name)
+        if override is not None:
+            inst.properties["Datasheet"] = override
+        expected = url if override is None else override
+        for node in (inst.to_sexp_node("test", "/"), parse_string(inst.to_sexp("test", "/"))):
+            fields = [
+                p.get_string(1) for p in node.find_all("property") if p.get_string(0) == "Datasheet"
+            ]
+            assert fields == [expected]
+            loaded = SymbolInstance.from_sexp(node, {definition.lib_id: definition})
+            assert loaded.properties["Datasheet"] == expected
+
     def test_symbol_instance_to_sexp_node(self, mock_symbol_def):
         """SymbolInstance generates valid S-expression node."""
         inst = SymbolInstance(
@@ -2210,6 +2232,46 @@ class TestSchematicAutoLayout:
 
 class TestSchematicValidationAdvanced:
     """Advanced tests for Schematic validation."""
+
+    def test_native_bom_reference_suffix(self):
+        sch = Schematic(title="Assembly references", snap_mode=SnapMode.OFF)
+        part = SymbolDef(lib_id="Device:R", name="R", raw_sexp="", pins=[])
+        for index, (ref, unit, listed) in enumerate(
+            [
+                ("Q1A", 1, True),
+                ("Q1_A", 1, True),
+                ("Q2-A", 1, True),
+                ("D3.A", 1, True),
+                ("LED_RED", 1, True),
+                ("R99\u03a9", 1, True),
+                ("R2", 1, True),
+                ("D_TVS2", 1, True),
+                ("U3", 1, True),
+                ("U3", 2, True),
+                ("J4A", 1, False),
+                ("#PWR5A", 1, True),
+            ]
+        ):
+            sch.symbols.append(
+                SymbolInstance(
+                    symbol_def=part,
+                    x=10.16 * index,
+                    y=0,
+                    rotation=0,
+                    reference=ref,
+                    value="test",
+                    unit=unit,
+                    in_bom=listed,
+                )
+            )
+
+        findings = [i for i in sch.validate(fix_auto=True) if i["type"] == "native_bom_reference"]
+        assert len(findings) == 6
+        assert all(f["severity"] == "warning" for f in findings)
+        assert not any(f["fix_applied"] for f in findings)
+        for ref in ["Q1A", "Q1_A", "Q2-A", "D3.A", "LED_RED", "R99\u03a9"]:
+            assert any(f"'{ref}?'" in f["message"] for f in findings), ref
+        assert sch.symbols[0].reference == "Q1A"
 
     def test_validate_duplicate_references(self):
         """Validate detects duplicate references."""

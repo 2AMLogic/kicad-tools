@@ -1103,6 +1103,23 @@ class TestRunnerOtherSites:
 
         assert res.success is False
 
+    def test_explicit_saved_refill_never_degrades_to_read_only_drc(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import runner
+
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240108) (generator pcbnew))")
+        monkeypatch.setattr(runner, "_kicad_drc_supports_refill", lambda _cli: False)
+
+        def reject_flags(cmd, **kwargs):
+            assert "--refill-zones" in cmd and "--save-board" in cmd
+            Path(cmd[cmd.index("--output") + 1]).write_text('{"violations":[]}')
+            return subprocess.CompletedProcess(cmd, 1, "", "Unknown argument: --save-board")
+
+        monkeypatch.setattr(runner.subprocess, "run", reject_flags)
+        result = runner.run_refill_zones(pcb, kicad_cli=Path("kicad-cli"), require_save=True)
+        assert not result.success
+        assert "Unknown argument" in result.stderr
+
     def test_run_refill_zones_killed_fails(self, monkeypatch, tmp_path):
         from kicad_tools.cli import runner
 
@@ -1287,3 +1304,206 @@ def test_no_stray_temp_reports_left(monkeypatch, tmp_path):
         _fake_kicad_cli(monkeypatch, geometric, returncode=rc, report=report)
         run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=FAKE_CLI)
     assert [p.name for p in tmp_path.iterdir()] == []
+
+
+# ---------------------------------------------------------------------------
+# The flag-less retry never inherits the first attempt's report (Issue #9959)
+# ---------------------------------------------------------------------------
+
+
+def _write_then_reject_cli(
+    tmp_path: Path, *, retry_exit: int = 0, retry_report: str | None = None
+) -> Path:
+    """A kicad-cli whose refill attempt writes a *complete* report, then rejects ``--refill-zones``.
+
+    Stock KiCad never does this -- an unknown option is rejected during
+    argument parsing, before any report is opened -- but a wrapper, a shim or
+    a future kicad-cli that writes before validating can, and the flag-less
+    retry then used to be judged against the rejected attempt's file.  The
+    ``--help`` probe SIGKILLs itself (inconclusive), so the refill flag is
+    attempted.  Each launch logs whether the report path already existed
+    when it started; the per-launch reset must keep that False.
+    """
+    log = tmp_path / "argv.log"
+    cli = tmp_path / "kicad-cli"
+    cli.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, signal, sys\n"
+        f"log, report = {str(log)!r}, {VALID_REPORT!r}\n"
+        f"retry_exit, retry_report = {retry_exit!r}, {retry_report!r}\n"
+        "argv = sys.argv[1:]\n"
+        "open(log, 'a').write(json.dumps(argv) + '\\n')\n"
+        "if '--help' in argv:\n"
+        "    os.kill(os.getpid(), signal.SIGKILL)\n"
+        "out_flag = '--output' if '--output' in argv else '-o'\n"
+        "out = argv[argv.index(out_flag) + 1]\n"
+        "open(log + '.existed', 'a').write(str(os.path.exists(out)) + '\\n')\n"
+        "if '--refill-zones' in argv:\n"
+        "    open(out, 'w').write(report)\n"
+        "    sys.stdout.write('Unknown argument: --refill-zones\\n'); sys.exit(1)\n"
+        "if retry_report is not None:\n"
+        "    open(out, 'w').write(retry_report)\n"
+        "sys.exit(retry_exit)\n"
+    )
+    cli.chmod(cli.stat().st_mode | stat.S_IXUSR)
+    return cli
+
+
+def _launch_saw_existing_reports(tmp_path: Path) -> list[bool]:
+    """Per launch: did the report path already exist when kicad-cli started?"""
+    lines = (tmp_path / "argv.log.existed").read_text().splitlines()
+    return [line == "True" for line in lines]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs an executable script")
+class TestRetryNeverInheritsTheFirstAttemptsReport:
+    """Issue #9959: a write-then-reject launch must not hand its report to
+    the flag-less retry.  Every launch starts from no report, so a retry
+    that writes nothing is judged as "no report" -- never as the first
+    attempt's file."""
+
+    @pytest.mark.parametrize("retry_exit", [0, 5])
+    def test_command_drc_reportless_retry_is_a_failure(self, tmp_path, retry_exit):
+        from kicad_tools.cli import runner
+
+        cli = _write_then_reject_cli(tmp_path, retry_exit=retry_exit)
+
+        res = runner.run_drc(
+            tmp_path / "b.kicad_pcb",
+            output_path=tmp_path / "out.json",
+            schematic_parity=False,
+            kicad_cli=cli,
+            refill_zones=True,
+        )
+
+        assert res.success is False
+        assert "wrote no DRC report" in res.stderr
+        assert _launch_saw_existing_reports(tmp_path) == [False, False]
+
+    @pytest.mark.parametrize("retry_exit", [0, 5])
+    def test_geometric_drc_reportless_retry_did_not_run(self, tmp_path, retry_exit):
+        cli = _write_then_reject_cli(tmp_path, retry_exit=retry_exit)
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+
+        assert res.ran is False
+        assert res.reason == REASON_NO_REPORT
+        assert res.failed is True
+        assert _launch_saw_existing_reports(tmp_path) == [False, False]
+
+    @pytest.mark.parametrize("retry_exit", [0, 5])
+    @pytest.mark.parametrize(
+        "retry_report",
+        [None, VALID_REPORT, '{"violations": [], "unconnected_items": []}'],
+        ids=["reportless", "fresh-full", "fresh-empty"],
+    )
+    def test_run_drc_verdict_follows_the_retry_not_the_first_attempt(
+        self, tmp_path, retry_exit, retry_report
+    ):
+        from kicad_tools.cli import runner
+
+        cli = _write_then_reject_cli(tmp_path, retry_exit=retry_exit, retry_report=retry_report)
+
+        res = runner.run_drc(
+            tmp_path / "b.kicad_pcb",
+            output_path=tmp_path / "out.json",
+            schematic_parity=False,
+            kicad_cli=cli,
+            refill_zones=True,
+        )
+
+        if retry_report is None:
+            assert res.success is False
+            assert "wrote no DRC report" in res.stderr
+            assert not (tmp_path / "out.json").exists()
+        else:
+            assert res.success is True, res.stderr
+            assert res.output_path is not None
+            assert res.output_path.read_text() == retry_report
+
+    @pytest.mark.parametrize("retry_exit", [0, 5])
+    @pytest.mark.parametrize(
+        "retry_report",
+        [None, VALID_REPORT],
+        ids=["reportless", "fresh-full"],
+    )
+    def test_geometric_verdict_follows_the_retry_not_the_first_attempt(
+        self, tmp_path, retry_exit, retry_report
+    ):
+        cli = _write_then_reject_cli(tmp_path, retry_exit=retry_exit, retry_report=retry_report)
+
+        res = run_geometric_drc(tmp_path / "b.kicad_pcb", kicad_cli=cli)
+
+        if retry_report is None:
+            assert res.ran is False
+            assert res.reason == REASON_NO_REPORT
+        else:
+            assert res.ran is True, res.note
+            assert res.reason == REASON_OK
+            assert res.unconnected_count == 1
+
+
+def test_drc_argv_output_path_handles_every_flag_form():
+    """The launch-side reset finds the report in all four output spellings."""
+    from kicad_tools.cli.runner import _drc_argv_output_path
+
+    board = ["kicad-cli", "pcb", "drc"]
+    tail = ["--format", "json", "b.kicad_pcb"]
+    assert _drc_argv_output_path([*board, "--output", "/tmp/r.json", *tail]) == "/tmp/r.json"
+    assert _drc_argv_output_path([*board, "-o", "/tmp/r.json", *tail]) == "/tmp/r.json"
+    assert _drc_argv_output_path([*board, "--output=/tmp/r.json", *tail]) == "/tmp/r.json"
+    assert _drc_argv_output_path([*board, "-o=/tmp/r.json", *tail]) == "/tmp/r.json"
+    assert _drc_argv_output_path([*board, "--help"]) is None
+    assert _drc_argv_output_path([*board, "--output=", *tail]) is None
+
+
+@pytest.mark.parametrize("form", ["--output", "-o", "--output=", "-o="], ids=str)
+def test_launch_resets_every_output_flag_form(monkeypatch, tmp_path, form):
+    """A stale report is cleared before the launch in every flag spelling."""
+    from kicad_tools.cli import runner
+
+    out = tmp_path / "r.json"
+    out.write_text('{"violations": []}')  # stale, from an earlier launch
+    seen: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        seen["existed"] = out.exists()
+        return subprocess.CompletedProcess(list(cmd), 0, "", "")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    argv = (
+        ["kicad-cli", "pcb", "drc", form, str(out), "b.kicad_pcb"]
+        if form in ("--output", "-o")
+        else ["kicad-cli", "pcb", "drc", f"{form}{out}", "b.kicad_pcb"]
+    )
+
+    runner.run_kicad_drc_command(lambda refill: argv, FAKE_CLI, refill_zones=False)
+
+    assert seen["existed"] is False, "the launch must start from no report"
+
+
+def test_building_argv_alone_leaves_a_written_report_intact(monkeypatch, tmp_path):
+    """``build_cmd`` is side-effect-free: inspecting argv never deletes a report."""
+    from kicad_tools.cli import runner
+
+    out = tmp_path / "r.json"
+    out.write_text('{"violations": []}')
+    launches: list[bool] = []
+
+    def build_cmd(refill: bool) -> list[str]:
+        return ["kicad-cli", "pcb", "drc", "--output", str(out), "b.kicad_pcb"]
+
+    def fake_run(cmd, *args, **kwargs):
+        launches.append(out.exists())
+        return subprocess.CompletedProcess(list(cmd), 0, "", "")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    # Inspect argv (the parity-test spy pattern) before and after a launch;
+    # only the launch itself may clear the path.
+    assert build_cmd(False) and out.exists()
+    runner.run_kicad_drc_command(build_cmd, FAKE_CLI, refill_zones=False)
+    assert launches == [False]
+    out.write_text('{"violations": []}')
+    assert build_cmd(True) and build_cmd(False)
+    assert out.exists(), "argv inspection must not delete the report"

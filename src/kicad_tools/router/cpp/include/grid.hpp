@@ -305,7 +305,7 @@ public:
                  int net, int layer_idx, uint32_t ref_hash,
                  float clearance_override,
                  bool is_plane_net = false, float rotation = 0.0f,
-                 bool is_circular = false);
+                 bool is_circular = false, float copper_corner_radius = -1.0f);
 
     // Issue #6008: board-file keepout rule areas the occupancy planes cannot
     // hold -- net-filtered track rules (``spatial_keepouts``) and every via
@@ -478,8 +478,19 @@ public:
     // Issue #6272: ``clearance`` is the trace/via floor
     // (``trace_via_clearance``); ``partner_net`` / ``partner_clearance`` only
     // widen the candidate lookup -- a partner's barrel is never relaxed.
+    struct TraceViaBand {
+        float edge_mm = 0.0f;
+        float incoming_dx = 0.0f, incoming_dy = 0.0f;
+        bool terminal = false;
+    };
     bool trace_stored_vias_clear(const Segment& segment, float clearance,
-                                 int partner_net, float partner_clearance) const;
+                                 int /*partner_net*/, float partner_clearance) const {
+        return search_trace_vias_clear(segment, clearance, partner_clearance, {});
+    }
+    // Reconstructed pad-center stubs only need the same-net band. Ordinary
+    // planar steps use the same spatial lookup for foreign barrel clearance.
+    bool search_trace_vias_clear(const Segment& segment, std::optional<float> foreign_clearance,
+                                 float partner_clearance, const TraceViaBand& band) const;
     // Issue #6272: ``trace_clearance`` >= 0 raises the via-vs-stored-segment
     // floor to ``trace_via_clearance(trace_clearance, clearance)``; via-vs-via
     // keeps ``clearance``.  The default (-1) keeps the pre-#6272 via floor.

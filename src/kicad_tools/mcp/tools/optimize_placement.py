@@ -11,6 +11,8 @@ strategy, seed generation) and expose them as MCP-callable functions.
 from __future__ import annotations
 
 import logging
+import math
+import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
@@ -20,10 +22,13 @@ from typing import TYPE_CHECKING, Any, Sequence
 # one implementation, so the MCP tool and the CLI see the same board, score it
 # the same way and write the same file (issue #6253).
 from kicad_tools.cli.optimize_placement_cmd import (
+    DEFAULT_DECOUPLING_RADIUS_MM,
     _board_pins,
     _build_decoupling_context,
+    _build_sheet_map,
     _compute_net_anchor_weight,  # noqa: F401  (re-exported)
     _decoupling_report,
+    _designated_cap_violations,
     _evaluate,
     _footprint_size_from_pads,  # noqa: F401  (re-exported)
     _locked_refs,
@@ -33,6 +38,7 @@ from kicad_tools.cli.optimize_placement_cmd import (
     _without_caps,
     _write_board_as_read_atomic,
     _write_placements_to_pcb,
+    _write_placements_to_pcb_atomic,
     repair_snapped_silk_refs,
     route_check_placement,
     snap_decoupling,
@@ -128,10 +134,28 @@ def _evaluate_vector(
     board: BoardOutline,
     cost_config: PlacementCostConfig,
     footprint_sizes: dict[str, tuple[float, float]],
+    ref_sheets: dict[str, str] | None = None,
 ) -> PlacementScore:
     """Evaluate a single placement vector and return its score."""
     placements = _vector_to_placements(vector, components)
-    return cost_evaluate_placement(placements, nets, rules, board, cost_config, footprint_sizes)
+    return cost_evaluate_placement(
+        placements, nets, rules, board, cost_config, footprint_sizes, ref_sheets=ref_sheets
+    )
+
+
+def _resolve_sheet_map(pcb_path: str, cost_config: PlacementCostConfig) -> dict[str, str] | None:
+    """``ref -> sheet`` map for the schematic-group terms, or ``None``.
+
+    Mirrors the CLI's gate: skipped (no netlist export) when both group weights
+    are zero, and any failure degrades to ``None`` (issue #10146).
+    """
+    if not (cost_config.group_cohesion_weight or cost_config.group_order_weight):
+        return None
+    try:
+        return _build_sheet_map(pcb_path, quiet=True)
+    except Exception:  # defensive: never break a run
+        logger.debug("schematic-sheet grouping unavailable", exc_info=True)
+        return None
 
 
 def _build_footprint_sizes(
@@ -187,6 +211,8 @@ def _breakdown_to_dict(breakdown: CostBreakdown) -> dict[str, float]:
         "drc": round(breakdown.drc, 4),
         "area": round(breakdown.area, 4),
         "decoupling": round(breakdown.decoupling, 4),
+        "group_cohesion": round(breakdown.group_cohesion, 4),
+        "group_order": round(breakdown.group_order, 4),
     }
 
 
@@ -200,6 +226,8 @@ def _parse_weights(weights: dict[str, float] | None) -> PlacementCostConfig:
         boundary_weight=weights.get("boundary", 1e5),
         wirelength_weight=weights.get("wirelength", 1.0),
         area_weight=weights.get("area", 0.1),
+        group_cohesion_weight=weights.get("group_cohesion", 1.0),
+        group_order_weight=weights.get("group_order", 1.0),
     )
 
 
@@ -219,6 +247,7 @@ def optimize_placement(
     anchor_weight: float = 0.0,
     route_check: bool = False,
     route_check_budget: int = DEFAULT_ROUTE_CHECK_BUDGET,
+    decoupling_radius_mm: float = DEFAULT_DECOUPLING_RADIUS_MM,
 ) -> dict[str, Any]:
     """Optimize component placement on a PCB board using CMA-ES.
 
@@ -233,14 +262,16 @@ def optimize_placement(
         max_iterations: Maximum number of optimization iterations.
         weights: Optional cost function weight overrides. Keys:
             overlap, drc, boundary, wirelength, area, creepage, cohesion,
-            decoupling, plus ``mode`` ("lexicographic" or "weighted_sum").
+            decoupling, group_cohesion, group_order, plus ``mode``
+            ("lexicographic" or "weighted_sum").
             Same keys and defaults as ``kct optimize-placement --weights``.
             The decoupling-capacitor affinity term (default weight 2.0)
             pulls each decoupling cap onto the IC supply pin it serves, and
             a post-optimize snap pass finishes the job; pass
             ``{"decoupling": 0}`` to turn both off.
         seed_method: Seed placement method ("force-directed" or "random").
-        output_path: Path for output file. If None, does not write to disk.
+        output_path: Save the selected placement here, including infeasible candidates.
+            Omit for a preview.
         pre_slide_off: If True, run slide-off overlap resolution on the seed
             placement before passing it to the optimizer.
         anchor_weight: When > 0, every net touching a footprint with the
@@ -256,6 +287,7 @@ def optimize_placement(
             least its completion with no more DRC errors. At most 3 routes.
         route_check_budget: Per-net A* node-expansion cap of each check
             route (``kct route --per-net-iterations``).
+        decoupling_radius_mm: Maximum supply-pad distance to the designated IC pin, in mm.
 
     Returns:
         Dictionary with optimization results:
@@ -266,7 +298,8 @@ def optimize_placement(
         - iterations: Number of iterations completed.
         - converged: Whether the optimizer detected convergence.
         - wall_time_s: Wall clock time in seconds.
-        - feasible: Whether the final placement is feasible.
+        - feasible: Whether the score is feasible and all designated caps pass validation.
+        - infeasible_detail: Designated-cap diagnostics, when present.
         - component_count: Number of components optimized.
         - net_count: Number of nets considered.
         - output_path: Path to the output file (if written).
@@ -283,10 +316,12 @@ def optimize_placement(
     Raises:
         FileNotFoundError: If the PCB file does not exist.
         ParseError: If the PCB file cannot be parsed.
-        ValueError: If anchor_weight is negative.
+        ValueError: If anchor_weight, the route budget or the decoupling radius is invalid.
     """
     _validate_pcb_path(pcb_path)
 
+    if not math.isfinite(decoupling_radius_mm) or decoupling_radius_mm < 0:
+        raise ValueError("decoupling_radius_mm must be a finite nonnegative distance")
     if anchor_weight < 0.0:
         raise ValueError(f"anchor_weight must be >= 0 (got {anchor_weight})")
     if route_check and route_check_budget <= 0:
@@ -322,15 +357,20 @@ def optimize_placement(
     placement_bounds = bounds(board_outline, components)
 
     # Same scoring context as ``kct optimize-placement``: side flags pinned to
-    # the board's own (the writer cannot flip footprints) and the decoupling-cap
+    # the board's own during the search and the decoupling-cap
     # affinity term, on by default, off with ``weights={"decoupling": 0}``.
     # Locked footprints keep their board pose as well (issue #6262).
     locked_refs = _locked_refs(pcb_path)
     fixed_sides = _board_pins(_read_current_vector(pcb_path, components), components, locked_refs)
     locked_indices = sorted(fixed_sides.poses)
     decoupling_groups = _build_decoupling_context(pcb_path, nets, cost_config, quiet=True)
+    designated_caps = {ref for group in decoupling_groups or () for ref, _ in group.associated}
+    flippable_refs = designated_caps - locked_refs
+    # Schematic-sheet grouping (issue #10146): same map, same weight gate as the
+    # CLI, so ``group_cohesion`` / ``group_order`` are not inert here.
+    sheet_map = _resolve_sheet_map(pcb_path, cost_config)
 
-    def _score(vec: PlacementVector) -> PlacementScore:
+    def _score(vec: PlacementVector, pins: Sequence[int] | None = fixed_sides) -> PlacementScore:
         return _evaluate(
             vec,
             components,
@@ -340,7 +380,8 @@ def optimize_placement(
             cost_config,
             footprint_sizes,
             decoupling_groups=decoupling_groups,
-            fixed_sides=fixed_sides,
+            fixed_sides=pins,
+            ref_sheets=sheet_map,
         )
 
     # Create strategy.  Annotated with the concrete union (not the abstract
@@ -492,7 +533,10 @@ def optimize_placement(
             cost_config,
             footprint_sizes,
             _without_caps(decoupling_groups, locked_refs),
+            flippable_refs=flippable_refs,
+            max_radius_mm=decoupling_radius_mm,
             fixed_sides=fixed_sides,
+            ref_sheets=sheet_map,
         )
 
     route_check_report: RouteCheckReport | None = None
@@ -515,6 +559,7 @@ def optimize_placement(
             board_origin,
             best_vector,
             _snap_only,
+            flippable_refs=flippable_refs,
             fixed_sides=fixed_sides,
             locked_indices=locked_indices,
             budget=route_check_budget,
@@ -529,7 +574,7 @@ def optimize_placement(
             else []
         )
 
-    final_score = _score(best_vector)
+    final_score = _score(best_vector, pins=None if flippable_refs else fixed_sides)
 
     # Calculate improvement
     if seed_score.total > 0:
@@ -557,7 +602,8 @@ def optimize_placement(
         "iterations": iteration,
         "converged": optimizer.converged,
         "wall_time_s": round(elapsed, 3),
-        "feasible": final_score.is_feasible,
+        # A designated cap must also pass the serialized-board check below.
+        "feasible": final_score.is_feasible and not designated_caps,
         "component_count": len(components),
         "net_count": len(nets),
         "convergence_data": convergence_data,
@@ -591,25 +637,47 @@ def optimize_placement(
             for d in post_slide_result.overlap_details
         ]
 
-    # Write output if requested
-    if output_path:
-        try:
-            if route_check_report is not None and route_check_report.accepted_stage == "incumbent":
-                # Route check kept the board as read: write it untouched.
+    # Validate the serialized pad geometry for both preview and save. If the
+    # route check kept the incumbent, use its original (unrounded) geometry.
+    def validate_candidate(candidate: Path) -> None:
+        errors = _designated_cap_violations(candidate, decoupling_groups, decoupling_radius_mm)
+        result["feasible"] = final_score.is_feasible and not errors
+        if errors:
+            result["infeasible_detail"] = ", ".join(errors)
+
+    def write_candidate(destination: str) -> None:
+        _write_placements_to_pcb_atomic(
+            pcb_path,
+            destination,
+            best_vector,
+            components,
+            board_origin,
+            flippable_refs=flippable_refs,
+            validate=validate_candidate if designated_caps else None,
+        )
+
+    try:
+        if route_check_report is not None and route_check_report.accepted_stage == "incumbent":
+            if designated_caps:
+                validate_candidate(Path(pcb_path))
+            if output_path:
                 _write_board_as_read_atomic(pcb_path, output_path)
-            else:
-                _write_placements_to_pcb(
-                    pcb_path, output_path, best_vector, components, board_origin
-                )
-                # Re-anchor reference text the snap disturbed (issue #6256).
-                silk_repair = repair_snapped_silk_refs(output_path, snap_moves)
-                if silk_repair is not None:
-                    result["snap_silk_repair"] = silk_repair.as_dict()
-                    if silk_repair.warnings():
-                        result.setdefault("warnings", []).extend(silk_repair.warnings())
+        elif output_path:
+            write_candidate(output_path)
+            silk_repair = repair_snapped_silk_refs(output_path, snap_moves)
+            if silk_repair is not None:
+                result["snap_silk_repair"] = silk_repair.as_dict()
+                if silk_repair.warnings():
+                    result.setdefault("warnings", []).extend(silk_repair.warnings())
+        elif designated_caps:
+            with tempfile.TemporaryDirectory() as tmp:
+                write_candidate(str(Path(tmp) / "candidate.kicad_pcb"))
+
+        if output_path:
             result["output_path"] = output_path
-        except Exception as e:
-            result["warnings"] = [f"Optimization succeeded but save failed: {e}"]
+    except Exception as e:
+        action = "save" if output_path else "candidate validation"
+        result["warnings"] = [f"Optimization succeeded but {action} failed: {e}"]
 
     return result
 
@@ -628,14 +696,15 @@ def evaluate_placement(
     Args:
         pcb_path: Absolute path to .kicad_pcb file.
         weights: Optional cost function weight overrides. Keys:
-            overlap, drc, boundary, wirelength, area.
+            overlap, drc, boundary, wirelength, area, group_cohesion, group_order.
+            Set both sheet weights to zero to skip schematic discovery.
 
     Returns:
         Dictionary with placement evaluation results:
         - success: Whether evaluation completed.
         - score: Total placement score (lower is better).
         - feasible: Whether placement is feasible (no overlaps/violations).
-        - breakdown: Per-component score breakdown (wirelength, overlap, DRC, area).
+        - breakdown: Raw cost terms, including sheet cohesion and order in mm.
         - wirelength_estimators: The centre-anchored and pad-anchored
           wirelength of this same layout side by side, with their delta and
           which one ``score`` was computed from (issue #4831 M5). Report-only:
@@ -696,7 +765,13 @@ def evaluate_placement(
 
     # Evaluate placement
     score = cost_evaluate_placement(
-        current_placements, nets, rules, board_outline, cost_config, footprint_sizes
+        current_placements,
+        nets,
+        rules,
+        board_outline,
+        cost_config,
+        footprint_sizes,
+        ref_sheets=_resolve_sheet_map(pcb_path, cost_config),
     )
 
     # Compute per-footprint ratsnest distances

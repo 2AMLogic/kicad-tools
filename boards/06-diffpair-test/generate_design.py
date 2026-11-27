@@ -40,6 +40,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from kicad_tools.cli.silk_default_pass import run_default_silk_pass
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
@@ -495,6 +496,25 @@ def _pour_connected_pairs(elements: list, fills: list):
             yield indices[a], indices[b]
 
 
+def _pour_track_shape(track, origin):
+    """Return a track's copper in the same sheet coordinates as the fills."""
+    from shapely.geometry import LineString
+
+    ox, oy = origin
+    line = LineString([(x + ox, y + oy) for x, y in (track.start, track.end)])
+    return line.buffer((track.width or 0.3) / 2.0)
+
+
+def _pour_via_positions(pcb):
+    """Read each barrel in sheet coordinates with its resolved net and span."""
+    from shapely.geometry import Point
+
+    ox, oy = pcb.board_origin
+    for via in pcb.vias:
+        x, y = via.position
+        yield Point(x + ox, y + oy), (via.size or 0.6) / 2.0, via
+
+
 def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     """Geometric per-net copper-connectivity audit (PR #3481 pattern).
 
@@ -528,14 +548,11 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         shipped on softstart in the first place -- see PR #3481).
     """
     import math
-    import re
 
-    from shapely.geometry import LineString, Point
+    from shapely.geometry import Point
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
-    from kicad_tools.core.layers import kicad_read_via_layers
 
-    text = pcb_path.read_text()
     all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
     # Board 06's fixed 4-layer stackup in *physical* stack order (issue
     # #5176): F.Cu, then inner layers ascending, then B.Cu.  Needed so a
@@ -545,7 +562,7 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     # ``_via_bridged_layers``.
     copper_layer_order = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
 
-    def _via_layer_span(via_text: str) -> frozenset[str]:
+    def _via_layer_span(layers: list[str]) -> frozenset[str]:
         """Expand a via's declared endpoint layers to its full bridged span.
 
         ``(layers "F.Cu" "B.Cu")`` is a through-hole via that also joins
@@ -557,15 +574,10 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         while ``all_layers`` would be the false-PASS this audit exists to
         catch.
         """
-        m = re.search(r'\(layers "([^"]+)" "([^"]+)"\)', via_text)
-        if not m:
+        if len(layers) != 2:
             return frozenset()
-        # Issue #6614: KiCad reads a via with no blind/buried/micro keyword
-        # as a through via whatever its pair says, so read the span the
-        # same way (one rule shared with the schema and router parsers).
-        kw = re.match(r"\s*\(via\s+(micro|blind|buried)\b", via_text)
-        named = frozenset(kicad_read_via_layers(m.groups(), kw.group(1) if kw else None)[0])
-        copper_named = frozenset(layer for layer in named if layer.endswith(".Cu"))
+        # Via.from_sexp already applies KiCad's keyword-dependent span rule.
+        copper_named = frozenset(layer for layer in layers if layer.endswith(".Cu"))
         indices = [
             copper_layer_order.index(layer) for layer in copper_named if layer in copper_layer_order
         ]
@@ -578,38 +590,15 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     fills, zero_fill_zones = _pour_fill_components(analyzer.pcb, net_names)
 
     # Segments (actual width) and via barrels per net.
-    net_ids = dict(re.findall(r'\(net (\d+) "([^"]*)"\)', text))
     segs: dict[str, list] = {n: [] for n in net_names}
     vias: dict[str, list] = {n: [] for n in net_names}
-    for seg in _find_sexp_blocks(text, "\n\t(segment") + _find_sexp_blocks(text, "\n  (segment"):
-        name = net_ids.get(re.search(r"\(net (\d+)\)", seg).group(1))
-        if name not in segs:
-            continue
-        st = re.search(r"\(start ([\d.-]+) ([\d.-]+)\)", seg)
-        en = re.search(r"\(end ([\d.-]+) ([\d.-]+)\)", seg)
-        wd = re.search(r"\(width ([\d.]+)\)", seg)
-        lay = re.search(r'\(layer "([^"]*)"\)', seg).group(1)
-        width = float(wd.group(1)) if wd else 0.3
-        line = LineString(
-            [
-                (float(st.group(1)), float(st.group(2))),
-                (float(en.group(1)), float(en.group(2))),
-            ]
-        )
-        segs[name].append((line.buffer(width / 2.0), frozenset({lay})))
-    for via in _find_sexp_blocks(text, "\n\t(via") + _find_sexp_blocks(text, "\n  (via"):
-        name = net_ids.get(re.search(r"\(net (\d+)\)", via).group(1))
-        if name not in vias:
-            continue
-        at = re.search(r"\(at ([\d.-]+) ([\d.-]+)\)", via)
-        sz = re.search(r"\(size ([\d.]+)\)", via)
-        radius = (float(sz.group(1)) if sz else 0.6) / 2.0
-        vias[name].append(
-            (
-                Point(float(at.group(1)), float(at.group(2))).buffer(radius),
-                _via_layer_span(via),
-            )
-        )
+    for track in analyzer.pcb.segments:
+        if track.net_name in segs:
+            copper = _pour_track_shape(track, analyzer.pcb.board_origin)
+            segs[track.net_name].append((copper, frozenset({track.layer})))
+    for point, radius, via in _pour_via_positions(analyzer.pcb):
+        if via.net_name in vias:
+            vias[via.net_name].append((point.buffer(radius), _via_layer_span(via.layers)))
 
     # Pads (absolute sheet coordinates via the analyzer's PCB model).
     origin_x, origin_y = analyzer.pcb.board_origin
@@ -829,7 +818,6 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         ``(vias_placed, bridges_placed)``.
     """
     import math
-    import re
     import warnings
     from dataclasses import replace
 
@@ -848,18 +836,22 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         same_net_band_seat_ok,
         same_net_trace_band_clear,
     )
+    from kicad_tools.sexp.parser import quote_string
     from kicad_tools.validate.clearance_shapes import pad_shape as kernel_pad_shape
     from kicad_tools.zones.pour_bridge import BridgeSide, plan_via_hop_bridge
 
     text = pcb_path.read_text()
     _reserve_repair_uuids(text)
-    net_id_by_name = {name: int(num) for num, name in re.findall(r'\(net (\d+) "([^"]*)"\)', text)}
-    id_to_name = {str(v): k for k, v in net_id_by_name.items()}
     all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
 
     # --- global obstacle index ---------------------------------------------
     analyzer = NetStatusAnalyzer(pcb_path)
     origin_x, origin_y = analyzer.pcb.board_origin
+
+    if analyzer.pcb._net_name_only_dialect:
+        net_atoms = {name: quote_string(name) for name in net_names}
+    else:
+        net_atoms = {net.name: str(net.number) for net in analyzer.pcb.nets.values()}
 
     # Pads: (geom, net, layers, drill_r, center, name, is_th, inscribed,
     #        kpad, bound_r) -- ``kpad`` / ``bound_r`` are Issue #6748's true
@@ -943,21 +935,10 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     SAME_NET_PAD_GAP_MM, SAME_NET_TRACE_GAP_MM = same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
 
     # Segments: (geom, net, layer)
-    seg_index: list[tuple] = []
-    for seg in _find_sexp_blocks(text, "\n\t(segment") + _find_sexp_blocks(text, "\n  (segment"):
-        st = re.search(r"\(start ([\d.-]+) ([\d.-]+)\)", seg)
-        en = re.search(r"\(end ([\d.-]+) ([\d.-]+)\)", seg)
-        wd = re.search(r"\(width ([\d.]+)\)", seg)
-        lay = re.search(r'\(layer "([^"]+)"\)', seg).group(1)
-        nid = re.search(r"\(net (\d+)\)", seg).group(1)
-        width = float(wd.group(1)) if wd else 0.3
-        line = LineString(
-            [
-                (float(st.group(1)), float(st.group(2))),
-                (float(en.group(1)), float(en.group(2))),
-            ]
-        )
-        seg_index.append((line.buffer(width / 2.0), id_to_name.get(nid, ""), lay))
+    seg_index = [
+        (_pour_track_shape(track, analyzer.pcb.board_origin), track.net_name, track.layer)
+        for track in analyzer.pcb.segments
+    ]
 
     # Issue #5240: bounding-box pre-filter over the segment obstacles.  The
     # clearance guards below only ever reject on a *near* segment, and board
@@ -969,18 +950,10 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
 
     # Vias: (center_point, net, radius, actual drill diameter)
     via_index: list[tuple] = []
-    for via in _find_sexp_blocks(text, "\n\t(via") + _find_sexp_blocks(text, "\n  (via"):
-        at = re.search(r"\(at ([\d.-]+) ([\d.-]+)\)", via)
-        sz = re.search(r"\(size ([\d.]+)\)", via)
-        nid = re.search(r"\(net (\d+)\)", via).group(1)
-        radius = (float(sz.group(1)) if sz else 0.6) / 2.0
-        drill_match = re.search(r"\(drill ([\d.]+)\)", via)
-        if drill_match is None:
+    for point, radius, via in _pour_via_positions(analyzer.pcb):
+        if via.drill <= 0:
             raise ValueError("Pour repair requires an explicit round via drill")
-        drill = float(drill_match.group(1))
-        via_index.append(
-            (Point(float(at.group(1)), float(at.group(2))), id_to_name.get(nid, ""), radius, drill)
-        )
+        via_index.append((point, via.net_name, radius, via.drill))
 
     fills_by_net, _ = _pour_fill_components(analyzer.pcb, net_names)
 
@@ -1248,10 +1221,9 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         net: str, vx: float, vy: float, diameter: float = 0.45, drill: float = 0.25
     ) -> None:
         nonlocal vias_placed
-        nid = net_id_by_name[net]
         via_lines.append(
             f"  (via (at {vx:.3f} {vy:.3f}) (size {diameter}) (drill {drill}) "
-            f'(layers "F.Cu" "B.Cu") (net {nid}) (uuid "{_generate_uuid()}"))'
+            f'(layers "F.Cu" "B.Cu") (net {net_atoms[net]}) (uuid "{_generate_uuid()}"))'
         )
         via_index.append((Point(vx, vy), net, diameter / 2, drill))
         vias_placed += 1
@@ -1263,10 +1235,9 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         layer: str,
         width: float,
     ) -> None:
-        nid = net_id_by_name[net]
         seg_lines.append(
             f"  (segment (start {p0[0]:.3f} {p0[1]:.3f}) (end {p1[0]:.3f} {p1[1]:.3f}) "
-            f'(width {width}) (layer "{layer}") (net {nid}) '
+            f'(width {width}) (layer "{layer}") (net {net_atoms[net]}) '
             f'(uuid "{_generate_uuid()}"))'
         )
         seg_index.append((LineString([p0, p1]).buffer(width / 2.0), net, layer))
@@ -1676,7 +1647,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 skipped_roots.add(_find(target[0]))
 
     if via_lines or seg_lines:
-        content = pcb_path.read_text().rstrip().rstrip(")")
+        content = pcb_path.read_text().rstrip().removesuffix(")")
         content += "\n" + "\n".join(via_lines + seg_lines) + "\n)\n"
         pcb_path.write_text(content)
     for msg in failed:
@@ -1887,12 +1858,15 @@ def _relocate_pad_edge_vias(pcb_path: Path) -> int:
     clean result.  Returns the number of vias moved; a via with no legal spot
     raises (the surrounding transaction restores the board).
     """
+    from reset_escape import repair_reset_escape
+
     from kicad_tools.cli.relocate_in_pad_vias import relocate_pad_edge_vias
     from kicad_tools.manufacturers import get_profile
     from kicad_tools.schema.pcb import PCB
 
     pcb = PCB.load(pcb_path)
-    result = relocate_pad_edge_vias(pcb, get_profile("jlcpcb").get_design_rules(layers=4))
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    result = relocate_pad_edge_vias(pcb, rules)
     if result.skipped or result.unresolvable:
         raise RuntimeError(f"Pad-edge vias left in the mask-dam zone: {result}")
     for move in result.moved:
@@ -1902,7 +1876,7 @@ def _relocate_pad_edge_vias(pcb_path: Path) -> int:
         )
     if result.changed:
         pcb.save(pcb_path)
-    return len(result.moved)
+    return len(result.moved) + repair_reset_escape(pcb_path, rules)
 
 
 def _same_net_leg_band_ok(
@@ -3463,6 +3437,19 @@ def _resolve_quantize_treatment(
     )
 
 
+def _clear_pad_departures(pcb_path: Path) -> int:
+    """Repair the sideband, USB2 and PCIe escapes flagged by the mask check.
+
+    Runs inside the step-13 transaction, so the refill, pour audit and
+    clearance gates below grade the rebuilt escapes like any other repair.
+    """
+    from pad_departures import clear_pad_departures
+
+    from kicad_tools.manufacturers import get_profile
+
+    return clear_pad_departures(pcb_path, get_profile("jlcpcb").get_design_rules(layers=4))
+
+
 def _finalize_signal_copper(
     pcb_path: Path, fill_argv: list[str], audit_pours: Callable[[str], bool]
 ) -> None:
@@ -3479,34 +3466,25 @@ def _finalize_signal_copper(
         n_split = _split_offangle_chords(pcb_path, before)
         n_vias = _legalize_signal_vias(pcb_path)
         n_edge = _relocate_pad_edge_vias(pcb_path)
-        if not (n_split or n_vias or n_edge):
-            print("   No repairable via/chord residuals detected")
+        legalized = bool(n_split or n_vias or n_edge)
+        pours_ok = True
+        if legalized:
+            print(
+                f"   {n_vias} via defect(s) repaired, {n_edge} pad-edge via(s) moved, "
+                f"{n_split} chord(s) split"
+            )
+            pours_ok = _refill_zones_and_audit(pcb_path, fill_argv, audit_pours, "legal")
+        # The pad-departure repair (#9989) runs on the refilled board and is
+        # followed by its own refill: its rebuilt escapes and the U1.12
+        # barrel's new seat must both be graded against a fresh pour, inside
+        # this transaction, before the final gate.
+        n_dep = _clear_pad_departures(pcb_path)
+        if n_dep:
+            print(f"   {n_dep} pad departure(s) cleared")
+            pours_ok = _refill_zones_and_audit(pcb_path, fill_argv, audit_pours, "depart")
+        elif not legalized:
+            print("   No repairable via, chord or pad-departure residuals detected")
             return
-        print(
-            f"   {n_vias} via defect(s) repaired, {n_edge} pad-edge via(s) moved, "
-            f"{n_split} chord(s) split"
-        )
-        print("13b. Re-filling zones after legalization...")
-        result = subprocess.run(fill_argv, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Zone re-fill failed (rc={result.returncode})")
-        print("13c. Copper-union pour audit + clearance gate (post-legalize)...")
-        pours_ok = audit_pours("[legal]")
-        # Relocated signal copper can carve an existing pour connection away
-        # during refill. Reconnect it inside this transaction; every added
-        # repair must survive legalization, refill, and the final gates.
-        for repair_round in range(MAX_POUR_REPAIR_ROUNDS):
-            if pours_ok:
-                break
-            added_vias, added_bridges = _repair_pour_connectivity(pcb_path, POUR_NETS)
-            if not (added_vias or added_bridges):
-                break
-            _legalize_signal_vias(pcb_path)
-            _relocate_pad_edge_vias(pcb_path)
-            result = subprocess.run(fill_argv, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(f"Post-legalize pour re-fill failed (rc={result.returncode})")
-            pours_ok = audit_pours(f"[legal-r{repair_round + 1}]")
         new_clearances = _clearance_signature(pcb_path) - before
         if not pours_ok or new_clearances:
             raise RuntimeError(
@@ -3519,6 +3497,39 @@ def _finalize_signal_copper(
         # refill is unnecessary and could itself fail after the rollback.
         pcb_path.write_bytes(original)
         raise
+
+
+def _refill_zones_and_audit(
+    pcb_path: Path, fill_argv: list[str], audit_pours: Callable[[str], bool], tag: str
+) -> bool:
+    """Refill the zones, audit the pours, and repair any carved connection.
+
+    The shared tail of step 13's transaction (used after the legalization
+    edits and again after the #9989 pad-departure repair): every mutation is
+    followed by its own refill and physical pour audit before the gate.
+    """
+    print(f"13b. Re-filling zones ({tag})...")
+    result = subprocess.run(fill_argv, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Zone re-fill failed (rc={result.returncode})")
+    print(f"13c. Copper-union pour audit + clearance gate ({tag})...")
+    pours_ok = audit_pours(f"[{tag}]")
+    # Relocated signal copper can carve an existing pour connection away
+    # during refill. Reconnect it inside this transaction; every added
+    # repair must survive legalization, refill, and the final gates.
+    for repair_round in range(MAX_POUR_REPAIR_ROUNDS):
+        if pours_ok:
+            break
+        added_vias, added_bridges = _repair_pour_connectivity(pcb_path, POUR_NETS)
+        if not (added_vias or added_bridges):
+            break
+        _legalize_signal_vias(pcb_path)
+        _relocate_pad_edge_vias(pcb_path)
+        result = subprocess.run(fill_argv, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"Post-legalize pour re-fill failed (rc={result.returncode})")
+        pours_ok = audit_pours(f"[{tag}-r{repair_round + 1}]")
+    return pours_ok
 
 
 def _write_router_netclass_sidecars(routed_path: Path, net_class_map: dict) -> list[Path]:
@@ -4705,28 +4716,41 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             print(f"   {tag} FAIL: audit crashed ({exc})")
         return ok
 
+    def _refill_for_repair(step: str) -> bool:
+        print(step)
+        result = subprocess.run(fill_argv, capture_output=True, text=True)
+        if result.returncode:
+            print(f"   Zone re-fill failed (rc={result.returncode}):")
+            if result.stderr:
+                print(f"   stderr: {result.stderr.strip()}")
+            return False
+        return True
+
+    # The stitcher carves its new copper out of the old fills. KiCad can
+    # reconnect the remaining islands when it refills that copper. Planning
+    # against the carve alone adds a redundant +3V3 bridge beside USB3_RX1.
+    fill_ok = _refill_for_repair("\n10a. Re-filling zones after stitching...")
+    any_fill_ok = first_fill_ok or fill_ok
     pour_ok = False
     for repair_round in range(1, MAX_POUR_REPAIR_ROUNDS + 1):
         print(
             f"\n10b. Pour-connectivity repair round {repair_round} "
             f"(offset vias + stubs + island bridges)..."
         )
-        try:
-            rep_vias, rep_bridges = _repair_pour_connectivity(output_path, skip_nets)
-            print(f"   Placed {rep_vias} repair via(s) + {rep_bridges} bridge trace(s)")
-        except Exception as exc:
-            print(f"   WARNING: pour-connectivity repair failed: {exc}")
+        if fill_ok:
+            try:
+                rep_vias, rep_bridges = _repair_pour_connectivity(output_path, skip_nets)
+                print(f"   Placed {rep_vias} repair via(s) + {rep_bridges} bridge trace(s)")
+            except Exception as exc:
+                print(f"   WARNING: pour-connectivity repair failed: {exc}")
+        else:
+            print("   Waiting for a successful zone fill before placing repair copper.")
 
         # Re-fill after repair: the new via barrels pass through the
         # OTHER nets' planes, so the fills must be recomputed to carve
         # clearance around them (and so the exported copper is final).
-        print(f"10c. Re-filling zones (round {repair_round})...")
-        fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
-        refill_ok = fill_result.returncode == 0
-        if not refill_ok:
-            print(f"   Zone re-fill failed (rc={fill_result.returncode}):")
-            if fill_result.stderr:
-                print(f"   stderr: {fill_result.stderr.strip()}")
+        fill_ok = _refill_for_repair(f"10c. Re-filling zones (round {repair_round})...")
+        any_fill_ok = any_fill_ok or fill_ok
 
         # Issue #3413 phase 4 acceptance gate: every pour net must be
         # GEOMETRICALLY continuous (all pads in one copper component) and
@@ -4734,7 +4758,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # is the copper-union audit, NOT the analyzer's boundary test
         # (#3482).
         print(f"11. Copper-union pour-connectivity audit (round {repair_round})...")
-        pour_ok = _run_pour_audit(f"[r{repair_round}]")
+        pour_ok = fill_ok and _run_pour_audit(f"[r{repair_round}]")
         if pour_ok:
             break
         # Issue #3509: when the filler is structurally unavailable (the
@@ -4743,7 +4767,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # zero-fill and no number of repair rounds can converge.  Stop
         # iterating; the FAIL verdict below (and the CI gate's asserted
         # pour audit) surfaces the environment defect attributably.
-        if not first_fill_ok and not refill_ok:
+        if not any_fill_ok:
             print(
                 "   Zone filler unavailable (every fill invocation failed) -- "
                 "aborting repair loop; pours CANNOT converge without fills "
@@ -5206,8 +5230,6 @@ def main() -> int:
                     "in route_pcb() if this recurs on an unloaded host."
                 )
 
-            drc_ok = run_drc(routed_path)
-
             # LVS (#3779, re-enabled by #4012): the fixture schematic is
             # now FULLY WIRED (generate_schematic.py emits a wire stub +
             # global label for all 198 pins, PIN_NETS mirroring
@@ -5238,10 +5260,33 @@ def main() -> int:
 
             # Export manufacturing bundle (#3147) so ``kct fleet status``
             # reports ``ship_ready=true`` (the bundle's manifest mtime must
-            # be newer than the freshly routed PCB).  Run unconditionally:
-            # routing is allowed to be PARTIAL on this board, and a current
-            # bundle still clears the ``"artifacts stale"`` blocker.
+            # be newer than the freshly routed PCB).  Runs after the clean
+            # LVS verdict above: a partial route already fast-failed at the
+            # #4066 gate and a copper/label divergence raised, so the
+            # exported package always describes a fully routed, LVS-clean
+            # board.  The default silk legalisation pass inside ``kct
+            # export`` finalises the routed PCB's silkscreen, and the
+            # manifest binds those final bytes -- which is why the full
+            # check below must run on the post-export board (#10308).
             mfg_ok = export_manufacturing_bundle(routed_path, output_dir)
+
+            # Issue #10308: grade the artifact this recipe DELIVERS, not an
+            # earlier snapshot.  ``run_drc`` used to run before the export,
+            # so it graded a different board from the one shipped: the
+            # export's silk legalisation pass rewrites the routed PCB
+            # afterwards, and the manufacturing manifest the full checker
+            # verifies (bundle hashes, archived project copy) did not exist
+            # yet -- the checker exited 2 (INCOMPLETE, "no manufacturing
+            # bundle") on every fresh run, so the recipe failed even when
+            # the delivered package was clean.  Run once, after export, on
+            # the PCB export just finalised; its existing command picks up
+            # the net-class sidecar and the fresh manifest.  It runs
+            # unconditionally (a failed export too): a missing or stale
+            # bundle then fails this check as well, and the ``export_ok``
+            # leg of the gate below independently fails the recipe even
+            # when an older, still-hash-matching package lets the check
+            # pass.
+            drc_ok = run_drc(routed_path)
 
             # Issue #3912: the exit code and the SUMMARY are now BOTH derived
             # from one shared PipelineGateResult so they cannot diverge.  The
@@ -5250,8 +5295,11 @@ def main() -> int:
             # while the process exited 0.  ``run_drc`` here uses
             # ``kct check --net-class-map``; that engine is the ONLY one that
             # can see the diffpair / match-group length-skew rule families
-            # (kicad-cli has no native expression for them), so its verdict is
-            # threaded in as ``supplemental_drc_ok``.  The gate's authoritative
+            # (kicad-cli has no native expression for them), and -- since it
+            # now runs after the export (#10308) -- its verdict also carries
+            # the manufacturing-bundle verification (manifest hashes,
+            # archived-board match), so it is threaded in as
+            # ``supplemental_drc_ok``.  The gate's authoritative
             # geometric leg (``kicad-cli pcb drc --refill-zones``) catches the
             # shorts / clearance defects kicad-cli owns; the union of the two
             # is the real DRC verdict.  Board-06 routes fully by design, so
@@ -5264,8 +5312,9 @@ def main() -> int:
                 export_ok=mfg_ok,
                 supplemental_drc_ok=drc_ok,
                 supplemental_reason=(
-                    "kct check --net-class-map reported diffpair / match-group "
-                    "errors (see DRC output above)"
+                    "kct check --mfr jlcpcb reported errors -- diffpair / "
+                    "match-group rules via --net-class-map and/or "
+                    "manufacturing-bundle verification (see DRC output above)"
                 ),
             )
 
@@ -5325,6 +5374,7 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
+            run_default_silk_pass(routed_path, mfr="jlcpcb")
             return 0
 
         # argparse choices already constrains this, but be explicit.

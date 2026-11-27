@@ -90,6 +90,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "sch pin-map": ["{sch}"],
     "sch connections": ["{sch}"],
     "sch unconnected": ["{sch}"],
+    "sch decoupling": ["{sch}"],
     "sch replace": ["{sch}", "R1", "Device:R_Small", "--dry-run"],
     "sch set-footprint": ["{sch}", "--ref", "R1", "--footprint", "Resistor_SMD:R_0402"],
     "sch assign-footprints": ["{sch}"],
@@ -240,6 +241,9 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "zones batch": ["{pcb}", "--power-nets", "GND:B.Cu", "--dry-run"],
     "zones hv-keepout": ["{pcb}", "--clearance", "2.0", "--dry-run"],
     "zones fill": ["{pcb}"],
+    # Issue #9808: the missing-board refusal is one JSON error document and
+    # needs neither kicad-cli nor a board mutation.
+    "zones relieve": ["{dir}/missing.kicad_pcb"],
     "stitch": ["{pcb}", "--dry-run"],
     # -- routing / repair drivers ------------------------------------------
     # Issue #5994: the default route run spends ~45 s in kicad-cli (oracle
@@ -293,6 +297,8 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "datasheet convert": ["{dir}/missing.pdf"],
     "datasheet extract-images": ["{dir}/missing.pdf", "-o", "{dir}/images"],
     "datasheet extract-tables": ["{dir}/missing.pdf"],
+    "datasheet extract-package": ["{fixtures}/package-table.pdf"],
+    "datasheet suggest-footprint": ["{fixtures}/package-table.pdf"],
     "datasheet info": ["{dir}/missing.pdf"],
     # -- decisions / placement ---------------------------------------------
     "decisions show": ["{pcb}"],
@@ -313,6 +319,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "validate": ["--sync", "{pro}"],
     "analyze congestion": ["{pcb}"],
     "analyze trace-lengths": ["{pcb}"],
+    "analyze reference-coverage": ["{pcb}", "--pair", "VIN", "NET1"],
     "analyze signal-integrity": ["{pcb}"],
     "analyze thermal": ["{pcb}"],
     "analyze complexity": ["{pcb}"],
@@ -409,6 +416,9 @@ CONTRACT_ARGV: dict[str, list[str]] = {
 # issue #6006) is run as given.
 FLAG_VARIANT_ARGV: dict[str, list[str]] = {
     "check --diff": ["check", "--diff", "{pcb}", "{pcb}"],
+    # Issue #10132: --check must keep stdout a single JSON document even
+    # when it exits 1 on reference order disagreements.
+    "sch re-annotate --check": ["sch", "re-annotate", "{sch}", "--check"],
     "check --format sarif": ["check", "{pcb}", "--format", "sarif"],
     "check --diff --format sarif": ["check", "--diff", "{pcb}", "{pcb}", "--format", "sarif"],
     "detect-mistakes --format sarif": [
@@ -483,6 +493,7 @@ EXEMPT: dict[str, str] = {
     "parts availability": "network: queries the LCSC/JLCPCB API per BOM line",
     "parts suggest": "network: queries the LCSC/JLCPCB API per BOM line",
     "parts alternatives": "needs the ~620 MB jlcparts catalog from `parts sync-catalog` (unit-tested in tests/test_parts_alternatives.py)",
+    "parts stock": "network: queries distributor stock APIs (mocked JSON run in tests/parts/test_distributors.py)",
     "parts import": "network: searches and downloads datasheets (mocked JSON run in tests/test_parts_cmd_import.py)",
     "suggest alternatives": "network: queries the LCSC/JLCPCB API",
     "parts sync-catalog": "network: downloads the JLCPCB parts catalog",
@@ -707,10 +718,33 @@ def _check_zones_fill_doc(doc: dict) -> None:
     assert doc.get("filled") is True, doc
 
 
+@pytest.mark.parametrize(
+    ("command", "key"), [("extract-package", "packages"), ("suggest-footprint", "results")]
+)
+def test_datasheet_json_with_no_packages(command, key, tmp_path):
+    # Page 2 of the fixture is blank.
+    pdf = str(FIXTURES / "package-table.pdf")
+    argv = ["datasheet", command, pdf, "--pages", "2", "--format", "json"]
+    doc = _assert_single_json_document(f"datasheet {command}", argv, tmp_path)
+    assert doc == {"source": pdf, key: []}
+
+
+def _check_package_doc(doc: dict) -> None:
+    assert [pkg["name"] for pkg in doc["packages"]] == ["SOIC8"]
+
+
+def _check_footprint_suggestions_doc(doc: dict) -> None:
+    (result,) = doc["results"]
+    assert result["package"]["name"] == "SOIC8"
+    assert result["matches"]
+
+
 # Leaves whose JSON payload must prove the real output path ran (#9803
 # acceptance): an early error, a dry-run, or a narrowed argv that silently
 # stopped generating output would otherwise still parse as one document.
 _CONTENT_CHECKS: dict[str, Callable[[dict], None]] = {
+    "datasheet extract-package": _check_package_doc,
+    "datasheet suggest-footprint": _check_footprint_suggestions_doc,
     "render": _check_render_doc,
     "zones fill": _check_zones_fill_doc,
 }

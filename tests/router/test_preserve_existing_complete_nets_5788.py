@@ -30,18 +30,18 @@ What is pinned here
 2. The same for a **coupled differential pair** -- board 06's failure was on
    coupled pairs, so a single-ended-only regression test would not have caught
    it.
-3. The default (no ``--preserve-existing``) is untouched: a complete net is
-   still re-routed.
+3. An explicit full reroute replaces a complete net's original copper.
 4. An EXPLICIT route set still re-routes a complete net -- ``--nets`` promises
    exactly that, and the fix must not quietly turn it into a no-op.
 5. The detector itself, against board 06's real input: exactly the eight LVDS
    nets are reported complete.
-6. End to end on board 06a (``slow``): every one of the 64 pre-routed LVDS
-   segments survives.
+6. End to end on board 06a (``slow``): every pre-routed segment on each of the
+   eight LVDS nets survives.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -57,6 +57,7 @@ _BOARD_06A = (
     / "output"
     / "diffpair_test.kicad_pcb"
 )
+_LVDS_NETS = [f"LVDS{channel}_{leg}" for channel in range(1, 5) for leg in ("N", "P")]
 
 
 def _seg_key(seg) -> tuple:
@@ -199,20 +200,13 @@ class TestCompleteNetIsLeftAlone:
         path.write_text(board)
         assert fully_connected_nets(path) == ["DONE_NET"]
 
-    def test_default_still_reroutes_a_complete_net(self, tmp_path):
-        """Regression-safety: WITHOUT the flag, a full re-route is still a full re-route.
-
-        ``--preserve-existing`` is documented as opt-in incremental routing; the
-        default must keep replacing existing copper with freshly routed nets, or
-        #5788's fix would have silently changed every plain ``kct route``.
-        """
-        board = _two_lane_board()
-        out_text = _run_route(tmp_path, board)
+    def test_full_reroute_replaces_a_complete_net(self, tmp_path):
+        board = _two_lane_board().replace("(width 0.25)", "(width 0.61)")
+        out_text = _run_route(tmp_path, board, extra_argv=["--no-preserve-existing"])
         out = parse_segments(out_text)
-        # Both lanes are routed from scratch, and the pre-existing copper block
-        # is NOT carried over verbatim -- the writer strips and re-emits.
         assert set(out) == set(_LANES)
-        assert out["DONE_NET"], "the default pass should have routed DONE_NET itself"
+        assert out["DONE_NET"]
+        assert all(segment.width != 0.61 for segment in out["DONE_NET"])
 
     def test_explicit_nets_still_reroutes_a_complete_net(self, tmp_path):
         """``--nets`` promises to route exactly what it lists -- even if complete.
@@ -330,21 +324,12 @@ class TestBoard06a:
         the eight open ones.
         """
         connected = fully_connected_nets(_BOARD_06A)
-        assert connected == [
-            "LVDS1_N",
-            "LVDS1_P",
-            "LVDS2_N",
-            "LVDS2_P",
-            "LVDS3_N",
-            "LVDS3_P",
-            "LVDS4_N",
-            "LVDS4_P",
-        ]
+        assert connected == _LVDS_NETS
 
     @pytest.mark.slow
     @pytest.mark.integration
-    def test_all_64_lvds_segments_survive(self, tmp_path):
-        """End to end: ``kct route --preserve-existing`` keeps 64/64 LVDS segments.
+    def test_all_pre_routed_lvds_segments_survive(self, tmp_path):
+        """End to end: ``kct route --preserve-existing`` keeps the input LVDS geometry.
 
         Marked ``slow`` (nightly): a full board 06 route is ~25 s with the C++
         backend built and considerably longer without it, which does not fit the
@@ -353,11 +338,12 @@ class TestBoard06a:
         """
         board = _BOARD_06A.read_text()
         orig = parse_segments(board)
-        lvds = sorted(n for n in orig if n.startswith("LVDS"))
-        assert sum(len(orig[n]) for n in lvds) == 64, (
-            "board 06's input no longer carries the 64 pre-routed LVDS segments "
-            "this regression test is written against"
-        )
+        lvds = {
+            net: Counter(map(_seg_key, segments))
+            for net, segments in orig.items()
+            if net.startswith("LVDS") and segments
+        }
+        assert sorted(lvds) == _LVDS_NETS, "expected pre-routed copper on all eight LVDS nets"
 
         out_path = tmp_path / "out.kicad_pcb"
         route_main(
@@ -372,11 +358,9 @@ class TestBoard06a:
         )
         out = parse_segments(out_path.read_text())
 
-        survived = sum(len(_geom(orig[n]) & _geom(out.get(n))) for n in lvds)
-        assert survived == 64, (
-            f"only {survived}/64 pre-routed LVDS segments survived "
-            "--preserve-existing (issue #5788)"
-        )
+        for net, original in lvds.items():
+            missing = original - Counter(map(_seg_key, out.get(net, ())))
+            assert not missing, f"{net} lost {missing.total()} pre-routed segment(s): {missing}"
         # The plane vias the generator placed survive too (the flag's original
         # #3155 promise), and the open LVTTL nets are the ones that gained copper.
         out_vias = parse_vias(out_path.read_text())

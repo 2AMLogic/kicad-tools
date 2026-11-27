@@ -29,8 +29,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from . import wall_deadline as _wall_deadline
+from .neck_down import band_safe_taper, taper_width_fn, tapered_run_pieces
 from .pad_landing import pad_landing_geometry
+from .pad_lanes import trace_fences_cover_goal
 from .resource_guard import reraise_if_resource_exhaustion
+from .route_via_gap import route_own_via_slit
 from .search_radius import search_radius_cells
 
 if TYPE_CHECKING:
@@ -174,7 +177,15 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # ``primitives.pad_half_extents``) instead of raw ``width/2``/``height/2``.  A
 # v74 .so under-sizes a non-cardinally rotated pad and silently accepts a leg
 # in the band the Python gate refuses (parity break on such boards).
-_REQUIRED_CPP_BUILD_VERSION = 75
+# v76 (Issue #9424): ``same_net_pad_gap_in_band`` takes a via annulus as a
+# union with its own SMD pad only at the union depth into the AABB's inscribed
+# stadium (``via_clearance.same_net_pad_union_depth_mm``).  A v75 .so seats
+# vias in a roundrect pad's corner air and in shallow overlap wedges that the
+# fab-view checker grades as ``physical_copper_gap``; reject it.
+# v77 (Issue #9273): the native trace search also guards stored same-net vias.
+# v78 (Issue #9273): a leg cannot skim a stored barrel and rely on a later weld.
+# v79 (Issue #9851): native pad-stub emission uses the serialized coordinate grid.
+_REQUIRED_CPP_BUILD_VERSION = 79
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -979,6 +990,11 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
     extension is absent the status also names the capability gap, not just the
     speed gap: the differential-pair centerline trunk rescue (Issue #5786) is
     C++-only, and without it the router falls back to independent legs.
+    Issue #9900 adds the search-capacity gap: the pure-Python A* shares the
+    per-net node-expansion budget but explores 10-100x less per expansion,
+    so maze-class corridors (the Board 06 USB3 fanout) can exhaust the cap
+    with the frontier still open -- targeted rip-up reports such victims as
+    ``victim_budget``, never as a proven geometric seal.
 
     Args:
         backend_info: Dictionary from get_backend_info().
@@ -1004,6 +1020,12 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
             "Differential-pair centerline trunk rescue requires C++. "
             "If the coupled search fails, routing falls back to independent legs"
         )
+        parts.append(
+            "Search-capacity limitation (issue #9900): without C++, a maze-class "
+            "corridor can exceed the per-net node-expansion budget and targeted "
+            "rip-up records such victims as 'victim_budget' -- a budget stop, not "
+            "a proven geometric seal"
+        )
         if grid_cells > LARGE_GRID_THRESHOLD:
             parts.append(
                 f"WARNING: Routing {grid_cells:,} grid cells with Python backend "
@@ -1013,6 +1035,36 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
             parts.append("Tip: Run 'kct build-native' for 10-100x faster routing")
 
     return " | ".join(parts)
+
+
+def _failure_reason_token_for_int(reason: int) -> str:
+    """Short stable token for a ``FAILURE_*`` code (#8486)."""
+    if router_cpp is None:
+        return "unknown"
+    tokens = {
+        int(router_cpp.FAILURE_NONE): "none",
+        int(router_cpp.FAILURE_NO_PATH): "no_path",
+        int(router_cpp.FAILURE_ITERATION_LIMIT): "iteration_limit",
+        int(router_cpp.FAILURE_TIMEOUT): "timeout",
+        int(router_cpp.FAILURE_VIA_VIA_BLOCKED): "via_via_blocked",
+        int(router_cpp.FAILURE_PAIRWISE_BLOCKED): "pairwise_blocked",
+    }
+    return tokens.get(int(reason), f"reason_{int(reason)}")
+
+
+def _failure_reason_token(result) -> str:
+    """Short stable token for a ``RouteResult``'s ``FAILURE_*`` code (#8486).
+
+    The per-attempt diagnostic records each native search's outcome; a
+    one-word token (``timeout``, ``no_path``, ...) is what lets a saved
+    trace distinguish a drained wall-clock budget from a geometric
+    dead-end without importing the extension's enum at the read side.
+    """
+    if router_cpp is None:
+        return "unknown"
+    return _failure_reason_token_for_int(
+        int(getattr(result, "failure_reason", router_cpp.FAILURE_NONE))
+    )
 
 
 class CppGrid:
@@ -1253,6 +1305,7 @@ class CppGrid:
         # the same carve-out as the Python ``_is_plane_net_pad`` helper.
         from .fine_pitch_escape import resolve_clearance_with_escape_region
         from .grid import _is_plane_net_pad
+        from .via_clearance import cpp_pad_copper_corner_radius
 
         component_pitches = grid.compute_component_pitches()
         grid._component_pitch_cache = component_pitches
@@ -1324,6 +1377,7 @@ class CppGrid:
                 is_plane_net,
                 pad.rotation,
                 pad.shape == "circle",
+                cpp_pad_copper_corner_radius(pad),
             )
 
         cpp_grid._impl.set_component_holes_known(grid._component_hole_index.known)
@@ -1443,6 +1497,11 @@ class CppGrid:
         self._impl.clear_stored_routes()
         self._synced_route_count = 0
         self._off_grid_stored_segments.clear()
+
+
+def _python_fallback_total_seconds(pathfinder: CppPathfinder) -> float:
+    """Total wall time spent in the Python fallback A* so far (Issue #8486)."""
+    return float(sum(getattr(pathfinder, "_python_fallback_seconds_by_reason", {}).values()))
 
 
 class CppPathfinder:
@@ -1620,6 +1679,10 @@ class CppPathfinder:
 
         # Lazy Python fallback router (constructed on first fallback)
         self._py_router: Router | None = None
+        # Issue #8486: search-dependency recording state (see
+        # ``begin_search_dependency``).
+        self._dependency_margin_mm: float | None = None
+        self._dependency_fallback_ran = False
         # Fallback statistics
         self._fallback_count: int = 0
         self._fallback_nets: list[str] = []
@@ -1643,7 +1706,7 @@ class CppPathfinder:
         # merely re-presented the same clearance obstruction -- do we
         # short-circuit, because that repeat is the genuine 60-200s/net dead
         # loss the optimization targets.
-        self._resume_clearance_exhaustions: dict[str, int] = {}
+        self._resume_clearance_exhaustions: dict[tuple[int, str], int] = {}
 
         # Issue #5599: per-net record of the MOST RECENT post-route
         # clearance-validation resume loop that had at least one failed
@@ -1702,12 +1765,13 @@ class CppPathfinder:
         # Issue #8370: per-net fallback wall time (including failed
         # fallbacks), and the pad-pair requests whose Python A* has already
         # drained (``last_route_exhausted``) after a C++ NO_PATH /
-        # PAIRWISE_BLOCKED.  Keyed on the request (Issue #8377), not the net:
-        # on a multi-pad net a drained pair A must not suppress the first
-        # attempt of never-tried pair B.  Unlike the #6098 memo this record is
-        # NOT stamped with the grid state, so it survives the grid changes
-        # negotiated rip-up makes between iterations.  Key:
-        # :meth:`_python_unreachable_key`.  Value: seconds the search took.
+        # PAIRWISE_BLOCKED / VIA_VIA_BLOCKED (#8486).  Keyed on the request
+        # (Issue #8377), not the net: on a multi-pad net a drained pair A must
+        # not suppress the first attempt of never-tried pair B.  Unlike the
+        # #6098 memo this record is NOT stamped with the grid state, so it
+        # survives the grid changes negotiated rip-up makes between
+        # iterations.  Key: :meth:`_python_unreachable_key`.  Value: seconds
+        # the search took.
         self._python_fallback_seconds_by_net: dict[str, float] = {}
         self._python_drained_nets: dict[tuple, float] = {}
         self._python_fallback_repeat_skips: int = 0
@@ -1729,6 +1793,13 @@ class CppPathfinder:
         self._python_fallback_stage_budget: float | None = None
         self._python_fallback_stage_spent: float = 0.0
         self._python_fallback_stage_budget_skips: int = 0
+        # Issue #8486: tracing-only history of Python fallback attempts, so a
+        # per-call trace can say whether a repeat saw the same request on an
+        # unchanged or a changed grid and how the earlier search ended.  Key:
+        # :meth:`_python_unreachable_key`.  Value: ``(grid state stamp,
+        # outcome)``.  Filled and read only while a per-attempt diagnostic is
+        # being collected, never consulted by a routing decision.
+        self._python_attempt_history: dict[tuple, tuple[tuple, str]] = {}
         # Issue #6329: nets whose search was ended by a per-net WALL-CLOCK
         # deadline while the tuned per-net iteration cap was active (i.e.
         # under ``--deterministic-budget``).  Net name -> what bound.  Each
@@ -1814,6 +1885,18 @@ class CppPathfinder:
         if os.environ.get("KCT_DEBUG_PNT"):
             self._per_call_timing_enabled = True
         self._per_call_timings: list[dict] = []
+        # Issue #8486: per-attempt diagnostic populated by ``_route_impl``
+        # ONLY while per-call timing is enabled, and merged into the record
+        # ``route()`` appends -- the chosen pad pair, the legal goal
+        # bounds/layers, the escape-fence decision and each native search's
+        # duration and outcome.  The November 24 private-board trace could
+        # not attribute its three unexplained 30 s attempts because the
+        # per-call record carried only net/elapsed/budget/success; these
+        # fields let a saved trace say WHICH connection and target was
+        # considered, whether every legal goal layer was fence-covered, and
+        # which search of a fenced/unfenced pair was skipped or retried.
+        # Always local: nothing here is logged or exported by this class.
+        self._attempt_diagnostic: dict | None = None
 
         # Issue #3002 (PR #3006 follow-up): Foreign-net via context for the
         # segment-vs-foreign-via clearance gate.  Mirrors the Python
@@ -1849,6 +1932,7 @@ class CppPathfinder:
         # :meth:`_escape_fence_budgets`.
         self._pad_lane_fences: list = []  # list[pad_lanes.FenceLane]
         self._escape_fence_fallbacks = 0
+        self._escape_fence_preempted = 0  # Issue #8486: goal-covered skips
 
     def set_segment_foreign_context(
         self,
@@ -2055,11 +2139,13 @@ class CppPathfinder:
 
         Args:
             enabled: True to start recording; False to stop and drop any
-                accumulated records.
+                accumulated records and fallback trace history. Draining the
+                records while timing stays enabled preserves that history.
         """
         self._per_call_timing_enabled = bool(enabled)
         if not enabled:
             self._per_call_timings = []
+            self._python_attempt_history.clear()
 
     def get_and_clear_per_call_timings(self) -> list[dict]:
         """Drain and return the recorded per-A*-call timing records.
@@ -2073,6 +2159,25 @@ class CppPathfinder:
         actually waited" measurement (a deadline-honoring inner search
         will still be bracketed by the timeout, plus a small fixed setup
         cost).
+
+        Issue #8486: each record also carries the per-attempt diagnostic
+        ``_route_impl`` collected -- ``start_pad``/``end_pad`` (e.g.
+        ``"U1.1"``), ``start_bounds``/``end_bounds`` (the pads' metal
+        boxes in grid cells), ``start_layers``/``end_layers`` (legal grid
+        layer indices), ``goal_covered`` (whether every legal goal cell
+        was trace-fence covered; ``None`` when the connection had no
+        escape fences), ``fence_decision`` (``"none"`` / ``"applied"`` /
+        ``"skipped-covered"``), ``searches`` (one dict per native search:
+        ``fenced``, ``elapsed``, ``succeeded``, ``failure_reason`` token)
+        and, when the attempt was handed off, ``python_fallback``, plus the
+        wall-time split ``native_search_seconds`` (the fresh searches),
+        ``python_fallback_seconds`` (the fallback A*) and ``other_seconds``
+        (the remainder: setup, stored-route sync, clearance-validation
+        resumes), which sum to ``elapsed``.  These
+        fields distinguish a drained fenced search from a pre-empted one
+        and name the exact connection and target considered -- the data
+        the November 24 board trace lacked.  Purely observational: the
+        produced copper is identical with tracing off and on.
 
         Returns:
             The list of timing records since the last drain (or since
@@ -2532,6 +2637,17 @@ class CppPathfinder:
         Returns:
             Route object if successful, None if no path found
         """
+        # A skipped native search or Python fallback must not inherit the
+        # preceding edge's failure evidence (#9900).
+        self._last_failure_info = None
+        # Issue #8486: same per-edge discipline for the trace diagnostic -- an
+        # attempt that returns before ``_route_impl`` assigns it (no legal
+        # layer) must not record the previous attempt's pad pair/searches.
+        self._attempt_diagnostic = None
+        if self._py_router is not None:
+            self._py_router.last_route_exhausted = False
+            self._py_router.last_route_deadline_hit = False
+            self._py_router.last_route_iteration_limited = False
         # Issue #5923: inside a bounded excursion (the corridor-yield re-run)
         # no single search may run past the excursion's wall deadline.
         # Identity when no deadline is installed.
@@ -2559,6 +2675,9 @@ class CppPathfinder:
                     self.clear_avoidance_costs()
 
         t0 = time.monotonic()
+        # Issue #8486: the Python fallback's wall time is already summed by
+        # reason; the call's share is the delta across this ``route()``.
+        fallback_s0 = _python_fallback_total_seconds(self)
         succeeded = False
         try:
             result = self._route_impl(
@@ -2592,16 +2711,35 @@ class CppPathfinder:
                 and per_net_timeout > 0
                 and elapsed > per_net_timeout * 1.2 + 0.5
             )
-            self._per_call_timings.append(
-                {
-                    "net": start.net,
-                    "net_name": start.net_name,
-                    "elapsed": elapsed,
-                    "per_net_timeout": per_net_timeout,
-                    "deadline_violated": deadline_violated,
-                    "succeeded": succeeded,
-                }
-            )
+            record = {
+                "net": start.net,
+                "net_name": start.net_name,
+                "elapsed": elapsed,
+                "per_net_timeout": per_net_timeout,
+                "deadline_violated": deadline_violated,
+                "succeeded": succeeded,
+            }
+            # Issue #8486: fold in the per-attempt diagnostic ``_route_impl``
+            # collected (pad pair, goal bounds/layers, fence decision,
+            # per-search duration+outcome, Python-fallback handoff).  The
+            # fields exist only under :meth:`enable_per_call_timing`, so a
+            # drained record keeps its historical shape on the fast path.
+            # ``getattr`` keeps duck-typed test doubles working (#5504's
+            # SimpleNamespace pathfinder).
+            diag = getattr(self, "_attempt_diagnostic", None)
+            if diag is not None:
+                record.update(diag)
+                # Issue #8486: split the call's wall time three ways so a
+                # trace says where a slow attempt went -- fresh native
+                # searches, the Python fallback A*, and everything else
+                # (setup, stored-route sync, clearance-validation resumes).
+                # Pure arithmetic over clocks already taken.
+                native_s = sum(float(sr["elapsed"]) for sr in diag.get("searches", ()))
+                fallback_s = max(0.0, _python_fallback_total_seconds(self) - fallback_s0)
+                record["native_search_seconds"] = native_s
+                record["python_fallback_seconds"] = fallback_s
+                record["other_seconds"] = max(0.0, elapsed - native_s - fallback_s)
+            self._per_call_timings.append(record)
             # Issue #3474 R1: live slow-call tracing under KCT_DEBUG_PNT.
             if os.environ.get("KCT_DEBUG_PNT") and (deadline_violated or elapsed > 5.0):
                 print(
@@ -2787,11 +2925,6 @@ class CppPathfinder:
         # Maximum number of resume attempts before giving up.
         max_resume_attempts = 5
 
-        # Issue #2476: Reset failure-info at the start of every route() call
-        # so the negotiated strategy never sees stale diagnostics from a
-        # previous net.
-        self._last_failure_info = None
-
         # Issue #5599: reset the evidence-gated strict foreign-pad kernel at
         # the start of every route() call -- a fresh search keeps the full
         # historical relaxation surface (the kernel is cell-center
@@ -2878,6 +3011,94 @@ class CppPathfinder:
             via_size=net_via_size,
         )
         fence_state = {"on": bool(escape_fences)}
+        # Issue #8486: per-attempt diagnostic (see ``_attempt_diagnostic`` in
+        # ``__init__``).  Populated only while per-call timing is enabled, so
+        # the production hot path is untouched.  The chosen pad pair, the
+        # legal goal bounds/layers and the fence verdict are exactly the
+        # fields the November 24 board trace lacked: they let a saved trace
+        # say which connection and target was considered and whether every
+        # legal goal layer was fence-covered.  Local-only by construction --
+        # nothing here is logged, written or exported by this class.
+        diag: dict | None = None
+        if self._per_call_timing_enabled:
+            diag = {
+                "start_pad": f"{start.component_key}.{start.terminal_id or start.pin}",
+                "end_pad": f"{end.component_key}.{end.terminal_id or end.pin}",
+                "start_bounds": (
+                    int(start_pad_bounds.metal_gx1),
+                    int(start_pad_bounds.metal_gy1),
+                    int(start_pad_bounds.metal_gx2),
+                    int(start_pad_bounds.metal_gy2),
+                ),
+                "start_layers": sorted(int(l) for l in (start_layers or [])),
+                "end_bounds": (
+                    int(end_pad_bounds.metal_gx1),
+                    int(end_pad_bounds.metal_gy1),
+                    int(end_pad_bounds.metal_gx2),
+                    int(end_pad_bounds.metal_gy2),
+                ),
+                "end_layers": sorted(int(l) for l in (end_layers or [])),
+                "goal_covered": None,
+                "fence_decision": "none",
+                "searches": [],
+            }
+        self._attempt_diagnostic = diag
+        goal_covered = bool(escape_fences) and trace_fences_cover_goal(
+            [
+                (
+                    int(b.gx1),
+                    int(b.gy1),
+                    int(b.gx2),
+                    int(b.gy2),
+                    int(b.layer),
+                )
+                for b in escape_fences
+                if int(b.layer) >= 0 and math.isinf(float(b.overflow_penalty))
+            ],
+            end_metal=(
+                int(end_pad_bounds.metal_gx1),
+                int(end_pad_bounds.metal_gy1),
+                int(end_pad_bounds.metal_gx2),
+                int(end_pad_bounds.metal_gy2),
+            ),
+            end_layers=list(end_layers or []),
+            start_metal=(
+                int(start_pad_bounds.metal_gx1),
+                int(start_pad_bounds.metal_gy1),
+                int(start_pad_bounds.metal_gx2),
+                int(start_pad_bounds.metal_gy2),
+            ),
+            start_layers=list(start_layers or []),
+        )
+        if diag is not None and escape_fences:
+            diag["goal_covered"] = bool(goal_covered)
+            diag["fence_decision"] = "applied"
+        # Issue #8486: a fenced search whose EVERY legal goal cell is covered
+        # by an infinite trace fence can never accept a goal -- the native A*
+        # refuses those cells on trace steps and via landings alike, and only
+        # a start seed (which needs no step) could bypass that.  On the
+        # reported 97-net board the unfenced retry after such fenced
+        # timeouts consumed 942.72 s of duplicate second searches.  When the
+        # goal is provably fence-covered, skip the hopeless fenced search and
+        # run the unfenced one directly with the FULL budget: the fenced
+        # search was certain to fail, so the produced copper is exactly the
+        # old failed-fenced-then-unfenced sequence's, minus its wasted first
+        # budget.  Sound-only: any uncovered goal cell, a start seed that is
+        # itself a goal, or an empty goal box keeps the fenced search.
+        if escape_fences and goal_covered:
+            fence_state["on"] = False
+            if diag is not None:
+                diag["fence_decision"] = "skipped-covered"
+            self._escape_fence_fallbacks = getattr(self, "_escape_fence_fallbacks", 0) + 1
+            self._escape_fence_preempted = getattr(self, "_escape_fence_preempted", 0) + 1
+            logger.info(
+                "escape fence pre-empted before the search (fallback #%d, "
+                "pre-empted #%d, net=%d): every legal goal cell is trace-fence "
+                "covered, running the unfenced search with the full budget",
+                self._escape_fence_fallbacks,
+                self._escape_fence_preempted,
+                start.net,
+            )
         # Issue #9019: the own-net slit-band gate is a hard step refusal; like
         # the fence it must never lose a connection, so a failed gated search
         # retries once with it off.
@@ -2947,12 +3168,20 @@ class CppPathfinder:
                 partner_net_id,
                 search_intra_pair_clearance if partner_net_id >= 0 else -1.0,
             )
-            return self._impl.route_resumable(
-                start.x,
-                start.y,
+            # Round to the writer's grid before the binding narrows to float32.
+            # Issue #8486: while per-call tracing is enabled, every native
+            # search launch (the first attempt, the slit-band retry, the
+            # fence fallback and any #5599 restart all funnel through here)
+            # records its fence state, duration and outcome -- the per-search
+            # view the single aggregate ``elapsed`` cannot give.  Pure
+            # observation: no budget, state or ordering is touched.
+            _search_t0 = time.monotonic() if diag is not None else 0.0
+            result = self._impl.route_resumable(
+                round(start.x, 4),
+                round(start.y, 4),
                 start_layer,
-                end.x,
-                end.y,
+                round(end.x, 4),
+                round(end.y, 4),
                 end_layer,
                 start.net,
                 start_layers or [],
@@ -3004,6 +3233,16 @@ class CppPathfinder:
                 + self._under_body_budgets_for_net(start.net)
                 + (escape_fences if fence_state["on"] else []),
             )
+            if diag is not None:
+                diag["searches"].append(
+                    {
+                        "fenced": bool(fence_state["on"]),
+                        "elapsed": time.monotonic() - _search_t0,
+                        "succeeded": bool(result.success),
+                        "failure_reason": _failure_reason_token(result),
+                    }
+                )
+            return result
 
         try:
             if pending_routable is not None:
@@ -3656,7 +3895,12 @@ class CppPathfinder:
         """
         from .layers import Layer
         from .primitives import Route, Segment, Via
-        from .quantize import dogleg_points
+        from .quantize import (
+            emits_trace_segment,
+            is_45_aligned,
+            normalize_direction,
+            same_direction,
+        )
 
         route = Route(net=start.net, net_name=start.net_name)
 
@@ -3671,48 +3915,22 @@ class CppPathfinder:
         # Python backend's ``_get_trace_width_for_net`` (Issue #1543).
         base_trace_width = float(net_class.trace_width if net_class else self._rules.trace_width)
 
-        # Issue #1018 parity: the C++ pathfinder has no neck-down support.
-        # Apply the same width taper as the Python backend
-        # (``PathFinder._convert_path_to_route``) as post-processing on the
-        # C++-returned segments.  Semantics match exactly: per-segment
-        # width is the minimum over both pads of
-        # ``rules.get_neck_down_width(min endpoint distance, pitch,
-        # base_width=net-class width)``, gated per pad by
-        # ``rules.should_apply_neck_down``.
+        # Issue #1018 parity / #9851: the C++ pathfinder has no neck-down
+        # support.  Apply the same width taper as the Python backend
+        # (``PathFinder._convert_path_to_route``) via the SHARED
+        # ``neck_down.taper_width_fn`` closure, so a piece's width is
+        # bit-identical whichever backend converted the path.
         pitches = self._get_component_pitches()
-        start_pitch = pitches.get(start.ref) if start.ref else None
-        end_pitch = pitches.get(end.ref) if end.ref else None
-        start_needs_neckdown = self._rules.should_apply_neck_down(start.ref, start_pitch)
-        end_needs_neckdown = self._rules.should_apply_neck_down(end.ref, end_pitch)
-
-        def _segment_width(x1: float, y1: float, x2: float, y2: float) -> float:
-            """Trace width for one segment, with Issue #1018 neck-down taper."""
-            if not start_needs_neckdown and not end_needs_neckdown:
-                return base_trace_width
-            min_width = base_trace_width
-            if start_needs_neckdown:
-                min_dist_start = min(
-                    math.hypot(x1 - start.x, y1 - start.y),
-                    math.hypot(x2 - start.x, y2 - start.y),
-                )
-                min_width = min(
-                    min_width,
-                    self._rules.get_neck_down_width(
-                        min_dist_start, start_pitch, base_width=base_trace_width
-                    ),
-                )
-            if end_needs_neckdown:
-                min_dist_end = min(
-                    math.hypot(x1 - end.x, y1 - end.y),
-                    math.hypot(x2 - end.x, y2 - end.y),
-                )
-                min_width = min(
-                    min_width,
-                    self._rules.get_neck_down_width(
-                        min_dist_end, end_pitch, base_width=base_trace_width
-                    ),
-                )
-            return min_width
+        start_pitch = pitches.get(start.component_key) if start.component_key else None
+        end_pitch = pitches.get(end.component_key) if end.component_key else None
+        segment_width_fn, start_needs_neckdown, end_needs_neckdown = taper_width_fn(
+            self._rules, start, end, start_pitch, end_pitch, base_trace_width
+        )
+        taper_centers: list[tuple[float, float]] = []
+        if start_needs_neckdown:
+            taper_centers.append((start.x, start.y))
+        if end_needs_neckdown:
+            taper_centers.append((end.x, end.y))
 
         # Issue #9019: the own-net pad slit-band edge (0 = guard off) and the
         # net's own SMD pad boxes per layer (built lazily, once per route).
@@ -3741,83 +3959,152 @@ class CppPathfinder:
                 _band_cache[layer_value] = hit
             return hit
 
-        for cpp_seg in result.segments:
-            layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
-            # Issue #3532: the C++ ``reconstruct_path`` connects the
-            # exact (off-grid) pad centres to the first/last grid cell
-            # with a single straight tail, which is off the 0/45/90/135
-            # angle set in general.  Split such segments into an exact
-            # two-leg dogleg HERE, in float64.
-            #
-            # Issue #9734: the C++ ``Segment`` stores float32 coordinates,
-            # whose ulp at board scale (~1.5e-5 mm at 130 mm) round-trips a
-            # grid-exact 132.855 as 132.854996.  Feeding those to the exact
-            # float64 clearance gates turns pairs DESIGNED to sit exactly at
-            # ``(w_a + w_b) / 2 + trace_clearance`` into sub-clearance by a
-            # few nm, and the finalize seg-seg SHORT gate correctly refuses
-            # to ship them (board 05: VCP's escape stub vs VM's committed
-            # trace at 0.324997 vs 0.325 required -- VCP demoted to
-            # unrouted, exit 3).  Snap every received coordinate back onto
-            # the 4-decimal (0.1 um) lattice -- the same contract
-            # ``RoutingGrid.grid_to_world`` already applies to every
-            # Python-backend cell coordinate -- so both backends emit
-            # identical, lattice-exact geometry.  (The width sibling of
-            # this fix is the #3456 float64 echo.)
-            points = dogleg_points(
-                round(float(cpp_seg.x1), 4),
-                round(float(cpp_seg.y1), 4),
-                round(float(cpp_seg.x2), 4),
-                round(float(cpp_seg.y2), 4),
-            )
-            from .neck_down import band_safe_width, taper_points
+        def _emit_run(x1: float, y1: float, x2: float, y2: float, layer_idx: int, net: int) -> None:
+            """Emit one straight run as tapered, band-safe segments.
 
-            centers = []
-            if start_needs_neckdown:
-                centers.append((start.x, start.y))
-            if end_needs_neckdown:
-                centers.append((end.x, end.y))
-            split_points = [points[0]]
-            for a, b in zip(points, points[1:], strict=False):
-                split_points.extend(
-                    taper_points(
-                        a,
-                        b,
-                        centers,
-                        self._rules.neck_down_distance,
-                        self._rules.grid_resolution,
-                    )[1:]
+            Runs through the SAME shared pipeline as
+            ``PathFinder._convert_path_to_route``'s ``_emit_segment``
+            (``neck_down.tapered_run_pieces``: #3532 dogleg, #1018 taper
+            cuts, per-piece width, #9019 slit-band guard, then
+            ``band_safe_taper`` to fuse pieces no width can lift out of the
+            band), so the two backends emit identical segment bytes for the
+            same path.
+            """
+            if emits_trace_segment(x1, y1, x2, y2):
+                layer_enum_value = self._grid.index_to_layer(layer_idx)
+                # Issue #9019: mirror ``PathFinder._convert_path_to_route`` --
+                # a taper must not open an air gap beside the net's own pad.
+                band_bboxes = (
+                    _own_net_band_bboxes(start.net, layer_enum_value)
+                    if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
+                    else None
                 )
-            # Issue #9019: mirror ``PathFinder._convert_path_to_route`` -- a
-            # taper must not open an air gap beside the net's own pad.
-            band_bboxes = (
-                _own_net_band_bboxes(start.net, layer_enum_value)
-                if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
-                else None
-            )
-            for (sx, sy), (ex, ey) in zip(split_points, split_points[1:], strict=False):
-                seg_width = _segment_width(sx, sy, ex, ey)
-                if band_bboxes:
-                    seg_width = band_safe_width(
-                        (sx, sy),
-                        (ex, ey),
-                        seg_width,
-                        base_trace_width,
-                        band_bboxes,
-                        band_edge_mm,
+                pieces = tapered_run_pieces(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    taper_centers,
+                    self._rules.neck_down_distance,
+                    self._rules.grid_resolution,
+                    segment_width_fn,
+                    base_trace_width,
+                    band_bboxes,
+                    band_edge_mm,
+                )
+                for (sx, sy), (ex, ey), seg_width in band_safe_taper(
+                    pieces, band_bboxes, band_edge_mm
+                ):
+                    if sx == ex and sy == ey:
+                        continue
+                    route.segments.append(
+                        Segment(
+                            x1=sx,
+                            y1=sy,
+                            x2=ex,
+                            y2=ey,
+                            width=seg_width,
+                            layer=Layer(layer_enum_value),
+                            net=net,
+                            net_name=start.net_name,
+                        )
                     )
-                if sx == ex and sy == ey:
+
+        # Issue #9734: the C++ ``Segment`` stores float32 coordinates,
+        # whose ulp at board scale (~1.5e-5 mm at 130 mm) round-trips a
+        # grid-exact 132.855 as 132.854996.  Feeding those to the exact
+        # float64 clearance gates turns pairs DESIGNED to sit exactly at
+        # ``(w_a + w_b) / 2 + trace_clearance`` into sub-clearance by a
+        # few nm, and the finalize seg-seg SHORT gate correctly refuses
+        # to ship them (board 05: VCP's escape stub vs VM's committed
+        # trace at 0.324997 vs 0.325 required -- VCP demoted to
+        # unrouted, exit 3).  Snap every received coordinate back onto
+        # the 4-decimal (0.1 um) lattice -- the same contract
+        # ``RoutingGrid.grid_to_world`` already applies to every
+        # Python-backend cell coordinate -- so both backends emit
+        # identical, lattice-exact geometry.  (The width sibling of
+        # this fix is the #3456 float64 echo.)
+        raw: list[tuple[float, float, float, float, int, int]] = [
+            (
+                round(float(s.x1), 4),
+                round(float(s.y1), 4),
+                round(float(s.x2), 4),
+                round(float(s.y2), 4),
+                int(s.layer),
+                int(s.net),
+            )
+            for s in result.segments
+        ]
+
+        # Issue #9851: the native ``reconstruct_path`` emits one segment
+        # per grid cell (plus pad-centre tails), while the Python
+        # converter merges collinear steps into straight runs inline
+        # (#972) and tapers each run ONCE.  Tapering per cell put the
+        # #1018 cut positions -- and therefore the per-piece widths -- at
+        # different places in the two backends for identical A* paths.
+        # Regroup the per-cell segments into the same straight runs here:
+        # a run ends at a turn, a reversal, a coordinate gap, or a
+        # via/layer change, exactly where the Python converter's run
+        # formation ends one.
+        end_x = round(end.x, 4)
+        end_y = round(end.y, 4)
+
+        # Keep the native pad tail separate until the grid runs are formed. A
+        # via on the accepted goal cell can leave this tail as the only copper
+        # on its outgoing layer. Older result doubles have no goal coordinates.
+        tail: tuple[float, float, float, float, int, int] | None = None
+        if raw:
+            goal_gx = int(getattr(result, "goal_gx", -1))
+            goal_gy = int(getattr(result, "goal_gy", -1))
+            node_end: tuple[float, float] | None = None
+            if goal_gx >= 0 and goal_gy >= 0 and hasattr(self._grid, "grid_to_world"):
+                node_wx, node_wy = self._grid.grid_to_world(goal_gx, goal_gy)
+                node_end = (round(float(node_wx), 4), round(float(node_wy), 4))
+            last = raw[-1]
+            if node_end is not None:
+                is_tail = (last[2], last[3]) != node_end
+            else:
+                is_tail = (last[2], last[3]) == (end_x, end_y)
+            if is_tail:
+                tail = raw.pop()
+            elif emits_trace_segment(last[2], last[3], end_x, end_y):
+                # Some callers supply only grid segments; close their last run to the pad.
+                tail = (last[2], last[3], end_x, end_y, last[4], last[5])
+
+        # [x1, y1, x2, y2, layer, net, last-step direction]
+        runs: list[list] = []
+        for x1, y1, x2, y2, layer, net in raw:
+            step_dir = normalize_direction(x2 - x1, y2 - y1)
+            if runs:
+                r = runs[-1]
+                if (
+                    r[4] == layer
+                    and r[5] == net
+                    and (r[2], r[3]) == (x1, y1)
+                    and step_dir is not None
+                    and same_direction(r[6], step_dir)
+                ):
+                    r[2], r[3], r[6] = x2, y2, step_dir
                     continue
-                seg = Segment(
-                    x1=sx,
-                    y1=sy,
-                    x2=ex,
-                    y2=ey,
-                    width=seg_width,
-                    layer=Layer(layer_enum_value),
-                    net=cpp_seg.net,
-                    net_name=start.net_name,
-                )
-                route.segments.append(seg)
+            runs.append([x1, y1, x2, y2, layer, net, step_dir])
+
+        # Extend through the pad only when the tail continues the last run on
+        # the same copper and the extended chord remains axial or 45 degrees.
+        if runs and tail is not None:
+            x1, y1, x2, y2, layer, net = tail
+            last_run = runs[-1]
+            if (
+                (last_run[2], last_run[3], last_run[4], last_run[5]) == (x1, y1, layer, net)
+                and same_direction(last_run[6], normalize_direction(x2 - x1, y2 - y1))
+                and is_45_aligned(x2 - last_run[0], y2 - last_run[1])
+            ):
+                last_run[2], last_run[3] = x2, y2
+                tail = None
+
+        for x1, y1, x2, y2, layer, net, _direction in runs:
+            _emit_run(x1, y1, x2, y2, layer, net)
+        if tail is not None:
+            _emit_run(*tail)
 
         # Issue #3130: Mirror the segment-width override for via diameter.
         # Previously C++ emitted ``rules_.via_diameter`` / ``rules_.via_drill``
@@ -4120,7 +4407,7 @@ class CppPathfinder:
         width = float(base_width)
         pitches = self._get_component_pitches()
         for pad in (start, end):
-            pitch = pitches.get(pad.ref) if pad.ref else None
+            pitch = pitches.get(pad.component_key) if pad.component_key else None
             if self._rules.should_apply_neck_down(pad.ref, pitch):
                 width = min(
                     width,
@@ -4168,6 +4455,9 @@ class CppPathfinder:
             post-checks), or None if route is valid.  Tuple-compatible with
             the historical ``(x, y)`` return.
         """
+        slit = route_own_via_slit(route, self._rules.same_net_trace_gap_band_edge_mm)
+        if slit is not None:
+            return RouteClearanceViolation(*slit, "own_via_trace_gap")
         py_grid = getattr(self._grid, "_py_grid", None)
         if py_grid is None:
             return None
@@ -4535,8 +4825,25 @@ class CppPathfinder:
             shared per-net deadline is already exhausted, or the C++ failure
             was a wall-clock timeout per issue #3876).
         """
+        # Issue #8486: record the handoff in the per-attempt diagnostic so a
+        # saved trace can tell a native-only attempt from one that continued
+        # in the Python A* (the stored-via handoffs on the reported board).
+        # The fallback's own outcome is already the record's top-level
+        # ``succeeded``/``elapsed``; this notes WHY it was entered.
+        diag = getattr(self, "_attempt_diagnostic", None)
+        if diag is not None:
+            diag["python_fallback"] = {
+                "request": "unclassified",
+                "reason": str(reason),
+                "cpp_failure_reason": (
+                    _failure_reason_token_for_int(cpp_failure_reason)
+                    if cpp_failure_reason is not None
+                    else None
+                ),
+            }
         py_grid = self._grid._py_grid
         if py_grid is None:
+            self._note_fallback_trace(action="skipped_no_python_grid")
             return None
 
         net_name = getattr(start, "net_name", "?")
@@ -4565,6 +4872,7 @@ class CppPathfinder:
                 "hard (issue #3876)",
                 net_name,
             )
+            self._note_fallback_trace(action="skipped_cpp_timeout")
             return None
 
         # Issue #3881: when a TUNED per-net iteration cap is active, a
@@ -4593,6 +4901,7 @@ class CppPathfinder:
                 net_name,
                 self._effective_search_iterations,
             )
+            self._note_fallback_trace(action="skipped_iteration_cap")
             return None
 
         # Issue #3923: resume-exhaustion cascade.  The C++ resumable
@@ -4673,8 +4982,9 @@ class CppPathfinder:
             # negotiated rip-up loop re-presented the same clearance
             # obstruction that the fresh Python A* already failed to resolve --
             # that is the 60-200s/net dead loss the optimization targets.
-            _seen = self._resume_clearance_exhaustions.get(net_name, 0)
-            self._resume_clearance_exhaustions[net_name] = _seen + 1
+            resume_key = (start.net, net_name)
+            _seen = self._resume_clearance_exhaustions.get(resume_key, 0)
+            self._resume_clearance_exhaustions[resume_key] = _seen + 1
             if _seen >= 1:
                 logger.debug(
                     "Net %s: C++ resumable search exhausted its clearance-validation "
@@ -4686,6 +4996,7 @@ class CppPathfinder:
                     _seen + 1,
                     reason,
                 )
+                self._note_fallback_trace(action="skipped_resume_repeat")
                 return None
 
         # Issue #6098: the Python A* already PROVED this exact request
@@ -4707,7 +5018,8 @@ class CppPathfinder:
         )
         _memo_key = _pair_key if _memo_enabled else None
         _proof = self._python_unreachable.get(_memo_key) if _memo_key is not None else None
-        if _proof is not None and _proof[0] == self._py_grid_state_stamp(py_grid):
+        _proof_stamp = self._py_grid_state_stamp(py_grid) if _proof is not None else None
+        if _proof is not None and _proof[0] == _proof_stamp:
             self._python_fallback_proven_skips += 1
             self._python_fallback_seconds_saved += _proof[1]
             logger.debug(
@@ -4716,6 +5028,9 @@ class CppPathfinder:
                 "on an unchanged grid (issue #6098)",
                 net_name,
                 reason,
+            )
+            self._trace_fallback_lineage(
+                py_grid, _pair_key, _proof_stamp, action="skipped_proven_unreachable"
             )
             return None
 
@@ -4726,6 +5041,22 @@ class CppPathfinder:
         # each rip-up, so the #6098 memo misses) cost 45-100 min/iteration on a
         # 97-net HV board.  Never in relief-probe mode, which stresses the
         # search without being committed.  Opt out: KICAD_ROUTER_SKIP_REPEAT_FALLBACK=0.
+        #
+        # Issue #8486 (November 2026): FAILURE_VIA_VIA_BLOCKED joins the two
+        # codes above.  The measured residual on the reported board is the
+        # Python fallback that follows the native via verdict -- five calls on
+        # one pad pair, 21.55 s of a 60.00 s sample, 99.95% of the non-native
+        # time -- and every repeat of the same request re-drained it.  The old
+        # exclusion inherited the #3923 resume-guard's wording ("the Python
+        # router's via placement can differ"), which is a FIRST-attempt
+        # argument: this skip fires only after the Python A* itself drained
+        # the SAME pad-pair request, so that placement already had its
+        # exhaustive chance.  A repeat whose only grid change is rip-up churn
+        # fails the same way.  Recovery when the blocker really changes: the
+        # native search runs first (a fully opened connection never consults
+        # the fallback), and the negotiated loop's reset_fallback_for_net
+        # valve -- the witness change or the periodic re-probe -- clears the
+        # record to buy a fresh full attempt.
         if (
             not self._relief_mode
             and cpp_failure_reason is not None
@@ -4734,6 +5065,7 @@ class CppPathfinder:
             in (
                 int(router_cpp.FAILURE_NO_PATH),
                 int(router_cpp.FAILURE_PAIRWISE_BLOCKED),
+                int(router_cpp.FAILURE_VIA_VIA_BLOCKED),
             )
             and _pair_key in self._python_drained_nets
             and os.environ.get("KICAD_ROUTER_SKIP_REPEAT_FALLBACK", "1").strip() != "0"
@@ -4746,6 +5078,9 @@ class CppPathfinder:
                 "request (issues #8370, #8377)",
                 net_name,
                 reason,
+            )
+            self._trace_fallback_lineage(
+                py_grid, _pair_key, _proof_stamp, action="skipped_drained_repeat"
             )
             return None
 
@@ -4768,6 +5103,9 @@ class CppPathfinder:
                     "Net %s: per-net budget exhausted by C++ search; "
                     "skipping Python fallback (issue #3474)",
                     net_name,
+                )
+                self._trace_fallback_lineage(
+                    py_grid, _pair_key, _proof_stamp, action="skipped_deadline_spent"
                 )
                 return None
             per_net_timeout = (
@@ -4817,6 +5155,9 @@ class CppPathfinder:
                     self._python_fallback_stage_spent,
                     self._python_fallback_stage_budget,
                 )
+                self._trace_fallback_lineage(
+                    py_grid, _pair_key, _proof_stamp, action="skipped_stage_budget"
+                )
                 return None
             if per_net_timeout is not None and per_net_timeout > 0:
                 _reduced_budget = max(
@@ -4846,6 +5187,10 @@ class CppPathfinder:
                     net_name,
                     reason,
                 )
+
+        # Issue #8486: the Python A* reads cells the C++ search never did, so
+        # a recorded search dependency no longer describes this call.
+        self._dependency_fallback_ran = True
 
         # Lazy-construct the Python Router on first fallback
         if self._py_router is None:
@@ -4955,7 +5300,10 @@ class CppPathfinder:
         )
 
         # Issue #8370: per-net fallback time (successful or not), and remember
-        # pad-pair requests whose Python A* drained for the repeat-only skip above.
+        # pad-pair requests whose Python A* drained for the repeat-only skip
+        # above -- including after a FAILURE_VIA_VIA_BLOCKED give-up (#8486):
+        # the fallback's own drain is the proof, whatever verdict handed it
+        # here.
         if not self._relief_mode:
             self._python_fallback_seconds_by_net[net_name] = (
                 self._python_fallback_seconds_by_net.get(net_name, 0.0) + dt
@@ -4968,6 +5316,7 @@ class CppPathfinder:
                 in (
                     int(router_cpp.FAILURE_NO_PATH),
                     int(router_cpp.FAILURE_PAIRWISE_BLOCKED),
+                    int(router_cpp.FAILURE_VIA_VIA_BLOCKED),
                 )
                 and getattr(self._py_router, "last_route_exhausted", False) is True
             ):
@@ -4995,7 +5344,20 @@ class CppPathfinder:
             and _memo_key is not None
             and getattr(self._py_router, "last_route_exhausted", False) is True
         ):
-            self._python_unreachable[_memo_key] = (self._py_grid_state_stamp(py_grid), dt)
+            _proof_stamp = self._py_grid_state_stamp(py_grid)
+            self._python_unreachable[_memo_key] = (_proof_stamp, dt)
+
+        # A diagnostic-only scan runs after the search so it cannot consume its deadline.
+        _trace_stamp = self._trace_fallback_lineage(py_grid, _pair_key, _proof_stamp, action="ran")
+        if _trace_stamp is not None:
+            self._record_fallback_trace(
+                _pair_key,
+                _trace_stamp,
+                route,
+                dt,
+                budget_s=per_net_timeout,
+                reduced=_reduced_budget is not None or _reduced_iterations is not None,
+            )
 
         if route is not None:
             self._fallback_count += 1
@@ -5013,6 +5375,83 @@ class CppPathfinder:
             )
 
         return route
+
+    def _note_fallback_trace(self, **fields: object) -> None:
+        """Add fields to the current attempt's ``python_fallback`` diagnostic (#8486).
+
+        A no-op unless a per-attempt diagnostic is being collected, so the
+        untraced fast path is untouched.
+        """
+        diag = getattr(self, "_attempt_diagnostic", None)
+        if diag is not None:
+            diag.setdefault("python_fallback", {}).update(fields)
+
+    def _trace_fallback_lineage(
+        self, py_grid, pair_key: tuple, stamp: tuple | None, *, action: str
+    ) -> tuple | None:
+        """Classify a completed fallback search or skip for tracing (#8486).
+
+        Records ``request`` (``first`` for a never-searched pad, ``repeat``
+        for the exact request already searched, ``changed_request`` for the
+        same start pad with a different goal, net class or mode), and for a
+        repeat ``grid`` (``unchanged`` / ``changed`` against the grid state the
+        earlier search read, by the same fingerprint the #6098 proof uses) and
+        ``prior_outcome`` (how that search ended). Reuse a routing proof's
+        fingerprint when available. Otherwise only a repeat comparison or
+        a search being added to the history needs a grid scan.
+        """
+        if getattr(self, "_attempt_diagnostic", None) is None:
+            return None
+        prior = self._python_attempt_history.get(pair_key)
+        if stamp is None and (prior is not None or action == "ran"):
+            stamp = self._py_grid_state_stamp(py_grid)
+        fields: dict[str, object] = {"action": action}
+        if prior is not None:
+            fields["request"] = "repeat"
+            fields["grid"] = "unchanged" if prior[0] == stamp else "changed"
+            fields["prior_outcome"] = prior[1]
+        elif any(key[:2] == pair_key[:2] for key in self._python_attempt_history):
+            fields["request"] = "changed_request"
+        else:
+            fields["request"] = "first"
+        self._note_fallback_trace(**fields)
+        return stamp
+
+    def _record_fallback_trace(
+        self,
+        pair_key: tuple,
+        stamp: tuple,
+        route: Route | None,
+        seconds: float,
+        *,
+        budget_s: float | None,
+        reduced: bool,
+    ) -> None:
+        """Trace how a Python fallback search that ran ended, and remember it (#8486).
+
+        ``outcome`` separates a route found, an open set that ``drained``
+        (every reachable cell expanded: a proof for this grid) and a search
+        stopped by its wall-clock ``deadline`` (not a proof), from any other
+        stop (``stopped``: the expansion cap, a goal rejected after reaching
+        it).
+        """
+        router = self._py_router
+        if route is not None:
+            outcome = "found"
+        elif getattr(router, "last_route_deadline_hit", False) is True:
+            # A drained bidirectional frontier can consume the shared retry budget.
+            outcome = "deadline"
+        elif getattr(router, "last_route_exhausted", False) is True:
+            outcome = "drained"
+        else:
+            outcome = "stopped"
+        self._python_attempt_history[pair_key] = (stamp, outcome)
+        self._note_fallback_trace(
+            outcome=outcome,
+            seconds=seconds,
+            budget_s=budget_s,
+            reduced_budget=reduced,
+        )
 
     def _note_wall_bound_under_cap(self, net_name: str, detail: str) -> None:
         """Record a per-net wall-clock bind under the tuned iteration cap.
@@ -5042,6 +5481,73 @@ class CppPathfinder:
             detail,
         )
 
+    #: Issue #8486: target edge (mm) of one coarse dependency block.
+    DEPENDENCY_BLOCK_MM = 0.25
+
+    def begin_search_dependency(self, margin_mm: float) -> bool:
+        """Start recording the cells the C++ searches that follow read.
+
+        ``margin_mm`` is the half-extent of the copper being routed (see
+        :class:`~kicad_tools.router.search_dependency.SearchDependency`).
+        Returns ``False`` on a stale extension without the recorder.
+        """
+        impl = self._impl
+        grid = self._grid
+        if not hasattr(impl, "dependency_begin") or not getattr(grid, "resolution", 0.0) > 0.0:
+            self._dependency_margin_mm = None
+            return False
+        block = max(1, int(round(self.DEPENDENCY_BLOCK_MM / grid.resolution)))
+        impl.dependency_begin(block)
+        self._dependency_margin_mm = float(margin_mm) + float(grid.resolution)
+        self._dependency_fallback_ran = False
+        return True
+
+    def collect_search_dependency(self):
+        """Stop recording; the :class:`SearchDependency` of the searches since
+        :meth:`begin_search_dependency`, or ``None`` when it is not a faithful
+        record (no recording, Python fallback ran, grid resized, nothing read).
+        """
+        margin = self._dependency_margin_mm
+        self._dependency_margin_mm = None
+        if margin is None:
+            return None
+        rows, cols, flat = self._impl.dependency_collect()
+        if self._dependency_fallback_ran or not flat or rows <= 0 or cols <= 0:
+            return None
+        import numpy as np
+
+        from .search_dependency import SearchDependency
+
+        mask = np.asarray(flat, dtype=np.uint8).reshape(rows, cols).astype(bool)
+        if not mask.any():
+            return None
+        grid = self._grid
+        block = max(1, int(round(self.DEPENDENCY_BLOCK_MM / grid.resolution)))
+        drill_reach = self._rules.via_drill / 2 + self._rules.min_hole_to_hole
+        return SearchDependency(
+            mask,
+            block,
+            float(grid.resolution),
+            float(grid.origin_x),
+            float(grid.origin_y),
+            margin,
+            drill_margin_mm=drill_reach + grid.resolution,
+        )
+
+    def reset_fallback_for_net(self, net: int) -> None:
+        """Retry this net after its blocking copper changes or a periodic re-probe.
+
+        The repeat limits describe an earlier search. Exact proofs still carry
+        their own grid fingerprint, and the stage keeps its accumulated spend.
+        """
+        for failures in (
+            self._python_failed_attempts,
+            self._python_drained_nets,
+            self._resume_clearance_exhaustions,
+        ):
+            for key in [pair for pair in failures if pair[0] == net]:
+                del failures[key]
+
     def _python_unreachable_key(
         self,
         start: Pad,
@@ -5062,6 +5568,7 @@ class CppPathfinder:
         reaches.
         """
         return (
+            start.net,
             repr(start),
             repr(end),
             repr(net_class),
@@ -5313,9 +5820,10 @@ class CppPathfinder:
                   copper can depend on machine load.
                 - python_fallback_seconds_by_net: Issue #8370.  Net name ->
                   summed wall time of its Python fallbacks, successful or not.
-                - python_fallback_repeat_skips: Issue #8370.  Fallbacks skipped
-                  because the Python A* had already drained for that net after
-                  a C++ NO_PATH / PAIRWISE_BLOCKED (seconds saved are added to
+                - python_fallback_repeat_skips: Issue #8370.  Fallbacks
+                  skipped because the Python A* had already drained for that
+                  net after a C++ NO_PATH / PAIRWISE_BLOCKED /
+                  VIA_VIA_BLOCKED (#8486) (seconds saved are added to
                   ``python_fallback_seconds_saved``).
                 - python_fallback_reduced_repeats: Issue #8485.  Repeat
                   fallbacks of a request whose Python A* already failed (any

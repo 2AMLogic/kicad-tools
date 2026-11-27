@@ -458,9 +458,9 @@ class Route:
     net_name: str
     segments: list[Segment] = field(default_factory=list)
     vias: list[Via] = field(default_factory=list)
-    # Issue #3441: True for sub-grid escape stubs (#1603) emitted by the
-    # pre-pass.  An escape stub only connects an off-grid pad to its
-    # nearest grid point -- it is NOT a full net route, so the negotiated
+    # Issue #3441: True for temporary pad access, including a sub-grid
+    # escape (#1603) or a BGA dogbone that terminates at its via (#9850).
+    # Its net still needs a route from the access point, so the negotiated
     # loop's pre-routed-net filter (#2464) must not treat nets that have
     # only escape stubs as already routed (doing so left board 07's six
     # TMDS nets permanently at 1/2 pads connected when the pre-pass was
@@ -695,6 +695,19 @@ class Pad:
     connects a via inside a through-hole pad on the footprint's side only.
     Routing, clearance and grid code ignore it.
     """
+
+    chamfered_outline: tuple[tuple[float, float], ...] = ()
+    """Copper boundary of an authored chamfered pad, in board-axis offsets from its centre."""
+
+    mask_chamfered_outline: tuple[tuple[float, float], ...] = field(default=(), kw_only=True)
+    """Plotted boundary when an omitted radius differs from the contact fallback."""
+
+    authored_layers: tuple[str, ...] = field(default=(), kw_only=True)
+    """Layers the pad authors in its footprint (copper, mask, paste), as written in the file."""
+
+    terminal_layers: tuple[Layer, ...] | None = field(default=None, kw_only=True)
+    copper_offset: tuple[float, float] = field(default=(0.0, 0.0), kw_only=True)
+    """Board-axis displacement from the pad anchor to its copper centre, in mm."""
 
     @property
     def component_key(self) -> str:

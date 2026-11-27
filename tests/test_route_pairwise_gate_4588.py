@@ -664,14 +664,17 @@ class TestPreservedCopperIsInScope:
     written unsafe copper into.
     """
 
-    def test_preserved_violation_fails_the_run_end_to_end(self, tmp_path: Path, capsys) -> None:
+    @pytest.mark.parametrize("preserve_args", [[], ["--preserve-existing"]])
+    def test_preserved_violation_fails_the_run_end_to_end(
+        self, tmp_path: Path, capsys, preserve_args
+    ) -> None:
         pcb = tmp_path / "preserved.kicad_pcb"
         pcb.write_text(_preserved_violation_board())
         vmap = _write_voltage_map(tmp_path)
         out = tmp_path / "preserved_routed.kicad_pcb"
 
         rc = route_main(
-            _route_args(pcb, out, "lattice", vmap) + ["--preserve-existing"],
+            _route_args(pcb, out, "lattice", vmap) + preserve_args,
         )
         captured = capsys.readouterr().out
 
@@ -699,20 +702,14 @@ class TestPreservedCopperIsInScope:
         assert "SUCCESS:" in captured
         assert "pairwise HV clearance violations" not in captured
 
-    def test_run_without_preserve_existing_does_not_audit_dropped_copper(
-        self, tmp_path: Path, capsys
-    ) -> None:
-        """Without ``--preserve-existing`` that copper is stripped, not written.
-
-        Auditing it anyway would fail a run over geometry the output does not
-        contain -- the mirror-image false signal of the bug being fixed.
-        """
+    def test_replacement_run_audits_only_written_copper(self, tmp_path: Path, capsys) -> None:
+        """The explicit opt-out strips the old copper before the audit."""
         pcb = tmp_path / "stripped.kicad_pcb"
         pcb.write_text(_preserved_violation_board())
         vmap = _write_voltage_map(tmp_path)
         out = tmp_path / "stripped_routed.kicad_pcb"
 
-        rc = route_main(_route_args(pcb, out, "lattice", vmap))
+        rc = route_main(_route_args(pcb, out, "lattice", vmap) + ["--no-preserve-existing"])
         captured = capsys.readouterr().out
 
         assert rc == 0, captured

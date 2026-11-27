@@ -161,20 +161,32 @@ jobs:
         # fail_under threshold, no upload, only a terminal table. The cause
         # was removed instead of raising the timeout.
         #
-        # --dist loadgroup (PR #6228): a class-scoped fixture runs once per
-        # xdist worker that receives a test from its class, so under the
-        # default --dist load the ~10 min board-04 --auto-mfr-tier route
-        # could run on up to 4 workers.  Tests marked
-        # @pytest.mark.xdist_group(...) stay on one worker; ungrouped tests
-        # load-balance exactly as under --dist load.
+        # --dist loadscope (Issue #10565): a class-scoped fixture runs once
+        # per xdist worker that receives a test from its class, so under a
+        # per-test scheduler the ~10 min board-04 --auto-mfr-tier route can
+        # run on up to 4 workers.  loadscope hands a whole scope to one
+        # worker: the methods of a class share a worker, the module-level
+        # functions of a file share a worker, and classes in the same file
+        # can run on different workers.
+        #
+        # Not --dist loadgroup (PR #6228).  On the pinned pytest 9.2.0 /
+        # pytest-xdist 3.8.0 the xdist_group mark does not group: a worker
+        # appends the group name to an item attribute that pytest 9 never
+        # reads, so the controller sees plain ids and hands out one test at
+        # a time, without load's contiguous chunks.  A scoped fixture is
+        # then built on every worker that receives one of its tests.  The
+        # @pytest.mark.xdist_group marks under tests/ are inert on this
+        # toolchain; scope, not the mark, decides placement.
         #
         # KCT_LATTICE_BOARD_GUARD (Issue #6463): set to 1 only on the weekly
         # Sunday cron, which enables the ~25-min board-05 case of
         # tests/test_lattice_boards_manufacturable_6449.py (its own
         # pytest.mark.timeout(3000) overrides --timeout=1200 for that test).
-        # Board 04's case runs on every slow run. Both share one xdist group,
-        # so board 05 occupies one worker while the rest load-balance on the
-        # other three; against the ~41-min median that stays under 90 min.
+        # Board 04's case runs on every slow run. Both are parametrizations
+        # of one module-level function, so loadscope keeps them on that
+        # module's worker: board 05 occupies one worker while the rest
+        # load-balance on the other three; against the ~41-min median
+        # (measured before Issue #10565) that stays under 90 min.
         # Twice-daily, push and workflow_dispatch runs leave it unset.
         #
         # --durations=25 (Issue #6478): a class-scoped fixture's cost shows
@@ -185,7 +197,7 @@ jobs:
         # board-05 case on another worker.
         env:
           KCT_LATTICE_BOARD_GUARD: ${{ github.event.schedule == '0 9 * * 0' && '1' || '' }}
-        run: uv run pytest -n auto --dist loadgroup -o addopts= --benchmark-disable --timeout=1200 --durations=25 -rs -m slow
+        run: uv run pytest -n auto --dist loadscope -o addopts= --benchmark-disable --timeout=1200 --durations=25 -rs -m slow
 
   # Issue #6738 (operator ruling 2026-10-16): the board 07 copper-safety DRC
   # ratchet runs here, on the schedule, instead of in ci.yml. ci.yml's

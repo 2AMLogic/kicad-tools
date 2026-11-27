@@ -1,5 +1,7 @@
 """Observed escape cells must move their own copper on both KiCad schemas."""
 
+import hashlib
+import json
 import runpy
 from pathlib import Path
 
@@ -10,6 +12,36 @@ from kicad_tools.sexp import parse_string
 REPAIR = runpy.run_path(
     str(Path(__file__).resolve().parents[1] / "boards/02-charlieplex-led/finalize_routing.py")
 )["_relocate_escapes"]
+
+
+def test_release_copper_clears_the_d9_via_slit_and_c1_mask_opening():
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.physical_gap import check_physical_copper_gap
+
+    output = Path(__file__).resolve().parents[1] / "boards/02-charlieplex-led/output"
+    path = output / "charlieplex_3x3_routed.kicad_pcb"
+    pcb = PCB.load(path)
+    moves = json.loads((output / "readiness/drill-relocations.json").read_text())
+    release_moves = {(row["net"], tuple(row["absolute_from"])) for row in moves}
+    assert {("NODE_D", (156.8, 105.0)), ("VCC", (152.8, 117.4))} <= release_moves
+
+    # The seed-42 D9 returning trace left a 0.117537 mm slit against this floor.
+    gaps = check_physical_copper_gap(pcb, 0.127)
+    assert not [v for v in gaps.violations if v.severity == "error"]
+
+    # A refused release keeps the previous package and records the new
+    # board's native measurements in the producer's readiness-attempt report.
+    board_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    report = json.loads((output / "manufacturing/kct-check.json").read_text())
+    if report["pcb_sha256"] != board_sha:
+        report = json.loads((output / "readiness-attempt/kct-check.json").read_text())
+    assert report["pcb_sha256"] == board_sha
+    (mask,) = report["mask_copper_assessments"]
+    assert mask["binding"]["source_sha256"] == board_sha
+    assert mask["geometry_provenance"]["export"]["source_sha256"] == board_sha
+    assert mask["coverage"] == "complete" and mask["passed"]
+    c1 = [sample for sample in mask["measurements"] if sample["owner_ref"] == "C1/1"]
+    assert any(sample["own_pad_entry"] and sample["conductor_net"] == "VCC" for sample in c1)
 
 
 @pytest.mark.parametrize("named_nets", [False, True])
@@ -27,6 +59,8 @@ REPAIR = runpy.run_path(
         ("NODE_B", (148.1, 105.5), (148.4, 105.5)),
         ("NODE_B", (158.9, 105.5), (158.6, 105.5)),
         ("NODE_C", (138.1, 106.0), (138.4, 106.0)),
+        ("NODE_D", (156.8, 105.0), (156.625, 105.5)),
+        ("VCC", (152.8, 117.4), (152.35, 116.3)),
         ("NODE_A", (148.0, 84.9), (148.0, 84.5)),
         ("NODE_D", (157.9, 106.0), (158.3, 106.0)),
         ("GND", (155.2, 117.4), (156.5, 117.4)),

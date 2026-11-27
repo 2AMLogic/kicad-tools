@@ -70,8 +70,8 @@ frozen ``routing_sidecars``) pass it in and the block grows a
 Not a check
 -----------
 
-These are metrics, not findings: nothing here is, or feeds, a ``kct
-check`` rule. ``sharp_trace_corner`` already warns on acute corners and
+The reported metrics are descriptive. The underlying Edge.Cuts material
+geometry is also used by the pour-slot check. ``sharp_trace_corner`` already warns on acute corners and
 turn-backs and its 90 deg threshold is unverified against fab guidance
 (see its docstring); no new rule and no new threshold are introduced
 here (recorded decision on issue #9594).
@@ -85,11 +85,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
+
     from kicad_tools.schema.pcb import PCB
 
 __all__ = [
     "TURN_BACK_MAX_ANGLE_DEG",
     "LayoutQualityReport",
+    "board_material_geometry",
     "analyze_layout_quality",
 ]
 
@@ -332,8 +335,8 @@ def _total_track_length_mm(pcb: PCB) -> float:
     return total
 
 
-def _outline_area_mm2(pcb: PCB) -> float | None:
-    """Area enclosed by the Edge.Cuts outline, or ``None`` when unsupported.
+def board_material_geometry(pcb: PCB) -> BaseGeometry | None:
+    """Board-relative laminate, including every island and cutout, or ``None`` when unprovable.
 
     Every Edge.Cuts contour is measured -- top-level graphics *and*
     footprint-owned ones (a board-edge cutout often lives as ``fp_rect``
@@ -366,9 +369,11 @@ def _outline_area_mm2(pcb: PCB) -> float | None:
     or absent outlines return ``None`` too.
     """
     from shapely.errors import ShapelyError  # type: ignore[import-untyped]
-    from shapely.geometry import MultiLineString, Polygon  # type: ignore[import-untyped]
+    from shapely.geometry import MultiLineString, MultiPolygon, Polygon  # type: ignore[import-untyped]
     from shapely.ops import polygonize_full  # type: ignore[import-untyped]
 
+    if getattr(pcb, "_sexp", None) is None:
+        return None
     try:
         segments = _edge_cuts_segments(pcb)
     except ValueError:
@@ -395,15 +400,23 @@ def _outline_area_mm2(pcb: PCB) -> float | None:
             key=lambda pair: pair[1].area,
             reverse=True,
         )
-        area = 0.0
+        material = []
         for idx, (face, ring) in enumerate(rings):
             probe = ring.representative_point()
             depth = sum(1 for _, other in rings[:idx] if other.contains(probe))
             if depth % 2 == 0:
-                area += face.area
-        return area if math.isfinite(area) and area > 0 else None
+                material.append(face)
+        if not material:
+            return None
+        region = material[0] if len(material) == 1 else MultiPolygon(material)
+        return region if region.is_valid and math.isfinite(region.area) else None
     except (ValueError, TypeError, OverflowError, ShapelyError):
         return None
+
+
+def _outline_area_mm2(pcb: PCB) -> float | None:
+    material = board_material_geometry(pcb)
+    return material.area if material is not None else None
 
 
 def _authored_radius_mm(node: Any) -> float:
@@ -678,7 +691,7 @@ def _edge_cuts_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float
                 # tessellated footprint arc, dropping the whole area.
                 segments.extend(zip(chain[:-1], chain[1:], strict=True))
             elif kind == "poly":
-                points = [fp_point(fp, point) for point in graphic.points]
+                points = [fp_point(fp, point) for point in graphic.boundary_points]
                 if len(points) < 3:
                     raise ValueError("Edge.Cuts fp_poly: missing points")
                 add_chain(points)

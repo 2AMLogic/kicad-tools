@@ -162,6 +162,26 @@ def test_stage_budget_exhaustion_skips_repeat_but_not_new_request() -> None:
     assert stats["python_fallback_stage_spent_s"] >= 10.0
 
 
+def test_reopened_net_retries_without_renewing_other_nets_stage_budget() -> None:
+    pf = _pathfinder()
+    other = _pads("other")
+    for pad in other:
+        pad.net = 2
+    pf.set_python_fallback_stage_budget(10.0)
+    with _deadline_hit_stub() as spy:
+        _fallback(pf)
+        _fallback(pf, pads=other)
+        pf._python_fallback_stage_spent = 10.0
+        pf.reset_fallback_for_net(1)
+        assert pf.fallback_stats["python_fallback_stage_spent_s"] == 10.0
+        _fallback(pf, pads=other)
+        assert spy.call_count == 2  # The other net still has a repeat.
+        _fallback(pf)
+    assert spy.call_count == 3
+    assert spy.call_args.kwargs["per_net_timeout"] == pytest.approx(100.0)
+    assert pf.fallback_stats["python_fallback_stage_budget_skips"] == 1
+
+
 def test_setting_stage_budget_resets_spend_and_none_uncaps() -> None:
     pf = _pathfinder()
     pf.set_python_fallback_stage_budget(10.0)

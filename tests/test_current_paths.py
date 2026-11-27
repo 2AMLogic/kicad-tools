@@ -501,6 +501,93 @@ class TestPadExtentEndpointBinding:
     """
 
     @staticmethod
+    def _round_terminal_pcb(end_x: float):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=160, height=85, center=False)
+        _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+        terminal = pcb.get_footprint("J2")
+        assert terminal is not None
+        pad = terminal.pads[0]
+        pad.size = (3.0, 3.0)
+        pad.drill = 2.2
+        pcb.add_trace((20, 50), (end_x, 50), width=5.5, layer="F.Cu", net="NET1")
+        return pcb, pad
+
+    @pytest.mark.parametrize(
+        ("end_x", "resolved"), [(118.45, True), (118.0, False), (115.0, False)]
+    )
+    def test_round_pth_under_track_end_cap(self, end_x: float, resolved: bool) -> None:
+        # At 118.45 copper reaches the full circumference of the drill. At
+        # 118.0 it contacts only part of the barrel, and 115.0 misses the land.
+        pcb, _ = self._round_terminal_pcb(end_x)
+        assert resolve_current_path(pcb, _trunk_spec()).ok is resolved
+
+    @pytest.mark.parametrize("geometry", ["shape", "slot", "offset", "nonplated", "second_track"])
+    def test_end_cap_requires_one_track_at_a_round_plated_drill(self, geometry: str) -> None:
+        pcb, pad = self._round_terminal_pcb(118.45)
+        if geometry == "shape":
+            # Circular control: only the pad shape changes below.
+            assert resolve_current_path(pcb, _trunk_spec()).ok
+            pad.shape = "rect"
+        elif geometry == "slot":
+            pad.drill_size = (2.2, 2.6)
+        elif geometry == "offset":
+            pad.drill_offset = (0.5, 0.0)
+        elif geometry == "nonplated":
+            pad.type = "np_thru_hole"
+        elif geometry == "second_track":
+            pcb.add_trace((121.55, 50), (130, 50), width=5.5, layer="B.Cu", net="NET1")
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert not r.ok
+        if geometry == "shape":
+            assert r.status == "unresolved"
+            assert "no routed copper touching it" in r.reason
+
+    @pytest.mark.parametrize(
+        ("start", "end", "expected"),
+        [
+            ((110.0, 50.0), (118.45, 50.0), (118.45, 50.0, "F.Cu")),
+            ((119.0, 50.0), (121.0, 50.0), None),
+        ],
+    )
+    def test_end_cap_binds_only_one_enclosing_end(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        expected: tuple[float, float, str] | None,
+    ) -> None:
+        """Both ends of a short segment enclosing the barrel bind nothing.
+
+        Called through the helper directly: with both ends inside the pad the
+        public resolver attaches through the pad extent, and moving the only
+        trace disconnects J1, so an unresolved result would not isolate this
+        guard.
+        """
+        from kicad_tools.router.current_paths import _single_barrel_contact
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+        from kicad_tools.validate.copper_contact import PAD, build_copper_contact_graph
+
+        pcb, pad = self._round_terminal_pcb(118.45)
+        (segment,) = pcb.segments
+        segment.start, segment.end = start, end
+        pad_key = next(
+            (i, j)
+            for i, fp in enumerate(pcb.footprints)
+            for j, candidate in enumerate(fp.pads)
+            if candidate is pad
+        )
+        contacts = build_copper_contact_graph(
+            ConnectivityValidator(pcb), pad.net_number, with_bonds=True
+        )
+        index = next(
+            i for i, item in enumerate(contacts.items) if item.kind == PAD and item.key == pad_key
+        )
+        assert sum(index in bond for bond in contacts.bonds) == 1
+        assert _single_barrel_contact(pad, pad_key, lambda: contacts) == expected
+
+    @staticmethod
     def _wide_pad_pcb(*, offsets: tuple[float, ...], pad_size=(2.29, 2.03)):
         """J1 -> J2, where the J1 end fans into ``offsets`` stubs on its pad."""
         from kicad_tools.schema.pcb import PCB
@@ -789,6 +876,89 @@ class TestPhysicalLayerGraph:
         assert len(result.segments) == 2
         assert result.length_mm == pytest.approx(100)
         assert audit_current_paths(pcb, [_trunk_spec(), _sense_spec()]).fully_covered
+
+    @pytest.mark.parametrize(
+        "width,net,span,reverse,expected",
+        [
+            (2.45, "NET1", ("F.Cu", "B.Cu"), False, "resolved"),
+            (2.45, "NET1", ("F.Cu", "B.Cu"), True, "resolved"),
+            (1.95, "NET1", ("F.Cu", "B.Cu"), False, "unresolved"),
+            (2.45, "OTHER", ("F.Cu", "B.Cu"), False, "unresolved"),
+            (2.45, "NET1", ("In2.Cu", "B.Cu"), False, "unresolved"),
+        ],
+    )
+    def test_offset_endpoint_covers_via_drill(self, width, net, span, reverse, expected):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(layers=4)
+        _add_pad_footprint(pcb, ref="J1", x=20, y=50.632, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=100, y=50, net="NET1")
+        endpoints = [(20, 50.632), (60, 50.632)]
+        if reverse:
+            endpoints.reverse()
+        pcb.add_trace(*endpoints, width=width, layer="In1.Cu", net="NET1")
+        pcb.add_trace((60, 50), (100, 50), width=1, layer="F.Cu", net="NET1")
+        pcb.add_via(60, 50, size=1.6, drill=0.8, layers=span, net=net)
+        result = resolve_current_path(pcb, _trunk_spec())
+        assert result.status == expected
+        if result.ok:
+            assert {id(s) for s in result.segments} == {id(s) for s in pcb.segments}
+            assert len(result.layer_changes) == 1
+            assert result.layer_changes[0].count == 1
+            assert result.layer_changes[0].drill == pytest.approx(0.8)
+            # A second bridge across the layers creates a real parallel path.
+            pcb.add_via(30, 50.632, size=1.6, drill=0.8, net=net)
+            pcb.add_trace((30, 50.632), (100, 50), width=1, layer="F.Cu", net=net)
+            assert resolve_current_path(pcb, _trunk_spec()).status == "ambiguous"
+
+    def _offset_via_pcb(self, end=(60, 50.632), start=(20, 50.632)):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(layers=4)
+        _add_pad_footprint(pcb, ref="J1", x=start[0], y=start[1], net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=100, y=50, net="NET1")
+        pcb.add_trace(start, end, width=2.45, layer="In1.Cu", net="NET1")
+        pcb.add_trace((60, 50), (100, 50), width=1, layer="F.Cu", net="NET1")
+        pcb.add_via(60, 50, size=1.6, drill=0.8, net="NET1")
+        return pcb
+
+    @pytest.mark.parametrize("split", [False, True])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_horizontal_offset_landing_keeps_all_copper(self, split, reverse):
+        pcb = self._offset_via_pcb()
+        if split:
+            vertex = (59.6, 50.632)
+            pcb.segments[0].end = vertex
+            pcb.add_trace(vertex, (60, 50.632), width=2.45, layer="In1.Cu", net="NET1")
+        if reverse:
+            pcb._segments.reverse()
+            for segment in pcb.segments:
+                segment.start, segment.end = segment.end, segment.start
+        result = resolve_current_path(pcb, _trunk_spec())
+        assert result.ok
+        assert result.length_mm == pytest.approx(80)
+        assert [change.count for change in result.layer_changes] == [1]
+        assert audit_current_paths(pcb, [_trunk_spec()]).fully_covered
+
+    def test_straight_stub_keeps_offset_via_contact(self):
+        pcb = self._offset_via_pcb()
+        pcb.add_trace((60, 50.632), (62, 50.632), width=2.45, layer="In1.Cu", net="NET1")
+        assert resolve_current_path(pcb, _trunk_spec()).status == "resolved"
+        pcb.add_via(30, 50.632, size=1.6, drill=0.8, net="NET1")
+        pcb.add_trace((30, 50.632), (100, 50), width=1, layer="F.Cu", net="NET1")
+        assert resolve_current_path(pcb, _trunk_spec()).status == "ambiguous"
+
+    def test_diagonal_split_keeps_length(self):
+        def length(split):
+            pcb = self._offset_via_pcb(start=(20, 10.632))
+            if split:
+                pcb.segments[0].end = (59.5, 50.132)
+                pcb.add_trace((59.5, 50.132), (60, 50.632), width=2.45, layer="In1.Cu", net="NET1")
+            result = resolve_current_path(pcb, _trunk_spec())
+            assert result.status == "resolved"
+            return result.length_mm
+
+        assert length(True) == pytest.approx(length(False))
 
     def test_interior_via_nearby_is_not_contact(self):
         pcb = self._interior_pcb()
@@ -1534,3 +1704,58 @@ class TestWitnessRendering:
         assert describe_witness({}) == ""
         assert describe_witness({}, (5.0, 5.0)) == ""
         assert witness_text({}) == ""
+
+
+def test_single_junction_loop_with_physical_return_to_trunk_stays_ambiguous():
+    pcb = _t_network_pcb(trunk_width=4)
+    pcb.add_trace((60, 70), (70, 65), width=0.2, layer="F.Cu", net="NET1")
+    pcb.add_trace((70, 65), (60, 50), width=0.2, layer="F.Cu", net="NET1")
+    # The spur ends inside the wide track, away from its centreline.
+    pcb.add_trace((70, 65), (90, 51), width=0.2, layer="F.Cu", net="NET1")
+    assert resolve_current_path(pcb, _trunk_spec(current_a=5)).status == "ambiguous"
+
+
+def test_offset_branch_within_straight_trunk_preserves_minimum_width():
+    pcb = _same_layer_bars_pcb(0.6, width=0.2, straight_width=4)
+    spec = _trunk_spec(current_a=5)
+    result = resolve_current_path(pcb, spec)
+    assert result.ok and result.min_width.width_mm == pytest.approx(4)
+    assert result.length_mm == pytest.approx(12)
+    assert not result.parallel_groups
+    assert reinforcement_eligible_segment_ids(pcb, [spec]) == {id(pcb.segments[0])}
+    assert not audit_current_paths(pcb, [spec]).uncovered
+
+
+def test_overlay_beyond_a_midtrack_turn_is_excluded_from_reinforcement():
+    from dataclasses import replace
+
+    pcb = _t_network_pcb(trunk_width=4)
+    pcb.remove_segments(list(pcb.segments[:2]))
+    pcb.add_trace((20, 50), (120, 50), width=4, layer="F.Cu", net="NET1")
+    pcb.add_trace((25, 50), (45, 50), width=0.2, layer="F.Cu", net="NET1")
+    branch = replace(_trunk_spec(), source=PathEndpoint("U3", "1"))
+    result = resolve_current_path(pcb, branch)
+    assert result.ok and result.length_mm == pytest.approx(80)
+    assert reinforcement_eligible_segment_ids(pcb, [branch]) == {id(pcb.segments[0])}
+
+
+def test_covered_interval_with_tail_rejoining_through_copper_width():
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.create(width=200, height=200, center=False)
+    for ref, (x, y) in [("J1", (93.5, 177.45)), ("J2", (108.7, 182.7))]:
+        _add_pad_footprint(pcb, ref=ref, x=x, y=y, net="NET1")
+    pcb.add_trace((93.5, 177.45), (108.7, 177.45), width=4, layer="B.Cu", net="NET1")
+    pcb.add_trace((108.7, 177.45), (108.7, 182.7), width=4, layer="B.Cu", net="NET1")
+    pcb.add_trace((108.7, 169), (108.7, 182.7), width=0.2, layer="B.Cu", net="NET1")
+    pcb.add_trace((108.7, 169), (98, 176.5), width=0.2, layer="B.Cu", net="NET1")
+    assert resolve_current_path(pcb, _trunk_spec(current_a=5)).status == "ambiguous"
+
+
+def test_thin_loop_on_an_arm_of_a_doubled_trunk():
+    pcb = _doubled_pcb()
+    for start, end in [((26, 50), (22, 60)), ((22, 60), (30, 60)), ((30, 60), (26, 50))]:
+        pcb.add_trace(start, end, width=0.2, layer="B.Cu", net="NET1")
+    result = resolve_current_path(pcb, _j_spec())
+    assert result.ok and len(result.parallel_groups) == 1 and len(result.off_path_loops) == 1
+    assert all(s.width != 0.2 for s in result.segments)

@@ -1,11 +1,13 @@
 """Read-only inspection of project netclasses, separate from writer-oriented APIs.
 
-See ``docs/guides/netclass-diagnostics.md`` for the KiCad 10.0.5 matching
+See ``docs/guides/netclass-diagnostics.md`` for the KiCad 10.0.6 matching
 contract and native oracle. Results describe independent memberships, not
 assignment precedence, composite classes, or effective electrical constraints.
 """
 
+import re
 from copy import deepcopy
+from functools import lru_cache
 from string import ascii_letters, digits
 from typing import Any
 
@@ -13,11 +15,98 @@ from typing import Any
 # interpretations: the native oracle's ``/USB/`` row matches only ``/USB/``.
 _LITERAL = frozenset(ascii_letters + digits + "_ -:/")
 
+# Punctuation the native oracle pins under BOTH interpretations (issue
+# #10122): ``.`` is any one character to the regex interpretation, newline
+# included (oracle row ``USB.X`` -> ``USB\nX``), and literal to the wildcard
+# one; ``X+`` is one-or-more ``X`` to the regex one and a literal ``+`` to the
+# wildcard one; a single-level ``(...)`` group is transparent to the regex
+# one while its parentheses stay literal to the wildcard one -- which is how
+# ``Net-(U5-CAPP)`` also covers KiCad's unparenthesized spelling.
+_REGEX_PUNCTUATION = frozenset(".+()")
+
+_QUANTIFIERS = frozenset("*?+")
+
+_ALLOWED = _LITERAL | _REGEX_PUNCTUATION | _QUANTIFIERS
+
+
+# KiCad also evaluates a wildcard interpretation of each pattern. Encode its two
+# wildcards (and other regex punctuation) so that interpretation is literal.
+_ENCODED_NET = re.compile(r"\^+((?:[A-Za-z0-9_ :/\-]|\\x[0-9A-F]{2}|[^\x00-\x7f])+)\\z\$")
+
+
+def literal_netclass_pattern(net: str, inventory: set[str]) -> str:
+    """Return a schematic-visible pattern selecting this board net alone."""
+    if all(c in _LITERAL for c in net) and net + "\n" not in inventory:
+        return net
+    body = "".join(c if c in _LITERAL or ord(c) > 127 else f"\\x{ord(c):02X}" for c in net)
+    pattern = f"^{body}\\z$"
+    # The wildcard matcher also accepts the verbatim encoding (and its final
+    # newline variant). Extra regex anchors leave the intended match intact.
+    while pattern in inventory or pattern + "\n" in inventory:
+        pattern = "^" + pattern
+    return pattern
+
+
+@lru_cache(maxsize=1024)
+def encoded_netclass_name(pattern: str) -> str | None:
+    """Decode only the literal expression emitted by literal_netclass_pattern."""
+    match = _ENCODED_NET.fullmatch(pattern)
+    if match is None:
+        return None
+    return re.sub(r"\\x([0-9A-F]{2})", lambda m: chr(int(m[1], 16)), match[1])
+
+
+def matches_encoded_netclass(pattern: str, net: str) -> bool:
+    literal = encoded_netclass_name(pattern)
+    return literal is not None and net in (literal, pattern, pattern + "\n")
+
 
 def _supported(pattern: str) -> bool:
-    return all(c in _LITERAL or c in "*?" for c in pattern) and not any(
-        a in "*?" and b in "*?" for a, b in zip(pattern, pattern[1:], strict=False)
-    )
+    if encoded_netclass_name(pattern) is not None:
+        return True
+    if not all(c in _ALLOWED for c in pattern):
+        return False
+    if any(
+        a in _QUANTIFIERS and b in _QUANTIFIERS for a, b in zip(pattern, pattern[1:], strict=False)
+    ):
+        return False
+    # Groups: balanced, single-level, non-empty and unquantified. Nested,
+    # empty, quantified or misplaced parentheses stay unsupported.
+    depth = 0
+    for index, char in enumerate(pattern):
+        following = pattern[index + 1 : index + 2]
+        if char == "(":
+            depth += 1
+            if depth > 1 or following in ("", ")") or following in _QUANTIFIERS:
+                return False
+        elif char == ")":
+            if following in _QUANTIFIERS:
+                return False
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _regex_tokens(pattern: str) -> list[tuple[str, str, str]]:
+    """The regex interpretation's ``(kind, char, quantifier)`` atom list.
+
+    Verified-group parentheses are dropped: an unquantified group only
+    sequences its contents, so transparency preserves the anchored match.
+    """
+    tokens: list[tuple[str, str, str]] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char in "()":
+            index += 1
+            continue
+        quantifier = pattern[index + 1 : index + 2]
+        if quantifier not in _QUANTIFIERS:
+            quantifier = ""
+        tokens.append(("any" if char == "." else "lit", char, quantifier))
+        index += 2 if quantifier else 1
+    return tokens
 
 
 def _matches(pattern: str, net: str) -> bool:
@@ -25,6 +114,9 @@ def _matches(pattern: str, net: str) -> bool:
     # NET_SETTINGS does not assign classes to the unnamed net.
     if not net:
         return False
+    literal = encoded_netclass_name(pattern)
+    if literal is not None:
+        return net in (literal, pattern, pattern + "\n")
     ends = {len(net)}
     if net.endswith("\n"):
         ends.add(len(net) - 1)
@@ -39,27 +131,30 @@ def _matches(pattern: str, net: str) -> bool:
     if ends & positions:
         return True
     # A leading quantifier is invalid regex; the wildcard branch still applies.
-    if pattern.startswith(("*", "?")):
+    if pattern[:1] in _QUANTIFIERS:
         return False
     positions = {0}
-    index = 0
-    while index < len(pattern):
-        char = pattern[index]
-        quantifier = pattern[index + 1 : index + 2]
-        if quantifier in ("*", "?"):
-            next_positions = set(positions)
+    for kind, char, quantifier in _regex_tokens(pattern):
+        if quantifier == "":
+            positions = {
+                i + 1 for i in positions if i < len(net) and (kind == "any" or net[i] == char)
+            }
+        elif quantifier == "?":
+            extended = set(positions)
+            for i in positions:
+                if i < len(net) and (kind == "any" or net[i] == char):
+                    extended.add(i + 1)
+            positions = extended
+        else:
+            extended = set() if quantifier == "+" else set(positions)
             for start in positions:
                 end = start
-                while end < len(net) and net[end] == char:
+                while end < len(net) and (kind == "any" or net[end] == char):
                     end += 1
-                    next_positions.add(end)
-                    if quantifier == "?":
-                        break
-            positions = next_positions
-            index += 2
-        else:
-            positions = {i + 1 for i in positions if i < len(net) and net[i] == char}
-            index += 1
+                    extended.add(end)
+            positions = extended
+        if not positions:
+            return False
     return bool(ends & positions)
 
 
@@ -154,6 +249,7 @@ def diagnose_netclasses(data: Any, net_names: Any = None) -> dict[str, Any]:
             return False
         return True
 
+    inventory_set = set(inventory or ())
     for index, entry in enumerate(entries("netclass_patterns")):
         path = f"net_settings.netclass_patterns[{index}]"
         pattern = entry.get("pattern") if isinstance(entry, dict) else None
@@ -179,7 +275,12 @@ def diagnose_netclasses(data: Any, net_names: Any = None) -> dict[str, Any]:
             continue
         row["status"] = "supported"
         if inventory is not None:
-            row["matches"] = [net for net in inventory if _matches(pattern, net)]
+            literal = encoded_netclass_name(pattern)
+            if literal is not None or (pattern and all(c in _LITERAL for c in pattern)):
+                candidates = {pattern, pattern + "\n", literal or pattern}
+                row["matches"] = sorted(inventory_set.intersection(candidates))
+            else:
+                row["matches"] = [net for net in inventory if _matches(pattern, net)]
             if not row["matches"]:
                 diagnostic("no_matches", path + ".pattern", "No supplied board nets match.")
 

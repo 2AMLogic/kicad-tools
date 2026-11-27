@@ -70,6 +70,11 @@ one function for each:
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.manufacturers import DesignRules
+    from kicad_tools.schema.pcb import PCB
 
 # IPC-2221 empirical constant k, by layer position.
 _K_EXTERNAL = 0.048
@@ -100,6 +105,10 @@ _ONDERDONK_TIME_CONSTANT = 33.0
 # 1 circular mil = the area of a circle 1 mil in diameter = pi/4 mils**2,
 # so mils**2 -> circular mils multiplies by 4/pi.
 _CIRCULAR_MILS_PER_SQUARE_MIL = 4.0 / math.pi
+
+
+def _required_area_mils2(current_a: float, k: float, delta_t_c: float) -> float:
+    return float((current_a / (k * delta_t_c**_DELTA_T_EXPONENT)) ** (1.0 / _AREA_EXPONENT))
 
 
 def width_for_current(
@@ -147,7 +156,7 @@ def width_for_current(
     k = _K_EXTERNAL if layer == "external" else _K_INTERNAL
 
     # Invert IPC-2221 for the required cross-sectional area (mils**2).
-    area_mils2 = (current_a / (k * delta_t_c**_DELTA_T_EXPONENT)) ** (1.0 / _AREA_EXPONENT)
+    area_mils2 = _required_area_mils2(current_a, k, delta_t_c)
 
     # Copper thickness for this weight, in mils.
     thickness_mils = copper_weight_oz * _MILS_PER_OZ
@@ -188,6 +197,16 @@ def via_barrel_current_capacity(
     area_mm2 = math.pi * plating_mm * (drill_mm + plating_mm)
     area_mils2 = area_mm2 / (_MM_PER_MIL**2)
     return float(_K_EXTERNAL * delta_t_c**_DELTA_T_EXPONENT * area_mils2**_AREA_EXPONENT)
+
+
+def via_drill_for_current(current_a: float) -> float:
+    """Minimum finished drill (mm) under the default single-barrel capacity screen."""
+    if not math.isfinite(current_a) or current_a <= 0:
+        raise ValueError(f"current_a must be finite and positive, got {current_a}")
+    area_mm2 = _required_area_mils2(current_a, _K_EXTERNAL, 10.0) * _MM_PER_MIL**2
+    # Invert the plated annulus used by via_barrel_current_capacity.
+    plating = VIA_PLATING_THICKNESS_MM
+    return max(0.0, area_mm2 / (math.pi * plating) - plating)
 
 
 def rms_current_for_duty_cycle(
@@ -311,3 +330,37 @@ def adiabatic_fusing_current(
     temp_ratio = (_COPPER_MELTING_C - ambient_c) / (_COPPER_INVERSE_TEMP_COEFF_C + ambient_c)
     numerator = math.log10(temp_ratio + 1.0)
     return float(area_cmil * math.sqrt(numerator / (_ONDERDONK_TIME_CONSTANT * duration_s)))
+
+
+def required_widths_for(
+    pcb: PCB, current_a: float, design_rules: DesignRules | None = None
+) -> dict[str, float]:
+    """IPC-2221 width (mm) a declared current needs on each copper layer.
+
+    Outer layers (``F.Cu`` / ``B.Cu``) use the external constant, inner layers
+    the internal one, at the supplied design-rule weights or those of an explicit
+    stackup (``Stackup.outer_inner_copper_oz``; 1 oz where none is declared).
+    Issue #8368: a flat "internal, 1 oz" figure overstated the outer-layer
+    width of a 2 oz board several times over, so every cut was refused.
+    """
+    if design_rules is not None:
+        outer_oz, inner_oz = design_rules.outer_copper_oz, design_rules.inner_copper_oz
+    else:
+        from kicad_tools.physics.stackup import Stackup
+
+        try:
+            derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+        except Exception:  # noqa: BLE001 - a malformed stackup falls back to 1 oz
+            derived = None
+        outer, inner = derived or (None, None)
+        outer_oz, inner_oz = outer or 1.0, inner or 1.0
+    names = [layer.name for layer in pcb.copper_layers] or ["F.Cu", "B.Cu"]
+    out: dict[str, float] = {}
+    for name in names:
+        external = name in ("F.Cu", "B.Cu")
+        out[name] = width_for_current(
+            current_a,
+            outer_oz if external else inner_oz,
+            layer="external" if external else "internal",
+        )
+    return out

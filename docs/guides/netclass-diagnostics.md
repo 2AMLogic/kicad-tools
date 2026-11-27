@@ -48,7 +48,7 @@ the project. The diagnostic itself never writes or migrates project data.
 Output order follows source entry order; the same inputs give the same report.
 This is an inspection API, not a complete `.kicad_pro` schema validator.
 
-## Supported matching contract (KiCad 10.0.5)
+## Supported matching contract (KiCad 10.0.6)
 
 KiCad's netclass matcher combines **anchored regular-expression OR anchored
 wildcard membership**, case sensitively. A literal `USB` matches `USB`, not
@@ -58,21 +58,46 @@ into ordinary prefix matching. In particular `USB_*` matches both `USB_D`
 and `USB1` (wildcard). Python `fnmatch` alone cannot implement this contract.
 
 The implemented subset is ASCII letters, digits, underscore, space, hyphen,
-colon, slash, `*` and `?`, with no adjacent quantifiers. Slash is literal under
-both interpretations -- the oracle's `/USB/` pattern matches only `/USB/` --
-so hierarchical sheet-path patterns such as `/Power/*` are supported (issue
-#6262). Other syntax is explicitly `unsupported_pattern`, including
-backslashes/escaping, brackets, parentheses, periods, regex anchors, and
-Unicode **in patterns**. It is not silently
-interpreted as a glob. The supported subset evaluates both interpretations;
-invalid leading regex quantifiers still allow the wildcard interpretation.
+colon, slash, `*`, `?`, `+`, `.` and single-level `(...)` groups, with no
+adjacent quantifiers and no empty, nested, unbalanced or quantified groups.
+Slash is literal under both interpretations -- the oracle's `/USB/` pattern
+matches only `/USB/` -- so hierarchical sheet-path patterns such as `/Power/*`
+are supported (issue #6262). The punctuation added in #10122 is **regex syntax
+to the regex interpretation and literal to the wildcard one**: `.` is any one
+character (a newline included: the oracle's `USB.X` matches `USB\nX`), `X+` is
+one or more `X`, and a group only sequences its contents. Supply names such as
+`+3.3V` or `+5V` match exactly their own spelling -- their regex reading has
+an invalid leading quantifier, so only the wildcard interpretation applies --
+while `Net-(U5-CAPP)` matches both that spelling (wildcard) and KiCad's
+unparenthesized spelling `Net-U5-CAPP` (regex), and `A.B`/`C+P` also match
+`AXB`/`CCP`.
+
+**Router-generated literal patterns** are a corpus-verified exception to the
+general exclusions for escapes, regex anchors and Unicode in patterns. The
+writer starts the expression with `^`, hex-escapes ASCII characters such as
+`.` and `+` as `\xHH`, preserves Unicode, and ends with `\z$`. The strict
+end anchor applies to the decoded net name. In the KiCad 10.0.6 corpus,
+`^A\x2EB\z$` matches `A.B` and rejects both `AXB` and `A.B` followed by a
+line feed. Likewise, `^\x2B5V\z$` and `^é\z$` select `+5V` and `é`
+respectively and reject their trailing-line-feed variants.
+
+The wildcard interpretation can also match the verbatim pattern text. For
+`^USB\z$`, the corpus lists `USB`, the text `^USB\z$` itself, and that
+text followed by a line feed as matches. It rejects `USB` followed by a
+line feed. The writer checks the board inventory for both verbatim aliases
+and prepends extra `^` anchors until neither alias names a board net. Each
+extra anchor changes the wildcard spelling while preserving the decoded match.
+
+Outside that router-generated form, escapes, regex anchors (such as `^USB$`)
+and Unicode in patterns produce `unsupported_pattern`. Brackets, braces,
+alternation, and quantified or nested groups are also unsupported.
 The independent implementation uses position sets, avoiding regex backtracking.
 
 Net names may contain punctuation, hierarchical slashes and Unicode. Native
 verification includes non-BMP Unicode and newlines: wildcard characters can
-consume newlines, and the anchored end also accepts the position before a final
-newline. KiCad does not assign the unnamed (empty-name) net; it therefore never
-appears among matches, even for `*`. Empty patterns are valid, with the same
+consume newlines, and the ordinary `$` end anchor also accepts the position
+before a final newline. KiCad leaves the unnamed (empty-name) net unassigned,
+so it never appears among matches, even for `*`. Empty patterns are valid, with the same
 anchor behavior. The oracle tests include these unusual cases to make the
 contract explicit rather than assuming Python regex defaults.
 
@@ -93,7 +118,7 @@ silently implying complete coverage. No migration or writer behavior changes.
 ## Reproducible native evidence
 
 The recorded corpus is in `tests/fixtures/netclass_diagnostics/oracle.json`.
-It was generated using **KiCad 10.0.5**, native Linux amd64 `pcbnew`, through
+It was generated using **KiCad 10.0.6**, native Linux amd64 `pcbnew`, through
 `NET_SETTINGS.SetNetclassPatternAssignment` and `GetEffectiveNetClass`.
 Each pattern gets fresh settings and a single isolated `Probe` class so other
 assignments and class precedence cannot mask membership. Exact pattern/net/result
@@ -102,18 +127,23 @@ supported results with the diagnostic and require unsupported rows to remain
 unevaluated. Unsupported native results are evidence of the boundary, not claims
 that the diagnostic implements those patterns.
 
-Regenerate with KiCad's Python environment, from the repository root:
+Regenerate with KiCad's Python environment, from the repository root. The
+CI-pinned image is the exact build the corpus was captured on (issue #10122;
+the earlier 10.0.5 corpus is row-for-row identical on it):
 
 ```sh
-python3 tests/fixtures/netclass_diagnostics/capture_kicad.py > tests/fixtures/netclass_diagnostics/oracle.json
+docker run --rm -v "$PWD:/work" -w /work \
+  kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec \
+  python3 tests/fixtures/netclass_diagnostics/capture_kicad.py \
+  > tests/fixtures/netclass_diagnostics/oracle.json
 ```
 
-The capture script rejects any version other than 10.0.5. It performs no project
+The capture script rejects any version other than 10.0.6. It performs no project
 or board writes. The captured oracle is independent of this Python diagnostic.
 Source references are pinned to the same release:
 
-- [KiCad 10.0.5 `eda_pattern_match.cpp`](https://github.com/KiCad/kicad-source-mirror/blob/10.0.5/common/eda_pattern_match.cpp): `CTX_NETCLASS`, anchored regex/wildcard construction and `StartsWith`.
-- [KiCad 10.0.5 `net_settings.cpp`](https://github.com/KiCad/kicad-source-mirror/blob/10.0.5/common/project/net_settings.cpp): assignment JSON loading and `GetEffectiveNetClass`.
+- [KiCad 10.0.6 `eda_pattern_match.cpp`](https://github.com/KiCad/kicad-source-mirror/blob/10.0.6/common/eda_pattern_match.cpp): `CTX_NETCLASS`, anchored regex/wildcard construction and `StartsWith`.
+- [KiCad 10.0.6 `net_settings.cpp`](https://github.com/KiCad/kicad-source-mirror/blob/10.0.6/common/project/net_settings.cpp): assignment JSON loading and `GetEffectiveNetClass`.
 
 Only behavior was studied; no KiCad implementation was copied into this MIT
 module. No Konnect source was consulted or copied.
