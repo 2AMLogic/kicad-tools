@@ -577,6 +577,9 @@ def test_regulator_voltage_polarity_and_role(catalog_db, capsys, description, ke
 @pytest.mark.parametrize(
     ("source", "equivalent", "conflicting"),
     [
+        ("Output ±5V", "Output +/-5V", "Output +5V"),
+        ("VIN 32V VOUT 3.3V", "VOUT 3.3V VIN 32V", "VIN 3.3V VOUT 32V"),
+        ("Input 32V Output 3.3V", "VOUT 3.3V VIN 32V", "VIN 3.3V VOUT 32V"),
         ("Fixed Output 3V3", "Fixed Output 3.3V", "Fixed Output 5V"),
         ("Fixed Output 1V8", "Fixed Output 1.8V", "Fixed Output 5V"),
         ("Fixed Output -1V8", "Fixed Output -1.8V", "Fixed Output +1V8"),
@@ -602,3 +605,37 @@ def test_regulator_voltage_notation(catalog_db, capsys, legacy, source, equivale
         if legacy:
             db.execute("ALTER TABLE jlc_components DROP COLUMN attributes")
     assert _alternatives(capsys, "C800") == ["C801", "C803"]
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_resistor_type_from_catalog_description(catalog_db, capsys, legacy):
+    desc = "-55℃~+155℃ 1W 200V 8.2Ω Thick Film Resistor ±1% ±400ppm/℃ 2512 " + RES_FAMILY
+    better = desc.replace("400ppm", "200ppm")
+    with sqlite3.connect(catalog_db) as db:
+        _insert(db, 175238, "CR2512F8R20E04S", "2512", "extended", desc, {})
+        _insert(db, 35219, "25121WF820KT4E", "2512", "basic", better, {})
+        _insert(db, 800, "R800", "2512", "basic", better.replace("Thick", "Thin"), {})
+        if legacy:
+            db.execute("ALTER TABLE jlc_components DROP COLUMN attributes")
+        else:
+            _insert(db, 801, "R801", "2512", "basic", better, {"Type": "Thin Film Resistor"})
+    assert _alternatives(capsys, "C175238") == ["C35219"]
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_dielectric_aliases(catalog_db, capsys, legacy):
+    with sqlite3.connect(catalog_db) as db:
+        for code, name in enumerate(("C0G/NP0", "NP0", "C0G/NP0", "X7R", "C0G/X7R"), 800):
+            tier = "extended" if code == 800 else "basic"
+            _insert(
+                db,
+                code,
+                str(code),
+                "0402",
+                tier,
+                f"10pF 50V ±5% {name}",
+                {"Temperature Coefficient": name},
+            )
+        if legacy:
+            db.execute("ALTER TABLE jlc_components DROP COLUMN attributes")
+    assert _alternatives(capsys, "C800") == ["C801", "C802"]

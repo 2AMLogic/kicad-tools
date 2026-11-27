@@ -107,7 +107,7 @@ def _quantity(unit: str) -> re.Pattern[str]:
 # Voltage keeps its sign and AC/DC qualifier ("250VAC", "-5V"): a 250 V AC
 # rating is not a 250 V DC one, and a -5 V output is not a +5 V output.
 # An unqualified voltage is treated as DC, as catalogs publish it.
-_VOLTAGE_VALUE = rf"(?:(?:±|\+/-)\s*)?([+\-−])?({_NUMBER})\s*([mkµu]?)V(?:\s*((?i:AC|DC)))?"
+_VOLTAGE_VALUE = rf"(±|\+/-|[+\-−])?\s*({_NUMBER})\s*([mkµu]?)V(?:\s*((?i:AC|DC)))?"
 _VOLTAGE = re.compile(rf"(?<![\w./+-]){_VOLTAGE_VALUE}(?![A-Za-z0-9_])")
 
 _RATINGS = {
@@ -186,7 +186,11 @@ _FARADS = rf"({_DEC})\s*([pnuµμm]?)[Ff](?!\w)"
 _ABSOLUTE_CAP_TOL = re.compile(rf"(?:±|\+/-)\s*{_FARADS}")
 _STRUCTURED_CAP_TOL = re.compile(rf"(?:(?:±|\+/-)\s*)?{_FARADS}")
 _SAFETY_CLASS = re.compile(r"\b([XY][1-4])\b", re.I)
-_DIELECTRIC = re.compile(r"(?<!\w)(C0G|NP0|X5R|X6S|X7R|X7S|X7T|X8R|X8L|Y5V|Z5U)(?!\w)", re.I)
+_C0G_ALIASES = re.compile(r"C0G(?:\s*/\s*NP0)?|NP0(?:\s*/\s*C0G)?", re.I)
+_DIELECTRIC = re.compile(
+    rf"(?<!\w)({_C0G_ALIASES.pattern}|X5R|X6S|X7R|X7S|X7T|X8R|X8L|Y5V|Z5U)(?!\w)",
+    re.I,
+)
 
 
 _OTHER_FAMILY = re.compile(
@@ -233,10 +237,23 @@ def _nominals(part: Part, kind: str) -> set[Fraction]:
 
 
 def _dielectrics(part: Part) -> set[str]:
-    found = {code.casefold() for code in _DIELECTRIC.findall(part.description)}
+    codes = _DIELECTRIC.findall(part.description)
     if "Temperature Coefficient" in part.specs:
-        found.add(part.specs["Temperature Coefficient"].strip().casefold())
-    return found
+        codes.append(part.specs["Temperature Coefficient"].strip())
+    return {"c0g" if _C0G_ALIASES.fullmatch(code) else code.casefold() for code in codes}
+
+
+_RESISTOR_TYPE = re.compile(r"\b(thick[- ]film|thin[- ]film|metal[- ]film|wirewound)\b", re.I)
+
+
+def _resistor_types(part: Part) -> set[str]:
+    types = {
+        value.casefold().replace("-", " ") for value in _RESISTOR_TYPE.findall(part.description)
+    }
+    structured = part.specs.get("Type", "").strip().casefold().replace("-", " ")
+    if _identified(structured):
+        types.add(structured.removesuffix(" resistor"))
+    return types
 
 
 _PPM = _quantity(r"ppm\s*/\s*(?:°\s*C|℃|K)")
@@ -288,7 +305,7 @@ _DEVICE_TOKEN = re.compile(
     rf"(?<![\w./+-])(?:(?P<low>{_VOLTAGE_VALUE}|[+\-−]?{_NUMBER})"
     r"\s*(?:~|～|(?i:to)|[–—-]|\.{2,3}|…)\s*)?"
     rf"(?P<high>{_VOLTAGE_VALUE})(?![A-Za-z0-9_])"
-    r"|\b(?P<role>(?i:input|output))\b"
+    r"|\b(?P<role>(?i:input|output|vin|vout))\b"
 )
 _Voltage = tuple[Fraction, str]
 
@@ -297,7 +314,10 @@ def _signed_voltage(match: re.Match[str]) -> _Voltage:
     value = Fraction(match[2]) * _FACTORS[match[3]]
     if match[1] in ("-", "−"):
         value = -value
-    return value, (match[4] or "dc").casefold()
+    kind = (match[4] or "dc").casefold()
+    if match[1] in ("±", "+/-"):
+        kind = "bipolar " + kind
+    return value, kind
 
 
 def _device_voltages(part: Part) -> set[tuple[str | None, _Voltage, _Voltage]]:
@@ -313,7 +333,7 @@ def _device_voltages(part: Part) -> set[tuple[str | None, _Voltage, _Voltage]]:
         for j in (i - 1, i + 1):
             if 0 <= j < len(tokens) and tokens[j]["role"] and j not in claimed:
                 claimed.add(j)
-                role = tokens[j]["role"].casefold()
+                role = "input" if tokens[j]["role"].casefold() in ("input", "vin") else "output"
                 break
         high_match = _VOLTAGE.fullmatch(token["high"])
         assert high_match is not None  # Both patterns use _VOLTAGE_VALUE.
@@ -468,8 +488,13 @@ def _compatible(source: Part, candidate: Part) -> bool:
                     mandatory += ("Tolerance",)
             skip.add("Temperature Coefficient")
         else:
+            required_types = _resistor_types(source)
+            offered_types = _resistor_types(candidate)
+            if len(required_types | offered_types) > 1 or (required_types and not offered_types):
+                return False
+            skip.add("Type")
             if not same_device:
-                if not _identified(source.specs.get("Type", "")):
+                if not required_types:
                     return False
                 mandatory = ("Power(Watts)", "Tolerance")
             if not _covers_coefficient(source, candidate):
