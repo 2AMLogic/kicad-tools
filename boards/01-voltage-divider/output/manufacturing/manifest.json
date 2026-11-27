@@ -23,8 +23,8 @@
       },
       "optimize_traces": {
         "copper_oz": 1.0,
-        "corners_after": 4,
-        "corners_before": 4,
+        "corners_after": 5,
+        "corners_before": 5,
         "layers": 2,
         "segments_after": 9,
         "segments_before": 9,
@@ -43,36 +43,36 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "d1791370956962913fac6bd16314506702a6021bfb14b9e396bc02e90a1a592f",
+      "sha256": "9e736d66dec3cd22b7126a2b582234235dba15a1621db99862b0696204f2d57c",
       "size": 2212
     },
     "assembly-back.pdf": {
-      "sha256": "762635aca8889ca42736c0092b14ba962cd829e534f554c04e9c0d802593f6d0",
+      "sha256": "1c801bf620d1e96256a24e29613121d2956cbbc87180788bd9d3ae3868ce0e97",
       "size": 8804
     },
     "assembly-front.pdf": {
-      "sha256": "1aeabcc7772acd60b33c6f5348db4aceddc474e372229824bba5c05a0b7a8575",
-      "size": 19669
+      "sha256": "43301204060dbcb20b8a14275c548cd2255a4f255a38ba1c5bdb3636f0b10b12",
+      "size": 18775
     },
     "bom_jlcpcb.csv": {
       "sha256": "e27d3eb62752fff2b81d590930c5034c38cef022b4bf458891f038622e6ee878",
       "size": 175
     },
     "check-report.json": {
-      "sha256": "1c99bb3e249fe9daa4f60be1a36befc2e0fac508f2b952fafce473837a306c41",
-      "size": 116399
+      "sha256": "203f0b14982e87ebc5978dfd6cb831738bd8f2d3b720d241b8cf8df354a5a10d",
+      "size": 116216
     },
     "cpl_jlcpcb.csv": {
       "sha256": "847457252c291c9086804931f5016de06f78dc1aa1020d4a0068bc98ddd89c36",
       "size": 377
     },
     "gerbers/gerbers.zip": {
-      "sha256": "a9075c048558c25c990f61b40a1fa3168ddc238166e8b19f9300b0eae69af919",
-      "size": 15902
+      "sha256": "395bc1258d3ab549ffe5e9ef37ee2bac8d14725fe17eb91c4966382034f38703",
+      "size": 15369
     },
     "images/assembly.png": {
-      "sha256": "60b15db7f93126c43276d0af80512fe40d610deb9cccaeb0fd48f8b07ea9c3ce",
-      "size": 155720
+      "sha256": "f0c4de5a247b999348a7344d65ec81fd4bae5282cf8c9f8e47d78ae3ba0c1255",
+      "size": 139362
     },
     "images/layer_B_Cu.png": {
       "sha256": "f69304aa8bfbc00c89ed7418621fc7891872f7fff53446aabb7c4d8e412c6f85",
@@ -91,19 +91,19 @@
       "size": 86201
     },
     "images/pcb_front.png": {
-      "sha256": "461bfafaa5d858ab1cd561beba685e544dde212eed5eb238b378187749fbded0",
-      "size": 202618
+      "sha256": "d103e665aeadc91f1cce58b8e0a400e219d2941cef4d5ec72bcf9b1aa5a96c22",
+      "size": 187057
     },
     "images/schematic_voltage_divider.png": {
-      "sha256": "02421af6d6d8fcfc31b5d5d4ddbb02bba24ae16635caccd9e9c90b4acb05e10b",
-      "size": 118121
+      "sha256": "27f0d0565c634d8f676c0d0b5e2edc214da86fdaa29c5f495a58dde423e213bf",
+      "size": 118129
     },
     "kicad_project.zip": {
-      "sha256": "8fd6c865dc088d580c9b729aada791afa3cff50d6bf5e0cb830c71b79cf71d46",
-      "size": 15832
+      "sha256": "ffcd5532e27916285632d2751ea29a6e2e6b80bd209e2ef80c35e556a727222e",
+      "size": 15828
     },
     "native-drc.json": {
-      "sha256": "0d0ff51f63234a71f5779b1134f7bf328cb4f4db5c00fdabb5780cc695813b11",
+      "sha256": "c2f690f878ac5005ac87651f4abbbf73331371de3adc1a8ac4257388415256a9",
       "size": 252
     },
     "procurement-review.md": {
@@ -111,19 +111,19 @@
       "size": 13488
     },
     "report.md": {
-      "sha256": "ef85489504ab8ef97900b23ee09c6fa3ce40a6b3210f55e0ab89881a68c86e49",
+      "sha256": "224d474d3de57a9e91381970303e32e144187f0944a160adf9a6a88247397768",
       "size": 2464
     },
     "report.pdf": {
-      "sha256": "be21e7683751f06608e7fffbc0a41824551c012cb10daab54f5d46db87e8c882",
-      "size": 925915
+      "sha256": "09eaef7c0646509948966b7972318a75f19b578fe41fb2165aa4b9f1f9a45f81",
+      "size": 903813
     },
     "schematic.pdf": {
-      "sha256": "f5d79356a1d6c5ca854e3d4fce1ccb70e5f445cb5de9ef2180ebd23fbaebba1a",
+      "sha256": "ed9f515150d83a921b65c55b9d439e0c2e792f8541a5811cc902ed20ab12f791",
       "size": 47852
     }
   },
-  "generated_at": "2026-11-26T19:43:14Z",
+  "generated_at": "2026-11-27T01:36:15Z",
   "kicad_tools_version": "0.29.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -297,7 +297,7 @@
               "R2"
             ],
             "source": "live",
-            "stock": 43938128,
+            "stock": 43570611,
             "verified": true
           },
           {

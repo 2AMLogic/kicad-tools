@@ -1,7 +1,7 @@
 {
   "file": "output/voltage_divider_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "e09c7b2047a18fd552e8beac7b49c1e8ef1df5dec8ca8c4db3bea4fc06e8554e",
+  "pcb_sha256": "7932e07ff6b357533509194dd2affaea75c1038155efee3f516d114e3b7404d5",
   "layers": 2,
   "summary": {
     "errors": 0,
@@ -587,10 +587,10 @@
         "warning_clearance_mm": 0.15
       },
       "binding": {
-        "source_sha256": "e09c7b2047a18fd552e8beac7b49c1e8ef1df5dec8ca8c4db3bea4fc06e8554e",
+        "source_sha256": "7932e07ff6b357533509194dd2affaea75c1038155efee3f516d114e3b7404d5",
         "project_sha256": "6b45aa185f18f6916f7a1e81fb1524668649043b0000da98710f6073115bd2a1",
         "rules_sha256": "c8725a98814be28fb7ef26c387bdbb9f0f5d282b155d191d97aed2aba1017994",
-        "export_profile_sha256": "3560fca782000a66ae15cf745dbd8c125e7c431fc33ac00c1922248ca41c8fb1"
+        "export_profile_sha256": "a14db0b80b025ce4319c841c8f5b08deb2bd6b87c188842f068eab065902c7c2"
       },
       "measurements": [
         {
@@ -1085,15 +1085,12 @@
       "intent_audit": [],
       "geometry_provenance": {
         "export": {
-          "source_sha256": "e09c7b2047a18fd552e8beac7b49c1e8ef1df5dec8ca8c4db3bea4fc06e8554e",
+          "source_sha256": "7932e07ff6b357533509194dd2affaea75c1038155efee3f516d114e3b7404d5",
           "project_sha256": "6b45aa185f18f6916f7a1e81fb1524668649043b0000da98710f6073115bd2a1",
           "rules_sha256": "c8725a98814be28fb7ef26c387bdbb9f0f5d282b155d191d97aed2aba1017994",
           "native_version": "10.0.6",
           "export_identity": {
             "command": [
-              "docker",
-              "run",
-              "kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec",
               "kicad-cli"
             ],
             "arguments": [
@@ -1110,7 +1107,8 @@
             "profile": "macro-free-native-gerber",
             "board_plot_params": false,
             "variables": [],
-            "plot_profile_source_sha256": "e09c7b2047a18fd552e8beac7b49c1e8ef1df5dec8ca8c4db3bea4fc06e8554e",
+            "command_file_sha256": "170493658ffb66d554137711b4e1a8c760de23a5056267424f0148d3e3323f68",
+            "plot_profile_source_sha256": "7932e07ff6b357533509194dd2affaea75c1038155efee3f516d114e3b7404d5",
             "stdout": "Plotted to '<scratch>/gerbers/voltage_divider_routed-F_Cu.gbr'.\nPlotted to '<scratch>/gerbers/voltage_divider_routed-B_Cu.gbr'.\nPlotted to '<scratch>/gerbers/voltage_divider_routed-F_Mask.gbr'.\nPlotted to '<scratch>/gerbers/voltage_divider_routed-B_Mask.gbr'.\n",
             "stderr": ""
           },
@@ -1560,10 +1558,10 @@
             }
           },
           "gerber_sha256": {
-            "F.Mask": "ad741423420d47bab0747fc4e30948b9ea6698cfa5a574f1b0e88bd3c190b8ab",
-            "B.Mask": "792e028621e5596d08509cfa2dfde958373f3062e2d6962cdadfb0622a3f452a",
-            "F.Cu": "30ea86db28e20db41fadadf6e2ed636107dabcb7bb540527d7a68da0faced304",
-            "B.Cu": "0a9c4d0bb1fcc5476219d4173aff3ccf06d55381df4ab442c8adb19494b048c7"
+            "F.Mask": "5444959251904ac4d0e86b15996b2b17d3eaf079398abde01d35cb0bea7dfaf4",
+            "B.Mask": "0ad02890e56e5272ee229844440ce783d55703f83ec4ccb4ab3df667fef10b5d",
+            "F.Cu": "c4b8cb1ba6aaa4d0e3479fe253d4f495b9de988d69112c58443d4ced7040fea2",
+            "B.Cu": "af18591aa303e3ed35c0e69bf39ff01cb44cc384a70c43809c8dd8372e333f5a"
           },
           "unsupported": [],
           "source_geometries": {}
@@ -1571,13 +1569,10 @@
         "objects": {
           "worker_sha256": "72d5a5841144a1cbab758c8f1db27823ac13792f22af7b43a00350097e1778bb",
           "native_python_command": [
-            "docker",
-            "run",
-            "kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec",
             "python3"
           ],
           "native_version": "10.0.6",
-          "objects_sha256": "844018744257b6de0245a6d23428f1df3dac6931442074a80a1d47b8d7c95761",
+          "objects_sha256": "2f3ab14f2d0cd1bac824b21161ae8387ca219d4727c48180ba9b6913f8dea6fc",
           "max_error_mm_per_construction": 0.005,
           "attribution": "native full-board object UUID; no neighbor removal"
         },
@@ -2012,8 +2007,8 @@
             "status": "complete",
             "missing_layers": [],
             "gerber_sha256": {
-              "F.Mask": "ad741423420d47bab0747fc4e30948b9ea6698cfa5a574f1b0e88bd3c190b8ab",
-              "F.Cu": "30ea86db28e20db41fadadf6e2ed636107dabcb7bb540527d7a68da0faced304"
+              "F.Mask": "5444959251904ac4d0e86b15996b2b17d3eaf079398abde01d35cb0bea7dfaf4",
+              "F.Cu": "c4b8cb1ba6aaa4d0e3479fe253d4f495b9de988d69112c58443d4ced7040fea2"
             },
             "openings": [
               {
@@ -2272,8 +2267,8 @@
             "status": "complete",
             "missing_layers": [],
             "gerber_sha256": {
-              "B.Mask": "792e028621e5596d08509cfa2dfde958373f3062e2d6962cdadfb0622a3f452a",
-              "B.Cu": "0a9c4d0bb1fcc5476219d4173aff3ccf06d55381df4ab442c8adb19494b048c7"
+              "B.Mask": "0ad02890e56e5272ee229844440ce783d55703f83ec4ccb4ab3df667fef10b5d",
+              "B.Cu": "af18591aa303e3ed35c0e69bf39ff01cb44cc384a70c43809c8dd8372e333f5a"
             },
             "openings": [
               {

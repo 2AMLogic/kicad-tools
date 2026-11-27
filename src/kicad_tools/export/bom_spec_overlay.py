@@ -27,14 +27,16 @@ logger = logging.getLogger(__name__)
 class AssemblySpecErrors:
     profiles: dict[tuple[int, str | None], str] = field(default_factory=dict)
     pad_containers: dict[int, str] = field(default_factory=dict)
+    land_patterns: dict[int, str] = field(default_factory=dict)
     tolerance: str | None = None
 
 
 def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
-    """Keep BOM assignments usable when lead or tolerance declarations are invalid.
+    """Keep BOM assignments usable when lead, land-pattern or tolerance declarations are invalid.
 
-    Profile errors identify the BOM row and pad (None for the part-level lead).
-    Other schema errors retain the regular spec loader's strict behavior.
+    Profile errors identify the BOM row and pad (None for the part-level lead);
+    land-pattern errors identify the BOM row.  Other schema errors retain the
+    regular spec loader's strict behavior.
     """
     from pydantic import ValidationError
 
@@ -63,6 +65,15 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
             if loc[2] == "lead":
                 pad = None
                 data["bom_entries"][row].pop("lead", None)
+            elif loc[2] == "land_pattern":
+                data["bom_entries"][row].pop("land_pattern", None)
+                field_path = ".".join(map(str, loc[2:]))
+                msg = f"invalid {field_path}: {error['msg']}"
+                if row in errors.land_patterns:
+                    errors.land_patterns[row] += f"; {msg}"
+                else:
+                    errors.land_patterns[row] = msg
+                continue
             elif loc[2] == "pad_leads" and len(loc) >= 4 and isinstance(loc[3], str):
                 pad = loc[3]
                 overrides = data["bom_entries"][row]["pad_leads"]
@@ -76,8 +87,8 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
                 continue
             else:
                 raise
-            field = ".".join(map(str, loc[2:]))
-            errors.profiles[row, pad] = f"invalid {field}: {error['msg']}"
+            field_path = ".".join(map(str, loc[2:]))
+            errors.profiles[row, pad] = f"invalid {field_path}: {error['msg']}"
     return ProjectSpec.model_validate(data), errors
 
 

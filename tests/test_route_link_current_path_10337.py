@@ -155,6 +155,18 @@ def test_via_grows_with_current_and_keeps_explicit_dimensions(board, capsys):
     )
 
 
+def test_plane_corridor_bounds_current_path_width(board, capsys):
+    board.write_text(
+        board.read_text().replace(_pad("J1", 110, 110), _pad("J1", 110, 110, through=True))
+    )
+    link = ("--link", "PWR J1.1 J2.1", "--current-path", "charge", "--link-layers", "In1.Cu")
+    # The inner track is 2.30 mm wide. Both strips fit the default 0.20 mm trace.
+    rc, doc = run(board, capsys, "--probe", *link, "--plane-corridor", "In1.Cu=108,109,121,111")
+    assert rc == 1 and not doc["links"][0]["routable"]
+    rc, doc = run(board, capsys, "--probe", *link, "--plane-corridor", "In1.Cu=108,108.8,121,111.2")
+    assert rc == 0 and doc["links"][0]["layers"] == ["In1.Cu"]
+
+
 def test_inner_corridor_reports_width_left_after_clearance(board, capsys):
     # Constrain the entrance to J2 on the inner layer; other layers cannot
     # reach the layer-qualified destination pad.
