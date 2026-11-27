@@ -29,6 +29,14 @@ STACKUP_ID_CHOICES: tuple[str, ...] = ("JLC04161H-3313", "JLC04161H-7628")
 STACKUP_ID_HELP = (
     "Verify this factory construction against actual PCB layers and bundle ordering metadata"
 )
+# Likewise shared with the unified ``kct export`` subparser (Issue #10492).
+VERIFY_REVIEWED_COPPER_HELP = (
+    "Publish only when every copper layer of the package's Gerbers equals a native plot of "
+    "the saved board, taken before any rule was written or zone refilled (Issue #10492). "
+    "Changed copper withholds the package, leaves the checked-out sources untouched and "
+    "writes a diagnostic report beside the output directory; the manifest names the "
+    "reviewed PCB by SHA-256. Cannot be combined with --no-gerbers"
+)
 
 
 def _boards_arg(value: str) -> int:
@@ -332,6 +340,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--verify-reviewed-copper",
+        dest="verify_reviewed_copper",
+        action="store_true",
+        help=VERIFY_REVIEWED_COPPER_HELP,
+    )
+    parser.add_argument(
         "--format",
         dest="output_format",
         default="text",
@@ -382,6 +396,7 @@ def build_manufacturing_config(
     keep_build_artifacts: bool = False,
     silk_fix: bool = True,
     via_land_overlap: bool = False,
+    verify_reviewed_copper: bool = False,
 ) -> ManufacturingConfig:
     """Build the ``PreflightConfig`` + ``ManufacturingConfig`` ``kct export`` uses.
 
@@ -447,6 +462,7 @@ def build_manufacturing_config(
         keep_build_artifacts=keep_build_artifacts,
         silk_fix=silk_fix,
         via_land_overlap=via_land_overlap,
+        verify_reviewed_copper=verify_reviewed_copper,
     )
 
 
@@ -506,6 +522,18 @@ def run_export(args: argparse.Namespace) -> int:
         print(f"Error: --merge-lcsc-from file not found: {merge_lcsc_from}", file=sys.stderr)
         return 1
 
+    # Issue #10492: refused here, before any output directory exists.  The
+    # library refuses the same combination for callers that build the config
+    # themselves.
+    verify_reviewed_copper = getattr(args, "verify_reviewed_copper", False)
+    if verify_reviewed_copper and args.no_gerbers:
+        print(
+            "Error: --verify-reviewed-copper compares the package's Gerber copper with the "
+            "saved board, so it cannot be combined with --no-gerbers.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Determine output directory
     output_dir = Path(args.output) if args.output else pcb_path.parent / "manufacturing"
 
@@ -542,6 +570,7 @@ def run_export(args: argparse.Namespace) -> int:
         keep_build_artifacts=getattr(args, "keep_build_artifacts", False),
         silk_fix=not getattr(args, "no_silk_fix", False),
         via_land_overlap=getattr(args, "via_land_overlap", False),
+        verify_reviewed_copper=verify_reviewed_copper,
     )
 
     pkg = ManufacturingPackage(
@@ -571,6 +600,9 @@ def run_export(args: argparse.Namespace) -> int:
             print(f"  Output directory: {result.output_dir}")
             for f in result.all_files:
                 print(f"  - {f.name}")
+            if verify_reviewed_copper:
+                # Issue #10492: nothing is prepared or plotted on a dry run.
+                print("  (The reviewed-copper comparison runs on a real export, not on a dry run.)")
         # A refusal the real run would raise (Issue #10431: an invalid
         # purchasing row) must not hide behind a dry run's file listing.
         if result.errors:
@@ -629,6 +661,9 @@ def run_export(args: argparse.Namespace) -> int:
         if result.silk_fix is not None:
             # Issue #9799: the default silk legalisation pass outcome.
             json_result["silk_fix"] = result.silk_fix
+        if result.reviewed_copper is not None:
+            # Issue #10492: the reviewed-copper comparison, published or withheld.
+            json_result["reviewed_copper"] = result.reviewed_copper
         print(json.dumps(json_result, indent=2))
         return 0 if result.success else 1
 
@@ -675,6 +710,15 @@ def run_export(args: argparse.Namespace) -> int:
             print(f"  [ok] Project ZIP: {result.project_zip_path.name}")
         if result.manifest_path:
             print(f"  [ok] Manifest: {result.manifest_path.name}")
+        # Issue #10492: name the board whose saved copper the package was verified against.
+        reviewed_copper = result.reviewed_copper
+        if reviewed_copper is not None and reviewed_copper["status"] == "identical":
+            reviewed_pcb = reviewed_copper["reviewed_pcb"]
+            print(
+                f"  [ok] Reviewed copper: all {len(reviewed_copper['layers'])} layer(s) equal "
+                f"the saved {reviewed_pcb['name']} (sha256 {reviewed_pcb['sha256']}); the "
+                "checked-out sources were not modified"
+            )
 
     if result.errors:
         print(f"\n{len(result.errors)} error(s) during export:", file=sys.stderr)

@@ -748,6 +748,79 @@ The result is `OK` when coverage is complete and every intersection is
 declared, and `WARN` otherwise; it never blocks the export. A standard export
 does not run the measurement.
 
+## Publish Only Reviewed Copper (`--verify-reviewed-copper`)
+
+`kct export` regenerates the manufacturer `.kicad_dru` and refills the zones,
+so the Gerbers obey the rules that ship (#9987). A refill can also plot copper
+nobody reviewed: an inner plane that shrinks under a new clearance, or an
+outlined zone with no saved fill that gains copper during export. A team that
+signed off the saved copper can ask for the package to be published only when
+the final copper equals what was reviewed (Issue #10492):
+
+```bash
+kct export board.kicad_pcb --mfr jlcpcb --verify-reviewed-copper
+```
+
+The opt-in works in three steps:
+
+1. It plots the saved board natively, before any rule is written or any zone
+   refilled. That plot is the reference.
+2. It runs the ordinary export (manufacturer rules, refill, silk pass,
+   preflight, BOM, CPL, Gerbers, project ZIP) on a private working copy. The
+   checked-out `.kicad_pcb`, `.kicad_pro` and `.kicad_dru` are never written,
+   whether the package is published or withheld.
+3. Before anything is published, it compares every copper layer of the staged
+   Gerber archive with the reference as geometry. Added area is candidate
+   minus reference; removed area is reference minus candidate, both in mm².
+
+Timestamps, X2 metadata and a polygon's starting vertex never read as a
+change. Copper that moved while keeping its area does, because each direction
+is measured on its own. Each direction is compared against a tolerance of
+0.000001 mm², which the result records. Inner layers are matched by their X2
+file function, so renamed copper layers are verified too.
+
+- **Identical on every layer**: the normal package is published, and
+  `manifest.json` and `README.txt` name the reviewed PCB by file name and
+  SHA-256 with each layer's reference and candidate plot digests.
+- **Changed, or a layer that is missing, ambiguous or unreadable**: exit code
+  1, nothing published, and an earlier package in the output directory is left
+  as it was. The error lists each affected layer with its added and removed
+  area, and the proposed board, its rules and the candidate Gerbers are copied
+  to `<output>-reviewed-copper/<attempt>/` beside the output directory, with
+  `reviewed-copper.json` and `reviewed-copper.txt`. That directory is outside
+  the package.
+
+```json
+{
+  "reviewed_copper": {
+    "schema": "kct.reviewed-copper.v1",
+    "status": "identical",
+    "reviewed_pcb": {"name": "board.kicad_pcb", "sha256": "927e4621…"},
+    "tolerance_mm2": 1e-06,
+    "layers": [
+      {
+        "layer": "In1.Cu",
+        "status": "identical",
+        "added_mm2": 0.0,
+        "removed_mm2": 0.0,
+        "reference": {"member": "board-In1_Cu.g1", "sha256": "…"},
+        "candidate": {"member": "board-In1_Cu.g1", "sha256": "…"}
+      }
+    ],
+    "changed_layers": [],
+    "unreadable_layers": []
+  }
+}
+```
+
+To adopt a proposed refill, review `proposed/<board>.kicad_pcb` with its
+`.kicad_pro` and `.kicad_dru`, copy them over the checked-out files, and
+export again: the copper is then identical and the package publishes.
+
+The comparison needs Gerber artwork, so `--no-gerbers --verify-reviewed-copper`
+is refused before anything is written. A standard export does not run the
+comparison and keeps its in-place refill.
+
 ## Other Manufacturers
 
 kicad-tools supports multiple manufacturers:
