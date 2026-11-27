@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **PR #10644**: fix(report): keep literal backslashes in Pandoc PDF report titles
+- **PR #10642**: fix: HTML-escape report cover scalars and the <title> text
+- **PR #10634**: fix(router): read analysis pad plating and layer from parsed pad
+- **Issue #10639** (closed): Report HTML cover escapes only the date scalar; title/subtitle/author are interpolated raw
+- **Issue #10629** (closed): load_pads_for_analysis still reads is_thru/layer from the raw pad block, diverging from load_pcb_for_routing
+
 - **Issue #9592** (closed): Audit kct route against ten router failure modes reported by agents in the PCBJam study
 - **Issue #9068** (closed): Board 05: clear the strict-gate flood (29 physical_copper_gap errors, 13 silk_hole_overlap, 348 provisional mask_to_copper) and re-pin readiness
 - **Issue #9921** (closed): Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package
