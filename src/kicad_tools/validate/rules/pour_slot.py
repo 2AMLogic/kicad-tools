@@ -253,6 +253,7 @@ class PourSlotRule(DRCRule):
         self._rule_areas = []
         self._areas_cache = {}
         self._enclosed_cache = {}
+        pour_keepouts: dict[str, list[BaseGeometry]] = defaultdict(list)
         for zone in pcb.zones:
             if zone.keepout is not None:
                 contours = getattr(zone, "rule_area_contours", None) or [zone.polygon]
@@ -265,6 +266,13 @@ class PourSlotRule(DRCRule):
                             area if area.is_valid else area.buffer(0),
                         )
                     )
+                if not zone.keepout.copperpour_allowed:
+                    ko_contours = getattr(zone, "rule_area_contours", None) or [zone.polygon]
+                    if all(len(ring) >= 3 for ring in ko_contours):
+                        ko = Polygon(ko_contours[0], holes=ko_contours[1:])
+                        ko = ko if ko.is_valid else ko.buffer(0)
+                        for ko_layer in {zone.layer, *getattr(zone, "layers", [])} - {""}:
+                            pour_keepouts[ko_layer].append(ko)
                 continue
             contours = zone.rule_area_contours or [zone.polygon]
             if any(len(ring) < 3 for ring in contours):
@@ -283,6 +291,13 @@ class PourSlotRule(DRCRule):
                     zones[layer].append(pour)
         # Only the highest-priority zone governs each point (Issue #10121).
         zones = {layer: _effective_pours(pours) for layer, pours in zones.items()}
+        # A copper-pour keepout leaves no fill on its layers, so no slot can
+        # form inside it (Issue #10121 review).
+        for layer, kos in pour_keepouts.items():
+            if layer in zones:
+                cut = unary_union(kos)
+                zones[layer] = [replace(p, outline=p.outline.difference(cut)) for p in zones[layer]]
+                zones[layer] = [p for p in zones[layer] if not p.outline.is_empty]
         zones = {layer: pours for layer, pours in zones.items() if pours}
         if not zones:
             return

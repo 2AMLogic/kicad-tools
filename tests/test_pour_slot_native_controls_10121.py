@@ -643,3 +643,11 @@ def test_unresolved_clearance_is_advisory_only(tmp_path, gap):
     assert not result.changed
     assert "Long" in result.left_alone_reasons[0]
     assert [(s.start, s.end, s.width) for s in pcb.segments] == before
+
+
+@pytest.mark.parametrize(("pour", "expected"), [("allowed", 1), ("not_allowed", 0)])
+def test_copperpour_keepout_leaves_no_slot(tmp_path: Path, pour: str, expected: int) -> None:
+    """A copper-pour keepout over the gap leaves no fill, so no slot (review fix)."""
+    area = _RULE_AREA.format(x0=9, x1=21).replace("(copperpour allowed)", f"(copperpour {pour})")
+    pcb = _control_p(tmp_path, (ZONE, area))
+    assert len(list(iter_pour_slot_pairs(pcb))) == expected
