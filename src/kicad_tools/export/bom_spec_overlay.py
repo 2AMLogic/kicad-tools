@@ -57,10 +57,11 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
         dropped_guarantees: set[int] = set()
         for error in exc.errors():
             loc = error["loc"]
-            if loc in (
-                ("requirements", "manufacturing", "finished_hole_tolerance_mm"),
-                ("requirements", "manufacturing", "finished_hole_tolerance_source"),
-            ):
+            if loc == ("requirements", "manufacturing", "finished_hole_tolerance_mm"):
+                data["requirements"]["manufacturing"].pop("finished_hole_tolerance_mm", None)
+                errors.tolerance = f"invalid {loc[-1]}: {error['msg']}"
+                continue
+            if loc == ("requirements", "manufacturing", "finished_hole_tolerance_source"):
                 manufacturing = data["requirements"]["manufacturing"]
                 manufacturing.pop("finished_hole_tolerance_mm", None)
                 manufacturing.pop("finished_hole_tolerance_source", None)

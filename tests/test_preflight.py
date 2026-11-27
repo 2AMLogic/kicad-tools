@@ -1166,9 +1166,9 @@ def _create_mounting_pcb(
     )
 
 
-def _snap_in_order_yaml(upper_mm: str | None = "0.13") -> str:
+def _snap_in_order_yaml(upper_mm: str | None = "0.13", lower_mm: str = "-0.08") -> str:
     """JLCPCB's ordinary -0.08/+0.13 mm through-hole tolerance for the spec."""
-    text = "    target_fab: jlcpcb\n    finished_hole_tolerance_mm: -0.08\n"
+    text = f"    target_fab: jlcpcb\n    finished_hole_tolerance_mm: {lower_mm}\n"
     if upper_mm is not None:
         text += f"    finished_hole_tolerance_upper_mm: {upper_mm}\n"
     return text + f"    finished_hole_tolerance_source: {_MOUNTING_ORDER_SOURCE}\n"
@@ -1247,14 +1247,23 @@ def _fake_assembly_export(self, output_dir=None):
     return assembly.AssemblyPackageResult(output_dir=od)
 
 
-def _export_project(tmp_path) -> Path:
+def _export_project(tmp_path, order: str | None = None) -> Path:
     """A snap-in project directory whose board and spec sit together."""
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     pcb = _create_mounting_pcb(project_dir)
-    _write_snap_in_spec(project_dir)
+    _write_snap_in_spec(project_dir, order=order)
+    symbols = "\n".join(
+        f'(symbol (lib_id "{lib_id}") (unit 1) (in_bom yes) (on_board yes)'
+        f' (property "Reference" "{ref}") (property "Value" "{value}"))'
+        for ref, lib_id, value in (
+            ("C1", "Device:C_Polarized", "LGU2E471MELB"),
+            ("C2", "Device:C_Polarized", "LGU2E471MELB"),
+            ("K1", "Relay:Relay_SPDT", "RELAY-SPDT"),
+        )
+    )
     (project_dir / "board.kicad_sch").write_text(
-        '(kicad_sch (version 20231120) (generator "eeschema"))'
+        f'(kicad_sch (version 20231120) (generator "eeschema") {symbols})'
     )
     (project_dir / "board.kicad_pro").write_text("{}")
     return pcb
@@ -1948,12 +1957,13 @@ class TestPreflightMountingHoleFit:
         assert serialized["data"]["summary"]["failed"] == 4
         assert serialized["data"]["summary"]["unassessed"] == 0
 
-    def test_strict_export_blocked_by_overrun(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("lower_mm", ["-0.08", "0.08"], ids=["valid-lower", "invalid-lower"])
+    def test_strict_export_blocked_by_overrun(self, tmp_path, monkeypatch, lower_mm):
         """A confirmed order overrun fails the export through strict preflight."""
         from kicad_tools.export import assembly
         from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
 
-        pcb = _export_project(tmp_path)
+        pcb = _export_project(tmp_path, order=_snap_in_order_yaml(lower_mm=lower_mm))
         monkeypatch.setattr(assembly.AssemblyPackage, "export", _fake_assembly_export)
 
         config = ManufacturingConfig(
@@ -1970,11 +1980,29 @@ class TestPreflightMountingHoleFit:
 
         assert not result.success
         assert any("assembly_mounting_hole_fit" in e for e in result.errors)
-        assert not any("assembly_lead_fit" in e for e in result.errors)
+        assert [pr.name for pr in result.preflight_results if pr.status == "FAIL"] == [
+            "assembly_mounting_hole_fit"
+        ]
         mounting = [
             pr for pr in result.preflight_results if pr.name == "assembly_mounting_hole_fit"
         ]
         assert mounting and mounting[0].status == "FAIL"
+        assert result.manifest_path is None
+        holes = _holes(mounting[0])
+        assert set(holes) == {("C1", "1"), ("C1", "2"), ("C2", "1"), ("C2", "2")}
+        for finding in holes.values():
+            order = finding["order"]
+            assert order["source"] == _MOUNTING_ORDER_SOURCE
+            assert order["max_mm"] == pytest.approx(2.13)
+            assert order["max"]["overrun_mm"] == pytest.approx(0.03)
+        if lower_mm == "0.08":
+            (invalid,) = mounting[0].data["invalid_declarations"]
+            assert invalid["field"] == "finished_hole_tolerance_mm"
+            for finding in holes.values():
+                assert finding["order"]["min"] == {
+                    "status": "unassessed",
+                    "reason": invalid["reason"],
+                }
 
     def test_ordinary_export_records_findings_in_manifest(self, tmp_path, monkeypatch):
         """Without strict preflight the export proceeds and the manifest carries the findings."""
