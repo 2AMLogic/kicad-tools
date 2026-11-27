@@ -46,8 +46,8 @@ Issues currently being built (`loom:building`).
 - **#8486**: Reduce repeated full-budget reroutes of six narrow nets on the 97-net board
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410)
+- **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package
 - **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill
-- **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film
 - **#10424**: BOM enrichment assigns incompatible packages, tolerance and wattage despite explicit schematic intent
 - **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes
 - **#10468**: Manufacturing review: include revision-bound simulation limits and fault-case evidence
@@ -55,23 +55,22 @@ Issues currently being built (`loom:building`).
 - **#10486**: Route-link option to join an existing same-net branch outside a component pad
 - **#10504**: route-link: non-plated-hole clearance ignores the board's hole_clearance rule
 - **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313
-- **#10587**: test flake: test_count_corners_serpentine_4000_under_budget exceeds its 1.0s wall-clock budget in the Test job
-- **#10590**: Placement treats a large interior Edge.Cuts opening as the board exterior
 - **#10594**: Manufacturing design reports label a revision-B PCB as Rev 1
+- **#10595**: Editable manufacturing ZIP omits the net-class map used to regenerate ampacity rules
+- **#10601**: Mask-copper aligned-pad bridge admits a candidate the angle census rejects (_BRIDGE_AXIS_TOLERANCE_MM vs ANGLE_TOL_DEG)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
-- **#10128**: fix(validate): stop pour_slot reporting packed parallel track pairs
 - **#10502**: Check electrical compatibility and identify catalog inventory in parts alternatives
 - **#10507**: fix(boards): declare Board 07's reviewed class widths and re-pin its SDRAM evidence
 - **#10519**: feat: add route-link --join-track to tee into a pad's track
 - **#10563**: fix(router): decline optimizer shortcuts that park a bend beside their own pad's mask opening
-- **#10591**: test: gate _count_corners serpentine budget on best of 3 runs
-- **#10592**: fix(pcb): select board outline face by exterior ring area
-- **#10593**: fix(drc): bridge aligned same-net pads when an offset run grazes one of them
+- **#10597**: fix: ship the selected net-class map with editable KiCad projects
+- **#10598**: fix: use authored PCB revision in report and export headers
+- **#10600**: fix(boards): reissue Board 05 revision B with matching copper and design rules
 
 ## Approved (Awaiting Merge)
 
@@ -113,7 +112,6 @@ Issues carrying `loom:curated`.
 - **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package *(curated)*
 - **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill *(curated)*
 - **#10105**: Support a repository layout with editable KiCad sources and a sibling generated-output directory *(curated)*
-- **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film *(curated)*
 - **#10385**: Refresh maintained board schematics after the instance Datasheet fix *(curated)*
 - **#10424**: BOM enrichment assigns incompatible packages, tolerance and wattage despite explicit schematic intent *(curated)*
 - **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes *(curated)*
@@ -125,8 +123,7 @@ Issues carrying `loom:curated`.
 - **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313 *(curated)*
 - **#10530**: Expand BOM numeric reference ranges with a shared suffix such as Q1A-Q4A *(curated)*
 - **#10575**: Preserve Board 03’s connector and MCU USB widths in the routed KiCad project *(curated)*
-- **#10587**: test flake: test_count_corners_serpentine_4000_under_budget exceeds its 1.0s wall-clock budget in the Test job *(curated)*
-- **#10590**: Placement treats a large interior Edge.Cuts opening as the board exterior *(curated)*
+- **#10601**: Mask-copper aligned-pad bridge admits a candidate the angle census rejects (_BRIDGE_AXIS_TOLERANCE_MM vs ANGLE_TOL_DEG) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -148,9 +145,9 @@ _None._
 | Important | 3 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 15 |
-| PRs awaiting review | 9 |
+| PRs awaiting review | 8 |
 | Approved PRs awaiting merge | 8 |
-| Curated | 37 |
+| Curated | 35 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
