@@ -565,9 +565,11 @@ def test_fill_after_thermal_edit_is_saved_only_if_its_refill_succeeded(
     calls = []  # (refill, edit_pending, refused)
     state = {"edit_pending": False}
 
-    def drc(path, cli, *, refill):
+    def drc(path, cli, *, refill, require_save=False):
         refused = refill and state["edit_pending"] and refuse_refill
-        report = None if refused else native_report(path, cli, refill=refill)
+        report = (
+            None if refused else native_report(path, cli, refill=refill, require_save=require_save)
+        )
         calls.append((refill, state["edit_pending"], refused))
         if refill:
             state["edit_pending"] = state["edit_pending"] and refused
@@ -588,3 +590,49 @@ def test_fill_after_thermal_edit_is_saved_only_if_its_refill_succeeded(
         copy_project_sidecars(board, probe)
         refill(probe, native_cli)
         assert saved == {z.layer: z.filled_polygons for z in PCB.load(probe).zones}
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    ("allow_retry", "save_status"),
+    [(True, 0), (False, 0), (False, 4)],
+    ids=["retry-saves", "report-only", "save-error"],
+)
+def test_route_requires_saved_copper_after_thermal_report(
+    tmp_path, native_cli, monkeypatch, allow_retry, save_status
+):
+    from kicad_tools.cli import route_cmd
+
+    board = _starved_board(tmp_path)
+    original = board.read_bytes()
+    run = subprocess.run
+    refused = []
+
+    def report_without_save(argv, *args, **kwargs):
+        if "--save-board" in argv and "--output" in argv:
+            report = Path(argv[argv.index("--output") + 1])
+            first_thermal = not refused and report.name.startswith("thermal_drc_")
+            if first_thermal or (refused and not allow_retry):
+                # Run native DRC and generate its complete report, leaving the board untouched.
+                proc = run([arg for arg in argv if arg != "--save-board"], *args, **kwargs)
+                assert isinstance(json.loads(report.read_text())["violations"], list)
+                refused.append(report)
+                assert proc.returncode == 0
+                proc.returncode = save_status
+                return proc
+        return run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", report_without_save)
+    result = route_cmd.main(route_args(board, "--native-zone-clearance", "--oracle-rounds", "0"))
+    assert refused
+    assert result == (0 if allow_retry else route_cmd.EXIT_UNVERIFIED)
+    routed = board.with_name("routed.kicad_pcb")
+    assert json.loads(routed.with_suffix(".route.json").read_text())["route_exit_code"] == result
+    assert board.read_bytes() == original
+    if allow_retry:
+        saved = {zone.layer: zone.filled_polygons for zone in PCB.load(routed).zones}
+        probe = board.with_name("probe.kicad_pcb")
+        shutil.copy2(routed, probe)
+        copy_project_sidecars(routed, probe)
+        refill(probe, native_cli)
+        assert saved == {zone.layer: zone.filled_polygons for zone in PCB.load(probe).zones}

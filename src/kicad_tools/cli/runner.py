@@ -1414,7 +1414,12 @@ def _remediate_starved_thermal(
         return None
 
     def _run_drc(refill: bool) -> dict | None:
-        return _kicad_drc_report(pcb_path, kicad_cli, refill=refill)
+        return _kicad_drc_report(
+            pcb_path,
+            kicad_cli,
+            refill=refill,
+            require_save=bool(refill and saved_fill_stale and saved_fill_stale[0]),
+        )
 
     def _settle() -> None:
         if settle is not None:
@@ -1491,11 +1496,15 @@ def _remediate_starved_thermal(
         return None
 
 
-def _kicad_drc_report(pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict | None:
+def _kicad_drc_report(
+    pcb_path: Path, kicad_cli: Path, *, refill: bool, require_save: bool = False
+) -> dict | None:
     """Run DRC on ``pcb_path`` and return the parsed report (or ``None``).
 
     ``refill`` adds ``--refill-zones --save-board`` so the run also refills
-    and persists the zones.  The default (all) severity is used so
+    and persists the zones. With ``require_save``, a report is usable only
+    when the native refill succeeded and rewrote the board.
+    The default (all) severity is used so
     ``isolated_copper`` *warnings* are visible alongside ``starved_thermal``
     *errors*; ``--schematic-parity`` is omitted because the fill output may
     lack a paired schematic.  The input net table is snapshotted and
@@ -1536,7 +1545,8 @@ def _kicad_drc_report(pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict 
         # unless the probe *definitively* said "no" -- and retrying once
         # without them when kicad-cli rejects the option -- is exactly
         # run_kicad_drc_command's policy (Issue #6775), so reuse it.
-        proc, _refilled = run_kicad_drc_command(
+        before = (pcb_path.read_bytes(), pcb_path.stat().st_mtime_ns) if require_save else None
+        proc, refilled = run_kicad_drc_command(
             build_cmd,
             kicad_cli,
             refill_zones=refill,
@@ -1545,7 +1555,18 @@ def _kicad_drc_report(pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict 
                 pcb_path, input_net_nodes, input_element_nets
             ),
         )
-        _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
+        # Check before net restoration, which can itself rewrite the file.
+        # This command omits --exit-code-violations, so a failed save is an error
+        # even if KiCad produced a complete violations report.
+        try:
+            if before is not None and (
+                not refilled
+                or proc.returncode != 0
+                or (pcb_path.read_bytes(), pcb_path.stat().st_mtime_ns) == before
+            ):
+                return None
+        finally:
+            _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
         # Issue #6724: a killed kicad-cli (negative status) or a missing,
         # empty or truncated report is "no report", never an empty one.
         if proc.returncode < 0:
