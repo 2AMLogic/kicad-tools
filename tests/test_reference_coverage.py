@@ -156,6 +156,39 @@ def test_inner_arc_via_empty_and_unknown_net(tmp_path, capsys):
     assert "TYPO" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("missing", [False, True])
+def test_via_only_layer_is_not_applicable_per_known_side(tmp_path, capsys, missing):
+    extra = '(via (at 10 2) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))'
+    path = board(tmp_path, missing=missing, extra=extra)
+    assert inspect(path, "--net", "LONG", "-f", "json") == 0
+    layers = json.loads(capsys.readouterr().out)["nets"]["LONG"]["layers"]
+    assert layers.keys() == {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}
+    measured = {
+        "coverage": "not_applicable",
+        "covered_mm": 0,
+        "uncovered_mm": 0,
+        "by_net_mm": {},
+        "void_spans": [],
+    }
+    unmeasured = {
+        "coverage": "unknown",
+        "covered_mm": None,
+        "uncovered_mm": None,
+        "by_net_mm": None,
+        "void_spans": None,
+    }
+    rows = (("In1.Cu", ("F.Cu", "In2.Cu")), ("In2.Cu", ("In1.Cu", "B.Cu")), ("B.Cu", ("In2.Cu",)))
+    for name, sides in rows:
+        row = layers[name]
+        assert (row["length_mm"], row["via_count"], row["paths"]) == (0, 1, [])
+        assert row["widths_mm"] == []
+        assert row["references"] == {
+            side: unmeasured if missing and side == "In1.Cu" else measured for side in sides
+        }
+    routed = layers["F.Cu"]["references"]["In1.Cu"]
+    assert routed["coverage"] == ("unknown" if missing else "partial")
+
+
 def test_stripline_estimate_only_where_both_sides_overlap(tmp_path, capsys):
     extra = track(1, "In1.Cu", 0, 10, 0)
     extra += zone(3, "F.Cu", [rect(0, 6)]) + zone(4, "In2.Cu", [rect(4, 10)])

@@ -114,9 +114,30 @@ def test_mixed_resolved_and_unresolved_stock(tmp_path):
         assert result.status == expected and "C999" in result.details
         held = evaluate_lcsc_stock(result.data, 5, covered, strict)
         assert held.status == "OK" and "held in operator inventory" in held.details
-    short = _run(tmp_path, [_part("C1", 1)], refs)
-    assert short.status == "FAIL"
-    assert "C1: needs" in short.details and "stock also unresolved: C999" in short.details
+
+
+@pytest.mark.parametrize(
+    ("source", "strict", "expected"),
+    [
+        ("live", False, "FAIL"),
+        ("live", True, "FAIL"),
+        ("cache", False, "WARN"),
+        ("cache", True, "FAIL"),
+    ],
+)
+def test_mixed_stock_shortfall_reports_unresolved_code(tmp_path, source, strict, expected):
+    result = _run(
+        tmp_path,
+        [_part("C1", 2, source=source)],
+        [("J12", "C1"), ("R1", "C999")],
+        order_boards=5,
+        strict_report_source=strict,
+    )
+    assert result.status == expected
+    assert "J12 -> C1: needs 5, stock 2" in result.details
+    assert "stock also unresolved: C999" in result.details
+    if source == "cache":
+        assert "unverified cache" in result.details
 
 
 def test_evaluator_parity_from_recorded_data(tmp_path):
