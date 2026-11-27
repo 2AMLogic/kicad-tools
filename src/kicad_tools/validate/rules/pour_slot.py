@@ -264,8 +264,6 @@ class PourSlotRule(DRCRule):
         for zone in chain(pcb.zones, pcb.footprint_rule_areas):
             selectors = zone.layers or [zone.layer]
             layers = pad_copper_layers(selectors, copper)
-            if "*.In.Cu" in selectors:
-                layers = layers.union(name for name in copper if name.startswith("In"))
             contours = zone.rule_area_contours or [zone.polygon]
             if not layers or any(len(ring) < 3 for ring in contours):
                 continue

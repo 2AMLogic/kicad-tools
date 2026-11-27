@@ -726,7 +726,8 @@ def test_zone_selectors_before_and_after_native_save(tmp_path, capsys, selector,
     [
         ("*.Cu", {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}),
         ("F&B.Cu", {"F.Cu", "B.Cu"}),
-        ("*.In.Cu", {"In1.Cu", "In2.Cu"}),
+        ("In1.Cu", {"In1.Cu"}),
+        ("*.In.Cu", set()),  # KiCad 10.0.6 saves this unknown zone layer as Rescue.
     ],
 )
 def test_wildcard_pour_on_four_layer_stack(tmp_path, selector, expected_layers):
