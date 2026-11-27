@@ -890,3 +890,13 @@ def test_terminal_map_flows_from_the_project_to_the_review_page(env, tmp_path, m
     scaled = [SWITCH_ITEM | {"required": 2}]
     assert json.loads((reviewed.page.directory / "purchasing.json").read_bytes())["items"] == scaled
     assert json.loads(reviewed.plan.plan_bytes)["purchasing"]["items"] == scaled
+
+    # A manifest-listed map without the export checksum is the buyer's own
+    # claim, never the exporter's PCB check: refuse it before any handoff.
+    unmarked = json.loads(frozen)
+    unmarked.pop("kct_export_sha256")
+    (bundle / "purchasing.json").write_text(json.dumps(unmarked, indent=2) + "\n")
+    write_manifest(env)
+    with pytest.raises(sp.SubmissionError, match="requires the export checksum"):
+        submit("unmarked")
+    assert not (tmp_path / "out-unmarked" / "handoff").exists()

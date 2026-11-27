@@ -587,8 +587,15 @@ def purchasing_export_digest(document: dict[str, Any]) -> str:
     return _digest(_json(document))
 
 
-def parse_purchasing_list(data: bytes) -> list[dict[str, Any]]:
-    """Rows of a frozen per-board purchasing list (Issue #10431)."""
+def parse_purchasing_list(
+    data: bytes, *, marked_terminals_only: bool = False
+) -> list[dict[str, Any]]:
+    """Rows of a frozen per-board purchasing list (Issue #10431).
+
+    With ``marked_terminals_only`` a terminal map (Issue #10514) is accepted
+    only from a list that carries the exporter's checksum: the handoff reports
+    those landings as checked on the PCB, which a buyer-authored list never was.
+    """
     try:
         document = _load_json(data)
     except SubmissionError as exc:
@@ -605,6 +612,11 @@ def parse_purchasing_list(data: bytes) -> list[dict[str, Any]]:
     ):
         raise SubmissionError("Unsupported or malformed purchasing list")
     rows = [_purchasing_row(row) for row in document["items"]]
+    if marked_terminals_only and not marked and any("terminals" in row for row in rows):
+        raise SubmissionError(
+            "Purchasing list: a terminal map requires the export checksum "
+            "(kct_export_sha256); re-export the list instead of editing it by hand"
+        )
     if marked and recorded != purchasing_export_digest(document):
         raise SubmissionError("Purchasing list differs from its exported contents")
     return rows
@@ -728,7 +740,7 @@ def prepare_submission(
             "source": {"path": purchasing_source, **_record(frozen.data)},
             "items": [
                 row | {"required": row["per_board"] * board_quantity}
-                for row in parse_purchasing_list(frozen.data)
+                for row in parse_purchasing_list(frozen.data, marked_terminals_only=True)
             ],
         }
     outputs = {names[role]: snapshots[path].data for role, path in artifacts.items()}
