@@ -37,7 +37,7 @@ from unittest import mock
 
 import pytest
 
-from kicad_tools.router import wall_deadline
+from kicad_tools.router import cpp_backend, wall_deadline
 from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, router_cpp
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
@@ -317,60 +317,56 @@ def test_a_moved_wall_still_connects_with_the_same_copper(
     assert _probes(plain) == []
 
 
-def test_a_timeout_that_later_connects_keeps_the_whole_forward_budget(
+@pytest.mark.parametrize(
+    ("excursion", "probe_budget", "forward_budget"),
+    [(None, 0.3, 3.0), (0.4, 0.04, 0.36)],
+    ids=["whole-forward-budget", "absolute-excursion-deadline"],
+)
+def test_forward_budget_after_a_probe_timeout(
     monkeypatch: pytest.MonkeyPatch,
+    excursion: float | None,
+    probe_budget: float,
+    forward_budget: float,
 ) -> None:
-    """Same copper, more budget: the probe's time is never taken from the search."""
-    start, end = _pad(1, 1), _pad(38, 2)
-    pathfinder = _board([_wall(GAP_WALL)])
+    """Spend the probe budget on a controlled clock, then run a real forward search."""
+    start, end = _pad(1, 1), _pad(3, 2)
+    pathfinder = _board([], size=5.0)
     _armed(pathfinder, start, end)
 
-    clamps: list[tuple[float | None, float | None]] = []
-    real_clamp = wall_deadline.clamp_search_timeout
+    clock = mock.Mock(wraps=time)
+    clock.monotonic.return_value = 100.0
+    monkeypatch.setattr(wall_deadline, "time", clock)
+    monkeypatch.setattr(cpp_backend, "time", clock)
 
-    def clamp(value):
-        result = real_clamp(value)
-        clamps.append((value, result))
-        return result
+    native = type(pathfinder._impl)
+    real_search = native.route_resumable
+    launches = []
 
-    monkeypatch.setattr(wall_deadline, "clamp_search_timeout", clamp)
-    route = pathfinder.route(start, end, per_net_timeout=3.0)
-    (repeat,) = pathfinder.get_and_clear_per_call_timings()
-    assert repeat["reverse_probe"]["outcome"] == "timeout"  # the detour needs more
-    assert [s["failure_reason"] for s in _ordinary(repeat)] == ["none"]
-    # Entry, probe (a tenth of the cap), then the start-side search on its WHOLE cap.
-    assert clamps == [(3.0, 3.0), (pytest.approx(0.3), pytest.approx(0.3)), (3.0, 3.0)]
+    def search(impl, *args):
+        # route_resumable takes start x/y, end x/y, and timeout at these positions.
+        source, target, timeout = args[:2], args[3:5], args[18]
+        launches.append((source, target, timeout))
+        if source == (end.x, end.y):
+            clock.monotonic.return_value += timeout
+            return mock.Mock(success=False, failure_reason=router_cpp.FAILURE_TIMEOUT)
+        return real_search(impl, *args)
 
-    expected = _board([_wall(GAP_WALL)]).route(start, end, per_net_timeout=3.0)
+    monkeypatch.setattr(native, "route_resumable", search)
+    with wall_deadline.deadline(excursion):
+        route = pathfinder.route(start, end, per_net_timeout=3.0)
+    (record,) = pathfinder.get_and_clear_per_call_timings()
+    assert record["reverse_probe"]["outcome"] == "timeout"
+    assert launches == [
+        ((end.x, end.y), (start.x, start.y), pytest.approx(probe_budget)),
+        ((start.x, start.y), (end.x, end.y), pytest.approx(forward_budget)),
+    ]
+
+    control_board = _board([], size=5.0)
+    expected = control_board.route(start, end, per_net_timeout=forward_budget)
+    (control,) = control_board.get_and_clear_per_call_timings()
+    (forward,) = _ordinary(record)
+    assert forward["expansions"] == control["searches"][0]["expansions"] > 0
     assert route is not None and _copper(route) == _copper(expected)
-
-
-def test_an_excursion_deadline_stays_absolute(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Inside a bounded excursion the forward search gets only what is left."""
-    start, end = _pad(1, 1), _pad(38, 2)
-    pathfinder = _board([_wall(GAP_WALL)])
-    _armed(pathfinder, start, end)
-
-    clamps: list[tuple[float | None, float | None]] = []
-    real_clamp = wall_deadline.clamp_search_timeout
-
-    def clamp(value):
-        result = real_clamp(value)
-        clamps.append((value, result))
-        return result
-
-    monkeypatch.setattr(wall_deadline, "clamp_search_timeout", clamp)
-    with wall_deadline.deadline(0.4):
-        assert pathfinder.route(start, end, per_net_timeout=3.0) is None
-        (record,) = pathfinder.get_and_clear_per_call_timings()
-    assert record["per_net_timeout"] == pytest.approx(0.4, abs=0.05)
-    assert [s["failure_reason"] for s in record["searches"]] == ["timeout", "timeout"]
-    # Entry cuts the cap to the excursion, the probe to a tenth of that, and the
-    # forward search to the excursion's remainder -- not back to the cut cap.
-    assert clamps[1][1] == pytest.approx(0.04, abs=0.006)
-    assert clamps[2][0] == pytest.approx(clamps[0][1])
-    assert clamps[2][1] < clamps[2][0]
-    assert record["elapsed"] < 0.5
 
 
 def test_relief_mode_never_probes_or_records() -> None:
