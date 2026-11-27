@@ -197,7 +197,9 @@ def test_saved_footprint_paths_match_native_project(tmp_path, monkeypatch, board
     library.mkdir()
     footprint = _TWO_PAD_FOOTPRINT
     if board_only:
-        footprint = footprint.replace("(attr smd)", "(attr smd board_only)")
+        footprint = footprint.replace(
+            "(attr smd)", '(attr smd board_only) (path "/dead0000-0000-4000-8000-000000000001")'
+        )
     (library / "OnlyHere.kicad_mod").write_text(footprint)
 
     expected = _native_symbol_paths(root)
@@ -224,26 +226,37 @@ def _install_multiunit_footprint(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("fallback", [False, True], ids=["native", "python"])
-def test_multiunit_package_has_one_saved_footprint(tmp_path, monkeypatch, fallback, caplog):
+@pytest.mark.parametrize(
+    ("library", "unit_pins"),
+    [
+        pytest.param("multiunit_test", [(1, "1"), (2, "3")], id="electrical"),
+        pytest.param("graphical_unit", [(1, "1"), (2, None)], id="graphical-last"),
+        pytest.param("graphical_unit", [(2, None), (1, "1")], id="graphical-first"),
+    ],
+)
+def test_multiunit_package_has_one_saved_footprint(
+    tmp_path, monkeypatch, fallback, caplog, library, unit_pins
+):
     from kicad_tools.schema.pcb import PCB
 
     root = tmp_path / "dual.kicad_sch"
     _install_multiunit_footprint(tmp_path)
-    symbols = Path(__file__).parent / "fixtures" / "multiunit_test.kicad_sym"
+    symbols = Path(__file__).parent / "fixtures" / f"{library}.kicad_sym"
     sch = Schematic(title="Two units", project_name=root.stem, local_symbol_libs=[symbols])
-    for unit, x in [(1, 50), (2, 100)]:
+    for index, (unit, pin) in enumerate(unit_pins, start=1):
         placed = sch.add_symbol(
-            "multiunit_test:MultiUnitPart",
-            x,
+            f"{library}:MultiUnitPart",
+            50 * index,
             50,
             "U1",
             "MultiUnitPart",
             footprint="local:Multi",
             unit=unit,
         )
-        px, py = placed.pin_position("1" if unit == 1 else "3")
-        sch.add_wire((px, py), (px - 5, py))
-        sch.add_label(f"UNIT{unit}", px - 5, py)
+        if pin is not None:
+            px, py = placed.pin_position(pin)
+            sch.add_wire((px, py), (px - 5, py))
+            sch.add_label(f"UNIT{unit}", px - 5, py)
     sch.write(root)
     expected = _native_symbol_paths(root)
     assert set(expected) == {"U1"} and len(expected["U1"]) == 2
@@ -255,7 +268,8 @@ def test_multiunit_package_has_one_saved_footprint(tmp_path, monkeypatch, fallba
     (footprint,) = PCB.load(output).footprints
     assert footprint.reference == "U1" and footprint.path in expected["U1"]
     nets = {p.number: p.net_name.lstrip("/") for p in footprint.pads}
-    assert (nets["1"], nets["3"]) == ("UNIT1", "UNIT2")
+    assert nets["1"] == "UNIT1"
+    assert nets["3"] == ("UNIT2" if library == "multiunit_test" else "")
 
 
 def _make_repeated_multiunit_project(tmp_path: Path, *, top_unit: int, last_unit: int | None):

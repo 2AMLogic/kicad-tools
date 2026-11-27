@@ -303,12 +303,15 @@ class PCBFromSchematic:
             )
         except (FileNotFoundError, ValueError):
             return None
-        if footprint is None or "board_only" in footprint.attr_flags:
-            return footprint
-        # A Python-generated netlist may lack native timestamps.
-        path = comp.symbol_path or min(self._symbol_paths.get(reference, ()), default="")
-        if path:
-            footprint.path = path
+        if footprint is None:
+            return None
+        if "board_only" in footprint.attr_flags:
+            footprint.path = ""
+        else:
+            # Only the placed schematic may supply the link, including on Python fallback.
+            footprint.path = comp.symbol_path or min(
+                self._symbol_paths.get(reference, ()), default=""
+            )
         return footprint
 
     def place_component(

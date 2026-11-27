@@ -627,7 +627,7 @@ def _collect_hierarchy_components(
         net_scope=sheet_path,
         parent_nets_by_port={},
         aliases=aliases,
-        multiunit_packages={},
+        annotated_packages={},
     )
     by_identity: dict[_NetIdentity, list] = defaultdict(list)
     for identity, pins in nets.items():
@@ -698,7 +698,7 @@ def _collect_sheet_nets(
     net_scope: str,
     parent_nets_by_port: dict[str, _NetIdentity],
     aliases: _ParentNetAliases,
-    multiunit_packages: dict[tuple[str, str], NetlistComponent],
+    annotated_packages: dict[tuple[str, str], tuple[int, NetlistComponent]],
     sheet_uuids: tuple[str, ...] = (),
     ancestors: frozenset[Path] = frozenset(),
 ) -> tuple[list[NetlistComponent], dict[_NetIdentity, list], bool]:
@@ -791,11 +791,15 @@ def _collect_sheet_nets(
             if include_symbol_pins
             else [],
         )
-        if sym.symbol_def.unit_count() > 1 and sym.reference and not sym.reference.endswith("?"):
-            # Units share a single physical package and library pin definition.
-            # Every unit still participates in the connectivity extraction below.
-            package = multiunit_packages.setdefault((sym.reference, lib_id), component)
-            if package is not component:
+        if sym.reference and not sym.reference.endswith("?"):
+            first_unit, package = annotated_packages.setdefault(
+                (sym.reference, lib_id), (sym.unit, component)
+            )
+            # A placed graphical unit can share the package without contributing pins.
+            # Keep duplicate single-unit references visible to the completeness check.
+            if package is not component and (
+                sym.unit != first_unit or sym.symbol_def.unit_count() > 1
+            ):
                 if not package.footprint:
                     package.footprint = footprint
                 continue
@@ -862,7 +866,7 @@ def _collect_sheet_nets(
             net_scope=f"{net_scope}{entry.sheetname or Path(entry.filename).stem}/",
             parent_nets_by_port=child_bindings,
             aliases=aliases,
-            multiunit_packages=multiunit_packages,
+            annotated_packages=annotated_packages,
             sheet_uuids=(*sheet_uuids, entry.uuid),
             ancestors=ancestors | {resolved},
         )
