@@ -24,6 +24,7 @@ from kicad_tools.router.io import (
     adjust_grid_for_compliance,
     format_clearance_violations,
     generate_netclass_setup,
+    load_pads_for_analysis,
     load_pcb_for_routing,
     merge_routes_into_pcb,
     parse_pcb_design_rules,
@@ -227,6 +228,97 @@ class TestRoutePcb:
 
         # Net map should have been updated
         assert "NEW_NET" in net_map
+
+
+@pytest.fixture
+def single_pad_board(tmp_path):
+    def write(pad):
+        path = tmp_path / "pad.kicad_pcb"
+        path.write_text(f"""(kicad_pcb
+          (version 20240108) (generator "test")
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (gr_rect (start 0 0) (end 10 10) (layer "Edge.Cuts"))
+          (footprint "Test" (layer "F.Cu") (at 4 4)
+            (fp_text reference "U1" (at 0 0) (layer "F.SilkS"))
+            {pad}))""")
+        return path
+
+    return write
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        "(at 0.001 2 30) (size 0.55 1.475) (drill 0.3)",
+        "( at 0.001 2 30) ( size 0.55 1.475) ( drill 0.3)",
+        "(at 0.001 2 30 ) (size 0.55 1.475 ) (drill 0.3 )",
+        "(at .001 2 30) (size .55 1.475) (drill .3)",
+        "(at +0.001 +2 +30) (size +0.55 +1.475) (drill +0.3)",
+        "(at 1e-3 2 3E1) (size 5.5e-1 1.475) (drill 3e-1)",
+        "(at 0.001 2 30) (size 0.55 1.475) (drill 3e-1)",
+    ],
+    ids=["canonical", "leading-space", "trailing-space", "leading-dot", "plus", "exp", "exp-drill"],
+)
+@pytest.mark.parametrize("loader", ["routing", "analysis"])
+def test_equivalent_pad_geometry(single_pad_board, fields, loader):
+    path = single_pad_board(
+        f'(pad 1 thru_hole trapezoid {fields} ( rect_delta 0 0) (layers "*.Cu"))'
+    )
+    if loader == "routing":
+        router, _ = load_pcb_for_routing(str(path), validate_drc=False)
+        (pad,) = router.pads.values()
+    else:
+        (pad,) = load_pads_for_analysis(path)
+
+    assert (pad.x, pad.y, pad.width, pad.height, pad.rotation, pad.drill) == pytest.approx(
+        (4.001, 6, 0.55, 1.475, 30, 0.3)
+    )
+    assert (pad.shape, pad.pin, pad.through_hole) == ("rect", "1", True)
+
+
+@pytest.mark.parametrize("pin,expected", [('""', ""), ("001", "001")])
+def test_pad_identity_and_oval_drill(single_pad_board, pin, expected):
+    path = single_pad_board(
+        f'(pad {pin} thru_hole oval (at 1 2) (size 1 2) (drill oval 0.8 1.2) (layers "*.Cu"))'
+    )
+    router, _ = load_pcb_for_routing(str(path), validate_drc=False)
+    (routed,) = router.pads.values()
+    (analyzed,) = load_pads_for_analysis(path)
+    for pad in (routed, analyzed):
+        assert (pad.pin, pad.drill) == (expected, 0.0)
+
+
+def test_spaced_padstack_is_unsupported(single_pad_board):
+    path = single_pad_board(
+        '(pad 1 smd oval (at 0 0) (size 1 2) (layers "F.Cu") ( padstack (mode front)))'
+    )
+    with pytest.raises(ValueError, match="layer-specific padstack"):
+        load_pcb_for_routing(str(path), validate_drc=False)
+    with pytest.raises(ValueError, match="layer-specific padstack"):
+        load_pads_for_analysis(path)
+    (pad,) = load_pads_for_analysis(path, placement_only=True)
+    assert pad.shape == "rect"
+
+
+def test_spaced_nonzero_rect_delta_preserves_trapezoid(single_pad_board):
+    path = single_pad_board(
+        '(pad 1 smd trapezoid (at 0 0) (size 1 2) (layers "F.Cu") ( rect_delta .2 0))'
+    )
+    with pytest.raises(ValueError, match="trapezoid"):
+        load_pads_for_analysis(path)
+
+
+@pytest.mark.parametrize("geometry", ["(size 1 2)", "(at 0 0)"])
+def test_missing_geometry_preserves_shape_error(single_pad_board, geometry):
+    path = single_pad_board(f'(pad 1 smd custom {geometry} (layers "F.Cu"))')
+    with pytest.raises(ValueError, match="Unsupported routing geometry 'custom' for pad U1.1"):
+        load_pcb_for_routing(str(path), validate_drc=False)
+
+
+def test_missing_pad_size_uses_analysis_default(single_pad_board):
+    path = single_pad_board('(pad 1 smd rect (at 0 0) (layers "F.Cu"))')
+    (pad,) = load_pads_for_analysis(path)
+    assert (pad.width, pad.height) == (0.3, 0.3)
 
 
 class TestLoadPcbForRouting:
