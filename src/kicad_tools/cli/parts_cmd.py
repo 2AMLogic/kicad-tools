@@ -381,10 +381,12 @@ def _alternatives(args) -> int:
     if not alts:
         print("No better alternatives with matching catalog specifications and stock found.")
         return 0
-    print(
-        f"{'LCSC':<10} {'MFR Part':<25} {'Package':<12} {'Type':<10} {'Offline catalog stock':>21} {'Price':>9}"
+    header = (
+        f"{'LCSC':<10} {'MFR Part':<25} {'Package':<12} {'Type':<10} "
+        f"{'Offline catalog stock':>21} {'Price':>9}"
     )
-    print("-" * 92)
+    print(header)
+    print("-" * len(header))
     for p in alts:
         price = f"${p.best_price:.4f}" if p.best_price is not None else "N/A"
         print(
