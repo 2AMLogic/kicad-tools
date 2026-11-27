@@ -33,12 +33,20 @@ _CACHE_LIMIT = 16
 
 
 @contextlib.contextmanager
-def staged_board(input_path: Path, destination: Path) -> Iterator[Path]:
-    """Stage copper beside its destination until the final census accepts it."""
+def staged_board(
+    input_path: Path, destination: Path, *, in_destination_dir: bool = True
+) -> Iterator[Path]:
+    """Stage copper beside its destination until the final census accepts it.
+
+    A preview never publishes, so it passes ``in_destination_dir=False`` and
+    stages in system temporary storage: it then needs no write access to the
+    board directory. Atomic publication needs the same filesystem, so it stays
+    beside the destination.
+    """
     from kicad_tools.sidecars import PROJECT_SIDECAR_SUFFIXES, stage_project_rules
 
     with tempfile.TemporaryDirectory(
-        prefix=".kct-creepage-", dir=destination.resolve().parent
+        prefix=".kct-creepage-", dir=destination.resolve().parent if in_destination_dir else None
     ) as tmp:
         candidate = Path(tmp) / destination.name
         # Refill and prune's next DRC pass must use the rules that will actually

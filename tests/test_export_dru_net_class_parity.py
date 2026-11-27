@@ -79,6 +79,7 @@ def test_export_matches_emit_dru_with_sidecar(tmp_path: Path) -> None:
 def test_export_without_sidecar_unchanged(tmp_path: Path) -> None:
     pcb = _stage(tmp_path, sidecar=False)
     dru = _export_dru(pcb)
+    assert "Ampacity Min Width" not in dru
     assert "Motor power" not in dru
 
 
@@ -105,4 +106,4 @@ def test_dedupe_net_classes_one_per_name() -> None:
 
 def test_sidecar_rules_present_in_export(tmp_path: Path) -> None:
     """Guards against the parity test passing vacuously (both sides empty)."""
-    assert "Motor power" in _export_dru(_stage(tmp_path, sidecar=True))
+    assert "Ampacity Min Width (Motor power" in _export_dru(_stage(tmp_path, sidecar=True))
