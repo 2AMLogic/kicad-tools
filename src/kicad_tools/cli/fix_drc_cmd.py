@@ -1718,6 +1718,11 @@ def _persisting_mask_conductors(
     }
 
 
+def _mask_action_nets(action: MaskRepairAction | MaskNudgeAction) -> set[str]:
+    """Every named net whose copper an action moves (primary plus any slid foreign net)."""
+    return {action.net_name, *getattr(action, "extra_nets", ())} - {""}
+
+
 def _mask_action_touches(action: MaskRepairAction | MaskNudgeAction, touched: set[str]) -> bool:
     """Whether a new mask finding names anything a move owns.
 
@@ -1897,7 +1902,7 @@ def _run_mask_pass(
             if not result.actions:
                 return result
             has_zones = any(zone.find("keepout") is None for zone in repairer.doc.find_all("zone"))
-            edited_nets = {act.net_name for act in result.actions}
+            edited_nets = {net for act in result.actions for net in _mask_action_nets(act)}
             pad_islands = (
                 _mask_pad_islands(candidate, None if has_zones else edited_nets)
                 if not args.no_connectivity_check
@@ -1910,8 +1915,15 @@ def _run_mask_pass(
                 for action in result.actions
             )
             bend_nets = {action.net_name for action in result.actions if action.bends}
+            extra_contact_nets = {
+                net for action in result.actions for net in getattr(action, "extra_nets", ())
+            }
             # Refill can split existing copper even when a move added no segment.
-            contact_nets = edited_nets | before.pour_nets() if has_zones else bend_nets
+            contact_nets = (
+                (edited_nets | before.pour_nets())
+                if has_zones
+                else (bend_nets | extra_contact_nets)
+            )
             before_native = (
                 _mask_native_state(candidate) if has_zones or check_copper or bend_nets else None
             )
@@ -2215,7 +2227,9 @@ def _verify_mask_actions(
     disconnected.update(lost_contacts or ())
     # A refill can split another net's pour. No action on that net can be
     # individually undone, so discard the private candidate as a whole.
-    disconnected_other_nets = disconnected - {act.net_name for act in result.actions}
+    disconnected_other_nets = disconnected - {
+        net for act in result.actions for net in _mask_action_nets(act)
+    }
     if disconnected_other_nets:
         raise _MaskPadConnectionLost(
             f"repair disconnected copper on {', '.join(sorted(disconnected_other_nets))}"
@@ -2232,7 +2246,7 @@ def _verify_mask_actions(
     for act in result.actions:
         if after is None:
             revert.append((act, "recheck_unavailable"))
-        elif act.net_name in disconnected:
+        elif _mask_action_nets(act) & disconnected:
             revert.append((act, "pad_connection_lost"))
         elif unattributed_mask_finding or _mask_action_touches(act, touched):
             revert.append((act, "new_mask_finding"))
@@ -2242,7 +2256,7 @@ def _verify_mask_actions(
             revert.append((act, "mask_margin_not_met"))
         elif act.uuid in regressed:
             revert.append((act, "new_drc_error"))
-        elif act.net_name in worse_nets:
+        elif _mask_action_nets(act) & worse_nets:
             revert.append((act, "creepage_worse"))
         else:
             keep.append(act)
@@ -2364,7 +2378,7 @@ def _attempt_granular_rollback(
     # Identify offenders by net_name membership.
     offending_nudges = [n for n in nudges if n.net_name in regressed]
     offending_actions = [a for a in actions if a.net_name in regressed]
-    offending_mask = [a for a in mask_actions if a.net_name in regressed]
+    offending_mask = [a for a in mask_actions if _mask_action_nets(a) & regressed]
     offending_copper = [a for a in copper_actions if a.net_name in regressed]
     offender_count = (
         len(offending_nudges) + len(offending_actions) + len(offending_mask) + len(offending_copper)
