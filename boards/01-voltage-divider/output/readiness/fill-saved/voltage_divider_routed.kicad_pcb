@@ -177,8 +177,9 @@
 		(descr "Fiducial, circular marking, 1mm bare copper, 2mm soldermask opening (Level A)")
 		(tags "fiducial")
 		(property "Reference" "FID2"
-			(at 0 -2 0)
+			(at 0 -1.95 0)
 			(layer "F.SilkS")
+			(hide yes)
 			(uuid "d46562cf-d733-59a5-ba26-827afdd78b9f")
 			(effects
 				(font
@@ -368,8 +369,9 @@
 		(descr "Fiducial, circular marking, 1mm bare copper, 2mm soldermask opening (Level A)")
 		(tags "fiducial")
 		(property "Reference" "FID3"
-			(at 0 -2 0)
+			(at 0 -1.95 0)
 			(layer "F.SilkS")
+			(hide yes)
 			(uuid "f92f9242-3cb0-55fa-9fdf-4f950299f7bf")
 			(effects
 				(font
@@ -475,8 +477,9 @@
 		(descr "Fiducial, circular marking, 1mm bare copper, 2mm soldermask opening (Level A)")
 		(tags "fiducial")
 		(property "Reference" "FID1"
-			(at 0 -2 0)
+			(at 0 -1.95 0)
 			(layer "F.SilkS")
+			(hide yes)
 			(uuid "373cd755-6dc8-5688-a9b0-df9c43373ad2")
 			(effects
 				(font
@@ -761,9 +764,9 @@
 		(uuid "89fe15ef-d9bf-57b8-9ebb-421947d5fa20")
 	)
 	(gr_text "Voltage Divider A 2026-11"
-		(at 150.32 79.42 0)
+		(at 146.32 93.92 0)
 		(layer "F.SilkS")
-		(uuid "f42e91f8-b1bd-5930-8a5f-e45f318ff2fe")
+		(uuid "3617e6a5-b01b-5aec-843d-b795cb14bcc8")
 		(effects
 			(font
 				(size 1 1)

@@ -106,6 +106,40 @@ def test_only_covered_part_does_not_hide_other_shortfall(tmp_path):
     assert "C2" in r.details
 
 
+def test_mixed_resolved_and_unresolved_stock(tmp_path):
+    refs = [("J12", "C1"), ("R1", "C999")]
+    covered = frozenset({"C999"})
+    for strict, expected in [(False, "WARN"), (True, "FAIL")]:
+        result = _run(tmp_path, [_part("C1", 100)], refs, strict_report_source=strict)
+        assert result.status == expected and "C999" in result.details
+        held = evaluate_lcsc_stock(result.data, 5, covered, strict)
+        assert held.status == "OK" and "held in operator inventory" in held.details
+
+
+@pytest.mark.parametrize(
+    ("source", "strict", "expected"),
+    [
+        ("live", False, "FAIL"),
+        ("live", True, "FAIL"),
+        ("cache", False, "WARN"),
+        ("cache", True, "FAIL"),
+    ],
+)
+def test_mixed_stock_shortfall_reports_unresolved_code(tmp_path, source, strict, expected):
+    result = _run(
+        tmp_path,
+        [_part("C1", 2, source=source)],
+        [("J12", "C1"), ("R1", "C999")],
+        order_boards=5,
+        strict_report_source=strict,
+    )
+    assert result.status == expected
+    assert "J12 -> C1: needs 5, stock 2" in result.details
+    assert "stock also unresolved: C999" in result.details
+    if source == "cache":
+        assert "unverified cache" in result.details
+
+
 def test_evaluator_parity_from_recorded_data(tmp_path):
     parts, refs = [_part("C1", 2)], [("Y2", "C1")]
     first = _run(tmp_path, parts, refs)
@@ -254,14 +288,14 @@ def test_partial_coverage_keeps_observations_and_unresolved_ids(tmp_path):
     refs = [("Y2", "C1"), ("R1", "C2"), ("R2", "C3")]
     r = _run(tmp_path, [_part("C1", 500)], refs)
 
-    assert r.status == "OK"  # an unresolvable id beside a checked part (issue #8121)
+    assert r.status == "WARN" and "C3" in r.details
     assert [(p["lcsc"], p["source"]) for p in r.data["parts"]] == [
         ("C1", "live"),
         ("C2", "offline_catalog"),
     ]
     assert r.data["unresolved"] == ["C3"]
     assert r.data["sources"] == {"parts_cache": "hit", "offline_catalog": "hit"}
-    assert r.message == "2 LCSC part(s) have recorded stock for 5 board(s)"
+    assert "2 other part(s) have recorded stock" in r.message
 
 
 def test_verdict_carries_where_each_lookup_reached(tmp_path):
@@ -558,6 +592,7 @@ def test_verify_keeps_the_producers_provenance_whatever_this_host_has(tmp_path, 
 def test_bundle_keeps_partial_coverage_with_its_provenance(tmp_path):
     refs = [("Y2", "C1"), ("R1", "C999")]
     entry = _produced_entry(tmp_path / "producer", [_part("C1", 500)], refs)
+    assert entry["status"] == "WARN" and "C999" in entry["details"]
 
     board = make_board(tmp_path)
     code, report = _gate(board, entry)

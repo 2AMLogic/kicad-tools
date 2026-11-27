@@ -1700,6 +1700,595 @@ class TestPreflightLeadFit:
 
 
 # ---------------------------------------------------------------------------
+# PreflightChecker -- SMD land-pattern check (Issue #10505)
+# ---------------------------------------------------------------------------
+
+_STACKPOLE_RHC2512_YAML = (
+    "  - ref: R40-R41\n"
+    "    part: RHC2512FT4K70\n"
+    "    land_pattern:\n"
+    "      pad_shape: rect\n"
+    "      pad_depth_mm: 3.00\n"
+    "      pad_width_mm: 3.50\n"
+    "      outer_span_mm: 8.00\n"
+    '      source: "Stackpole RHC series, page 2"\n'
+)
+
+
+def _smd_chip_pad(
+    number: str,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    *,
+    shape: str = "rect",
+    rotation: float = 0.0,
+    side: str = "F",
+) -> str:
+    """Format one copper SMD pad S-expression."""
+    at = f"{x} {y} {rotation}" if rotation else f"{x} {y}"
+    rratio = " (roundrect_rratio 0.204082)" if shape == "roundrect" else ""
+    layers = f'"{side}.Cu" "{side}.Paste" "{side}.Mask"'
+    return (
+        f'(pad "{number}" smd {shape} (at {at}) (size {w} {h})'
+        f'{rratio} (layers {layers}) (net 0 ""))'
+    )
+
+
+def _stock_2512_pads(*, rotation: float = 0.0, side: str = "F") -> list[str]:
+    """KiCad stock R_2512_6332Metric copper pads (1.225 x 3.35 mm, ±2.9625 mm)."""
+    return [
+        _smd_chip_pad(
+            "1", -2.9625, 0.0, 1.225, 3.35, shape="roundrect", rotation=rotation, side=side
+        ),
+        _smd_chip_pad(
+            "2", 2.9625, 0.0, 1.225, 3.35, shape="roundrect", rotation=rotation, side=side
+        ),
+    ]
+
+
+def _stackpole_rhc2512_pads(
+    *,
+    rotation: float = 0.0,
+    side: str = "F",
+    pad1_shape: str = "rect",
+    pad2_shape: str = "rect",
+    pad_depth: float = 3.00,
+    pad_width: float = 3.50,
+    pitch: float = 5.00,
+) -> list[str]:
+    """Stackpole RHC2512 drawing copper pads (3.00 x 3.50 mm, 5.00 mm pitch, 8.00 mm outer)."""
+    half = pitch / 2.0
+    return [
+        _smd_chip_pad(
+            "1", -half, 0.0, pad_depth, pad_width, shape=pad1_shape, rotation=rotation, side=side
+        ),
+        _smd_chip_pad(
+            "2", half, 0.0, pad_depth, pad_width, shape=pad2_shape, rotation=rotation, side=side
+        ),
+    ]
+
+
+def _create_pcb_with_smd_footprints(
+    directory: Path,
+    footprints: list[dict],
+    *,
+    filename: str = "board.kicad_pcb",
+) -> Path:
+    """Write a minimal valid PCB containing the specified SMD footprints.
+
+    Each entry in *footprints* is a dict with keys:
+    ``ref``, ``pads`` (list of pad s-expr strings), and optional
+    ``lib_id`` (default ``Resistor_SMD:R_2512_6332Metric``),
+    ``layer`` (default ``F.Cu``), ``rotation`` (default ``0``),
+    ``attr`` (default ``smd``).
+    """
+    fp_blocks = []
+    for idx, spec in enumerate(footprints):
+        ref = spec["ref"]
+        lib_id = spec.get("lib_id", "Resistor_SMD:R_2512_6332Metric")
+        layer = spec.get("layer", "F.Cu")
+        rot = spec.get("rotation", 0.0)
+        attr = spec.get("attr", "smd")
+        at = f"{10 + idx * 15} 20 {rot}" if rot else f"{10 + idx * 15} 20"
+        pad_lines = "\n    ".join(spec["pads"])
+        fp_blocks.append(
+            f'  (footprint "{lib_id}" (layer "{layer}")\n'
+            f"    (at {at})\n"
+            f'    (property "Reference" "{ref}" (at 0 0) (layer "{layer[0]}.SilkS"))\n'
+            f'    (property "Value" "4k7" (at 0 2) (layer "{layer[0]}.Fab"))\n'
+            f"    (attr {attr})\n"
+            f"    {pad_lines}\n"
+            f"  )"
+        )
+    fp_block = "\n".join(fp_blocks)
+    content = f"""(kicad_pcb (version 20240108) (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (gr_line (start 0 0) (end 80 0) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 80 0) (end 80 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 80 50) (end 0 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 0 50) (end 0 0) (layer "Edge.Cuts") (width 0.1))
+{fp_block}
+)
+"""
+    pcb_path = directory / filename
+    pcb_path.write_text(content)
+    return pcb_path
+
+
+def _run_smd_land_pattern(pcb_path: Path):
+    checker = PreflightChecker(
+        pcb_path=pcb_path,
+        config=PreflightConfig(skip_drc=True, skip_erc=True),
+    )
+    results = checker.run_all()
+    result = _find_result(results, "assembly_smd_land_pattern")
+    assert result is not None, "assembly_smd_land_pattern result missing from run_all()"
+    return result
+
+
+class TestPreflightSmdLandPattern:
+    """MPN-specific two-terminal SMD land-pattern checks (Issue #10505)."""
+
+    def test_stock_2512_fails_and_is_invariant_to_rotation_and_back_flip(self, tmp_path):
+        """Stock KiCad R_2512_6332Metric fails Stackpole RHC2512FT4K70 at 0, 90 and B.Cu."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "layer": "F.Cu",
+                    "rotation": 0,
+                    "pads": _stock_2512_pads(rotation=0, side="F"),
+                },
+                {
+                    "ref": "R41",
+                    "layer": "B.Cu",
+                    "rotation": 90,
+                    "pads": _stock_2512_pads(rotation=90, side="B"),
+                },
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+        before_bytes = pcb.read_bytes()
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert pcb.read_bytes() == before_bytes
+        assert result.status == "FAIL"
+        by_ref = {c["reference"]: c for c in result.data["components"]}
+        assert set(by_ref) == {"R40", "R41"}
+        for ref in ("R40", "R41"):
+            finding = by_ref[ref]
+            assert finding["mpn"] == "RHC2512FT4K70"
+            assert finding["source"] == "Stackpole RHC series, page 2"
+            assert finding["status"] == "fail"
+            assert finding["expected"] == {
+                "pad_shape": "rect",
+                "pad_depth_mm": pytest.approx(3.0),
+                "pad_width_mm": pytest.approx(3.5),
+                "pitch_mm": pytest.approx(5.0),
+                "outer_span_mm": pytest.approx(8.0),
+                "source": "Stackpole RHC series, page 2",
+            }
+            assert finding["measured"] == {
+                "pads": [
+                    {
+                        "pad": "1",
+                        "shape": "roundrect",
+                        "depth_mm": pytest.approx(1.225),
+                        "width_mm": pytest.approx(3.35),
+                    },
+                    {
+                        "pad": "2",
+                        "shape": "roundrect",
+                        "depth_mm": pytest.approx(1.225),
+                        "width_mm": pytest.approx(3.35),
+                    },
+                ],
+                "pitch_mm": pytest.approx(5.925),
+                "outer_span_mm": pytest.approx(7.150),
+            }
+            assert set(finding["mismatched_fields"]) == {
+                "pad 1 shape",
+                "pad 1 depth_mm",
+                "pad 1 width_mm",
+                "pad 2 shape",
+                "pad 2 depth_mm",
+                "pad 2 width_mm",
+                "pitch_mm",
+                "outer_span_mm",
+            }
+        # Same physical pattern yields identical measurements after rotation and flip
+        assert by_ref["R40"]["measured"] == by_ref["R41"]["measured"]
+        assert by_ref["R40"]["mismatched_fields"] == by_ref["R41"]["mismatched_fields"]
+        assert "R40 [RHC2512FT4K70]" in result.details
+        assert "Stackpole RHC series, page 2" in result.details
+
+    @pytest.mark.parametrize(
+        ("layer", "rotation"),
+        [("F.Cu", 0), ("F.Cu", 90), ("B.Cu", 0), ("B.Cu", 90)],
+    )
+    def test_stackpole_drawing_passes_across_orientations_and_sides(
+        self, tmp_path, layer, rotation
+    ):
+        """Stackpole drawing pads pass identically at 0/90 deg on F.Cu and B.Cu."""
+        side = layer[0]
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "layer": layer,
+                    "rotation": rotation,
+                    "pads": _stackpole_rhc2512_pads(rotation=rotation, side=side),
+                },
+                {
+                    "ref": "R41",
+                    "layer": "F.Cu",
+                    "rotation": 0,
+                    "pads": _stackpole_rhc2512_pads(rotation=0, side="F"),
+                },
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "OK"
+        by_ref = {c["reference"]: c for c in result.data["components"]}
+        assert by_ref["R40"]["status"] == "pass"
+        assert by_ref["R41"]["status"] == "pass"
+        assert by_ref["R40"]["mismatched_fields"] == []
+        assert by_ref["R40"]["measured"] == by_ref["R41"]["measured"]
+        assert by_ref["R40"]["measured"]["pitch_mm"] == pytest.approx(5.0)
+        assert by_ref["R40"]["measured"]["outer_span_mm"] == pytest.approx(8.0)
+
+    def test_vertical_local_pads_with_pad_angle_invariant_after_back_flip(self, tmp_path):
+        """Vertically-authored pads with non-zero local angles match after B.Cu flip + rotation."""
+        # Front at 0 deg: pads along Y at (0, -2.5) and (0, +2.5), each pad rotated 90 deg
+        # so its size[0]=3.00 aligns with Y (terminal axis) and size[1]=3.50 with X.
+        front_pads = [
+            _smd_chip_pad("1", 0.0, -2.5, 3.00, 3.50, shape="rect", rotation=90.0, side="F"),
+            _smd_chip_pad("2", 0.0, 2.5, 3.00, 3.50, shape="rect", rotation=90.0, side="F"),
+        ]
+        # Flipped to B.Cu (y negated, local angle -> -90) and footprint rotated +90 deg
+        # (board-absolute pad angle = -90 + 90 = 0 deg).
+        back_rot90_pads = [
+            _smd_chip_pad("1", 0.0, 2.5, 3.00, 3.50, shape="rect", rotation=0.0, side="B"),
+            _smd_chip_pad("2", 0.0, -2.5, 3.00, 3.50, shape="rect", rotation=0.0, side="B"),
+        ]
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {"ref": "R40", "layer": "F.Cu", "rotation": 0, "pads": front_pads},
+                {"ref": "R41", "layer": "B.Cu", "rotation": 90, "pads": back_rot90_pads},
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "OK"
+        by_ref = {c["reference"]: c for c in result.data["components"]}
+        assert by_ref["R40"]["measured"] == by_ref["R41"]["measured"]
+        assert by_ref["R40"]["status"] == "pass"
+        assert by_ref["R41"]["status"] == "pass"
+
+    def test_single_pad_shape_mismatch_and_unassessed_siblings(self, tmp_path):
+        """One rounded pad flags only that pad's shape; sibling unassessed parts preserve findings."""
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "pads": _stackpole_rhc2512_pads(pad1_shape="rect", pad2_shape="roundrect"),
+                },
+                {
+                    # Another 2512 MPN in the same family, no drawing declared.
+                    "ref": "R42",
+                    "pads": _stock_2512_pads(),
+                },
+                {
+                    # Source-less land_pattern declaration.
+                    "ref": "R43",
+                    "pads": _stock_2512_pads(),
+                },
+                {
+                    # Missing MPN (no bom_entries row at all).
+                    "ref": "R44",
+                    "pads": _stock_2512_pads(),
+                },
+            ],
+        )
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: R40\n"
+            "    part: RHC2512FT4K70\n"
+            "    land_pattern:\n"
+            "      pad_shape: rect\n"
+            "      pad_depth_mm: 3.00\n"
+            "      pad_width_mm: 3.50\n"
+            "      outer_span_mm: 8.00\n"
+            '      source: "Stackpole RHC series, page 2"\n'
+            "  - ref: R42\n"
+            "    part: RHC2512FT10K0\n"
+            "  - ref: R43\n"
+            "    part: CRCW25124K70FKEG\n"
+            "    lcsc: C54321\n"
+            "    land_pattern:\n"
+            "      pad_shape: rect\n"
+            "      pad_depth_mm: 3.00\n"
+            "      pad_width_mm: 3.50\n"
+            "      outer_span_mm: 8.00\n",
+        )
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "FAIL"
+        by_ref = {c["reference"]: c for c in result.data["components"]}
+
+        # R40: only pad 2 shape mismatches; dimensions and pad 1 match
+        r40 = by_ref["R40"]
+        assert r40["status"] == "fail"
+        assert r40["mismatched_fields"] == ["pad 2 shape"]
+
+        # R42: same 2512 footprint and RHC2512 family name, different exact MPN -> unassessed
+        r42 = by_ref["R42"]
+        assert r42["status"] == "unassessed"
+        assert r42["mpn"] == "RHC2512FT10K0"
+        assert "RHC2512FT10K0" in r42["reason"]
+        assert r42["measured"] is not None
+
+        # R43: source-less declaration -> unassessed with source reason, MPN retained
+        r43 = by_ref["R43"]
+        assert r43["status"] == "unassessed"
+        assert r43["mpn"] == "CRCW25124K70FKEG"
+        assert "source" in r43["reason"].lower()
+
+        # R44: no BOM assignment -> unassessed with missing MPN reason
+        r44 = by_ref["R44"]
+        assert r44["status"] == "unassessed"
+        assert r44["mpn"] is None
+        assert "bom_entries" in r44["reason"]
+
+        # Invalid land_pattern on R43 must not break BOM export assignment
+        package = AssemblyPackage(
+            pcb_path=pcb,
+            schematic_path=None,
+            config=AssemblyConfig(bom_source="pcb", auto_lcsc=False),
+        )
+        exported = package.export(tmp_path / "assembly")
+        with exported.bom_path.open(newline="", encoding="utf-8-sig") as bom:
+            assignments = {row["Designator"]: row["LCSC Part #"] for row in csv.DictReader(bom)}
+        assert assignments["R43"] == "C54321"
+
+    def test_blank_mpn_unassessed(self, tmp_path):
+        """A BOM entry with a blank MPN cannot claim verification even with a pattern."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [{"ref": "R40", "pads": _stackpole_rhc2512_pads()}],
+        )
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: R40\n"
+            '    part: ""\n'
+            "    land_pattern:\n"
+            "      pad_shape: rect\n"
+            "      pad_depth_mm: 3.00\n"
+            "      pad_width_mm: 3.50\n"
+            "      outer_span_mm: 8.00\n"
+            '      source: "Stackpole RHC series, page 2"\n',
+        )
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "WARN"
+        (finding,) = result.data["components"]
+        assert finding["status"] == "unassessed"
+        assert finding["mpn"] is None
+        assert "MPN" in finding["reason"]
+
+    def test_unusable_geometry_reports_specific_unassessed_reason(self, tmp_path):
+        """Skewed pads, unsupported shapes and coincident centers report unassessed."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "pads": [
+                        _smd_chip_pad("1", -2.5, 0.0, 3.0, 3.5, shape="custom"),
+                        _smd_chip_pad("2", 2.5, 0.0, 3.0, 3.5, shape="rect"),
+                    ],
+                },
+                {
+                    "ref": "R41",
+                    "pads": [
+                        _smd_chip_pad("1", -2.5, 0.0, 3.0, 3.5, shape="rect", rotation=30.0),
+                        _smd_chip_pad("2", 2.5, 0.0, 3.0, 3.5, shape="rect", rotation=0.0),
+                    ],
+                },
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "WARN"
+        by_ref = {c["reference"]: c for c in result.data["components"]}
+        assert by_ref["R40"]["status"] == "unassessed"
+        assert "custom" in by_ref["R40"]["reason"]
+        assert by_ref["R41"]["status"] == "unassessed"
+        assert "axis-aligned" in by_ref["R41"]["reason"]
+
+    def test_dnp_tht_and_multi_terminal_footprints_excluded(self, tmp_path):
+        """DNP, through-hole and >2-terminal SMD parts do not create chip findings."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {"ref": "R40", "attr": "smd dnp", "pads": _stock_2512_pads()},
+                {
+                    "ref": "Q1",
+                    "lib_id": "Package_TO_SOT_SMD:SOT-23",
+                    "pads": [
+                        _smd_chip_pad("1", -0.95, 1.1, 0.6, 0.7),
+                        _smd_chip_pad("2", 0.95, 1.1, 0.6, 0.7),
+                        _smd_chip_pad("3", 0.0, -1.1, 0.6, 0.7),
+                    ],
+                },
+                {
+                    "ref": "J1",
+                    "lib_id": "Connector_PinHeader:PinHeader_1x02",
+                    "attr": "through_hole",
+                    "pads": [_tht_pad("1", 1.0), _tht_pad("2", 1.0)],
+                },
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "OK"
+        assert result.data["components"] == []
+
+    @pytest.mark.parametrize(("delta", "expected_status"), [(0.001, "pass"), (0.002, "fail")])
+    def test_numerical_comparison_precision_boundary(self, tmp_path, delta, expected_status):
+        """Comparison tolerance is +/-0.001 mm: 1 um passes, 2 um fails."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "pads": _stackpole_rhc2512_pads(pad_width=3.50 + delta),
+                }
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.data["tolerance_mm"] == pytest.approx(0.001)
+        (finding,) = result.data["components"]
+        assert finding["status"] == expected_status
+
+    def test_strict_export_blocked_and_pcb_stays_byte_identical(self, tmp_path, monkeypatch):
+        """A confirmed SMD land-pattern mismatch blocks strict export without modifying the PCB."""
+        from kicad_tools.export import assembly
+        from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = _create_pcb_with_smd_footprints(
+            project_dir,
+            [
+                {"ref": "R40", "pads": _stock_2512_pads()},
+                {"ref": "R41", "rotation": 90, "pads": _stock_2512_pads(rotation=90)},
+            ],
+        )
+        _write_lead_spec(project_dir, _STACKPOLE_RHC2512_YAML)
+        (project_dir / "board.kicad_sch").write_text(
+            '(kicad_sch (version 20231120) (generator "eeschema"))'
+        )
+        (project_dir / "board.kicad_pro").write_text("{}")
+
+        original_bytes = pcb.read_bytes()
+
+        def fake_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            strict_preflight=True,
+            preflight=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        result = pkg.export(tmp_path / "output")
+
+        assert not result.success
+        assert any("assembly_smd_land_pattern" in e for e in result.errors)
+        smd = [pr for pr in result.preflight_results if pr.name == "assembly_smd_land_pattern"]
+        assert smd and smd[0].status == "FAIL"
+        json.dumps(smd[0].to_dict())
+        assert pcb.read_bytes() == original_bytes
+
+    @pytest.mark.parametrize("no_spec", [False, True])
+    def test_export_spec_selection(self, tmp_path, no_spec):
+        """SMD land-pattern check honors explicit --spec and --no-spec selection."""
+        from kicad_tools.cli.export_cmd import build_manufacturing_config
+        from kicad_tools.export.manufacturing import ManufacturingPackage
+
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path, [{"ref": "R40", "pads": _stock_2512_pads()}]
+        )
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: R40\n    part: OTHER\n",
+        )
+        variant = tmp_path / "variant"
+        variant.mkdir()
+        selected = _write_lead_spec(variant, _STACKPOLE_RHC2512_YAML)
+        config = build_manufacturing_config(
+            output_dir=tmp_path,
+            spec_path=selected,
+            no_spec=no_spec,
+            strict_preflight=True,
+            skip_drc=True,
+            skip_erc=True,
+        )
+        results = ManufacturingPackage(pcb_path=pcb, config=config)._run_preflight()
+        result = _find_result(results, "assembly_smd_land_pattern")
+        assert result is not None
+        (comp,) = result.data["components"]
+        if no_spec:
+            assert result.status == "WARN"
+            assert comp["status"] == "unassessed" and comp["mpn"] is None
+        else:
+            assert result.status == "FAIL"
+            assert comp["mpn"] == "RHC2512FT4K70"
+
+    def test_asymmetric_single_pad_depth_flags_only_offending_pad_and_outer_span(self, tmp_path):
+        """Changing only pad 1 depth flags pad 1 depth_mm and outer_span_mm, not pad 2 or pitch."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "pads": [
+                        _smd_chip_pad("1", -2.5, 0.0, 2.00, 3.50, shape="rect"),
+                        _smd_chip_pad("2", 2.5, 0.0, 3.00, 3.50, shape="rect"),
+                    ],
+                }
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "FAIL"
+        (finding,) = result.data["components"]
+        assert finding["mismatched_fields"] == ["pad 1 depth_mm", "outer_span_mm"]
+        assert finding["measured"]["pitch_mm"] == pytest.approx(5.0)
+        assert finding["measured"]["outer_span_mm"] == pytest.approx(7.5)
+
+
+# ---------------------------------------------------------------------------
 # PreflightChecker -- DRC check
 # ---------------------------------------------------------------------------
 

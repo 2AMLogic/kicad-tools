@@ -57,6 +57,7 @@ __all__ = [
     "LinkRoute",
     "LinkRouteRules",
     "LinkTerminal",
+    "PlaneCorridor",
     "append_link_route",
     "append_link_routes",
     "collapse_link_route",
@@ -224,6 +225,38 @@ class LinkRouteRules:
         if not rest.is_empty:
             parts.append((rest, full))
         return parts
+
+
+@dataclass(frozen=True)
+class PlaneCorridor:
+    """An inner layer and a closed rectangle in routing coordinates (mm)."""
+
+    layer: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+    def contains(self, x: Any, y: Any, radius: float) -> Any:
+        # Works on both grid arrays and exact segment endpoints. The inset of
+        # a rectangle is convex, so two legal endpoints contain the full stroke.
+        # Origin translation and insetting can shift coincident edges by a
+        # few float ulps. This allowance is 1/1000 of KiCad's 1 nm board unit.
+        epsilon = 1e-9
+        return (
+            (x >= self.x0 + radius - epsilon)
+            & (x <= self.x1 - radius + epsilon)
+            & (y >= self.y0 + radius - epsilon)
+            & (y <= self.y1 - radius + epsilon)
+        )
+
+    def covers_route(self, route: LinkRoute) -> bool:
+        radius = route.width_for(self.layer) / 2
+        return all(
+            self.contains(x1, y1, radius) and self.contains(x2, y2, radius)
+            for x1, y1, x2, y2, layer in route.segments
+            if layer == self.layer
+        )
 
 
 @dataclass
@@ -628,6 +661,7 @@ def route_link(
     *,
     model: _BoardModel | None = None,
     allowed_layers: Collection[str] | None = None,
+    plane_corridor: PlaneCorridor | None = None,
     grid_anchor: tuple[float, float] | None = None,
 ) -> LinkRoute | None:
     """Route copper from terminal ``a`` to terminal ``b`` on net ``net_number``.
@@ -637,7 +671,9 @@ def route_link(
 
     ``allowed_layers`` (Issue #8310) restricts the link to those copper
     layers: tracks and vias keep off every other layer, and a terminal only
-    bonds on an allowed layer.  ``None`` keeps every layer.
+    bonds on an allowed layer.  ``None`` keeps every layer. ``plane_corridor``
+    confines tracks on its inner layer to the board-relative rectangle,
+    including their full width. The caller validates the native refill on commit.
     """
     import numpy as np
     import shapely
@@ -791,15 +827,19 @@ def route_link(
                 m[li] = mask_of(geom if inset.is_empty else inset) & ~blocked[li]
         return m
 
-    # Inner layers that carry a pour are plane layers: a link may drop a via
-    # into one (that is how a stranded pad reaches its plane) but never runs
-    # a track along it.
-    plane_layer = [
-        li
+    # Plane layers accept vias by default. Only lateral moves on the
+    # explicitly authorized layer use the inset rectangle.
+    corridor_li = -1
+    corridor_mask = None
+    if plane_corridor is not None:
+        if plane_corridor.layer not in copper or plane_corridor.layer in ("F.Cu", "B.Cu"):
+            return None
+        corridor_li = copper.index(plane_corridor.layer)
+        corridor_mask = plane_corridor.contains(gx, gy, rules.width_for(plane_corridor.layer) / 2)
+    is_plane = [
+        li != corridor_li and layer not in ("F.Cu", "B.Cu") and bool(model.fills.get(layer))
         for li, layer in enumerate(copper)
-        if layer not in ("F.Cu", "B.Cu") and model.fills.get(layer)
     ]
-    is_plane = [li in plane_layer for li in range(nl)]
 
     start = terminal_mask(a)
     goal = terminal_mask(b)
@@ -827,9 +867,13 @@ def route_link(
         if goal[li, i, j]:
             found = (li, i, j)
             break
-        for di, dj in [] if is_plane[li] else _DIRS:
+        corridor_cells = corridor_mask if li == corridor_li else None
+        lateral = not is_plane[li] and (corridor_cells is None or corridor_cells[i, j])
+        for di, dj in _DIRS if lateral else ():
             ni, nj = i + di, j + dj
             if not (0 <= ni < nx and 0 <= nj < ny) or blocked[li, ni, nj]:
+                continue
+            if corridor_cells is not None and not corridor_cells[ni, nj]:
                 continue
             step = g * (math.sqrt(2.0) if di and dj else 1.0)
             # Diagonal moves must not cut a blocked corner.
@@ -887,6 +931,8 @@ def route_link(
             route.segments.append((x_a, y_a, x_b, y_b, copper[li]))
 
     # Exact check: grid quantisation must never leak a sub-clearance segment.
+    if plane_corridor is not None and not plane_corridor.covers_route(route):
+        return None
     if _route_violates_foreign(route, foreign_by_layer, via_by_layer=via_foreign_by_layer):
         return None
     return route
@@ -1016,6 +1062,7 @@ def route_link_via(
     *,
     model: _BoardModel | None = None,
     allowed_layers: Collection[str] | None = None,
+    plane_corridor: PlaneCorridor | None = None,
     failure: dict[str, Any] | None = None,
 ) -> LinkRoute | None:
     """Route ``a`` -> forced via at ``via_at`` -> ``b`` (Issue #8310).
@@ -1049,14 +1096,32 @@ def route_link_via(
         model=model,
         allowed_layers=layers,
         grid_anchor=site if rules.width_by_layer else None,
+        plane_corridor=plane_corridor,
     )
-    leg2 = route_link(pcb, net_number, net_name, vt, b, rules, model=model, allowed_layers=layers)
+    leg2 = route_link(
+        pcb,
+        net_number,
+        net_name,
+        vt,
+        b,
+        rules,
+        model=model,
+        allowed_layers=layers,
+        plane_corridor=plane_corridor,
+    )
     if leg1 is None or leg2 is None:
         if failure is not None:
             start, end = (a, vt) if leg1 is None else (vt, b)
             failure.update(
                 explain_link_failure(
-                    pcb, net_number, start, end, rules, model=model, allowed_layers=layers
+                    pcb,
+                    net_number,
+                    start,
+                    end,
+                    rules,
+                    model=model,
+                    allowed_layers=layers,
+                    plane_corridor=plane_corridor,
                 )
             )
         return None
@@ -1081,6 +1146,7 @@ def explain_link_failure(
     *,
     model: _BoardModel | None = None,
     allowed_layers: Collection[str] | None = None,
+    plane_corridor: PlaneCorridor | None = None,
 ) -> dict[str, Any]:
     """Why a link did not route (Issue #8310): a terminal fault or a blocker.
 
@@ -1142,6 +1208,10 @@ def explain_link_failure(
         layers = allowed_layers or model.copper
         out["reason"] += "; required track widths: " + ", ".join(
             f"{layer} {rules.width_for(layer):.3f} mm" for layer in layers
+        )
+    if plane_corridor is not None:
+        out["reason"] += (
+            f" with lateral tracks on {plane_corridor.layer} confined to the authorized corridor"
         )
     return out
 

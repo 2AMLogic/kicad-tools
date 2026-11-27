@@ -2980,6 +2980,7 @@ class LatticePathfinder:
         escape_plan: dict[int, EscapeChoice] | None = None,
         guide: PartnerGuide | None = None,
         mirror: LayerMirror | None = None,
+        shorten_hop: bool = False,
         via_pairs: _ViaPairSpec | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Apply physical Kelvin isolation throughout every search stage."""
@@ -3000,11 +3001,18 @@ class LatticePathfinder:
                 committed, pads, root, target, self._pad_layer_indices
             )
         try:
-            return self._route_staged(
+            # Search and hop shortening must see the same foreign landings and Kelvin guard.
+            active_plan = escape_plan if extra_clearance <= 0.0 and partner_net is None else None
+            active_copper = (
+                foreign_reservations(committed, active_plan, start.net)
+                if active_plan
+                else committed
+            )
+            result, reason = self._route_staged(
                 start,
                 end,
                 net_class,
-                committed=committed,
+                committed=active_copper,
                 history=history,
                 present=present,
                 allow_vias=allow_vias,
@@ -3013,11 +3021,14 @@ class LatticePathfinder:
                 stub_layers=stub_layers,
                 stubs_override=stubs_override,
                 exempt_pads=exempt_pads,
-                escape_plan=escape_plan,
+                escape_plan=active_plan,
                 guide=guide,
                 mirror=mirror,
                 via_pairs=via_pairs,
             )
+            if shorten_hop and result is not None:
+                result = self._shorten_pair_hop(result, net_class, active_copper)
+            return result, reason
         finally:
             committed.kelvin_guard = previous
 
@@ -3073,8 +3084,6 @@ class LatticePathfinder:
             failure -- is returned as-is.
         """
         fat = extra_clearance > 0.0 or partner_net is not None
-        if escape_plan and not fat:
-            committed = foreign_reservations(committed, escape_plan, start.net)
         last_resort = (
             self.rules.via_in_pad_last_resort and allow_vias and not fat and self.num_layers > 1
         )
@@ -3089,7 +3098,7 @@ class LatticePathfinder:
             "stubs_override": stubs_override,
             "exempt_pads": exempt_pads,
         }
-        if escape_plan and not fat:
+        if escape_plan:
             search_kwargs["escape_plan"] = escape_plan
         if guide is not None and not fat:
             search_kwargs["guide"] = guide
@@ -8155,6 +8164,8 @@ class LatticePathfinder:
         keepouts, max_shift = self._pair_hop_keepouts(points[0], points[-1], net, half)
 
         def clear(a: Pt, b: Pt) -> bool:
+            # A direct pad-to-pad segment replaces both original escape stubs.
+            attached = () if (a, b) == (points[0], points[-1]) else stubs
             return (
                 self._escape_boundary.segment_clear(a, b, half)
                 and not (keepouts and keepouts.segment_blocked(a, b, layer, net, half))
@@ -8166,7 +8177,7 @@ class LatticePathfinder:
                     )
                 )
                 and committed.seg_clear(a, b, layer, net, half, clearance)
-                and self._own_net_pad_band_ok(a, b, layer, net, half, attached=stubs)
+                and self._own_net_pad_band_ok(a, b, layer, net, half, attached=attached)
             )
 
         chosen = shorter_pair_hop(points, clear, max_shift=max_shift)
@@ -8202,6 +8213,8 @@ class LatticePathfinder:
         """
         _key, start, end, net_class = item
         options: dict[str, Any] = {"escape_plan": escape_plan} if escape_plan else {}
+        if isinstance(_key, tuple) and len(_key) == 3 and _key[1] == "hop":
+            options["shorten_hop"] = True
         if guide is not None:
             options["guide"] = guide
         if mirror is not None:
@@ -8217,8 +8230,6 @@ class LatticePathfinder:
         )
         if result is None:
             return None, reason
-        if isinstance(_key, tuple) and len(_key) == 3 and _key[1] == "hop":
-            result = self._shorten_pair_hop(result, net_class, committed)
         # Final self-DRC gate (#4318): a route whose own segment body
         # runs across its own via center is malformed copper the
         # checker cannot repair -- decline it honestly rather than
