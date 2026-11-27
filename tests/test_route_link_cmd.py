@@ -341,6 +341,30 @@ class TestCommit:
         assert sig and len(pcb.vias) == 2
         assert {s.layer for s in sig} == {"F.Cu", "B.Cu"}
 
+    @pytest.mark.parametrize("offset", [False, True], ids=["roundrect", "offset-plated"])
+    def test_join_track_starts_on_source_land(self, tmp_path, capsys, offset):
+        from shapely.geometry import Point, box
+
+        host = TEE_TRACK.replace("start 5 4", "start 6 8").replace("end 5 14", "end 12 14")
+        board = _tee(tmp_path, host)
+        prefix, source = board.read_text().rsplit(TEE_SMD, 1)
+        if offset:
+            pad = '(pad "1" thru_hole rect (at 0 0) (size 2 2) (drill 0.4 (offset 0.6 0)) (layers "*.Cu" "*.Mask")'
+            land = box(11.6, 8, 13.6, 10)
+        else:
+            pad = '(pad "1" smd roundrect (at 0 0) (size 2 2) (roundrect_rratio 0.25) (layers "F.Cu" "F.Mask")'
+            land = box(11.5, 8.5, 12.5, 9.5).buffer(0.5)
+        board.write_text(
+            prefix.replace("(at 5 4)", "(at 6 8)").replace("(at 5 14)", "(at 12 14)") + pad + source
+        )
+        out = tmp_path / "saved.kicad_pcb"
+        probe = _joined(capsys, board, "--join-track", "--link-layers", "F.Cu", "--probe")
+        saved = _joined(capsys, board, "--join-track", "--link-layers", "F.Cu", "-o", str(out))
+        assert saved["status"] == "committed"
+        assert saved["length_mm"] == probe["length_mm"]
+        assert saved["junction"] == probe["junction"] == {"x": 9.5, "y": 11.5, "layer": "F.Cu"}
+        assert any(land.contains(Point(start)) for start, *_ in _file_segments(out))
+
     def test_join_track_splits_the_host_and_adds_the_branch(self, tee, capsys):
         rc, doc = _run(capsys, str(tee), *TEE_ARGS, "--join-track")
         assert rc == 0 and doc["written"] == str(tee)

@@ -692,7 +692,7 @@ def _resolve_end(
     pcb: Any, end: EndSpec, net_number: int, net: str, origin: tuple[float, float]
 ) -> tuple[Any, str | None]:
     """The :class:`LinkTerminal` for ``end``, or ``(None, why)``."""
-    from kicad_tools.router.link_router import LinkTerminal, terminal_at_copper, terminal_for_pad
+    from kicad_tools.router.link_router import terminal_at_copper, terminal_for_pad
 
     if end.xy is None:
         assert end.ref is not None and end.pad is not None
@@ -714,7 +714,7 @@ def _resolve_end(
     if end.layer is not None:
         if end.layer not in term.layers:
             return None, f"{end.describe()} has no copper on layer {end.layer}"
-        term = LinkTerminal(term.label, term.point, {end.layer: term.layers[end.layer]})
+        term = replace(term, layers={end.layer: term.layers[end.layer]})
     return term, None
 
 

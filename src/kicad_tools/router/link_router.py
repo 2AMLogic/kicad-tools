@@ -293,6 +293,8 @@ class LinkTerminal:
     label: str
     point: tuple[float, float]
     layers: dict[str, Any]
+    # Named-pad tees require a known copper land on the starting layer.
+    exact_pad_lands: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -634,6 +636,15 @@ def _build_model(pcb: PCB) -> _BoardModel:
     return _BoardModel(copper, items, drills, pad_geoms, fills, outline)
 
 
+def _uniform_pad_lands(fp: Any, pad: Any, layers: Collection[str]) -> dict[str, Any]:
+    from kicad_tools.geometry.copper import pad_copper_outline, pad_outline_is_exact
+
+    if not pad_outline_is_exact(pad):
+        return {}
+    outline = pad_copper_outline(pad, fp.position, fp.rotation)
+    return dict.fromkeys(layers, outline) if outline is not None else {}
+
+
 def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None:
     """The copper of footprint pad ``ref.pad_number`` as a :class:`LinkTerminal`."""
     copper = _copper_layer_names(pcb)
@@ -653,7 +664,8 @@ def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None
             lands = dict.fromkeys(layers, geom)
             if stack is not None:
                 lands.update(stack)
-            return LinkTerminal(f"{ref}.{pad_number}", (c.x, c.y), lands)
+            exact = stack if stack is not None else _uniform_pad_lands(fp, pad, layers)
+            return LinkTerminal(f"{ref}.{pad_number}", (c.x, c.y), lands, exact)
     return None
 
 
@@ -757,8 +769,6 @@ def _join_island(pcb: PCB, model: _BoardModel, net_number: int, pad: LinkTermina
     """
     from shapely.geometry import LineString, Point
 
-    from kicad_tools.geometry.copper import pad_copper_outline, pad_outline_is_exact
-
     copper = model.copper
     nodes: list[dict[str, Any]] = []
     destination = None
@@ -769,10 +779,7 @@ def _join_island(pcb: PCB, model: _BoardModel, net_number: int, pad: LinkTermina
             layers = _pad_layers(pin.layers, copper)
             lands = _padstack_lands(fp, pin, layers)
             if lands is None:
-                if not pad_outline_is_exact(pin):
-                    continue
-                outline = pad_copper_outline(pin, fp.position, fp.rotation)
-                lands = dict.fromkeys(layers, outline) if outline is not None else {}
+                lands = _uniform_pad_lands(fp, pin, layers)
             if not lands:
                 continue
             nodes.append(lands)
@@ -1642,6 +1649,15 @@ def route_link_junction(
                 "the destination pad on the allowed layers"
             )
         return None
+    if source.exact_pad_lands is not None:
+        lands = {
+            layer: land for layer, land in source.exact_pad_lands.items() if layer in source.layers
+        }
+        if not lands:
+            if failure is not None:
+                failure["reason"] = "no known source pad land on the starting layers"
+            return None
+        source = replace(source, layers=lands)
     source_reach = max(g.hausdorff_distance(Point(source.point)) for g in source.layers.values())
     best: tuple[tuple[int, float], LinkRoute] | None = None
     from kicad_tools.sexp.builders import fmt
@@ -1689,6 +1705,13 @@ def route_link_junction(
         )
         if route is None or not route.segments or route.segments[-1][2:] != (*site, seg.layer):
             continue
+        if source.exact_pad_lands is not None:
+            # A small pad can lose its inset entirely. Check the serialized
+            # endpoint too, since adding the board origin can round it again.
+            x, y, _, _, layer = route.segments[0]
+            land = source.layers.get(layer)
+            if land is None or not land.covers(Point(_written_point(x, y, origin, digits))):
+                continue
         route.junction = LinkJunction(
             site, seg.layer, seg.start, seg.end, seg.width, seg.uuid, digits
         )
