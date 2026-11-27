@@ -677,10 +677,14 @@ def _candidate_power(part: object) -> float | None:
 def _melf_evidence(part: object, body: str) -> str | None:
     """A problem string unless the record positively establishes the MELF body."""
     package = (getattr(part, "package", "") or "").strip()
-    texts = [package] if package else [
-        getattr(part, "description", "") or "",
-        getattr(part, "mfr_part", "") or "",
-    ]
+    texts = (
+        [package]
+        if package
+        else [
+            getattr(part, "description", "") or "",
+            getattr(part, "mfr_part", "") or "",
+        ]
+    )
     token = re.compile(r"MELF" if body.casefold() == "melf" else re.escape(body), re.I)
     generic = re.compile(r"MELF|MM[ABU]-\d{4}", re.I)
     if package and generic.search(package) is None:
@@ -690,16 +694,12 @@ def _melf_evidence(part: object, body: str) -> str | None:
     return None
 
 
-def sourcing_problem(
-    item: BOMItem, part: SuggestedPart | Part | None, *, require_evidence: bool = True
-) -> str | None:
+def sourcing_problem(item: BOMItem, part: SuggestedPart | Part | None) -> str | None:
     """Check specifications a broad nominal-value search can lose.
 
     For resistors a catalogue record must *positively* establish the chip
     package of a chip footprint and any stated tolerance / power rating; an
-    unknown or undecodable record leaves the row unresolved.  A caller with no
-    catalogue at all passes ``require_evidence=False`` so the package check is
-    skipped for a missing record (stated ratings still need a record).
+    unknown or undecodable record leaves the row unresolved.
     """
     mpn = getattr(item, "mpn", "")
     if mpn and (part is None or (part.mfr_part or "").casefold() != mpn.casefold()):
@@ -707,7 +707,7 @@ def sourcing_problem(
     if not re.fullmatch(r"R\d+[A-Z]*", item.reference, re.I):
         return None
     requested = extract_package_from_footprint(item.footprint)
-    if requested in CHIP_PACKAGES and (part is not None or require_evidence):
+    if requested in CHIP_PACKAGES:
         structured = (getattr(part, "package", "") or "").strip()
         if structured and _PKG_FIELD_CHIP_RE.search(structured) is None:
             # A stated non-chip package is authoritative; never fall back to

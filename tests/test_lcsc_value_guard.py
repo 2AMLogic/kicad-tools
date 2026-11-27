@@ -514,17 +514,19 @@ class TestMergeReadBackValueGuard:
         assert merged_count == 1
         assert items[0].lcsc == "C987654"
 
-    def test_no_cache_behaves_like_before(self):
-        existing = {("10k", "0402"): "C123456"}
-        items = [_make_item("R1", "10k", "0402")]
+    def test_no_cache_leaves_chip_resistor_unassigned(self, caplog):
+        footprint = "Resistor_SMD:R_1206_3216Metric"
+        existing = {("10k", footprint): "C123456"}
+        items = [_make_item("R1", "10k", footprint)]
 
         merged_count, merged_refs = apply_existing_lcsc_assignments(
             items, existing, parts_cache=None
         )
 
-        assert merged_count == 1
-        assert merged_refs == {"R1"}
-        assert items[0].lcsc == "C123456"
+        assert merged_count == 0
+        assert merged_refs == set()
+        assert not items[0].lcsc
+        assert "catalogue does not establish the 1206 package" in caplog.text
 
     def test_existing_lcsc_and_dnp_skipped(self, tmp_path):
         cache = _make_cache(tmp_path)
