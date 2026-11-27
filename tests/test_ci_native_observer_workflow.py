@@ -127,6 +127,90 @@ def test_board05_staged_cases_reach_one_worker(tmp_path):
     assert len(list(tmp_path.glob("record_staged_worker.gw*"))) == 1
 
 
+def test_kelvin_replay_cache_consumers_reach_one_worker(tmp_path):
+    # Under --dist loadgroup, all consumers of test_access_witness_replay_5508._CACHE
+    # (_routed_kelvin / _stranding_kelvin / stranding_witness) across both 5508 and
+    # 6292 must land on one worker while bulk selection still excludes ci_extended.
+    (tmp_path / "record_kelvin_worker.py").write_text(
+        "import inspect, json\n"
+        "from pathlib import Path\n"
+        "def pytest_runtest_setup(item):\n"
+        "    src = ''\n"
+        "    try:\n"
+        "        src = inspect.getsource(item.obj)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    uses_stranding = 'stranding_witness' in item.fixturenames or '_stranding_kelvin(' in src\n"
+        "    uses_routed = '_routed_kelvin(' in src\n"
+        "    if uses_stranding or uses_routed:\n"
+        "        worker = item.config.workerinput['workerid']\n"
+        "        entry = {\n"
+        "            'worker': worker,\n"
+        "            'nodeid': item.nodeid.rsplit('@', 1)[0],\n"
+        "            'stranding': uses_stranding,\n"
+        "            'routed': uses_routed,\n"
+        "        }\n"
+        "        with Path(__file__).with_suffix('.' + worker + '.jsonl').open('a') as f:\n"
+        "            f.write(json.dumps(entry) + '\\n')\n"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-n",
+            "4",
+            "--dist",
+            "loadgroup",
+            "--setup-plan",
+            "-o",
+            "addopts=",
+            "-m",
+            "not slow and not ci_extended",
+            "-p",
+            "record_kelvin_worker",
+            "tests/router/test_access_witness_replay_5508.py",
+            "tests/router/test_access_witness_replay_6292.py",
+        ],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join([str(tmp_path), os.environ.get("PYTHONPATH", "")]),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    worker_files = sorted(tmp_path.glob("record_kelvin_worker.gw*.jsonl"))
+    entries = [json.loads(line) for path in worker_files for line in path.read_text().splitlines()]
+    workers = {entry["worker"] for entry in entries}
+    nodeids = {entry["nodeid"] for entry in entries}
+    stranding_5508 = [
+        entry
+        for entry in entries
+        if entry["stranding"]
+        and entry["nodeid"].startswith("tests/router/test_access_witness_replay_5508.py::")
+    ]
+    assert len(workers) == 1, entries
+    assert len(stranding_5508) == 9, stranding_5508
+    assert (
+        "tests/router/test_access_witness_replay_6292.py::"
+        "TestRoutedFixtures::test_stranding_kelvin_matches_the_reference"
+    ) in nodeids
+    assert (
+        "tests/router/test_access_witness_replay_6292.py::"
+        "TestRoutedFixtures::test_routed_kelvin_matches_the_reference"
+    ) in nodeids
+    assert (
+        "tests/router/test_access_witness_replay_5508.py::"
+        "TestStrandedTerminals::test_pads_of_a_net_that_never_landed_are_tracked"
+    ) not in nodeids
+    assert (
+        "tests/router/test_access_witness_replay_5508.py::"
+        "TestReplayOnTheKelvinFixture::test_comp_closes_u3_at_iteration_zero_of_the_initial_pass"
+    ) not in nodeids
+
+
 @pytest.mark.parametrize("group", [*GROUPS, "extended"])
 @pytest.mark.parametrize("board07", ["true", "false"])
 def test_existing_workflow_command_and_failure_propagation(tmp_path, group, board07):
