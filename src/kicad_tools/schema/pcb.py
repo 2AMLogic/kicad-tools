@@ -7926,10 +7926,12 @@ class PCB:
                     continue
                 ref, number = endpoint
                 fp = self.get_footprint(ref)
-                pad = next((p for p in fp.pads if p.number == number), None) if fp else None
-                if pad is None:
+                endpoint_pad = (
+                    next((p for p in fp.pads if p.number == number), None) if fp else None
+                )
+                if endpoint_pad is None:
                     raise ValueError(f"Cannot find pad {number} on footprint {ref}")
-                available = pad_copper_layers(pad.layers, copper)
+                available = pad_copper_layers(endpoint_pad.layers, copper)
                 if layer not in available:
                     raise ValueError(
                         f"Pad {ref}.{number} has no declared copper on {layer}; "
