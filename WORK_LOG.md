@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #9844** (closed): Router: route turns back past its own via inside the slit band (board 05 RESET V-turn)
+- **Issue #10594** (closed): Manufacturing design reports label a revision-B PCB as Rev 1
+- **PR #10598**: fix: use authored PCB revision in report and export headers
+- **Issue #10616** (closed): Router reserves entry lanes for explicit no-connect pads and leaves Board 05 nFAULT open
+- **PR #10620**: fix: reserve fine-pitch escape lanes for routing targets
+- **Issue #10622** (closed): Guide docs PRs can never use the docs-only fast path: installed Guide predates the WORK_PLAN check receipt (#14204) while Judge enforces #15220
 - **Issue #10614** (closed): Readiness checks the sibling net-class map and approves an explicit map with ampacity errors
 - **PR #10617**: fix(readiness): check the selected net-class map
 - **PR #10607**: fix: gate aligned-pad bridges on 45-degree angle tolerance
