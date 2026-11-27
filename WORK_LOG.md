@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10614** (closed): Readiness checks the sibling net-class map and approves an explicit map with ampacity errors
+- **PR #10617**: fix(readiness): check the selected net-class map
 - **PR #10607**: fix: gate aligned-pad bridges on 45-degree angle tolerance
 - **PR #10606**: fix(submission): verify bundled renders through the release manifest
 - **Issue #10603** (closed): Tapeout sign-off refuses receipt-bound manufacturing render files
