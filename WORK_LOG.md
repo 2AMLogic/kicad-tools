@@ -16,6 +16,21 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10527** (closed): Check simulated analog pin ranges across the driven waveform and supply states
+- **PR #10536**: feat: check simulated analog pin voltages against supply-state limits
+- **Issue #10564** (closed): Cover the untested branches of assembly_smd_land_pattern
+- **PR #10573**: test: cover remaining branches of the SMD land-pattern check
+- **Issue #10428** (closed): Preserve native schematic instance links on the footprints placed by create-pcb
+- **PR #10429**: Write native symbol links when creating a PCB from a schematic
+- **Issue #10565** (closed): ci: keep shared Slow Tests fixtures on one worker with the pinned pytest toolchain
+- **PR #10572**: ci: schedule Slow Tests with --dist loadscope so scoped fixtures build once
+- **Issue #10559** (closed): Reinforcement sidecar consumers raise raw TypeError on a malformed nested coordinate point
+- **PR #10569**: fix: validate nested wire-record coordinates in the sidecar guard
+- **Issue #10566** (closed): Reissue Board 00’s three placed Datasheet fields and its matching project archive
+- **PR #10567**: fix(boards): refresh the Board 00 schematic and its matching package
+- **Issue #10570** (closed): ci: record the Slow Tests step time under --dist loadscope against the loadgroup baseline (#10565 AC3)
+- **Issue #10473** (closed): Assembly preflight: validate soldered wire or ferrule fit without assigning the wire land a component MPN
+- **PR #10491**: feat: assess declared wire and ferrule landings in the lead-fit preflight check
 - **Issue #10555** (closed): route: a pre-existing net class wider than its router width keeps the wider value, so _write_netclasses_to_project cannot declare a narrower class
 - **PR #10558**: fix(route): lower kct-created net classes to the routed width
 - **Issue #10487** (closed): Schematic validation misses trailing-letter references that native KiCad BOM marks unannotated

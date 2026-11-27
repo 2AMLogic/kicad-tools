@@ -43,7 +43,13 @@ import pytest
 # module's ceiling to 180 s: fast tests are unaffected (a timeout is an
 # upper bound), and both fixtures' first-touch tests get 3x the router's
 # internal budget for setup + replay + assertions.
-pytestmark = pytest.mark.timeout(180)
+# Keep the module on one xdist worker under --dist loadgroup so _CACHE
+# (_routed_kelvin / _stranding_kelvin) and stranding_witness are each built
+# once per bulk run instead of repeated across workers (Issue #10556).
+pytestmark = [
+    pytest.mark.timeout(180),
+    pytest.mark.xdist_group("access_witness_replay_kelvin"),
+]
 
 from kicad_tools.router.access_witness import (
     ACCESS_EMPTY,
