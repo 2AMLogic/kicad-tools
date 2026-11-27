@@ -1714,6 +1714,30 @@ _STACKPOLE_RHC2512_YAML = (
     '      source: "Stackpole RHC series, page 2"\n'
 )
 
+# Synthetic identifiers only: the round-pad MPN and drawing name no real product.
+_SYNTHETIC_ROUND_PAD_YAML = (
+    "  - ref: R40\n"
+    "    part: SYN-ROUND-PAD-2TERM\n"
+    "    land_pattern:\n"
+    "      pad_shape: circle\n"
+    "      pad_depth_mm: 1.50\n"
+    "      pad_width_mm: 1.50\n"
+    "      outer_span_mm: 5.00\n"
+    '      source: "Synthetic round-pad drawing, page 1"\n'
+)
+
+
+def _rhc2512_land_pattern_yaml(source: str) -> str:
+    """Indent-4 ``land_pattern`` block for the Stackpole RHC2512 drawing."""
+    return (
+        "    land_pattern:\n"
+        "      pad_shape: rect\n"
+        "      pad_depth_mm: 3.00\n"
+        "      pad_width_mm: 3.50\n"
+        "      outer_span_mm: 8.00\n"
+        f'      source: "{source}"\n'
+    )
+
 
 def _smd_chip_pad(
     number: str,
@@ -1767,6 +1791,28 @@ def _stackpole_rhc2512_pads(
         _smd_chip_pad(
             "2", half, 0.0, pad_depth, pad_width, shape=pad2_shape, rotation=rotation, side=side
         ),
+    ]
+
+
+def _transverse_2512_pads(*, rotation: float = 0.0, side: str = "F") -> list[str]:
+    """Stackpole RHC2512 copper pads stacked along local Y with no per-pad angle.
+
+    ``size[0]`` (3.5 mm) is transverse to the terminal axis and ``size[1]``
+    (3.0 mm) runs along it, so the pads only measure correctly when the two
+    size operands are swapped.
+    """
+    sign = 1.0 if side == "B" else -1.0
+    return [
+        _smd_chip_pad("1", 0.0, sign * 2.5, 3.50, 3.00, rotation=rotation, side=side),
+        _smd_chip_pad("2", 0.0, -sign * 2.5, 3.50, 3.00, rotation=rotation, side=side),
+    ]
+
+
+def _round_pad_pair(*, pad2_height: float = 1.50) -> list[str]:
+    """Two 1.5 mm circular copper pads on a 3.5 mm pitch (5.00 mm outer span)."""
+    return [
+        _smd_chip_pad("1", -1.75, 0.0, 1.50, 1.50, shape="circle"),
+        _smd_chip_pad("2", 1.75, 0.0, 1.50, pad2_height, shape="circle"),
     ]
 
 
@@ -2286,6 +2332,325 @@ class TestPreflightSmdLandPattern:
         assert finding["mismatched_fields"] == ["pad 1 depth_mm", "outer_span_mm"]
         assert finding["measured"]["pitch_mm"] == pytest.approx(5.0)
         assert finding["measured"]["outer_span_mm"] == pytest.approx(7.5)
+
+    @pytest.mark.parametrize(
+        ("layer", "rotation"),
+        [("F.Cu", 0), ("F.Cu", 90), ("B.Cu", 0), ("B.Cu", 90)],
+    )
+    def test_vertical_pads_without_per_pad_angle_swap_depth_and_width(
+        self, tmp_path, layer, rotation
+    ):
+        """Pads stacked along local Y with no per-pad angle take depth from ``size[1]``."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "layer": layer,
+                    "rotation": rotation,
+                    "pads": _transverse_2512_pads(rotation=rotation, side=layer[0]),
+                }
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "OK"
+        (finding,) = result.data["components"]
+        assert finding["reference"] == "R40"
+        assert finding["status"] == "pass"
+        assert finding["mismatched_fields"] == []
+        assert finding["measured"] == {
+            "pads": [
+                {
+                    "pad": "1",
+                    "shape": "rect",
+                    "depth_mm": pytest.approx(3.0),
+                    "width_mm": pytest.approx(3.5),
+                },
+                {
+                    "pad": "2",
+                    "shape": "rect",
+                    "depth_mm": pytest.approx(3.0),
+                    "width_mm": pytest.approx(3.5),
+                },
+            ],
+            "pitch_mm": pytest.approx(5.0),
+            "outer_span_mm": pytest.approx(8.0),
+        }
+
+    def test_circle_pads_with_equal_axes_pass(self, tmp_path):
+        """Equal-axis circle pads measure depth equal to width and pass a circle declaration."""
+        pcb = _create_pcb_with_smd_footprints(tmp_path, [{"ref": "R40", "pads": _round_pad_pair()}])
+        _write_lead_spec(tmp_path, _SYNTHETIC_ROUND_PAD_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "OK"
+        (finding,) = result.data["components"]
+        assert finding["status"] == "pass"
+        assert finding["mismatched_fields"] == []
+        assert finding["expected"]["pad_shape"] == "circle"
+        assert finding["measured"] == {
+            "pads": [
+                {
+                    "pad": "1",
+                    "shape": "circle",
+                    "depth_mm": pytest.approx(1.5),
+                    "width_mm": pytest.approx(1.5),
+                },
+                {
+                    "pad": "2",
+                    "shape": "circle",
+                    "depth_mm": pytest.approx(1.5),
+                    "width_mm": pytest.approx(1.5),
+                },
+            ],
+            "pitch_mm": pytest.approx(3.5),
+            "outer_span_mm": pytest.approx(5.0),
+        }
+        assert "expected circle 1.500 x 1.500 mm" in result.details
+
+    def test_circle_pad_with_unequal_axes_unassessed(self, tmp_path):
+        """A circular pad whose axes differ by more than 0.001 mm is unassessed, naming the pad."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path, [{"ref": "R40", "pads": _round_pad_pair(pad2_height=1.502)}]
+        )
+        _write_lead_spec(tmp_path, _SYNTHETIC_ROUND_PAD_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "WARN"
+        (finding,) = result.data["components"]
+        assert finding["reference"] == "R40"
+        assert finding["status"] == "unassessed"
+        assert finding["reason"] == "circular pad 2 has unequal axes (1.500 x 1.502 mm)"
+        assert finding["measured"] is None
+        assert finding["expected"]["pad_shape"] == "circle"
+        assert (
+            "R40 [SYN-ROUND-PAD-2TERM]: unassessed: "
+            "circular pad 2 has unequal axes (1.500 x 1.502 mm)"
+        ) in result.details
+
+    def test_circle_pad_axis_difference_within_tolerance_is_measured(self, tmp_path):
+        """A circular pad whose axes differ by exactly 0.001 mm stays inside the tolerance."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path, [{"ref": "R40", "pads": _round_pad_pair(pad2_height=1.501)}]
+        )
+        _write_lead_spec(tmp_path, _SYNTHETIC_ROUND_PAD_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "OK"
+        (finding,) = result.data["components"]
+        assert finding["status"] == "pass"
+        assert finding["mismatched_fields"] == []
+
+    def test_same_mpn_row_without_declaration_borrows_sole_declaration(self, tmp_path):
+        """A row sharing an exact MPN with one declaring row is assessed against that drawing."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {"ref": "R40", "pads": _stackpole_rhc2512_pads()},
+                {"ref": "R41", "pads": _stackpole_rhc2512_pads()},
+                {"ref": "R42", "pads": _stock_2512_pads()},
+            ],
+        )
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: R40\n"
+            "    part: RHC2512FT4K70\n"
+            + _rhc2512_land_pattern_yaml("Stackpole RHC series, page 2")
+            + "  - ref: R41-R42\n"
+            "    part: RHC2512FT4K70\n",
+        )
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "FAIL"
+        by_ref = {c["reference"]: c for c in result.data["components"]}
+        assert by_ref["R40"]["status"] == "pass"
+
+        # R41 declares nothing: it borrows R40's drawing and passes against it.
+        r41 = by_ref["R41"]
+        assert r41["status"] == "pass"
+        assert r41["mpn"] == "RHC2512FT4K70"
+        assert r41["source"] == "Stackpole RHC series, page 2"
+        assert r41["expected"] == by_ref["R40"]["expected"]
+
+        # R42 borrows the same drawing, so stock KiCad copper fails against it.
+        r42 = by_ref["R42"]
+        assert r42["status"] == "fail"
+        assert r42["source"] == "Stackpole RHC series, page 2"
+        assert r42["expected"] == by_ref["R40"]["expected"]
+        assert "pad 1 depth_mm" in r42["mismatched_fields"]
+
+        assert "R41 [RHC2512FT4K70]: pass per 'Stackpole RHC series, page 2'" in result.details
+
+    def test_same_mpn_conflicting_declarations_leave_undeclared_row_unassessed(self, tmp_path):
+        """Same geometry with different source text conflicts for an undeclared third row."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {"ref": "R40", "pads": _stackpole_rhc2512_pads()},
+                {"ref": "R41", "pads": _stackpole_rhc2512_pads()},
+                {"ref": "R42", "pads": _stackpole_rhc2512_pads()},
+            ],
+        )
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: R40\n"
+            "    part: RHC2512FT4K70\n"
+            + _rhc2512_land_pattern_yaml("Stackpole RHC series, page 2")
+            + "  - ref: R41\n"
+            "    part: RHC2512FT4K70\n"
+            + _rhc2512_land_pattern_yaml("Stackpole RHC series, p. 2")
+            + "  - ref: R42\n"
+            "    part: RHC2512FT4K70\n",
+        )
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "WARN"
+        assert result.data["summary"] == {
+            "components": 3,
+            "passed": 2,
+            "failed": 0,
+            "unassessed": 1,
+        }
+        by_ref = {c["reference"]: c for c in result.data["components"]}
+
+        # Each declaring row is assessed against its own declaration.
+        assert by_ref["R40"]["status"] == "pass"
+        assert by_ref["R40"]["source"] == "Stackpole RHC series, page 2"
+        assert by_ref["R41"]["status"] == "pass"
+        assert by_ref["R41"]["source"] == "Stackpole RHC series, p. 2"
+
+        # The undeclared row cannot choose between the two declarations.
+        r42 = by_ref["R42"]
+        assert r42["mpn"] == "RHC2512FT4K70"
+        assert r42["status"] == "unassessed"
+        assert r42["reason"] == "conflicting SMD land-pattern declarations for MPN RHC2512FT4K70"
+        assert r42["source"] is None
+        assert r42["expected"] is None
+        assert r42["measured"] is not None
+        assert (
+            "R42 [RHC2512FT4K70]: unassessed: "
+            "conflicting SMD land-pattern declarations for MPN RHC2512FT4K70"
+        ) in result.details
+
+    @pytest.mark.parametrize(
+        ("pads", "expected_reason"),
+        [
+            pytest.param(
+                [
+                    _smd_chip_pad("1", -0.95, 1.1, 0.6, 0.7),
+                    _smd_chip_pad("2", 0.95, 1.1, 0.6, 0.7),
+                    _smd_chip_pad("3", 0.0, -1.1, 0.6, 0.7),
+                ],
+                "expected 2 copper SMD pads, found 3; only two-terminal SMD chips are assessed",
+                id="three-pads",
+            ),
+            pytest.param(
+                [
+                    _smd_chip_pad("1", -2.5, 0.0, 3.0, 3.5, side="F"),
+                    _smd_chip_pad("2", 2.5, 0.0, 3.0, 3.5, side="B"),
+                ],
+                "copper SMD pads 1 (F.Cu) and 2 (B.Cu) are on different copper layers",
+                id="different-copper-layers",
+            ),
+            pytest.param(
+                [
+                    _smd_chip_pad("1", -2.5, 0.0, 0.0, 3.5),
+                    _smd_chip_pad("2", 2.5, 0.0, 3.0, 3.5),
+                ],
+                "pad 1 has non-positive size (0.0, 3.5) mm",
+                id="non-positive-size",
+            ),
+            pytest.param(
+                [
+                    _smd_chip_pad("1", 0.0, 0.0, 3.0, 3.5),
+                    _smd_chip_pad("2", 0.0, 0.0, 3.0, 3.5),
+                ],
+                "copper SMD pads have coincident centers; terminal axis is undefined",
+                id="coincident-centers",
+            ),
+        ],
+    )
+    def test_remaining_unusable_geometry_reasons(self, tmp_path, pads, expected_reason):
+        """Pad count, layer, size and coincident-center faults each report their own reason."""
+        pcb = _create_pcb_with_smd_footprints(tmp_path, [{"ref": "R40", "pads": pads}])
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "WARN"
+        assert result.data["summary"] == {
+            "components": 1,
+            "passed": 0,
+            "failed": 0,
+            "unassessed": 1,
+        }
+        (finding,) = result.data["components"]
+        assert finding["reference"] == "R40"
+        assert finding["mpn"] == "RHC2512FT4K70"
+        assert finding["status"] == "unassessed"
+        assert finding["reason"] == expected_reason
+        assert finding["measured"] is None
+        assert finding["expected"]["pad_shape"] == "rect"
+        assert f"R40 [RHC2512FT4K70]: unassessed: {expected_reason}" in result.details
+
+    def test_no_pcb_loaded_reports_ok_with_zero_components(self, tmp_path):
+        """Without a loaded PCB the check reports OK and an empty component list."""
+        checker = PreflightChecker(
+            pcb_path=tmp_path / "missing.kicad_pcb",
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+
+        result = checker._check_assembly_smd_land_pattern()
+
+        assert result.name == "assembly_smd_land_pattern"
+        assert result.status == "OK"
+        assert result.message == "No PCB loaded; SMD land pattern not assessed"
+        assert result.data["components"] == []
+        assert result.data["summary"] == {
+            "components": 0,
+            "passed": 0,
+            "failed": 0,
+            "unassessed": 0,
+        }
+        assert result.data["tolerance_mm"] == pytest.approx(0.001)
+
+    def test_failure_message_names_five_references_and_counts_the_rest(self, tmp_path):
+        """The summary message lists at most five failing references; ``data`` keeps them all."""
+        refs = [f"R{40 + i}" for i in range(6)]
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [{"ref": ref, "pads": _stock_2512_pads()} for ref in refs],
+        )
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: R40-R45\n"
+            "    part: RHC2512FT4K70\n"
+            + _rhc2512_land_pattern_yaml("Stackpole RHC series, page 2"),
+        )
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "FAIL"
+        assert result.message == (
+            "SMD land pattern mismatch on 6 component(s): R40, R41, R42, R43, R44 (and 1 more)"
+        )
+        assert result.data["summary"] == {
+            "components": 6,
+            "passed": 0,
+            "failed": 6,
+            "unassessed": 0,
+        }
+        assert [c["reference"] for c in result.data["components"]] == refs
+        assert all(c["status"] == "fail" for c in result.data["components"])
+        assert "R45 [RHC2512FT4K70]: fail" in result.details
 
 
 # ---------------------------------------------------------------------------
