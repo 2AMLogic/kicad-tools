@@ -651,3 +651,89 @@ def test_copperpour_keepout_leaves_no_slot(tmp_path: Path, pour: str, expected: 
     area = _RULE_AREA.format(x0=9, x1=21).replace("(copperpour allowed)", f"(copperpour {pour})")
     pcb = _control_p(tmp_path, (ZONE, area))
     assert len(list(iter_pour_slot_pairs(pcb))) == expected
+
+
+@pytest.mark.parametrize(("permission", "moves"), [("not_allowed", 0), ("allowed", 1)])
+def test_footprint_pour_keepout_in_check_cleanup_and_fill(tmp_path, capsys, permission, moves):
+    import shutil
+
+    from kicad_tools.cli import main
+    from kicad_tools.cli.runner import run_refill_zones
+
+    if not shutil.which("kicad-cli"):
+        pytest.skip("native refill requires kicad-cli")
+    board = tmp_path / "footprint-keepout.kicad_pcb"
+    area = _RULE_AREA.format(x0=9, x1=21).replace("copperpour allowed", f"copperpour {permission}")
+    footprint = (
+        '(footprint "Test:Keepout" (layer "F.Cu") (at 0 0) '
+        '(property "Reference" "U9" (at 0 0) (layer "F.Fab")) ' + area + ")"
+    )
+    _write_connected_board(board, 0.750, (ZONE, footprint))
+    board.with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "NET2 to zone" '
+        """(condition "A.NetName == 'NET2' && B.Type == 'Zone'") """
+        "(constraint clearance (min 0.4mm)))\n"
+    )
+    assert _public_pour_slot_count(board, capsys) == moves
+    refill = run_refill_zones(board, require_save=True)
+    assert refill.success, refill.stderr
+    assert _public_pour_slot_count(board, capsys) == moves
+    assert (
+        main(["optimize-traces", str(board), "--net", "GND", "--pour-slots", "--format", "json"])
+        == 0
+    )
+    cleanup = json.loads(capsys.readouterr().out)["pour_slots"]
+    assert cleanup["pairs_before"] == cleanup["spread"] == moves
+    assert cleanup["pairs_after"] == 0
+    gap, _, strips = _saved_gap_and_film(board)
+    assert gap == pytest.approx(0.905 if moves else 0.750)
+    assert strips == pytest.approx([0.304 if moves else 0.0] * 3, abs=0.002)
+
+
+@pytest.mark.parametrize("selector", ["*.Cu", "F&B.Cu"])
+@pytest.mark.parametrize(("subject", "expected"), [("pour", 1), ("keepout", 0), ("named-area", 0)])
+def test_zone_selectors_before_and_after_native_save(tmp_path, capsys, selector, subject, expected):
+    import shutil
+
+    from kicad_tools.cli.runner import run_refill_zones
+
+    if not shutil.which("kicad-cli"):
+        pytest.skip("native save requires kicad-cli")
+    board = tmp_path / "layer-selectors.kicad_pcb"
+    layers = f'(layers "{selector}")'
+    if subject == "pour":
+        _write_connected_board(board, 0.550, (ZONE.replace('(layer "F.Cu")', layers),))
+    else:
+        area = _RULE_AREA.format(x0=9, x1=21).replace('(layers "F.Cu")', layers)
+        if subject == "keepout":
+            area = area.replace("copperpour allowed", "copperpour not_allowed")
+        _write_connected_board(board, 0.550, (ZONE, area))
+        if subject == "named-area":
+            board.with_suffix(".kicad_dru").write_text(
+                '(version 1)\n(rule "Wide clearance" '
+                """(condition "A.Type == 'Track' && A.intersectsArea('WideSpacing')") """
+                "(constraint clearance (min 0.3mm)))\n"
+            )
+    assert _public_pour_slot_count(board, capsys) == expected
+    refill = run_refill_zones(board, require_save=True)
+    assert refill.success, refill.stderr
+    assert selector not in [item for zone in PCB.load(board).zones for item in zone.layers]
+    assert _public_pour_slot_count(board, capsys) == expected
+
+
+@pytest.mark.parametrize(
+    ("selector", "expected_layers"),
+    [
+        ("*.Cu", {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}),
+        ("F&B.Cu", {"F.Cu", "B.Cu"}),
+        ("*.In.Cu", {"In1.Cu", "In2.Cu"}),
+    ],
+)
+def test_wildcard_pour_on_four_layer_stack(tmp_path, selector, expected_layers):
+    pcb = PCB.create(width=50, height=40, center=False, layers=4)
+    for layer in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
+        pcb.add_trace((11, 15), (19, 15), width=0.4, layer=layer, net="NET1")
+        pcb.add_trace((11, 15.95), (19, 15.95), width=0.4, layer=layer, net="NET2")
+    pcb._sexp.append(parse_string(ZONE.replace('(layer "F.Cu")', f'(layers "{selector}")')))
+    saved = _roundtrip(pcb, tmp_path, "four-layer.kicad_pcb")
+    assert {pair.layer for pair in iter_pour_slot_pairs(saved)} == expected_layers

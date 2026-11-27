@@ -48,7 +48,7 @@ import math
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
-from itertools import product
+from itertools import chain, product
 from typing import TYPE_CHECKING, Any
 
 from shapely import get_parts  # type: ignore[import-untyped]
@@ -56,6 +56,7 @@ from shapely.geometry import LineString, Polygon  # type: ignore[import-untyped]
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 from shapely.ops import unary_union  # type: ignore[import-untyped]
 
+from kicad_tools.core.layers import is_declared_copper_layer, pad_copper_layers
 from kicad_tools.core.project_clearance import DEFAULT_NETCLASS_CLEARANCE_MM
 from kicad_tools.router.board_clearance_rules import (
     CLEARANCE,
@@ -254,41 +255,40 @@ class PourSlotRule(DRCRule):
         self._areas_cache = {}
         self._enclosed_cache = {}
         pour_keepouts: dict[str, list[BaseGeometry]] = defaultdict(list)
-        for zone in pcb.zones:
-            if zone.keepout is not None:
-                contours = getattr(zone, "rule_area_contours", None) or [zone.polygon]
-                if getattr(zone, "name", "") and all(len(ring) >= 3 for ring in contours):
-                    area = Polygon(contours[0], holes=contours[1:])
-                    self._rule_areas.append(
-                        (
-                            zone.name,
-                            frozenset({zone.layer, *getattr(zone, "layers", [])} - {""}),
-                            area if area.is_valid else area.buffer(0),
-                        )
-                    )
-                if not getattr(zone.keepout, "copperpour_allowed", True):
-                    ko_contours = getattr(zone, "rule_area_contours", None) or [zone.polygon]
-                    if all(len(ring) >= 3 for ring in ko_contours):
-                        ko = Polygon(ko_contours[0], holes=ko_contours[1:])
-                        ko = ko if ko.is_valid else ko.buffer(0)
-                        for ko_layer in {zone.layer, *getattr(zone, "layers", [])} - {""}:
-                            pour_keepouts[ko_layer].append(ko)
-                continue
+        copper = [
+            layer.name
+            for layer in pcb.layers.values()
+            if is_declared_copper_layer(layer.name, layer.type)
+        ]
+        # Footprint rule areas and board zones both expose board-relative contours.
+        for zone in chain(pcb.zones, pcb.footprint_rule_areas):
+            selectors = zone.layers or [zone.layer]
+            layers = pad_copper_layers(selectors, copper)
+            if "*.In.Cu" in selectors:
+                layers = layers.union(name for name in copper if name.startswith("In"))
             contours = zone.rule_area_contours or [zone.polygon]
-            if any(len(ring) < 3 for ring in contours):
+            if not layers or any(len(ring) < 3 for ring in contours):
                 continue
             outline = Polygon(contours[0], holes=contours[1:])
+            if not outline.is_valid:
+                outline = outline.buffer(0)
+            if zone.keepout is not None:
+                if getattr(zone, "name", ""):
+                    self._rule_areas.append((zone.name, layers, outline))
+                if not getattr(zone.keepout, "copperpour_allowed", True):
+                    for layer in layers:
+                        pour_keepouts[layer].append(outline)
+                continue
             pour = _Pour(
-                outline if outline.is_valid else outline.buffer(0),
+                outline,
                 getattr(zone, "net_name", ""),
                 zone.clearance,
                 zone.min_thickness,
                 getattr(zone, "priority", 0) or 0,
-                len({zone.layer, *getattr(zone, "layers", [])} - {""}) == 1,
+                len(layers) == 1,
             )
-            for layer in {zone.layer, *getattr(zone, "layers", [])}:
-                if layer:
-                    zones[layer].append(pour)
+            for layer in layers:
+                zones[layer].append(pour)
         # Only the highest-priority zone governs each point (Issue #10121).
         zones = {layer: _effective_pours(pours) for layer, pours in zones.items()}
         # A copper-pour keepout leaves no fill on its layers, so no slot can

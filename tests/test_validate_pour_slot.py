@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+from kicad_tools.schema.pcb import Layer
 from kicad_tools.validate.rules.pour_slot import PourSlotRule
 
 
@@ -34,6 +35,8 @@ class _Zone:
 class _PCB:
     segments: list = field(default_factory=list)
     zones: list = field(default_factory=list)
+    footprint_rule_areas: list = field(default_factory=list)
+    layers = {0: Layer(0, "F.Cu", "signal"), 2: Layer(2, "B.Cu", "signal")}
 
 
 def _pair(gap, **kw):
