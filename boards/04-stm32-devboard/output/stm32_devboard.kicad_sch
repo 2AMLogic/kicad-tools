@@ -2590,7 +2590,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" "http://ww1.microchip.com/downloads/en/devicedoc/22056b.pdf"
 			(at 100.33 100.33 0)
 			(effects
 				(font
@@ -2673,7 +2673,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 64.77 100.33 0)
 			(effects
 				(font
@@ -2727,7 +2727,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 134.62 100.33 0)
 			(effects
 				(font
@@ -2781,7 +2781,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 149.86 100.33 0)
 			(effects
 				(font
@@ -2835,7 +2835,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" "https://www.st.com/resource/en/datasheet/stm32f103c8.pdf"
 			(at 209.55 119.38 0)
 			(effects
 				(font
@@ -2981,7 +2981,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 160.02 85.09 0)
 			(effects
 				(font
@@ -3035,7 +3035,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 167.64 85.09 0)
 			(effects
 				(font
@@ -3089,7 +3089,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 175.26 85.09 0)
 			(effects
 				(font
@@ -3143,7 +3143,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 182.88 85.09 0)
 			(effects
 				(font
@@ -3197,7 +3197,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 190.5 85.09 0)
 			(effects
 				(font
@@ -3251,7 +3251,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 139.7 149.86 0)
 			(effects
 				(font
@@ -3305,7 +3305,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 132.08 165.1 0)
 			(effects
 				(font
@@ -3359,7 +3359,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 147.32 165.1 0)
 			(effects
 				(font
@@ -3413,7 +3413,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 289.56 100.33 0)
 			(effects
 				(font
@@ -3475,7 +3475,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 171.45 96.52 0)
 			(effects
 				(font
@@ -3529,7 +3529,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 265.43 149.86 0)
 			(effects
 				(font
@@ -3583,7 +3583,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 265.43 170.18 0)
 			(effects
 				(font

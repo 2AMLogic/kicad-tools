@@ -8,6 +8,34 @@ from kicad_tools.router.pairplan import tie
 from kicad_tools.router.pairplan.geometry import seg_pt_dist
 
 
+def test_aligned_pad_centers_take_the_clear_straight_hop():
+    # The lattice entered the pads along different axes on the seed-42 board.
+    points = [(0, 0), (0.15, 0.15), (0.15, 1.85), (-0.05, 2.05), (-0.05, 2.225), (0, 2.275)]
+    checked = []
+
+    def clear(a, b):
+        checked.append((a, b))
+        return True
+
+    assert tie.shorter_pair_hop(points, clear) == [points[0], points[-1]]
+    assert checked == [(points[0], points[-1])]
+
+
+@pytest.mark.parametrize("reserved_lane", [False, True], ids=["foreign-via", "future-pour-via"])
+def test_blocked_straight_hop_keeps_the_searched_pad_entries(reserved_lane):
+    points = [(0, 0), (0.25, 0.25), (0.5, 0.5), (0.5, 1.5), (0.25, 1.75), (0, 2)]
+
+    def clear(a, b):
+        return reserved_lane or seg_pt_dist(a, b, (0, 1)) >= 0.2
+
+    # A future pour via has no copper to probe yet. Its reserved lane limits
+    # how far any shortcut can move away from the searched path.
+    result = tie.shorter_pair_hop(points, clear, max_shift=0.3 if reserved_lane else None)
+    assert result is not None
+    assert result[:2] == points[:2] and result[-2:] == points[-2:]
+    assert min(seg_pt_dist(a, b, (0, 1)) for a, b in zip(result, result[1:], strict=False)) >= 0.2
+
+
 @pytest.mark.parametrize("rotate", [False, True])
 def test_hop_takes_a_short_octilinear_path_around_the_reserved_barrel(rotate):
     def xy(x, y):
