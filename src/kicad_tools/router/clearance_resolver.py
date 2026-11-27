@@ -817,6 +817,11 @@ def _read_project_clearances(
     if not isinstance(data, dict):
         return (None, None)
 
+    return project_min_clearance_mm(data), _project_net_class(data)
+
+
+def project_min_clearance_mm(data: dict) -> float | None:
+    """Read the board clearance floor from an already loaded KiCad project."""
     minimum: float | None = None
     board = data.get("board")
     if isinstance(board, dict):
@@ -830,7 +835,7 @@ def _read_project_clearances(
                 if candidate is not None and candidate > 0:
                     minimum = candidate if minimum is None else max(minimum, candidate)
 
-    return (minimum, _project_net_class(data))
+    return minimum
 
 
 def _project_net_class(data: dict) -> tuple[str, float] | None:

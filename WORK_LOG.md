@@ -16,6 +16,17 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **PR #10593**: fix(drc): bridge aligned same-net pads when an offset run grazes one of them
+- **Issue #10121** (closed): Verify the nine Board 05 pour-slot warnings against the native copper film
+- **Issue #10587** (closed): test flake: test_count_corners_serpentine_4000_under_budget exceeds its 1.0s wall-clock budget in the Test job
+- **PR #10591**: test: gate _count_corners serpentine budget on best of 3 runs
+- **Issue #10590** (closed): Placement treats a large interior Edge.Cuts opening as the board exterior
+- **PR #10592**: fix(pcb): select board outline face by exterior ring area
+- **PR #10128**: fix(validate): stop pour_slot reporting packed parallel track pairs
+- **Issue #10561** (closed): Board 03 USB common-run measurement depends on where an unchanged track is split
+- **PR #10571**: fix(board03): clip the USB common run to its window before measuring coupling
+- **PR #10472**: fix: carry a pad-edge escape end into the pad along its own line
+- **Issue #10588** (closed): create-issue.sh (and every config-resolver.sh caller) exits 126 on dispatch workers: 208 KB private-defaults tier overflows jq's per-argument limit
 - **Issue #10582** (closed): Reject terminal landings outside a purchasing row’s declared references
 - **PR #10583**: fix: reject purchasing terminal landings outside the row's declared refs
 - **Issue #10492** (closed): Offer an export mode that verifies reviewed copper before publishing manufacturing artwork

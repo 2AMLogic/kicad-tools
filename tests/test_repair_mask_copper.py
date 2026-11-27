@@ -5467,3 +5467,130 @@ def test_elbow_repair_preserves_tracks_on_neighbor_pour(tmp_path, capsys):
         for entry in outcome["unrepaired"]
     )
     assert board.read_bytes() == original
+
+
+# ---------------------------------------------------------------------------
+# Aligned-pad bridge (issue #9939, Board 03 J1/A4 and J1/B9)
+#
+# R1/1 (the finding's owner) is centred at (100, 100) and R2/1 at (100, 97), both
+# on N1 and both 2 x 1 mm, so their centres share the vertical line x = 100.  An
+# offset 0.2 mm run at x = 99.8 reaches R2/1 through a 45 degree lead and is
+# fed through a 45 degree join, grazing R1/1 on the way.
+# ---------------------------------------------------------------------------
+
+BRIDGE_RUN = _seg("run", (99.8, 102.0), (99.8, 97.2))
+BRIDGE_LEAD = _seg("lead", (99.8, 97.2), (100.0, 97.0))
+BRIDGE_JOIN = _seg("join", (99.4, 102.4), (99.8, 102.0))
+BRIDGE_FEED = _seg("feed", (99.4, 102.4), (99.4, 105.0))
+BRIDGE_COPPER = "\n".join([BRIDGE_RUN, BRIDGE_LEAD, BRIDGE_JOIN, BRIDGE_FEED])
+
+
+def _bridge_finding(conductor: str = "run") -> DRCViolation:
+    return DRCViolation(
+        type=ViolationType.MASK_TO_COPPER,
+        type_str="mask_to_copper",
+        severity=Severity.ERROR,
+        message=f"Mask-to-copper overlap: violation; opening R1/1; {PASS_THROUGH}",
+        locations=[Location(x_mm=99.8, y_mm=100.0, layer="F.Cu")],
+        items=[PAD, conductor],
+        required_value_mm=0.09,
+    )
+
+
+def _segments(board: Path) -> dict[str, tuple[tuple[float, float], tuple[float, float]]]:
+    out = {}
+    for node in parse_file(board).find_all("segment"):
+        uuid = str(node.find("uuid").get_first_atom()).strip('"')
+        s = [float(a) for a in node.find("start").get_atoms()]
+        e = [float(a) for a in node.find("end").get_atoms()]
+        out[uuid] = ((s[0], s[1]), (e[0], e[1]))
+    return out
+
+
+def test_offset_run_becomes_a_bridge_between_the_two_pad_centres(tmp_path):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100 97")
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_bridge_finding()], max_displacement=1.0)
+    assert result.repaired == 1 and not result.unrepaired
+    action = result.actions[0]
+    assert action.action == "bridge_aligned_pads"
+    repairer.save(board)
+    segments = _segments(board)
+    # The run now joins the two pad centres directly; its lead is gone.
+    assert segments["run"] == ((100.0, 100.0), (100.0, 97.0))
+    # The join kept its 45 degree direction and now meets the pad-centre line;
+    # the former lead is the entry from the join to the first pad's centre, so
+    # each part ends in a pad and no conductor is added or dropped.
+    assert segments["join"] == ((99.4, 102.4), (pytest.approx(100.0), pytest.approx(101.8)))
+    assert segments["lead"] == ((pytest.approx(100.0), pytest.approx(101.8)), (100.0, 100.0))
+    assert set(segments) == {"run", "lead", "join", "feed"}
+    assert segments["feed"] == ((99.4, 102.4), (99.4, 105.0))  # untouched
+
+
+def test_bridge_dry_run_predicts_without_touching_the_board(tmp_path):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100 97")
+    original = board.read_bytes()
+    result = MaskCopperRepairer(board).repair(
+        [_bridge_finding()], max_displacement=1.0, dry_run=True
+    )
+    assert result.repaired == 1 and result.actions[0].action == "bridge_aligned_pads"
+    assert board.read_bytes() == original
+
+
+def test_bridge_undo_restores_every_segment_exactly(tmp_path):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100 97")
+    before = _segments(board)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_bridge_finding()], max_displacement=1.0)
+    repairer.save(board)
+    undo = MaskCopperRepairer(board)
+    assert undo.undo_action(result.actions[0])
+    undo.save(board)
+    assert _segments(board) == before
+
+
+def test_bridge_is_declined_when_the_new_line_crowds_other_net_copper(tmp_path):
+    # An N2 track ends 0.1 mm from the centre line: the bridge would leave it
+    # closer than the 0.15 mm floor while the old run was 0.3 mm away.
+    crowd = _seg("crowd", (100.3, 98.5), (102.0, 98.5), net=2)
+    board = _board2(tmp_path, BRIDGE_COPPER + "\n" + crowd, "100 97")
+    before = _segments(board)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_bridge_finding()], max_displacement=1.0, clearance_mm=0.15)
+    assert result.repaired == 0
+    assert [u.reason for u in result.unrepaired] == ["would_violate_clearance"]
+    repairer.save(board)
+    assert _segments(board) == before  # the run, its lead and the join are untouched
+
+
+def test_bridge_is_declined_beyond_the_displacement_limit(tmp_path):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100 97")
+    result = MaskCopperRepairer(board).repair([_bridge_finding()], max_displacement=0.1)
+    assert result.repaired == 0
+    assert [u.reason for u in result.unrepaired] == ["exceeds_max_displacement"]
+
+
+def test_bridge_does_not_apply_when_the_pad_centres_are_not_aligned(tmp_path):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100.6 97")
+    result = MaskCopperRepairer(board).repair([_bridge_finding()], max_displacement=1.0)
+    assert result.repaired == 0
+    assert [u.reason for u in result.unrepaired] == ["not_own_pad_entry"]
+
+
+def test_fix_drc_keeps_a_bridge_that_clears_its_finding(tmp_path, monkeypatch):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100 97")
+    code = _run(monkeypatch, board, [_report(_bridge_finding()), _report(), _report()])
+    assert code == 0
+    assert _segments(board)["run"] == ((100.0, 100.0), (100.0, 97.0))
+
+
+def test_fix_drc_restores_the_run_and_its_lead_when_the_bridge_does_not_clear(
+    tmp_path, monkeypatch, capsys
+):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100 97")
+    before = _segments(board)
+    still = _report(_bridge_finding())
+    code = _run(monkeypatch, board, [still, still, still])
+    assert code != 0
+    assert _segments(board) == before  # run, lead and join all back where they were
+    assert "finding_not_cleared" in capsys.readouterr().out
