@@ -555,7 +555,7 @@ class TestCommit:
         destination_flash = box(11.5, 13.5, 12.5, 14.5)
         assert any(destination_flash.covers(p) for p in ends)
 
-    @pytest.mark.parametrize("width", [0.28, 0.22])
+    @pytest.mark.parametrize("width", [0.28, 0.265, 0.22])
     @pytest.mark.parametrize(
         "pad",
         [
@@ -582,6 +582,30 @@ class TestCommit:
         ends = [Point(point) for start, end, *_ in _file_segments(out) for point in (start, end)]
         # This central rectangle lies inside both the chamfer and the trapezoid.
         assert any(box(109.935, 114.55, 110.115, 115.45).covers(p) for p in ends)
+
+    @pytest.mark.parametrize("order", ["R1.1 R2.1", "R2.1 R1.1"])
+    @pytest.mark.parametrize("width", [0.28, 0.265])
+    @pytest.mark.parametrize(
+        "pad",
+        [
+            "smd roundrect (at 0 0) (size {width} 1) (roundrect_rratio 0) "
+            "(chamfer_ratio 0.2) (chamfer top_left top_right)",
+            "smd trapezoid (at 0 0) (size {width} 1) (rect_delta 0.08 0)",
+        ],
+        ids=["chamfered", "trapezoid"],
+    )
+    def test_two_narrow_approximated_pads_half_a_step_apart(
+        self, tmp_path, capsys, pad, width, order
+    ):
+        board = tmp_path / "two_narrow.kicad_pcb"
+        two_pads = BOARD.partition("  (segment ")[0] + ")\n"
+        before, r2 = two_pads.split("(at 120 110)")
+        r2 = r2.replace("smd rect (at 0 0) (size 0.8 0.8)", pad.format(width=width))
+        before = before.replace("smd rect (at 0 0) (size 0.8 0.8)", pad.format(width=width))
+        board.write_text(before + "(at 110.025 115)" + r2)
+        args = (str(board), "--link", f"SIG {order}", "--link-layers", "F.Cu")
+        rc, probe = _run(capsys, *args, "--trace-width", ".2", "--probe")
+        assert rc == 0 and probe["links"][0]["routable"]
 
     def test_output_file_leaves_input_alone(self, board, tmp_path, capsys):
         out = tmp_path / "out.kicad_pcb"

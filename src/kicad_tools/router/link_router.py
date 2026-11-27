@@ -646,9 +646,40 @@ def _uniform_pad_lands(fp: Any, pad: Any, layers: Collection[str]) -> dict[str, 
     return dict.fromkeys(layers, outline) if outline is not None else {}
 
 
+def _approximated_pad_box(fp: Any, pad: Any, geom: Any) -> Any:
+    """Un-eroded, offset-aware size box for a pad the outline models only roughly.
+
+    ``pad_copper_outline`` erodes the box of chamfered ``roundrect`` and
+    ``trapezoid`` pads by ``PAD_FALLBACK_ERODE`` per side; on top of the
+    terminal inset that empties 0.26-0.28 mm wide pads on a 0.05 mm grid.  The
+    ordinary route keeps the historical un-eroded box (now at the pad's
+    ``(offset)`` centre); ``exact_pad_lands`` still marks it unmodelled.
+    """
+    from shapely.geometry import Polygon
+
+    from kicad_tools.geometry.copper import custom_pad_board_outline, pad_board_center
+
+    center = pad_board_center(pad, fp.position, fp.rotation)
+    w, h = pad.size
+    if custom_pad_board_outline(pad, center) is not None or w <= 0 or h <= 0:
+        return geom
+    ox, oy = getattr(pad, "drill_offset", (0.0, 0.0)) or (0.0, 0.0)
+    ang = math.radians(-(getattr(pad, "rotation", 0.0) or 0.0))
+    ca, sa = math.cos(ang), math.sin(ang)
+    return Polygon(
+        [
+            (
+                center[0] + (lx + ox) * ca - (ly + oy) * sa,
+                center[1] + (lx + ox) * sa + (ly + oy) * ca,
+            )
+            for lx, ly in ((-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2))
+        ]
+    )
+
+
 def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None:
     """The copper of footprint pad ``ref.pad_number`` as a :class:`LinkTerminal`."""
-    from kicad_tools.geometry.copper import pad_copper_outline
+    from kicad_tools.geometry.copper import pad_copper_outline, pad_outline_is_exact
 
     copper = _copper_layer_names(pcb)
     fp = pcb.get_footprint(ref)
@@ -662,6 +693,8 @@ def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None
             geom = pad_copper_outline(pad, fp.position, fp.rotation)
             if geom is None:
                 return None
+            if not pad_outline_is_exact(pad):
+                geom = _approximated_pad_box(fp, pad, geom)
             c = geom.centroid
             stack = _padstack_lands(fp, pad, layers)
             # The ordinary named-pad route retains its existing approximation
