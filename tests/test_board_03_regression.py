@@ -66,8 +66,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import runpy
+import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -97,6 +100,45 @@ SCH_FILE = OUTPUT_DIR / "usb_joystick.kicad_sch"
 PCB_FILE = OUTPUT_DIR / "usb_joystick.kicad_pcb"
 ROUTED_PCB_FILE = OUTPUT_DIR / "usb_joystick_routed.kicad_pcb"
 UNROUTED_PCB = BOARD_DIR / "regression-fixture" / "usb_joystick.kicad_pcb"
+
+
+def test_recipe_exports_one_canonical_rules_file(tmp_path, monkeypatch) -> None:
+    from kicad_tools.export.manufacturing import ManufacturingPackage, ManufacturingResult
+
+    output = shutil.copytree(
+        OUTPUT_DIR,
+        tmp_path / "output",
+        ignore=shutil.ignore_patterns("manufacturing", "*.zip", "readiness*", "*report.json"),
+    )
+    routed = output / ROUTED_PCB_FILE.name
+    expected_rules = routed.with_suffix(".kicad_dru").read_bytes()
+
+    def export_project_only(package, out_dir):
+        result = ManufacturingResult(out_dir)
+        package._generate_project_zip(out_dir, result)
+        package._generate_manifest(out_dir, result)
+        return result
+
+    monkeypatch.setattr(ManufacturingPackage, "export", export_project_only)
+    monkeypatch.syspath_prepend(str(BOARD_DIR))
+    recipe = runpy.run_path(str(BOARD_DIR / "generate_design.py"))
+    assert recipe["export_manufacturing_bundle"](routed, output)
+
+    with zipfile.ZipFile(output / "manufacturing" / "kicad_project.zip") as archive:
+        assert archive.read("usb_joystick.kicad_dru") == expected_rules
+        assert sorted(archive.namelist()) == sorted(
+            [
+                "usb_joystick.kicad_dru",
+                "usb_joystick.kicad_pcb",
+                "usb_joystick.kicad_pro",
+                "usb_joystick.kicad_sch",
+                "VERSION.md",
+                "fp-lib-table",
+                "footprints/Joystick.pretty/Samtec_TSM-103-01-T-DV.kicad_mod",
+                "3dshapes/JST_PH_S5B-PH-SM4-TB.wrl",
+            ]
+        )
+
 
 # Issue #3410: ``generate_design.py:route_pcb()`` now delegates to the
 # production ``kct route`` CLI invocation (pinned by
