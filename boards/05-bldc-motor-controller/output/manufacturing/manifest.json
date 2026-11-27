@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.29.0",
-  "generated_at": "2026-11-27T12:25:23.572478+00:00",
+  "generated_at": "2026-11-27T17:58:05.539013+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "HARDWARE.md": {
@@ -13,11 +13,11 @@
       "size": 1686
     },
     "assembly-back.pdf": {
-      "sha256": "2249a1b148846cd8b6d9fb7221655825d09ca22675cabfb8eea58bf8d2d17a58",
+      "sha256": "93d2fe1f3ca86d9052bc27135c8aa197f2e7bd106823530b4276520257ebe0db",
       "size": 87242
     },
     "assembly-front.pdf": {
-      "sha256": "56214a79ed49fd677af585545f68426eaa832c1172cc740f2768bbd36c6853cf",
+      "sha256": "ea51614c33975e46b6d4e616206edfca27f35a374ff87f49c5462b0a02990cc6",
       "size": 141784
     },
     "bom_jlcpcb.csv": {
@@ -25,7 +25,7 @@
       "size": 1375
     },
     "check-report.json": {
-      "sha256": "a8e126e2d6355c4f41fb5d9dadf28789bd37d1ac63bf284b700e87c899626d50",
+      "sha256": "9a5730e68af6a035c56b9b692390be1111ff5664a807fc76ef8672b498cdec4d",
       "size": 1838566
     },
     "cpl_jlcpcb.csv": {
@@ -53,8 +53,8 @@
       "size": 3516
     },
     "gerbers/gerbers.zip": {
-      "sha256": "8df8bdd1f0311f3d3711a39d462fab43c830cafa8380b02b0842ba01c494819b",
-      "size": 212850
+      "sha256": "6649652fe949ed80890c988dc892795fd5dd40a9f906607a907ff6cd27ec05ab",
+      "size": 212853
     },
     "images/assembly.png": {
       "sha256": "853f8a7cbb9df90f2c8afa89d34491ae7001938308f361fc6cfe04c7d90d4480",
@@ -93,11 +93,11 @@
       "size": 443637
     },
     "kct-check.json": {
-      "sha256": "a8e126e2d6355c4f41fb5d9dadf28789bd37d1ac63bf284b700e87c899626d50",
+      "sha256": "9a5730e68af6a035c56b9b692390be1111ff5664a807fc76ef8672b498cdec4d",
       "size": 1838566
     },
     "kicad_project.zip": {
-      "sha256": "fae8eea80cc25a521832acd50c1c25759f890128c035ae8c80f86c9ea614bbd9",
+      "sha256": "6cefd789d5d88110585feb5acb48f91f5278e244647771d5bdb3c4e93256c274",
       "size": 284183
     },
     "lvs.json": {
@@ -149,7 +149,7 @@
       "size": 3628640
     },
     "schematic.pdf": {
-      "sha256": "2f987326cc1c6075a0e09695c8fe3de4488ab5aac7d8fffbf430fe6c82b9a7b9",
+      "sha256": "8ecadad4dd760d3b57ffe77aec5327b037c1c3ab33485408058528a37d721916",
       "size": 159563
     }
   },
@@ -1872,7 +1872,7 @@
               "C6"
             ],
             "per_board": 1,
-            "stock": 600473,
+            "stock": 586958,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -1883,7 +1883,7 @@
               "U1"
             ],
             "per_board": 1,
-            "stock": 35984,
+            "stock": 36285,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -1894,7 +1894,7 @@
               "C8"
             ],
             "per_board": 1,
-            "stock": 9141919,
+            "stock": 9301325,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -1905,7 +1905,7 @@
               "D1"
             ],
             "per_board": 1,
-            "stock": 302993,
+            "stock": 301791,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -1917,7 +1917,7 @@
               "C4"
             ],
             "per_board": 2,
-            "stock": 3228793,
+            "stock": 3184656,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -1936,7 +1936,7 @@
               "R9"
             ],
             "per_board": 9,
-            "stock": 43524277,
+            "stock": 43176664,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -1948,7 +1948,7 @@
               "R4"
             ],
             "per_board": 2,
-            "stock": 37826482,
+            "stock": 37652725,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -1959,7 +1959,7 @@
               "R2"
             ],
             "per_board": 1,
-            "stock": 218969,
+            "stock": 212689,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -1970,7 +1970,7 @@
               "C1"
             ],
             "per_board": 1,
-            "stock": 24937,
+            "stock": 24619,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -1981,7 +1981,7 @@
               "D2"
             ],
             "per_board": 1,
-            "stock": 11420,
+            "stock": 11341,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -1992,7 +1992,7 @@
               "C7"
             ],
             "per_board": 1,
-            "stock": 3600067,
+            "stock": 3998846,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -2014,7 +2014,7 @@
               "RV1"
             ],
             "per_board": 1,
-            "stock": 9728,
+            "stock": 9407,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -2025,7 +2025,7 @@
               "J3"
             ],
             "per_board": 1,
-            "stock": 61261,
+            "stock": 58639,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -2036,7 +2036,7 @@
               "U3"
             ],
             "per_board": 1,
-            "stock": 52,
+            "stock": 46,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -2047,7 +2047,7 @@
               "J2"
             ],
             "per_board": 1,
-            "stock": 423596,
+            "stock": 415828,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -2067,7 +2067,7 @@
               "C9"
             ],
             "per_board": 10,
-            "stock": 19853563,
+            "stock": 19565805,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -2078,7 +2078,7 @@
               "R1"
             ],
             "per_board": 1,
-            "stock": 4471,
+            "stock": 4465,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -2089,7 +2089,7 @@
               "J4"
             ],
             "per_board": 1,
-            "stock": 72392,
+            "stock": 71255,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -2101,7 +2101,7 @@
               "J5"
             ],
             "per_board": 2,
-            "stock": 26896,
+            "stock": 26756,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -2112,7 +2112,7 @@
               "D3"
             ],
             "per_board": 1,
-            "stock": 3506610,
+            "stock": 3441982,
             "verified": true,
             "source": "live",
             "age_days": 0
