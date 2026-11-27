@@ -415,7 +415,14 @@ class ReviewedCopperExport:
     (:meth:`write_diagnostics`).
     """
 
-    def __init__(self, live: Path, *, project_root: Path | None, output_dir: Path) -> None:
+    def __init__(
+        self,
+        live: Path,
+        *,
+        project_root: Path | None,
+        output_dir: Path,
+        schematic_path: Path | None = None,
+    ) -> None:
         self.live = live
         self.output_dir = output_dir
         self.pcb_bytes = live.read_bytes()
@@ -435,7 +442,7 @@ class ReviewedCopperExport:
             self.reference_dir = self.snapshot_dir / "reference"
             self.snapshot.write_bytes(self.pcb_bytes)
             self._copy_authored(self.snapshot)
-            self._mirror_project()
+            self._mirror_project(schematic_path)
         except BaseException:
             self.close()
             raise
@@ -453,7 +460,7 @@ class ReviewedCopperExport:
             if authored.is_file():
                 shutil.copy2(authored, board.with_suffix(suffix))
 
-    def _mirror_project(self) -> None:
+    def _mirror_project(self, schematic_path: Path | None) -> None:
         board = self.dir / self.relative
         prepared = {
             board.name,
@@ -465,10 +472,7 @@ class ReviewedCopperExport:
         for path in (self.output_dir, self.diagnostics_root):
             with contextlib.suppress(OSError, RuntimeError):
                 resolved = path.resolve()
-                # A destination that is the board's own directory (or holds the
-                # project) is also where the inputs live: excluding it would
-                # drop them. Only a destination apart from the inputs is a
-                # package, not a source.
+                # Keep the board directory and its project inputs together.
                 if not self.board_dir.is_relative_to(resolved):
                     excluded.add(resolved)
 
@@ -488,6 +492,7 @@ class ReviewedCopperExport:
                 return False
 
         self._mirror(self.root, self.dir, skip=skip)
+        self._copy_sheets_in_outputs(schematic_path, excluded)
         board.parent.mkdir(parents=True, exist_ok=True)
         # The sources the export prepares start as private bytes of the saved ones.
         board.write_bytes(self.pcb_bytes)
@@ -495,6 +500,25 @@ class ReviewedCopperExport:
         marker = self.live.with_name(f".{self.live.name}.zonefill")
         if marker.is_file():
             shutil.copy2(marker, board.with_name(marker.name))
+
+    def _copy_sheets_in_outputs(self, schematic_path: Path | None, excluded: set[Path]) -> None:
+        """Carry the selected hierarchy through an otherwise excluded output directory."""
+        from kicad_tools.report.utils import find_schematic, walk_schematic_hierarchy
+
+        outputs = {path for path in excluded if path.is_relative_to(self.root) and path.is_dir()}
+        if not outputs:
+            return
+        root_sheet = schematic_path or find_schematic(self.live)
+        if root_sheet is None:
+            return
+        hierarchy = walk_schematic_hierarchy(
+            root_sheet, lambda sheet: sheet.is_relative_to(self.root)
+        )
+        for sheet in hierarchy.sheets:
+            if any(sheet.is_relative_to(output) for output in outputs):
+                target = self.dir / sheet.relative_to(self.root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(sheet, target)
 
     def _mirror(self, source: Path, target: Path, *, skip: Callable[[Path], bool]) -> None:
         for entry in sorted(source.iterdir()):

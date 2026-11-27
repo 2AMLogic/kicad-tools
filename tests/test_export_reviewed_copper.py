@@ -30,7 +30,11 @@ import pytest
 from kicad_tools.cli import main as cli_main
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.export.gerber import JLCPCB_PRESET, GerberExporter
-from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+from kicad_tools.export.manufacturing import (
+    ManufacturingConfig,
+    ManufacturingPackage,
+    verify_manifest,
+)
 from kicad_tools.export.preflight import PreflightConfig
 from kicad_tools.export.reviewed_copper import (
     REVIEWED_COPPER_TOLERANCE_MM2,
@@ -981,3 +985,72 @@ def test_destination_that_is_the_board_directory_keeps_archive_inputs(
         n.endswith("probe.kicad_sch") for n in members(out)
     )
     assert members(out) >= members(tmp_path / "plain")
+
+
+@needs_kicad_cli
+@pytest.mark.parametrize("destination", ["schematic", "schematic/children"])
+def test_reviewed_export_keeps_selected_hierarchy_in_output(tmp_path, monkeypatch, destination):
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    project = tmp_path / "project"
+    pcb_dir = project / "pcb"
+    pcb_dir.mkdir(parents=True)
+    board = _four_layer_board(pcb_dir / "probe.kicad_pcb")
+    schematic = project / "schematic" / "probe.kicad_sch"
+    child = schematic.parent / "children" / "power.kicad_sch"
+    child.parent.mkdir(parents=True)
+    sheet_header = '(kicad_sch (version 20240108) (generator eeschema) (paper "A4")'
+    schematic.write_text(
+        sheet_header
+        + ' (sheet (property "Sheetname" "Power") (property "Sheetfile" "children/power.kicad_sch")))\n'
+    )
+    child.write_text(sheet_header + ")\n")
+    source_sheets = {path.name: path.read_bytes() for path in (schematic, child)}
+
+    plain = tmp_path / "ordinary"
+    reviewed = project / destination
+    args = ["--sch", str(schematic), "--project-root", str(project)]
+    assert _export(board, reviewed, *args) == 0
+    assert cli_main(["export", str(board), *_EXPORT_ARGS, "-o", str(plain), *args]) == 0
+
+    with (
+        zipfile.ZipFile(plain / "kicad_project.zip") as ordinary_zip,
+        zipfile.ZipFile(reviewed / "kicad_project.zip") as reviewed_zip,
+    ):
+        assert sorted(reviewed_zip.namelist()) == sorted(ordinary_zip.namelist())
+        sheets = [name for name in ordinary_zip.namelist() if name.endswith(".kicad_sch")]
+        assert {Path(name).name for name in sheets} == source_sheets.keys()
+        for name in sheets:
+            assert (
+                reviewed_zip.read(name) == ordinary_zip.read(name) == source_sheets[Path(name).name]
+            )
+    assert verify_manifest(reviewed / "manifest.json") == []
+
+
+def test_working_copy_restores_only_selected_sheets_inside_an_output(tmp_path):
+    board = tmp_path / "probe.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    output = tmp_path / "generated"
+    nested = output / "more"
+    nested.mkdir(parents=True)
+    schematic = board.with_suffix(".kicad_sch")
+    schematic.write_text('(kicad_sch (sheet (property "Sheetfile" "generated/power.kicad_sch")))')
+    child = output / "power.kicad_sch"
+    child.write_text('(kicad_sch (sheet (property "Sheetfile" "more/sense.kicad_sch")))')
+    grandchild = nested / "sense.kicad_sch"
+    grandchild.write_text("(kicad_sch)")
+    (nested / "unreferenced.kicad_sch").write_text("(kicad_sch)")
+    (output / "manifest.json").write_text("{}")
+
+    workspace = ReviewedCopperExport(board, project_root=tmp_path, output_dir=output)
+    try:
+        staged = workspace.dir / "generated"
+        assert {p.relative_to(staged) for p in staged.rglob("*") if p.is_file()} == {
+            child.relative_to(output),
+            grandchild.relative_to(output),
+        }
+        for source in (child, grandchild):
+            target = staged / source.relative_to(output)
+            assert target.read_bytes() == source.read_bytes()
+            assert not source.samefile(target)
+    finally:
+        workspace.close()

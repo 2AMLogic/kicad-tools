@@ -2025,7 +2025,10 @@ class ManufacturingPackage:
         live = self.pcb_path
         try:
             workspace = ReviewedCopperExport(
-                live, project_root=self.config.project_root, output_dir=out_dir
+                live,
+                project_root=self.config.project_root,
+                output_dir=out_dir,
+                schematic_path=self.schematic_path,
             )
         except (OSError, ValueError) as exc:
             result.errors.append(f"Could not stage a working copy of {live.name}: {exc}")
