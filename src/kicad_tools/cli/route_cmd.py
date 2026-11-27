@@ -8513,7 +8513,7 @@ def _canonicalize_routed_uuids(output_path: Path, *, args=None) -> None:
 
 
 def _fill_zones_after_route(
-    output_path: Path, quiet: bool = False, *, router=None, args=None
+    output_path: Path, quiet: bool = False, *, router=None, args=None, require_saved: bool = False
 ) -> None:
     """Fill copper-pour zones after routing completes.
 
@@ -8541,6 +8541,7 @@ def _fill_zones_after_route(
     Args:
         output_path: Path to the routed PCB file (modified in place).
         quiet: Suppress informational output.
+        require_saved: Also verify selective placement fills against a full native refill.
     """
     record_stage("native-zone-fill")
     if args is not None:
@@ -8582,6 +8583,16 @@ def _fill_zones_after_route(
 
                 write_native_zone_clearance_rules(output_path)
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
+            if require_saved:
+                # Selective filling intentionally leaves protected pours fixed.
+                # A new through via must still clear them in the saved board.
+                from kicad_tools.cli.runner import find_kicad_cli
+                from kicad_tools.export.manufacturing import _saved_zone_fill_matches_native_refill
+
+                cli = find_kicad_cli()
+                args._zone_fill_verified = (
+                    cli is not None and _saved_zone_fill_matches_native_refill(output_path, cli)
+                )
             if not quiet:
                 print("  Zone fill: complete; placement-excluded copper preserved")
         except Exception as exc:
@@ -8718,7 +8729,7 @@ def _fill_zones_after_route(
     # Validate net format after zone fill -- kicad-cli may corrupt nets.
     report = validate_net_format(output_path)
     if args is not None:
-        args._zone_fill_verified = report.valid
+        args._zone_fill_verified = report.valid and result.refill_saved
     if not report.valid:
         logger.warning(
             "Net format corruption detected after zone fill: "
@@ -11343,17 +11354,21 @@ def _publish_preserved_departure(pcb_path, output_path, route_sexp, args, router
         )
         trial = copy(args)
         trial._preserved_departure_trial = True
-        _run_post_save_stitching(trial, staged, quiet=quiet)
         _fill_zones_after_route(staged, quiet=quiet, router=router, args=trial)
         _complete_pour_nets_with_oracle(staged, args=trial, quiet=quiet, router=router)
-        if not (
-            getattr(trial, "_zone_fill_verified", False)
-            and getattr(trial, "_pour_connectivity_verified", False)
-        ):
-            # Keep the input's saved fills. The declined signal and its
-            # temporary cut through the original power pour stay together.
-            relocate({staged: None})
-            _write_routed_pcb(source, output_path, "", guard_copper_loss=True)
+        verified = False
+        try:
+            _run_post_save_stitching(trial, staged, router=router, pour_pass_ran=True, quiet=quiet)
+            verified = getattr(trial, "_zone_fill_verified", False) and getattr(
+                trial, "_pour_connectivity_verified", False
+            )
+        finally:
+            if not verified:
+                # Retain the source even if the post-stitch refill raised
+                # before this speculative departure could be published.
+                relocate({staged: None})
+                _write_routed_pcb(source, output_path, "", guard_copper_loss=True)
+        if not verified:
             return False
 
         moves: list[tuple[Path, Path | None]] = [
@@ -11406,6 +11421,7 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
 
     args._stranded_pour_links = 0
     args._pour_connectivity_verified = False
+    args._oracle_changed_copper = False
     args._exhausted_mixed_plane_pads = frozenset()
     # Issue #6273: True when the check was cut by --timeout before KiCad
     # reported anything -- the count above is then unknown, not 0.
@@ -11475,6 +11491,8 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
         )
         if not quiet:
             print("\n--- KiCad Oracle Completion (pour nets) ---")
+        # If the closer raises mid-edit, its incoming fill is no longer proven.
+        args._oracle_changed_copper = True
         result = run_oracle_completion(
             output_path,
             oracle=_make_pour_oracle(args),
@@ -11493,6 +11511,7 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             # regression merely for being below the project's via floors.
             declared_via=(closer.via_size, closer.via_drill),
         )
+        args._oracle_changed_copper = any(round_.kept for round_ in result.rounds)
     except Exception as exc:  # advisory machinery must never fail a route
         logger.warning("Oracle completion skipped: %s", exc)
         return 0
@@ -15387,19 +15406,23 @@ def route_with_layer_escalation(
         quiet=quiet,
     )
 
-    # Issue #7377: --stitch-power-planes runs on every tail, after the save
-    # and before the zone fill (same position as the single-attempt path).
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
     # Fill copper-pour zones now that traces exist (issue #2516).
     # Must run BEFORE DRC so the DRC sees filled zones rather than bare
     # zone outlines and does not flag zone-to-trace clearance against
     # unfilled polygons.
-    if final_result.nets_routed > 0:
+    run_pour_pass = final_result.nets_routed > 0
+    if run_pour_pass:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+    _run_post_save_stitching(
+        args,
+        output_path,
+        router=final_result.router,
+        pour_pass_ran=run_pour_pass,
+        quiet=quiet,
+    )
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
@@ -16446,16 +16469,20 @@ def route_with_rule_relaxation(
         quiet=quiet,
     )
 
-    # Issue #7377: --stitch-power-planes runs on every tail, after the save
-    # and before the zone fill (same position as the single-attempt path).
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
     # Fill copper-pour zones now that traces exist (issue #2516).
-    if final_result.nets_routed > 0:
+    run_pour_pass = final_result.nets_routed > 0
+    if run_pour_pass:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+    _run_post_save_stitching(
+        args,
+        output_path,
+        router=final_result.router,
+        pour_pass_ran=run_pour_pass,
+        quiet=quiet,
+    )
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
@@ -19063,16 +19090,20 @@ def route_with_combined_escalation(
         quiet=quiet,
     )
 
-    # Issue #7377: --stitch-power-planes runs on every tail, after the save
-    # and before the zone fill (same position as the single-attempt path).
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
     # Fill copper-pour zones now that traces exist (issue #2516).
-    if final_result.nets_routed > 0:
+    run_pour_pass = final_result.nets_routed > 0
+    if run_pour_pass:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+    _run_post_save_stitching(
+        args,
+        output_path,
+        router=final_result.router,
+        pour_pass_ran=run_pour_pass,
+        quiet=quiet,
+    )
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
@@ -19698,19 +19729,28 @@ def _warn_bus_flags_ignored_early(args, router, multi_res_plan=None) -> None:
         _warn_bus_flags_ignored(args, reason)
 
 
-def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
+class _PostStitchRefillError(RuntimeError):
+    """KiCad did not save a verified fill around the proposed stitch copper."""
+
+
+def _run_post_save_stitching(
+    args, output_path: Path, *, router, pour_pass_ran: bool, quiet: bool = False
+):
     """Run ``--stitch-power-planes`` on the saved board; shared by every tail (#7377).
 
-    Must run after the routed board is saved and verified, and before the
-    copper-pour zone fill so the fill and DRC see the stitching vias.  Returns
-    the ``run_stitch`` result, or ``None`` when the flag is off, ``--dry-run``
-    is set, or the board has no plane nets.
+    The stitcher checks pads against the pour left by signal routing and oracle
+    completion. A plane-only board skips that ordinary pass, so run it here
+    before deciding which pads still need copper. If stitching edits the board,
+    repeat the fill and connectivity check on the geometry that will ship.
     """
     if not getattr(args, "stitch_power_planes", False) or args.dry_run:
         return None
 
     from kicad_tools.cli.stitch_cmd import find_all_plane_nets, run_stitch
     from kicad_tools.core.sexp_file import load_pcb as load_stitch_pcb
+    from kicad_tools.sidecars import PROJECT_SIDECAR_SUFFIXES, copy_project_sidecars
+
+    from .route_receipt import relocate
 
     if not quiet:
         print("\n--- Stitching Power Planes ---")
@@ -19722,18 +19762,60 @@ def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
             print("  No power plane nets found (no zones with assigned nets)")
         return None
 
+    if not pour_pass_ran:
+        _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
+        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
+
     net_names = list(plane_nets.keys())
     if not quiet:
         print(f"  Found {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
 
-    stitch_result = run_stitch(
-        pcb_path=output_path,
-        net_names=net_names,
-        via_size=args.via_diameter,  # Use same via size as routing
-        drill=args.via_drill,
-        clearance=args.clearance,
-        dry_run=False,
-    )
+    # Keep the published board and project together while the new via or
+    # trace still crosses the previous fill. Only promote the refilled copy.
+    with tempfile.TemporaryDirectory(prefix=".kct-stitch-", dir=output_path.parent) as directory:
+        staged = Path(directory) / output_path.name
+        shutil.copy2(output_path, staged)
+        copy_project_sidecars(output_path, staged)
+        refresh_fill = not getattr(args, "_zone_fill_verified", False) or getattr(
+            args, "_oracle_changed_copper", False
+        )
+        if refresh_fill:
+            _fill_zones_after_route(
+                staged, quiet=quiet, router=router, args=args, require_saved=True
+            )
+            if not args._zone_fill_verified:
+                relocate({staged: None})
+                raise _PostStitchRefillError(
+                    "Could not verify a saved zone refill before stitching."
+                )
+        stitch_result = run_stitch(
+            pcb_path=staged,
+            net_names=net_names,
+            via_size=args.via_diameter,
+            drill=args.via_drill,
+            clearance=args.clearance,
+            dry_run=False,
+            fill_verified=True,
+        )
+        added_copper = bool(stitch_result.vias_added or stitch_result.traces_added)
+        if added_copper:
+            _fill_zones_after_route(
+                staged, quiet=quiet, router=router, args=args, require_saved=True
+            )
+            if not args._zone_fill_verified:
+                relocate({staged: None})
+                raise _PostStitchRefillError(
+                    "Post-stitch zone refill could not be verified. Discarded the proposed stitch."
+                )
+        if refresh_fill or added_copper:
+            moves: list[tuple[Path, Path | None]] = [
+                (output_path.with_suffix(ext), staged.with_suffix(ext))
+                for ext in PROJECT_SIDECAR_SUFFIXES
+                if staged.with_suffix(ext).is_file()
+            ]
+            _publish_transaction([*moves, (output_path, staged)])
+            relocate({staged: output_path})
+            _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
 
     if not quiet:
         if stitch_result.vias_added:
@@ -25633,6 +25715,9 @@ def _main_impl(argv: list[str] | None = None, *, plane_pads: frozenset[str] = fr
                         # completion pass a no-op.
                         result = _chain_budget_coarser_pass(args, argv, result)
                         result = _chain_complete_pass(args, argv, result)
+                    except _PostStitchRefillError as exc:
+                        print(f"Error: {exc}", file=sys.stderr)
+                        result = EXIT_UNVERIFIED
                     except BaseException:
                         if gate is not None:
                             # Never leave an unjudged board at --output.
@@ -28633,12 +28718,15 @@ def _run_main_impl(args, parser, argv) -> int:
     output_verification_regressed = output_verification.regressed
 
     if departure is None:
-        _run_post_save_stitching(args, output_path, quiet=quiet)
         # Fill before DRC so KiCad sees poured copper (issue #2516). A
         # provisional departure already ran both steps on its staged board.
-        if not args.dry_run and stats["nets_routed"] > 0:
+        run_pour_pass = not args.dry_run and stats["nets_routed"] > 0
+        if run_pour_pass:
             _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
             _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
+        _run_post_save_stitching(
+            args, output_path, router=router, pour_pass_ran=run_pour_pass, quiet=quiet
+        )
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.

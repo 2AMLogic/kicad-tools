@@ -141,7 +141,9 @@ class FakeKiCad:
         via_uuid, via_desc = self.clearance_on[zone]
         return _violation("clearance", (zone, "Zone [GND]"), (via_uuid, via_desc))
 
-    def report(self, pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict:
+    def report(
+        self, pcb_path: Path, kicad_cli: Path, *, refill: bool, require_save: bool = False
+    ) -> dict:
         self.calls.append("refill" if refill else "check")
         if refill:
             pcb_path.write_text(_board())

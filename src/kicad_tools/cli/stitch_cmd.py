@@ -6521,8 +6521,18 @@ def _compute_plane_bonded_pads(
     pcb_path: Path,
     net_names: set[str],
     net_target_layers: dict[str, str | None],
+    *,
+    fill_verified: bool = False,
 ) -> dict[str, str]:
-    """Only skip a pad when its saved bond survives a native refill under the current rules."""
+    """Only skip a pad when its saved bond survives a native refill under the current rules.
+
+    ``fill_verified`` is the caller's evidence that the saved fill on this exact
+    board and rule set was just refilled natively and verified (``kct route``
+    after its own fill and connectivity pass). The bond is then read directly
+    and no second refill is requested, so a refused extra refill cannot drop a
+    verified bond (issue #10261). Standalone callers leave it ``False`` and keep
+    the independent refill check.
+    """
     import tempfile
 
     from kicad_tools._shapely import has_shapely
@@ -6531,6 +6541,8 @@ def _compute_plane_bonded_pads(
 
     if not has_shapely():
         return {}
+    if fill_verified:
+        return _saved_plane_bonds(pcb_path, net_names, net_target_layers)
     # Board cutouts, project clearances and other edits can invalidate a
     # stored pour without touching its zone outline. Refill once for all nets
     # on a writable copy, including during a dry run on a read-only source.
@@ -6630,8 +6642,13 @@ def run_stitch(
     pad_edge_gap: float = 0.0,
     same_net_pad_gap_mm: float = 0.0,
     same_net_trace_gap_mm: float = 0.0,
+    fill_verified: bool = False,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
+
+    ``fill_verified``: issue #10261 -- the caller has verified the saved zone
+    fill of this exact board under the current rules, so the bond check reuses
+    it instead of requesting another native refill.
 
     Args:
         pcb_path: Path to the PCB file
@@ -6817,7 +6834,9 @@ def run_stitch(
     plane_bonded: dict[str, str] = {}
     if nets_with_fill:
         try:
-            plane_bonded = _compute_plane_bonded_pads(pcb_path, net_name_set, net_target_layers)
+            plane_bonded = _compute_plane_bonded_pads(
+                pcb_path, net_name_set, net_target_layers, fill_verified=fill_verified
+            )
         except Exception as exc:  # pragma: no cover - defensive fallback
             result.strict_model_error = (
                 result.strict_model_error or f"plane-bond proof: {type(exc).__name__}: {exc}"

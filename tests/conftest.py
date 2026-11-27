@@ -1142,6 +1142,7 @@ def _ci_extended_ids() -> frozenset[str]:
     )
 
 
+@pytest.hookimpl(tryfirst=True)  # Read canonical IDs before xdist appends its loadgroup suffix.
 def pytest_collection_modifyitems(config, items):
     # Issue #6102: a `pr_required` test is a merge gate and must run in the PR
     # "Test" job, so it is never marked ci_extended even if it is listed.

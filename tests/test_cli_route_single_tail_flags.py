@@ -55,30 +55,30 @@ def test_flags_read_only_in_shared_helpers() -> None:
 
 def test_every_tail_calls_shared_post_save_and_verdict_helpers() -> None:
     tree = ast.parse(ROUTE_CMD.read_text())
-    tails = {
+    escalation_tails = {
         "route_with_layer_escalation",
         "route_with_rule_relaxation",
         "route_with_combined_escalation",
-        "main_with_result",
     }
-    calls: dict[str, set[str]] = {}
-    for fn in ast.walk(tree):
-        if isinstance(fn, ast.FunctionDef) and fn.name in tails | {"_run_main_impl"}:
+    tails = escalation_tails | {"_run_main_impl", "_publish_preserved_departure"}
+    calls: dict[str, dict[str, int]] = {}
+    for fn in tree.body:
+        if isinstance(fn, ast.FunctionDef) and fn.name in tails:
             calls[fn.name] = {
-                n.func.id
+                n.func.id: n.lineno
                 for n in ast.walk(fn)
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
             }
-    for name in (
-        "route_with_layer_escalation",
-        "route_with_rule_relaxation",
-        "route_with_combined_escalation",
-    ):
-        assert "_run_post_save_stitching" in calls[name], name
+    for name in escalation_tails:
         assert "_run_post_verdict_reports" in calls[name], name
-    single = calls.get("_run_main_impl", set())
-    assert "_run_post_save_stitching" in single
-    assert "_export_failed_nets_if_requested" in single
+    assert "_export_failed_nets_if_requested" in calls["_run_main_impl"]
+    for name in tails:
+        tail = calls[name]
+        assert (
+            tail["_fill_zones_after_route"]
+            < tail["_complete_pour_nets_with_oracle"]
+            < tail["_run_post_save_stitching"]
+        ), name
 
 
 # --- Entry-path warnings (#7657) ---------------------------------------------
