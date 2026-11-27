@@ -241,6 +241,9 @@ class MaskViaRelocateAction(MaskNudgeAction):
     added_segments: list[tuple[str, float, float, float, float, float, str, int | str]] = field(
         default_factory=list
     )
+    #: Foreign nets whose tracks were slid aside as part of this transaction, so
+    #: connectivity and creepage checks cover every edited net.
+    extra_nets: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -335,6 +338,23 @@ class _SwappedElbow:
     far: tuple[float, float]  # the other leg's far end, which stays
     corner: tuple[float, float]  # where the swap puts the reported end
     other_corner: tuple[float, float]  # and the other, keeping their offset
+
+
+@dataclass(frozen=True)
+class _ForeignJog:
+    """A foreign-net straight jog that can slide along parallel continuing runs."""
+
+    net: str
+    layer: str
+    axis: tuple[float, float]
+    low: float
+    high: float
+    copies: tuple[tuple[str, tuple[float, float], tuple[float, float], float], ...]
+    runs: tuple[tuple[str, str, tuple[float, float], tuple[float, float], float], ...]
+
+    @property
+    def moved_uuids(self) -> frozenset[str]:
+        return frozenset([*(u for u, *_ in self.copies), *(u for u, *_ in self.runs)])
 
 
 def _num(node: SExp | None) -> float:
@@ -857,12 +877,18 @@ class MaskCopperRepairer(CopperGapRepairer):
         return poly
 
     def _other_net_obstacles_with_meta(
-        self, layer: str, net_name: str, skip_uuid: str, pads: dict
+        self,
+        layer: str,
+        net_name: str,
+        skip_uuid: str,
+        pads: dict,
+        *,
+        skip_uuids: set[str] | frozenset[str] = frozenset(),
     ) -> list[tuple[BaseGeometry, str, str]]:
         obstacles: list[tuple[BaseGeometry, str, str]] = []
         for uuid, node in self._segment_nodes().items():
             obs_net = self._net_name(node)
-            if uuid == skip_uuid or obs_net == net_name:
+            if uuid == skip_uuid or uuid in skip_uuids or obs_net == net_name:
                 continue
             layer_node = node.find("layer")
             if layer_node is None or _bare(layer_node.get_first_atom()) != layer:
@@ -877,7 +903,7 @@ class MaskCopperRepairer(CopperGapRepairer):
             )
         for via in self.doc.find_all("via"):
             obs_net = self._net_name(via)
-            if obs_net == net_name:
+            if obs_net == net_name or self._via_uuid(via) in skip_uuids:
                 continue
             at = self._xy(via.find("at"))
             size_node = via.find("size")
@@ -4009,7 +4035,1064 @@ class MaskCopperRepairer(CopperGapRepairer):
                 return None
         if not preserve_approach and relocate(required + margin_mm):
             return None
+        if (
+            not preserve_approach
+            and project is not None
+            and self._relocate_via_sliding_foreign_jog(
+                via_node,
+                via_uuid,
+                openings,
+                pads,
+                result,
+                at,
+                size,
+                copper,
+                joined,
+                primary_push,
+                required,
+                margin_mm,
+                warning_clearance_mm,
+                max_displacement,
+                dry_run,
+                clearance_mm,
+                design_rules,
+                touched_by_action,
+                project,
+            )
+        ):
+            return None
         return primary_reason
+
+    def _relocate_via_sliding_foreign_jog(
+        self,
+        via_node: SExp,
+        via_uuid: str,
+        openings: list[str],
+        pads: dict,
+        result: MaskRepairResult,
+        at: tuple[float, float],
+        size: float,
+        copper: BaseGeometry,
+        joined: list[tuple[str, SExp, str, tuple[float, float]]],
+        primary_push: tuple[float, float] | None,
+        required: float,
+        margin_mm: float,
+        warning_clearance_mm: float | None,
+        max_displacement: float,
+        dry_run: bool,
+        clearance_mm: float | None,
+        design_rules: DesignRules | None,
+        touched_by_action: set[str],
+        project: tuple,
+    ) -> bool:
+        """Relocate a via by sliding a blocking foreign-net jog along its parallel runs."""
+        from kicad_tools.router.board_clearance_rules import (
+            ItemProps,
+            item_props_for_type,
+            pad_clearance_override,
+        )
+        from kicad_tools.router.primitives import _make_uuid
+        from kicad_tools.router.quantize import _is_quantum_aligned, is_45_aligned
+        from kicad_tools.schema.pcb import PCB
+
+        if self._locks.is_generator_owned(via_node):
+            return False
+        rules = self._board_rules
+        if rules.dru_error:
+            return False
+        net_name = self._net_name(via_node)
+        span_layers = self._via_span_layer_set(via_node)
+        base_floor = clearance_mm if clearance_mm is not None else 0.0
+        via_props = item_props_for_type("via", net_name, True)
+        own_track_props = ItemProps("Track", net_name)
+        _project_copper, holes = project
+
+        obstacles: list[
+            tuple[BaseGeometry, float, float, frozenset[str], str, str, str, float]
+        ] = []
+        joined_uuids = {uid for uid, *_ in joined}
+        for seg_uid, node in self._segment_nodes().items():
+            obs_net = self._net_name(node)
+            if seg_uid in joined_uuids or obs_net == net_name:
+                continue
+            layer_node = node.find("layer")
+            layer = _bare(layer_node.get_first_atom()) if layer_node is not None else ""
+            if not layer or layer not in span_layers:
+                continue
+            seg_s, seg_e = self._xy(node.find("start")), self._xy(node.find("end"))
+            width_node = node.find("width")
+            if seg_s is None or seg_e is None or width_node is None:
+                continue
+            geom = LineString([seg_s, seg_e]).buffer(_num(width_node) / 2, quad_segs=16)
+            obs_props = item_props_for_type(
+                "track", obs_net, False, layer=layer, footprint_ref="", footprint_lib_id=""
+            )
+            via_req = max(
+                base_floor,
+                rules.clearance(via_props, obs_props, layer),
+                rules.physical_clearance(via_props, obs_props, layer),
+            )
+            trk_req = max(
+                base_floor,
+                rules.clearance(own_track_props, obs_props, layer),
+                rules.physical_clearance(own_track_props, obs_props, layer),
+            )
+            obstacles.append(
+                (
+                    geom,
+                    via_req,
+                    trk_req,
+                    frozenset({layer}),
+                    "track",
+                    seg_uid,
+                    obs_net,
+                    copper.distance(geom),
+                )
+            )
+        for other_via in self.doc.find_all("via"):
+            other_at = self._xy(other_via.find("at"))
+            other_size = other_via.find("size")
+            if other_at is None or other_size is None or math.dist(other_at, at) < _TOLERANCE_MM:
+                continue
+            obs_net = self._net_name(other_via)
+            if obs_net == net_name:
+                continue
+            layers = self._via_span_layer_set(other_via)
+            if not (layers & span_layers):
+                continue
+            geom = Point(other_at).buffer(_num(other_size) / 2, quad_segs=32)
+            obs_props = item_props_for_type("via", obs_net, True)
+            via_req = max(
+                base_floor,
+                rules.clearance(via_props, obs_props),
+                rules.physical_clearance(via_props, obs_props),
+            )
+            trk_req = max(
+                base_floor,
+                *(
+                    max(
+                        rules.clearance(own_track_props, obs_props, lyr),
+                        rules.physical_clearance(own_track_props, obs_props, lyr),
+                    )
+                    for lyr in layers & span_layers
+                ),
+            )
+            obstacles.append(
+                (
+                    geom,
+                    via_req,
+                    trk_req,
+                    layers,
+                    "via",
+                    self._via_uuid(other_via),
+                    obs_net,
+                    copper.distance(geom),
+                )
+            )
+        pcb = PCB(self.doc)
+        for fp in pcb.footprints:
+            for index, pad in enumerate(fp.pads):
+                identity = _bare(pad.uuid) if pad.uuid else f"{fp.reference}:pad:{index}"
+                entry = pads.get(identity)
+                if entry is None:
+                    continue
+                poly, _centre, pad_layers, pad_net, _ref, _shape = entry
+                if pad_net == net_name:
+                    continue
+                layers = frozenset(
+                    name
+                    for name in span_layers
+                    if name in pad_layers
+                    or "*.Cu" in pad_layers
+                    or ("F&B.Cu" in pad_layers and name in {"F.Cu", "B.Cu"})
+                )
+                if not layers:
+                    continue
+                pad_props = item_props_for_type(
+                    "pad",
+                    pad_net,
+                    pad.type == "thru_hole",
+                    pad.type,
+                    fp.layer,
+                    fp.reference,
+                    fp.name,
+                )
+                local = pad_clearance_override(fp, pad)
+                elec_via = (
+                    rules.clearance(via_props, pad_props)
+                    if local is None
+                    else max(local, rules.min_clearance or 0.0)
+                )
+                via_req = max(base_floor, rules.physical_clearance(via_props, pad_props), elec_via)
+                elec_trk = max(
+                    (
+                        rules.clearance(own_track_props, pad_props, lyr)
+                        if local is None
+                        else max(local, rules.min_clearance or 0.0)
+                    )
+                    for lyr in layers
+                )
+                trk_req = max(
+                    base_floor,
+                    max(
+                        rules.physical_clearance(own_track_props, pad_props, lyr) for lyr in layers
+                    ),
+                    elec_trk,
+                )
+                obstacles.append(
+                    (
+                        poly,
+                        via_req,
+                        trk_req,
+                        layers,
+                        "pad",
+                        identity,
+                        pad_net,
+                        copper.distance(poly),
+                    )
+                )
+
+        preferred = max(required, warning_clearance_mm or 0.0) + margin_mm
+        candidates = self._via_alternate_candidates(
+            at,
+            size,
+            openings,
+            pads,
+            required + margin_mm,
+            max_displacement,
+            primary_push,
+            preferred_gap=preferred,
+        )
+        jog_cache: dict[str, _ForeignJog | None] = {}
+
+        for push in candidates:
+            centre = (round(at[0] + push[0], 4), round(at[1] + push[1], 4))
+            via_disp = math.dist(at, centre)
+            if via_disp > max_displacement + 1e-9:
+                continue
+            if any(
+                (gap := math.dist(centre, h_c) - radii) < h_req - 1e-6 and gap < old_gap - 1e-6
+                for h_c, radii, h_req, old_gap, _desc in holes
+            ):
+                continue
+
+            via_plan = self._via_elbow_or_tail_plan(
+                joined,
+                at,
+                centre,
+                size,
+                net_name,
+                openings,
+                pads,
+                required,
+                margin_mm,
+                max_displacement,
+                touched_by_action,
+            )
+            if via_plan is None:
+                continue
+            via_end_moves, tails, via_final_lines, via_moved_points, via_moved_uuids = via_plan
+
+            new_disc = Point(centre).buffer(size / 2, quad_segs=32)
+            blocking_tracks: set[str] = set()
+            blocked_by_fixed = False
+            for geom, via_req, trk_req, layers, kind, uid, _obs_net, old_d in obstacles:
+                if uid in via_moved_uuids:
+                    continue
+                violated = (
+                    new_disc.distance(geom) < via_req - 1e-6
+                    and new_disc.distance(geom) < old_d - 1e-6
+                )
+                if not violated:
+                    for old_line, new_line, lyr in via_final_lines:
+                        if lyr in layers:
+                            nd = new_line.distance(geom)
+                            if nd < trk_req - 1e-6 and nd < old_line.distance(geom) - 1e-6:
+                                violated = True
+                                break
+                if violated:
+                    if kind != "track":
+                        blocked_by_fixed = True
+                        break
+                    blocking_tracks.add(uid)
+            if blocked_by_fixed or not blocking_tracks:
+                continue
+
+            sample_uid = next(iter(blocking_tracks))
+            if sample_uid not in jog_cache:
+                jog_cache[sample_uid] = self._parse_foreign_jog(
+                    sample_uid, pads, touched_by_action | via_moved_uuids
+                )
+            jog = jog_cache[sample_uid]
+            if jog is None or jog.net == net_name or not (blocking_tracks <= jog.moved_uuids):
+                continue
+
+            ux, uy = jog.axis
+            c0_s, c0_e, _ = jog.copies[0][1], jog.copies[0][2], jog.copies[0][3]
+            mid_x, mid_y = (c0_s[0] + c0_e[0]) / 2, (c0_s[1] + c0_e[1]) / 2
+            away_dot = (mid_x - centre[0]) * ux + (mid_y - centre[1]) * uy
+            signs = (1.0, -1.0) if away_dot >= 0 else (-1.0, 1.0)
+
+            jog_track_props = ItemProps("Track", jog.net)
+            req_via_jog = max(
+                base_floor,
+                rules.clearance(via_props, jog_track_props, jog.layer),
+                rules.physical_clearance(via_props, jog_track_props, jog.layer),
+                rules.clearance(own_track_props, jog_track_props, jog.layer),
+                rules.physical_clearance(own_track_props, jog_track_props, jog.layer),
+            )
+            via_shapes_on_jog_layer: list[BaseGeometry] = []
+            if jog.layer in span_layers:
+                via_shapes_on_jog_layer.append(new_disc)
+            via_shapes_on_jog_layer.extend(
+                new_l for _old_l, new_l, lyr in via_final_lines if lyr == jog.layer
+            )
+            if not via_shapes_on_jog_layer:
+                continue
+
+            chosen_jog: (
+                tuple[
+                    float,
+                    float,
+                    list[tuple[str, str, float, float, float, float]],
+                    list[tuple[BaseGeometry, BaseGeometry, str]],
+                    list[tuple[tuple[float, float], tuple[float, float], frozenset[str]]],
+                ]
+                | None
+            ) = None
+            diagonal_axis = abs(abs(ux) - abs(uy)) < 1e-6
+
+            for sign in signs:
+                for step in range(1, int(max_displacement / _SLIDE_STEP_MM + 1e-9) + 1):
+                    signed = sign * step * _SLIDE_STEP_MM
+                    if not jog.low < signed < jog.high:
+                        break
+                    if diagonal_axis:
+                        mag = round(abs(signed) / math.sqrt(2.0), 4)
+                        jdx = math.copysign(mag, signed * ux)
+                        jdy = math.copysign(mag, signed * uy)
+                    else:
+                        jdx = round(signed * ux, 4)
+                        jdy = round(signed * uy, 4)
+                    jog_disp = math.hypot(jdx, jdy)
+                    if jog_disp > max_displacement + 1e-9:
+                        break
+                    if (
+                        chosen_jog is not None
+                        and jog_disp >= math.hypot(chosen_jog[0], chosen_jog[1]) - 1e-9
+                    ):
+                        break
+
+                    jog_end_moves: list[tuple[str, str, float, float, float, float]] = []
+                    jog_moves: list[tuple[BaseGeometry, BaseGeometry, str]] = []
+                    jog_moved_pts: list[
+                        tuple[tuple[float, float], tuple[float, float], frozenset[str]]
+                    ] = []
+                    angles_ok = True
+                    for c_uid, s_pt, e_pt, w in jog.copies:
+                        ns = (round(s_pt[0] + jdx, 4), round(s_pt[1] + jdy, 4))
+                        ne = (round(e_pt[0] + jdx, 4), round(e_pt[1] + jdy, 4))
+                        if not (
+                            _is_quantum_aligned(ne[0] - ns[0], ne[1] - ns[1])
+                            or is_45_aligned(ne[0] - ns[0], ne[1] - ns[1])
+                        ):
+                            angles_ok = False
+                            break
+                        jog_end_moves.append((c_uid, "start", s_pt[0], s_pt[1], ns[0], ns[1]))
+                        jog_end_moves.append((c_uid, "end", e_pt[0], e_pt[1], ne[0], ne[1]))
+                        jog_moves.append(
+                            (
+                                LineString([s_pt, e_pt]).buffer(w / 2, quad_segs=16),
+                                LineString([ns, ne]).buffer(w / 2, quad_segs=16),
+                                jog.layer,
+                            )
+                        )
+                        jog_moved_pts.append((s_pt, ns, frozenset({jog.layer})))
+                        jog_moved_pts.append((e_pt, ne, frozenset({jog.layer})))
+                    if not angles_ok:
+                        continue
+                    for r_uid, r_tag, joint_pt, far_pt, w in jog.runs:
+                        nj = (round(joint_pt[0] + jdx, 4), round(joint_pt[1] + jdy, 4))
+                        if math.dist(far_pt, nj) < _MIN_RUN_MM or not (
+                            _is_quantum_aligned(nj[0] - far_pt[0], nj[1] - far_pt[1])
+                            or is_45_aligned(nj[0] - far_pt[0], nj[1] - far_pt[1])
+                        ):
+                            angles_ok = False
+                            break
+                        jog_end_moves.append((r_uid, r_tag, joint_pt[0], joint_pt[1], nj[0], nj[1]))
+                        jog_moves.append(
+                            (
+                                LineString([far_pt, joint_pt]).buffer(w / 2, quad_segs=16),
+                                LineString([far_pt, nj]).buffer(w / 2, quad_segs=16),
+                                jog.layer,
+                            )
+                        )
+                        jog_moved_pts.append((joint_pt, nj, frozenset({jog.layer})))
+                    if not angles_ok:
+                        continue
+
+                    if any(
+                        new_j.distance(v_shape) < req_via_jog + 0.001
+                        for _old_j, new_j, _lyr in jog_moves
+                        for v_shape in via_shapes_on_jog_layer
+                    ):
+                        continue
+
+                    if self._loses_same_net_contact(
+                        jog_moves,
+                        jog.layer,
+                        jog.net,
+                        set(jog.moved_uuids),
+                        pads,
+                        protect_ends=True,
+                    ):
+                        continue
+                    if self._copper_floor_reason(
+                        jog_moves,
+                        jog.layer,
+                        jog.net,
+                        jog.copies[0][0],
+                        pads,
+                        clearance_mm,
+                        pairwise_rules=rules,
+                        skip_uuids=via_moved_uuids | {via_uuid},
+                    ):
+                        continue
+                    if self._other_opening_reason(
+                        [], jog_moves, jog_moved_pts, pads, required, jog_disp
+                    ):
+                        continue
+                    chosen_jog = (jdx, jdy, jog_end_moves, jog_moves, jog_moved_pts)
+                    break
+
+            if chosen_jog is None:
+                continue
+
+            jdx, jdy, jog_end_moves, _jog_moves, _jog_moved_pts = chosen_jog
+            via_moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
+                (copper, new_disc, name) for name in sorted(span_layers)
+            ]
+            via_moves.extend(via_final_lines)
+            if self._other_opening_reason(
+                openings,
+                via_moves,
+                [(at, centre, frozenset(span_layers)), *via_moved_points],
+                pads,
+                required,
+                max(via_disp, *(math.dist(o, n) for o, n, _ in via_moved_points), 0.0),
+            ):
+                continue
+
+            all_end_moves = [*via_end_moves, *jog_end_moves]
+            if not self._joint_via_jog_engine_and_connectivity_ok(
+                at,
+                centre,
+                size,
+                via_uuid,
+                all_end_moves,
+                tails,
+                {net_name, jog.net},
+                pads,
+                design_rules,
+            ):
+                continue
+
+            added: list[tuple[str, float, float, float, float, float, str, int | str]] = [
+                (_make_uuid(), *tail) for tail in tails
+            ]
+            points: list[tuple[str, str, str | None, float, float]] = [
+                ("via", via_uuid, None, at[0], at[1])
+            ]
+            points.extend(
+                ("segment", uid, tag, ox, oy) for uid, tag, ox, oy, _nx, _ny in all_end_moves
+            )
+            points.extend(("segment", tail[0], None, tail[1], tail[2]) for tail in added)
+            max_disp = max(
+                via_disp,
+                math.hypot(jdx, jdy),
+                *(math.dist((ox, oy), (nx, ny)) for _u, _t, ox, oy, nx, ny in via_end_moves),
+            )
+            first = pads[openings[0]]
+            refs = ", ".join(pads[o][4] for o in openings)
+            action = MaskViaRelocateAction(
+                action="relocate_clear",
+                uuid=via_uuid,
+                kind="via",
+                pad_uuid=openings[0],
+                pad_ref=first[4],
+                net_name=net_name,
+                layer=self._via_span(via_node),
+                old_x=at[0],
+                old_y=at[1],
+                new_x=centre[0],
+                new_y=centre[1],
+                dx=centre[0] - at[0],
+                dy=centre[1] - at[1],
+                displacement_mm=max_disp,
+                detail=(
+                    f"moved via {via_disp:.4f}mm clear of {refs}, "
+                    f"sliding [{jog.net}] jog {math.hypot(jdx, jdy):.4f}mm along its parallel runs"
+                ),
+                openings=list(openings),
+                points=points,
+                end_moves=all_end_moves,
+                added_segments=added,
+                extra_nets={jog.net},
+            )
+            if self._apply_via_relocate(action, result, dry_run) is None:
+                return True
+        return False
+
+    def _via_elbow_or_tail_plan(
+        self,
+        joined: list[tuple[str, SExp, str, tuple[float, float]]],
+        at: tuple[float, float],
+        centre: tuple[float, float],
+        size: float,
+        net_name: str,
+        openings: list[str],
+        pads: dict,
+        required: float,
+        margin_mm: float,
+        max_displacement: float,
+        touched_by_action: set[str],
+    ) -> (
+        tuple[
+            list[tuple[str, str, float, float, float, float]],
+            list[tuple[float, float, float, float, float, str, int | str]],
+            list[tuple[BaseGeometry, BaseGeometry, str]],
+            list[tuple[tuple[float, float], tuple[float, float], frozenset[str]]],
+            set[str],
+        ]
+        | None
+    ):
+        """Connect every attached approach to ``centre`` by sliding its elbow or adding an in-land tail."""
+        from kicad_tools.router.quantize import _is_quantum_aligned, is_45_aligned
+        from kicad_tools.validate.mask_copper import clean_own_pad_entry
+
+        if not joined:
+            return [], [], [], [], set()
+        if any(uid in touched_by_action for uid, *_ in joined):
+            return None
+
+        buckets: list[
+            tuple[str, tuple[float, float], list[tuple[str, SExp, str, tuple[float, float]]]]
+        ] = []
+        for item in joined:
+            _uid, node, tag, _end = item
+            layer_node = node.find("layer")
+            layer = _bare(layer_node.get_first_atom()) if layer_node is not None else ""
+            other = self._xy(node.find("end" if tag == "start" else "start"))
+            if not layer or tag is None or other is None:
+                return None
+            placed = False
+            for b_layer, b_other, members in buckets:
+                if b_layer == layer and math.dist(other, b_other) < _TOLERANCE_MM:
+                    members.append(item)
+                    placed = True
+                    break
+            if not placed:
+                buckets.append((layer, other, [item]))
+
+        end_moves: list[tuple[str, str, float, float, float, float]] = []
+        tails: list[tuple[float, float, float, float, float, str, int | str]] = []
+        final_lines: list[tuple[BaseGeometry, BaseGeometry, str]] = []
+        moved_points: list[tuple[tuple[float, float], tuple[float, float], frozenset[str]]] = []
+        moved_uuids: set[str] = set()
+        moved_tags: set[tuple[str, str]] = set()
+        post_segments: list[tuple[tuple[float, float], tuple[float, float], float, str]] = []
+
+        def record_end(
+            uid: str, tag: str, old_pt: tuple[float, float], new_pt: tuple[float, float], layer: str
+        ) -> bool:
+            if (uid, tag) in moved_tags:
+                return False
+            moved_tags.add((uid, tag))
+            moved_uuids.add(uid)
+            end_moves.append((uid, tag, old_pt[0], old_pt[1], new_pt[0], new_pt[1]))
+            moved_points.append((old_pt, new_pt, frozenset({layer})))
+            return True
+
+        for layer, rep_other, bucket in buckets:
+            rep_uid, _rep_node, _rep_tag, rep_end = bucket[0]
+            ax, ay = rep_end[0] - rep_other[0], rep_end[1] - rep_other[1]
+            a_len = math.hypot(ax, ay)
+            if a_len < _TOLERANCE_MM:
+                return None
+
+            # 1. Collinear slide along the approach's own line.
+            new_vx, new_vy = centre[0] - rep_other[0], centre[1] - rep_other[1]
+            new_vlen = math.hypot(new_vx, new_vy)
+            if (
+                new_vlen >= _MIN_RUN_MM
+                and new_vx * ax + new_vy * ay > 0
+                and abs(new_vx * ay - new_vy * ax) / a_len <= _RUN_AXIS_TOLERANCE_MM
+                and math.dist(rep_end, centre) <= max_displacement + 1e-9
+                and not any(self._locks.is_generator_owned(n) for _, n, *_ in bucket)
+                and all(
+                    (o := self._xy(n.find("end" if t == "start" else "start"))) is not None
+                    and (
+                        _is_quantum_aligned(centre[0] - o[0], centre[1] - o[1])
+                        or is_45_aligned(centre[0] - o[0], centre[1] - o[1])
+                    )
+                    for _u, n, t, _e in bucket
+                )
+            ):
+                for uid, node, tag, end_pt in bucket:
+                    other_pt = self._xy(node.find("end" if tag == "start" else "start"))
+                    w = _num(node.find("width"))
+                    if (
+                        other_pt is None
+                        or w <= 0
+                        or not record_end(uid, tag, end_pt, centre, layer)
+                    ):
+                        return None
+                    final_lines.append(
+                        (
+                            LineString([other_pt, end_pt]).buffer(w / 2, quad_segs=16),
+                            LineString([other_pt, centre]).buffer(w / 2, quad_segs=16),
+                            layer,
+                        )
+                    )
+                    post_segments.append((other_pt, centre, w, layer))
+                continue
+
+            # 2. Slide the approach's far elbow along its continuing run(s).
+            bucket_uuids = {u for u, *_ in bucket}
+            elbow_applied = False
+            pad_covers_elbow = any(
+                (
+                    layer in p_layers
+                    or "*.Cu" in p_layers
+                    or ("F&B.Cu" in p_layers and layer in {"F.Cu", "B.Cu"})
+                )
+                and poly.buffer(_INSIDE_EPS_MM).contains(Point(rep_other))
+                for poly, _c, p_layers, _p_net, _ref, _sh in pads.values()
+            )
+            if not pad_covers_elbow and not any(
+                self._locks.is_generator_owned(n) for _, n, *_ in bucket
+            ):
+                junction_members, blocked = self._junction(layer, rep_other, rep_uid, net_name)
+                if not blocked and not self._has_fixed_junction_contact(rep_other, layer, net_name):
+                    runs: list[tuple[str, SExp, str, tuple[float, float], tuple[float, float]]] = []
+                    valid_junction = True
+                    for m_uid, m_node, m_tag in junction_members:
+                        m_other = self._xy(m_node.find("end" if m_tag == "start" else "start"))
+                        m_joint = self._xy(m_node.find(m_tag))
+                        if m_other is None or m_joint is None or m_node.find("width") is None:
+                            valid_junction = False
+                            break
+                        if math.dist(m_other, at) < _TOLERANCE_MM:
+                            if m_uid not in bucket_uuids:
+                                valid_junction = False
+                                break
+                            continue
+                        if (
+                            m_uid in touched_by_action
+                            or self._locks.is_locked(m_node)
+                            or self._locks.is_generator_owned(m_node)
+                        ):
+                            valid_junction = False
+                            break
+                        runs.append((m_uid, m_node, m_tag, m_joint, m_other))
+                    if valid_junction and runs:
+                        _, _, _, p0, o0 = runs[0]
+                        vx0, vy0 = p0[0] - o0[0], p0[1] - o0[1]
+                        v_len = math.hypot(vx0, vy0)
+                        if v_len >= _TOLERANCE_MM:
+                            ux, uy = vx0 / v_len, vy0 / v_len
+                            det_v = vx0 * ay - vy0 * ax
+                            if (
+                                _on_45_grid(ux, uy)
+                                and abs(det_v) >= 0.1 * v_len * a_len
+                                and all(
+                                    abs((pt[0] - ot[0]) * uy - (pt[1] - ot[1]) * ux)
+                                    <= _RUN_AXIS_TOLERANCE_MM
+                                    for _ru, _rn, _rt, pt, ot in runs
+                                )
+                            ):
+                                dx_c = centre[0] - rep_other[0]
+                                dy_c = centre[1] - rep_other[1]
+                                t_v = (dx_c * ay - dy_c * ax) / det_v
+                                k_a = (vx0 * dy_c - vy0 * dx_c) / det_v
+                                shift = (t_v * vx0, t_v * vy0)
+                                signed_s = shift[0] * ux + shift[1] * uy
+                                if (
+                                    math.hypot(*shift) <= max_displacement + 1e-9
+                                    and k_a * a_len >= _MIN_RUN_MM
+                                    and self._run_keeps_length(runs, (ux, uy), signed_s)
+                                ):
+                                    cand_arm_ok = True
+                                    arm_records = []
+                                    for uid, node, tag, end_pt in bucket:
+                                        other_tag = "end" if tag == "start" else "start"
+                                        orig_other = self._xy(node.find(other_tag))
+                                        w = _num(node.find("width"))
+                                        if orig_other is None or w <= 0:
+                                            cand_arm_ok = False
+                                            break
+                                        new_other = (
+                                            round(orig_other[0] + shift[0], 6),
+                                            round(orig_other[1] + shift[1], 6),
+                                        )
+                                        if math.dist(new_other, centre) < _MIN_RUN_MM or not (
+                                            _is_quantum_aligned(
+                                                centre[0] - new_other[0],
+                                                centre[1] - new_other[1],
+                                            )
+                                            or is_45_aligned(
+                                                centre[0] - new_other[0],
+                                                centre[1] - new_other[1],
+                                            )
+                                        ):
+                                            cand_arm_ok = False
+                                            break
+                                        arm_records.append(
+                                            (uid, tag, end_pt, other_tag, orig_other, new_other, w)
+                                        )
+                                    run_records = []
+                                    if cand_arm_ok:
+                                        for r_uid, r_node, r_tag, r_joint, r_far in runs:
+                                            rw = _num(r_node.find("width"))
+                                            new_rj = (
+                                                round(r_joint[0] + shift[0], 6),
+                                                round(r_joint[1] + shift[1], 6),
+                                            )
+                                            if (
+                                                rw <= 0
+                                                or math.dist(r_far, new_rj) < _MIN_RUN_MM
+                                                or not (
+                                                    _is_quantum_aligned(
+                                                        new_rj[0] - r_far[0],
+                                                        new_rj[1] - r_far[1],
+                                                    )
+                                                    or is_45_aligned(
+                                                        new_rj[0] - r_far[0],
+                                                        new_rj[1] - r_far[1],
+                                                    )
+                                                )
+                                            ):
+                                                cand_arm_ok = False
+                                                break
+                                            run_records.append(
+                                                (r_uid, r_tag, r_joint, new_rj, r_far, rw)
+                                            )
+                                    if cand_arm_ok:
+                                        for (
+                                            uid,
+                                            tag,
+                                            end_pt,
+                                            other_tag,
+                                            orig_other,
+                                            new_other,
+                                            w,
+                                        ) in arm_records:
+                                            if not record_end(
+                                                uid, tag, end_pt, centre, layer
+                                            ) or not record_end(
+                                                uid, other_tag, orig_other, new_other, layer
+                                            ):
+                                                return None
+                                            final_lines.append(
+                                                (
+                                                    LineString([orig_other, end_pt]).buffer(
+                                                        w / 2, quad_segs=16
+                                                    ),
+                                                    LineString([new_other, centre]).buffer(
+                                                        w / 2, quad_segs=16
+                                                    ),
+                                                    layer,
+                                                )
+                                            )
+                                            post_segments.append((new_other, centre, w, layer))
+                                        for r_uid, r_tag, r_joint, new_rj, r_far, rw in run_records:
+                                            if not record_end(r_uid, r_tag, r_joint, new_rj, layer):
+                                                return None
+                                            final_lines.append(
+                                                (
+                                                    LineString([r_far, r_joint]).buffer(
+                                                        rw / 2, quad_segs=16
+                                                    ),
+                                                    LineString([r_far, new_rj]).buffer(
+                                                        rw / 2, quad_segs=16
+                                                    ),
+                                                    layer,
+                                                )
+                                            )
+                                            post_segments.append((r_far, new_rj, rw, layer))
+                                        elbow_applied = True
+            if elbow_applied:
+                continue
+
+            # 3. Fallback: kept-line slide + aligned in-land tail.
+            tail_plan = self._via_tail_plan(bucket, centre, size, max_displacement)
+            if tail_plan is None:
+                return None
+            b_ends, b_tails, b_lines = tail_plan
+            for b_tail in b_tails:
+                if not _is_quantum_aligned(
+                    round(b_tail[2], 6) - round(b_tail[0], 6),
+                    round(b_tail[3], 6) - round(b_tail[1], 6),
+                ):
+                    return None
+                post_segments.append(
+                    ((b_tail[0], b_tail[1]), (b_tail[2], b_tail[3]), b_tail[4], b_tail[5])
+                )
+            for uid, tag, ox, oy, nx, ny in b_ends:
+                tail_node = self._segment_by_uuid(uid)
+                other_pt = (
+                    self._xy(tail_node.find("end" if tag == "start" else "start"))
+                    if tail_node is not None
+                    else None
+                )
+                w = _num(tail_node.find("width")) if tail_node is not None else 0.0
+                if other_pt is None or not record_end(uid, tag, (ox, oy), (nx, ny), layer):
+                    return None
+                post_segments.append((other_pt, (nx, ny), w, layer))
+            tails.extend(b_tails)
+            final_lines.extend(b_lines)
+
+        for seg_s, seg_e, seg_w, seg_layer in post_segments:
+            seg_copper = LineString([seg_s, seg_e]).buffer(seg_w / 2, quad_segs=16)
+            for op_uid in openings:
+                aperture = self._pad_mask_openings.get((op_uid, seg_layer))
+                pad_poly, _c, p_layers, _p_net, _ref, shape = pads[op_uid]
+                if aperture is not None:
+                    gap = seg_copper.distance(aperture.geometry)
+                    if gap > 0:
+                        if gap < required + margin_mm - 1e-9:
+                            return None
+                    elif not clean_own_pad_entry(
+                        aperture.geometry,
+                        seg_copper,
+                        pad_poly,
+                        f"pad:{shape}",
+                        seg_w,
+                        (seg_s, seg_e),
+                        clearance_mm=required,
+                        uncertainty_mm=_MASK_UNCERTAINTY_MM,
+                        margin_mm=aperture.margin_mm,
+                    ):
+                        return None
+                elif seg_layer in p_layers or "*.Cu" in p_layers:
+                    grown = pad_poly.buffer(_INSIDE_EPS_MM)
+                    if not (grown.contains(Point(seg_s)) or grown.contains(Point(seg_e))):
+                        if seg_copper.distance(pad_poly) < required + margin_mm - 1e-9:
+                            return None
+
+        old_disc = Point(at).buffer(size / 2, quad_segs=32)
+        new_disc = Point(centre).buffer(size / 2, quad_segs=32)
+        moving_all = moved_uuids | {u for u, *_ in joined}
+        for lyr in {line_layer for _o, _n, line_layer in final_lines}:
+            layer_moves = [m for m in final_lines if m[2] == lyr]
+            layer_moves.append((old_disc, new_disc, lyr))
+            if self._loses_same_net_contact(
+                layer_moves,
+                lyr,
+                net_name,
+                moving_all,
+                pads,
+                protect_ends=True,
+            ):
+                return None
+
+        return end_moves, tails, final_lines, moved_points, moved_uuids
+
+    def _parse_foreign_jog(
+        self, seg_uuid: str, pads: dict, touched: set[str]
+    ) -> _ForeignJog | None:
+        """Identify a foreign straight jog bounded at both ends by parallel runs."""
+        from kicad_tools.router.quantize import _is_quantum_aligned, is_45_aligned
+
+        seg = self._segment_by_uuid(seg_uuid)
+        if seg is None or seg_uuid in touched:
+            return None
+        net = self._net_name(seg)
+        if not net or self._locks.is_locked(seg) or self._locks.is_generator_owned(seg):
+            return None
+        layer_node, width_node = seg.find("layer"), seg.find("width")
+        if layer_node is None or width_node is None:
+            return None
+        layer = _bare(layer_node.get_first_atom())
+        width = _num(width_node)
+        start, end = self._xy(seg.find("start")), self._xy(seg.find("end"))
+        if not layer or width <= 0 or start is None or end is None:
+            return None
+        if math.dist(start, end) < _TOLERANCE_MM or not (
+            _is_quantum_aligned(end[0] - start[0], end[1] - start[1])
+            or is_45_aligned(end[0] - start[0], end[1] - start[1])
+        ):
+            return None
+        for poly, _c, p_layers, _p_net, _ref, _sh in pads.values():
+            if (
+                layer in p_layers
+                or "*.Cu" in p_layers
+                or ("F&B.Cu" in p_layers and layer in {"F.Cu", "B.Cu"})
+            ):
+                grown = poly.buffer(_INSIDE_EPS_MM)
+                if grown.contains(Point(start)) or grown.contains(Point(end)):
+                    return None
+
+        copies_dict: dict[str, SExp] = {seg_uuid: seg}
+        raw_runs: list[tuple[str, SExp, str, tuple[float, float], tuple[float, float]]] = []
+        sides: list[int] = []
+        for point, opposite in ((start, end), (end, start)):
+            members, blocked = self._junction(layer, point, seg_uuid, net)
+            if blocked or self._has_fixed_junction_contact(point, layer, net):
+                return None
+            count = 0
+            for uid, node, tag in members:
+                other = self._xy(node.find("end" if tag == "start" else "start"))
+                if other is None or node.find("width") is None:
+                    return None
+                if math.dist(other, opposite) < _TOLERANCE_MM:
+                    copies_dict[uid] = node
+                    continue
+                raw_runs.append((uid, node, tag, point, other))
+                count += 1
+            sides.append(count)
+        if min(sides) == 0:
+            return None
+        if set(copies_dict) & touched or any(
+            self._locks.is_locked(node) or self._locks.is_generator_owned(node)
+            for node in copies_dict.values()
+        ):
+            return None
+
+        _, _, _, first_pt, first_other = raw_runs[0]
+        axis_len = math.dist(first_pt, first_other)
+        if axis_len < _TOLERANCE_MM:
+            return None
+        ux = (first_pt[0] - first_other[0]) / axis_len
+        uy = (first_pt[1] - first_other[1]) / axis_len
+        if not _on_45_grid(ux, uy):
+            return None
+        jx, jy = end[0] - start[0], end[1] - start[1]
+        if abs(jx * uy - jy * ux) < 0.1 * math.hypot(jx, jy):
+            return None
+
+        low, high = -math.inf, math.inf
+        runs_out: list[tuple[str, str, tuple[float, float], tuple[float, float], float]] = []
+        for uid, node, tag, joint_pt, far_pt in raw_runs:
+            if (
+                uid in touched
+                or self._locks.is_locked(node)
+                or self._locks.is_generator_owned(node)
+            ):
+                return None
+            vx, vy = joint_pt[0] - far_pt[0], joint_pt[1] - far_pt[1]
+            if abs(vx * uy - vy * ux) > _RUN_AXIS_TOLERANCE_MM:
+                return None
+            rw = _num(node.find("width"))
+            if rw <= 0:
+                return None
+            along = vx * ux + vy * uy
+            if along > 0:
+                low = max(low, _MIN_RUN_MM - along)
+            else:
+                high = min(high, -along - _MIN_RUN_MM)
+            runs_out.append((uid, tag, joint_pt, far_pt, rw))
+        if not low < 0 < high:
+            return None
+
+        copies_out: list[tuple[str, tuple[float, float], tuple[float, float], float]] = []
+        for uid, node in copies_dict.items():
+            cs, ce = self._xy(node.find("start")), self._xy(node.find("end"))
+            cw = _num(node.find("width"))
+            if cs is None or ce is None or cw <= 0:
+                return None
+            copies_out.append((uid, cs, ce, cw))
+
+        return _ForeignJog(
+            net=net,
+            layer=layer,
+            axis=(ux, uy),
+            low=low,
+            high=high,
+            copies=tuple(copies_out),
+            runs=tuple(runs_out),
+        )
+
+    def _joint_via_jog_engine_and_connectivity_ok(
+        self,
+        at: tuple[float, float],
+        centre: tuple[float, float],
+        size: float,
+        via_uuid: str,
+        end_moves: list[tuple[str, str, float, float, float, float]],
+        tails: list[tuple[float, float, float, float, float, str, int | str]],
+        nets: set[str],
+        pads: dict,
+        design_rules: DesignRules | None,
+    ) -> bool:
+        """Verify shared clearance engine and net contact graphs on the temporarily edited doc."""
+        from kicad_tools.router.primitives import _make_uuid
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        pcb_before = PCB(self.doc)
+        before_graphs = {}
+        for name in nets:
+            net_obj = pcb_before.get_net_by_name(name)
+            if net_obj is None:
+                return False
+            before_graphs[name] = (
+                net_obj.number,
+                ConnectivityValidator(pcb_before)._contact_graph(net_obj.number),
+            )
+
+        via_node = self._via_by_uuid(via_uuid)
+        at_node = None if via_node is None else via_node.find("at")
+        if at_node is None:
+            return False
+
+        saved_ends: list[tuple[SExp, list]] = []
+        added_nodes: list[SExp] = []
+        old_via_children = list(at_node.children)
+        try:
+            for uid, tag, _ox, _oy, nx, ny in end_moves:
+                seg_node = self._segment_by_uuid(uid)
+                end_node = None if seg_node is None else seg_node.find(tag)
+                if end_node is None:
+                    return False
+                saved_ends.append((end_node, list(end_node.children)))
+                end_node.set_value(0, round(nx, 6))
+                end_node.set_value(1, round(ny, 6))
+            for tail in tails:
+                node = self._tail_segment_node((_make_uuid(), *tail))
+                self._insert_segment_after_last(node)
+                added_nodes.append(node)
+
+            # Check shared clearance engine before updating via_node's position
+            # so _target_clearance_reason locates target_via at (at[0], at[1]).
+            if design_rules is not None:
+                reason = self._target_clearance_reason(
+                    at[0],
+                    at[1],
+                    centre[0],
+                    centre[1],
+                    design_rules,
+                    before_refill=self._will_refill,
+                )
+                if reason is not None and self._fail_closed_reason_is_local(
+                    reason, centre, size, pads
+                ):
+                    return False
+
+            at_node.set_value(0, round(centre[0], 4))
+            at_node.set_value(1, round(centre[1], 4))
+            validator = ConnectivityValidator(PCB(self.doc))
+            for name, (net_num, prev_graph) in before_graphs.items():
+                if not validator._contact_graph(net_num).preserves_connections(prev_graph):
+                    return False
+            return True
+        finally:
+            at_node.children[:] = old_via_children
+            for node in added_nodes:
+                if node in self.doc.children:
+                    self.doc.children.remove(node)
+            for end_node, children in saved_ends:
+                end_node.children[:] = children
 
     def _pad_bond_bridges(
         self,
@@ -4932,6 +6015,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         clearance_mm: float | None,
         *,
         pairwise_rules: BoardClearanceRules | None = None,
+        skip_uuids: set[str] | frozenset[str] = frozenset(),
     ) -> tuple[str, str] | None:
         """Decline a move that crowds other-net copper below the floor."""
         from kicad_tools.router.board_clearance_rules import ItemProps
@@ -4939,7 +6023,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         base_required = clearance_mm if clearance_mm is not None else 0.0
         track_props = ItemProps("Track", net_name) if pairwise_rules is not None else None
         for obstacle, obs_kind, obs_net in self._other_net_obstacles_with_meta(
-            layer, net_name, skip_uuid, pads
+            layer, net_name, skip_uuid, pads, skip_uuids=skip_uuids
         ):
             required = base_required
             if pairwise_rules is not None and track_props is not None:
