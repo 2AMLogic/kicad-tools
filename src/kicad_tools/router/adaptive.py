@@ -262,6 +262,8 @@ class AdaptiveAutorouter:
                     "shape": pad.get("shape", "rect"),
                     "roundrect_rratio": pad.get("roundrect_rratio"),
                     "chamfered_outline": pad.get("chamfered_outline", ()),
+                    "mask_chamfered_outline": pad.get("mask_chamfered_outline", ()),
+                    "authored_layers": pad.get("authored_layers", ()),
                     "copper_offset": pad.get("copper_offset", (0.0, 0.0)),
                     "height": pad.get("height", 0.5),
                     "net": net_num,
