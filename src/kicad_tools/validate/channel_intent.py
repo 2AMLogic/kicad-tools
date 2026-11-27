@@ -11,11 +11,6 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from kicad_tools.lvs.board_lvs import (
-    _is_placeholder_net,
-    _iter_instance_symbols,
-    _schematic_pin_to_net,
-)
 from kicad_tools.operations.netlist import Netlist, export_netlist
 from kicad_tools.schema.pcb import PCB
 
@@ -104,39 +99,8 @@ class _Source:
         self.fields[ref].append(fields)
 
     @classmethod
-    def from_schematic(cls, path: Path, intent: ChannelIntent) -> _Source:
+    def from_netlist(cls, netlist: Netlist) -> _Source:
         source = cls()
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        for ref, symbol, _ in _iter_instance_symbols(path, placement_refs=True):
-            source.add_component(ref, symbol.value, symbol.properties)
-        pin_names = _schematic_pin_to_net(path, placement_refs=True)
-        # The LVS graph identifies an unlabelled connection by an arbitrary
-        # representative pin. Only KiCad's actual name can be compared literally.
-        unnamed = {
-            (ref, pin)
-            for instance in intent.instances.values()
-            for role, ref in instance.references.items()
-            for pin in intent.roles[role].pins
-            if _is_placeholder_net(pin_names.get((ref, pin)))
-        }
-        for key, name in pin_names.items():
-            if key not in unnamed:
-                source.pins[key].add(name)
-        if unnamed:
-            with TemporaryDirectory() as tmp:
-                native = export_netlist(path, Path(tmp) / "channel.net", fallback=False)
-            for net in native.nets:
-                for node in net.nodes:
-                    key = (node.reference, node.pin)
-                    if key in unnamed:
-                        source.pins[key].add(net.name or None)
-        return source
-
-    @classmethod
-    def from_netlist(cls, path: Path) -> _Source:
-        source = cls()
-        netlist = Netlist.load(path)
         for part in netlist.components:
             source.add_component(part.reference, part.value, part.properties)
         for net in netlist.nets:
@@ -189,8 +153,12 @@ def check_channel_intent(declaration: Path, design: Path, pcb: Path) -> list[Fin
     """Check declared bindings independently and return all source-specific mismatches."""
     intent = ChannelIntent.load(declaration)
     if design.suffix == ".kicad_sch":
-        findings = _compare(intent, _Source.from_schematic(design, intent), "schematic")
+        with TemporaryDirectory() as tmp:
+            netlist = export_netlist(design, Path(tmp) / "channel.net", fallback=False)
+        label = "schematic"
     else:
-        findings = _compare(intent, _Source.from_netlist(design), "netlist")
+        netlist = Netlist.load(design)
+        label = "netlist"
+    findings = _compare(intent, _Source.from_netlist(netlist), label)
     findings.extend(_compare(intent, _Source.from_pcb(pcb), "pcb"))
     return findings

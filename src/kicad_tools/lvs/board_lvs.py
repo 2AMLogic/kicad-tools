@@ -425,26 +425,18 @@ def _instance_reference_map(visit: _SheetVisit) -> dict[str, str]:
                 break
         if not prop_ref:
             continue
-        # Several annotations can share one path (e.g. another project's block).
-        # A native export honours the last one, so a later annotation equal to
-        # the displayed reference must cancel an earlier rename.
-        selected: str | None = None
         for project in instances.find_all("project"):
             for path_node in project.find_all("path"):
                 if path_node.get_string(0) != visit.uuid_path:
                     continue
                 ref_node = path_node.find("reference")
                 inst_ref = ref_node.get_string(0) if ref_node is not None else None
-                if inst_ref:
-                    selected = inst_ref
-        if selected and selected != prop_ref:
-            renames[prop_ref] = selected
+                if inst_ref and inst_ref != prop_ref:
+                    renames[prop_ref] = inst_ref
     return renames
 
 
-def _iter_instance_symbols(
-    sch_path: Path, *, placement_refs: bool = False
-) -> Iterator[tuple[str, SymbolInstance, _SheetVisit]]:
+def _iter_instance_symbols(sch_path: Path) -> Iterator[tuple[str, SymbolInstance, _SheetVisit]]:
     """Yield ``(reference, symbol, visit)`` for every placed symbol in a hierarchy.
 
     ``reference`` is the designator of *this placement* of the symbol: the
@@ -456,9 +448,7 @@ def _iter_instance_symbols(
     pin-to-pad mapping; issue #6004) see both footprints.
 
     Singly placed sheets -- every sheet in a non-reusing design -- are
-    neither re-parsed nor renamed, so the common case is unchanged.  With
-    ``placement_refs`` every sheet is renamed through its placement annotations,
-    as a native netlist export does.
+    neither re-parsed nor renamed, so the common case is unchanged.
     """
     visits = list(_walk_hierarchy_schematics(Path(sch_path)))
     placements: dict[Path, int] = {}
@@ -466,11 +456,7 @@ def _iter_instance_symbols(
         key_path = visit.source.resolve()
         placements[key_path] = placements.get(key_path, 0) + 1
     for visit in visits:
-        renames = (
-            _instance_reference_map(visit)
-            if placement_refs or placements[visit.source.resolve()] > 1
-            else {}
-        )
+        renames = _instance_reference_map(visit) if placements[visit.source.resolve()] > 1 else {}
         for sym in visit.schematic.symbols:
             ref = getattr(sym, "reference", "") or ""
             yield renames.get(ref, ref), sym, visit
@@ -532,9 +518,7 @@ def _connect_sheet_ports(
                 aliases[_component_root(aliases, name)] = _component_root(aliases, connected_port)
 
 
-def _schematic_pin_to_net(
-    sch_path: Path, *, placement_refs: bool = False
-) -> dict[tuple[str, str], str | None]:
+def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
     """Build ``{(ref, pad) -> net_name | None}`` for every pin in the schematic.
 
     Walks the full sheet hierarchy: the root ``.kicad_sch`` plus every
@@ -621,11 +605,7 @@ def _schematic_pin_to_net(
         # ``MCU_A``'s ``R1``/``R2`` (issue #5815).  Skipped outright for a
         # singly-placed sheet -- every sheet in a non-reusing design -- so
         # the usual case pays no extra parse and is bit-for-bit unchanged.
-        renames = (
-            _instance_reference_map(visit)
-            if placement_refs or placements[visit.source.resolve()] > 1
-            else {}
-        )
+        renames = _instance_reference_map(visit) if placements[visit.source.resolve()] > 1 else {}
         for (ref, pad), net in sch._pin_nets_from_graph(parent, names, pins).items():
             out[(renames.get(ref, ref), pad)] = net
     # Port connections can cross several sheets in either direction. Choose

@@ -11,6 +11,10 @@ from kicad_tools.cli import main
 from kicad_tools.operations.netlist import Netlist, build_netlist_from_schematic
 from kicad_tools.sexp import parse_string
 
+requires_kicad = pytest.mark.skipif(
+    shutil.which("kicad-cli") is None, reason="needs kicad-cli for a native export"
+)
+
 FIXTURE = Path(__file__).parent / "fixtures" / "channel_intent"
 
 
@@ -40,12 +44,15 @@ def check(bank, source, capsys, status):
     )
 
 
-@pytest.mark.parametrize("source", ["kicad_sch", "net"])
+@pytest.mark.parametrize("source", [pytest.param("kicad_sch", marks=requires_kicad), "net"])
 def test_clean_channels(bank, source, capsys):
     assert check(bank, source, capsys, 0) == []
 
 
-@pytest.mark.parametrize(("source", "label"), [("kicad_sch", "schematic"), ("net", "netlist")])
+@pytest.mark.parametrize(
+    ("source", "label"),
+    [pytest.param("kicad_sch", "schematic", marks=requires_kicad), ("net", "netlist")],
+)
 def test_wrong_capacitor_on_both_sources(bank, source, label, capsys):
     for ext in [source, "kicad_pcb"]:
         path = bank / f"bank.{ext}"
@@ -107,6 +114,7 @@ def test_swapped_dividers(bank, capsys, repeated):
     assert check(bank, "net", capsys, 1) == sorted(expected)
 
 
+@requires_kicad
 def test_shared_private_net(bank, capsys):
     pcb = bank / "bank.kicad_pcb"
     pcb.write_text(pcb.read_text().replace('(net 5 "/K28"))', '(net 4 "/K27"))'))
@@ -230,7 +238,7 @@ def export_bank_netlist(bank):
     )
 
 
-@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="needs kicad-cli for a native export")
+@requires_kicad
 @pytest.mark.parametrize("miswired", [False, True])
 def test_wired_private_nets_match_native_export(bank, capsys, miswired):
     sch = bank / "bank.kicad_sch"
@@ -263,7 +271,7 @@ def test_wired_private_nets_match_native_export(bank, capsys, miswired):
         assert check(bank, ext, capsys, int(miswired)) == (expected if miswired else [])
 
 
-@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="needs kicad-cli for a native export")
+@requires_kicad
 def test_swapped_placement_references_match_native_export(bank, capsys):
     """Swapped placement annotations: direct schematic input agrees with a fresh native netlist."""
     sch = bank / "bank.kicad_sch"
@@ -296,6 +304,7 @@ def _add_second_project_block(sch, *, last):
     sch.write_text(text)
 
 
+@requires_kicad
 def test_conflicting_placement_annotations_last_one_wins(bank, capsys):
     """With a shared path the last annotation is selected, as a native export does."""
     sch = bank / "bank.kicad_sch"
@@ -311,3 +320,58 @@ def test_conflicting_placement_annotations_last_one_wins(bank, capsys):
     findings = check(bank, "kicad_sch", capsys, 1)
     assert {row[1] for row in findings} == {"R327", "R427"}
     assert len(findings) == 6
+
+
+@requires_kicad
+def test_touching_pins_no_connect_and_missing_pin(bank, capsys):
+    sch = bank / "bank.kicad_sch"
+    # Move R427 pin 1 directly onto C127 pin 2. Keep its other pin on T27.
+    text = sch.read_text().replace("(at 50.80 50.8 0)", "(at 25.40 55.88 0)")
+    text = text.replace("(at 50.80 53.34 0)", "(at 25.40 58.42 0)")
+    doc = parse_string(text)
+    for label in doc.find_all("label"):
+        if label.get_string(0) == "REF27" and label.find("at").get_float(0) != 38.10:
+            doc.children.remove(label)
+        elif label.get_string(0) == "K27":
+            doc.children.remove(label)
+            doc.children.append(
+                parse_string(
+                    '(no_connect (at 25.40 48.26) (uuid "00000000-0000-0000-0000-000000000014"))'
+                )
+            )
+    sch.write_text(doc.to_string())
+    declaration = bank / "intent.json"
+    intent = json.loads(declaration.read_text())
+    intent["roles"]["compensation"]["pins"]["3"] = "ref"
+    declaration.write_text(json.dumps(intent))
+    export_bank_netlist(bank)
+    for ext, source in [("net", "netlist"), ("kicad_sch", "schematic")]:
+        expected = [
+            ("27", "C127", source, "1", None, "/K27", "unconnected-(C127-Pad1)"),
+            ("27", "C127", source, "2", None, "/REF27", "Net-(C127-Pad2)"),
+            ("27", "R427", source, "1", None, "/REF27", "Net-(C127-Pad2)"),
+        ]
+        for ch in ("27", "28"):
+            for label in ("pcb", source):
+                expected.append((ch, f"C1{ch}", label, "3", None, f"/REF{ch}", None))
+        assert check(bank, ext, capsys, 1) == sorted(expected)
+
+
+@requires_kicad
+def test_project_variables_match_native_export(bank, capsys):
+    sch = bank / "bank.kicad_sch"
+    text = sch.read_text()
+    for value, variable in [("C106248", "ORDER_CODE"), ("1 µF", "COMP_CAP"), ("T28", "MID_TAP")]:
+        text = text.replace(f'"{value}"', '"${' + variable + '}"')
+    sch.write_text(text)
+    for code in ("C106248", "C14663"):
+        variables = {"ORDER_CODE": code, "COMP_CAP": "1 µF", "MID_TAP": "T28"}
+        (bank / "bank.kicad_pro").write_text(json.dumps({"text_variables": variables}))
+        export_bank_netlist(bank)
+        for ext, source in [("net", "netlist"), ("kicad_sch", "schematic")]:
+            expected = [
+                (ch, f"C1{ch}", source, None, "LCSC", "C106248", code)
+                for ch in ("27", "28")
+                if code != "C106248"
+            ]
+            assert check(bank, ext, capsys, int(bool(expected))) == expected
