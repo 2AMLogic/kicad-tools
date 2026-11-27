@@ -9,11 +9,11 @@
       "size": 1109
     },
     "assembly-back.pdf": {
-      "sha256": "fd400e5ea78cb995596e07bc90866cc3827274a2c0b9b3527e1e69fb4c1c94af",
+      "sha256": "0e2eb2937a7556957b7e26c7042e14c2f9bd8ef6d333e64d138ce0aba39e7413",
       "size": 30200
     },
     "assembly-front.pdf": {
-      "sha256": "1274e02fcdbcdbff7bd1984a02465f76c1f109b465d5d6c4b916fdc9bc9890db",
+      "sha256": "ce89a9f2023d56a3069136306693e34a1da6f4041ee28cac4184272d1253617f",
       "size": 57477
     },
     "bom_jlcpcb.csv": {
@@ -21,8 +21,8 @@
       "size": 746
     },
     "check-report.json": {
-      "sha256": "c6c9f689b71f710ee24c1f52a37ce75561e62c3f43e9476e35b83b951a81df5d",
-      "size": 893489
+      "sha256": "9ef982bc495611ce4eb269a77fc3a6118e9d4b67ae1672eb9da146e4e68d5068",
+      "size": 893306
     },
     "cpl_jlcpcb.csv": {
       "sha256": "cf68a29f553dbfc0332a67c018be523dd09f8a2017d441ba69e8cb17d310b86e",
@@ -37,8 +37,8 @@
       "size": 37
     },
     "gerbers/gerbers.zip": {
-      "sha256": "2f00e57ffe6a334c6c402501b22a2cee96882daaff2d2aa783f9d5fe8fbc47c9",
-      "size": 39631
+      "sha256": "6dfa4be59f47d04142f7ca939fcb5000418542b22ab430c7b6b8f6516dcf134e",
+      "size": 39635
     },
     "images/assembly.png": {
       "sha256": "1a6b29d17a6d1889d6f860708d3a6db51e18d4de300a6d9848aacb9c1ea299f7",
@@ -77,8 +77,8 @@
       "size": 262609
     },
     "kicad_project.zip": {
-      "sha256": "c9fe0d856fdde9b626217df5f99cc2e9c8209875d14b0744bfbd290682ab2ccc",
-      "size": 73758
+      "sha256": "755f0ce3faf4ec265e1ca52c144b2187521d57349ee527782b1cc43a32291997",
+      "size": 73753
     },
     "lvs.json": {
       "sha256": "8a44e465f8db5c6f95b19b46257bd87290819ef27e8b68a85cbf490bd0f47a68",
@@ -97,15 +97,15 @@
       "size": 8620
     },
     "report.md": {
-      "sha256": "f84751d893bdd4ec252e2586f074542b70923d25bdf58796e49ee548c22481c8",
+      "sha256": "521c28e740b13d7b6f9ef4106af777a80a7e6ee8b980079b510011d5d339abde",
       "size": 3317
     },
     "report.pdf": {
-      "sha256": "e9c6f537ec8e1f0bbbce8ad596411bc197513cb869dd5fed2a7b9e52bef8e24a",
-      "size": 2249118
+      "sha256": "da0519740205ad8749b3616ff9b3e709dd598e1f86c2b2575fdc07722dc083bd",
+      "size": 2249714
     },
     "schematic.pdf": {
-      "sha256": "077f68282d8eeb15961ca95d88ee96337f5af20434fa78f5173ff3dc79dc647f",
+      "sha256": "25040dc6fe27d4580422e7f245946ba32e682e3fbae9513389bc982c73dd5068",
       "size": 132640
     }
   },

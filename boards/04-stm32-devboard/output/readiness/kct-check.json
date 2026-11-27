@@ -1,7 +1,7 @@
 {
-  "file": "output/stm32_devboard_routed.kicad_pcb",
+  "file": "stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "9bccbf2e7107d2a25fae510e87374cfc802833b0cf9b1c71227ce8178ec05169",
+  "pcb_sha256": "ab4c02899b71e0a248d8133692f06c2e630135870b08364d6813fbe83fd592c6",
   "layers": 0,
   "summary": {
     "errors": 0,
@@ -580,7 +580,7 @@
     "schematic_missing": false,
     "incomplete_categories": [],
     "schematic": {
-      "path": "output/stm32_devboard.kicad_sch",
+      "path": "stm32_devboard.kicad_sch",
       "source": "--schematic"
     }
   },

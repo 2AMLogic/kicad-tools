@@ -4330,7 +4330,7 @@
         "source_sha256": "e6330202d7decf888d54c185e7c94e324ca0490d113a4fb9ef01088aa145793a",
         "project_sha256": "646aa5be16bad2b2a2aa4e1c83a0c679f8d7916bca7d93ccf37af22ee6d686bb",
         "rules_sha256": "55898344647f1a1ae1be91f063ebb7c6db6f3df8e2ee8cbdf55c28eb6b0daadf",
-        "export_profile_sha256": "eb07696ba121c776da8ffe61fa978108f815a62674614cb181f634d9bd154c7c"
+        "export_profile_sha256": "1703b7863d366ef21de6b2c9be8e6b5198d510d620c7bf682aba5cbf58df16ba"
       },
       "measurements": [
         {
@@ -9321,9 +9321,6 @@
           "native_version": "10.0.6",
           "export_identity": {
             "command": [
-              "docker",
-              "run",
-              "kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec",
               "kicad-cli"
             ],
             "arguments": [
@@ -9340,6 +9337,7 @@
             "profile": "macro-free-native-gerber",
             "board_plot_params": false,
             "variables": [],
+            "command_file_sha256": "170493658ffb66d554137711b4e1a8c760de23a5056267424f0148d3e3323f68",
             "plot_profile_source_sha256": "e6330202d7decf888d54c185e7c94e324ca0490d113a4fb9ef01088aa145793a",
             "stdout": "Plotted to '<scratch>/gerbers/diffpair_test_routed-F_Cu.gbr'.\nPlotted to '<scratch>/gerbers/diffpair_test_routed-B_Cu.gbr'.\nPlotted to '<scratch>/gerbers/diffpair_test_routed-F_Mask.gbr'.\nPlotted to '<scratch>/gerbers/diffpair_test_routed-B_Mask.gbr'.\n",
             "stderr": ""
@@ -15236,10 +15234,10 @@
             }
           },
           "gerber_sha256": {
-            "F.Mask": "bf7d88ac80071b595ab20d7597f0244e88a0803247a9e16a53eb277e5eb17c90",
-            "B.Mask": "ddf9e0648bb290121c5a5925f5ab925f88c34a61ccac29734ea104a140383f42",
-            "F.Cu": "28d3d875d6a1cb522a7c6475806cee2f8f296b2616c3260f1d07a38ad602b642",
-            "B.Cu": "ea69c5fbfef9757fa07b85d60960a6a81689d86b3728fed1c102d7e5307bf7cf"
+            "F.Mask": "45b52b2b9db07e64b71b3acab0d64adc0224f65cae16bddece7ede0ba663d562",
+            "B.Mask": "e35767ba1ba77411d2dbfce03bd7b4aaa554a5710453f3e34a44ab351b697e64",
+            "F.Cu": "5c534d4b29a49b26e9a4d090d0bd3575e7abcd3bc287840fb0fcb672343d5b2b",
+            "B.Cu": "ab922e621ac98b0f7a167b140cf59bfc02f3ec408d851aa977efe8039ff69377"
           },
           "unsupported": [],
           "source_geometries": {}
@@ -15247,9 +15245,6 @@
         "objects": {
           "worker_sha256": "72d5a5841144a1cbab758c8f1db27823ac13792f22af7b43a00350097e1778bb",
           "native_python_command": [
-            "docker",
-            "run",
-            "kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec",
             "python3"
           ],
           "native_version": "10.0.6",
@@ -20514,8 +20509,8 @@
             "status": "complete",
             "missing_layers": [],
             "gerber_sha256": {
-              "F.Mask": "bf7d88ac80071b595ab20d7597f0244e88a0803247a9e16a53eb277e5eb17c90",
-              "F.Cu": "28d3d875d6a1cb522a7c6475806cee2f8f296b2616c3260f1d07a38ad602b642"
+              "F.Mask": "45b52b2b9db07e64b71b3acab0d64adc0224f65cae16bddece7ede0ba663d562",
+              "F.Cu": "5c534d4b29a49b26e9a4d090d0bd3575e7abcd3bc287840fb0fcb672343d5b2b"
             },
             "openings": [
               {
@@ -23209,8 +23204,8 @@
             "status": "complete",
             "missing_layers": [],
             "gerber_sha256": {
-              "B.Mask": "ddf9e0648bb290121c5a5925f5ab925f88c34a61ccac29734ea104a140383f42",
-              "B.Cu": "ea69c5fbfef9757fa07b85d60960a6a81689d86b3728fed1c102d7e5307bf7cf"
+              "B.Mask": "e35767ba1ba77411d2dbfce03bd7b4aaa554a5710453f3e34a44ab351b697e64",
+              "B.Cu": "ab922e621ac98b0f7a167b140cf59bfc02f3ec408d851aa977efe8039ff69377"
             },
             "openings": [
               {

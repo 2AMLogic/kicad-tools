@@ -641,7 +641,7 @@
 		(uuid "4a7a15d3-6194-5f3f-ba81-1b4d2d86fa3f")
 		(at 143.5 82.6)
 		(property "Reference" "C11"
-			(at -5.5 4.73 0)
+			(at -5.25 4.48 0)
 			(layer "F.SilkS")
 			(uuid "29cf4f36-2eec-5995-9715-36e7895f50af")
 			(effects
@@ -1252,7 +1252,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.st.com/resource/en/datasheet/stm32f103c8.pdf"
 			(at 0 0 0)
 			(layer "F.Fab")
 			(hide yes)
@@ -2060,7 +2060,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "http://ww1.microchip.com/downloads/en/devicedoc/22056b.pdf"
 			(at 0 0 0)
 			(layer "F.Fab")
 			(hide yes)
