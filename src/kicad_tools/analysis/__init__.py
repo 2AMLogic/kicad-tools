@@ -52,6 +52,7 @@ from .net_status import (
     PadInfo,
     build_zone_net_map,
 )
+from .reference_coverage import reference_coverage
 from .routing_quality import (
     FRAGMENT_LENGTH_MM,
     RULE_FRAGMENT_FRACTION,
@@ -141,5 +142,6 @@ __all__ = [
     "evaluate_routing_quality_thresholds",
     "infer_rail_voltage",
     "normalize_state_name",
+    "reference_coverage",
     "routing_quality_gate_dict",
 ]
