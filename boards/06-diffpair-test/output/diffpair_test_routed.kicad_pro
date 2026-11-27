@@ -59,34 +59,7 @@
     "filename": "diffpair_test.kicad_pro",
     "version": 1,
     "manufacturer": "jlcpcb",
-    "kct_router_netclasses": {
-      "classes": [
-        "LVDS",
-        "LVTTL",
-        "Power"
-      ],
-      "assignments": [
-        "+3V3",
-        "GND",
-        "IN1",
-        "IN2",
-        "IN3",
-        "IN4",
-        "LVDS1_N",
-        "LVDS1_P",
-        "LVDS2_N",
-        "LVDS2_P",
-        "LVDS3_N",
-        "LVDS3_P",
-        "LVDS4_N",
-        "LVDS4_P",
-        "OUT1",
-        "OUT2",
-        "OUT3",
-        "OUT4"
-      ]
-    },
-    "kct_sidecar_sha256": "b062fe0aa7e6050b4130ce343b9a12703bb26167e3ae3cea30a8b540444fda67"
+    "kct_sidecar_sha256": "0b596f629ed4946dd715b70da579fc5db10cd63b7a860bcef838935b6c35f5cf"
   },
   "net_settings": {
     "classes": [
@@ -116,12 +89,12 @@
         "line_style": 0,
         "microvia_diameter": 0.3,
         "microvia_drill": 0.1,
-        "name": "LVDS",
+        "name": "LVTTL",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.1016,
-        "via_diameter": 0.45,
-        "via_drill": 0.2,
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
         "wire_width": 6
       },
       {
@@ -133,12 +106,12 @@
         "line_style": 0,
         "microvia_diameter": 0.3,
         "microvia_drill": 0.1,
-        "name": "LVTTL",
+        "name": "LVDS",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.1016,
-        "via_diameter": 0.45,
-        "via_drill": 0.2,
+        "track_width": 0.26,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
         "wire_width": 6
       },
       {
@@ -153,9 +126,9 @@
         "name": "Power",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.1016,
-        "via_diameter": 0.45,
-        "via_drill": 0.2,
+        "track_width": 0.3,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
         "wire_width": 6
       }
     ],
@@ -183,7 +156,80 @@
       "OUT3": "LVTTL",
       "OUT4": "LVTTL"
     },
-    "netclass_patterns": []
+    "netclass_patterns": [
+      {
+        "netclass": "LVTTL",
+        "pattern": "IN1"
+      },
+      {
+        "netclass": "LVTTL",
+        "pattern": "IN2"
+      },
+      {
+        "netclass": "LVTTL",
+        "pattern": "IN3"
+      },
+      {
+        "netclass": "LVTTL",
+        "pattern": "IN4"
+      },
+      {
+        "netclass": "LVTTL",
+        "pattern": "OUT1"
+      },
+      {
+        "netclass": "LVTTL",
+        "pattern": "OUT2"
+      },
+      {
+        "netclass": "LVTTL",
+        "pattern": "OUT3"
+      },
+      {
+        "netclass": "LVTTL",
+        "pattern": "OUT4"
+      },
+      {
+        "netclass": "LVDS",
+        "pattern": "LVDS1_P"
+      },
+      {
+        "netclass": "LVDS",
+        "pattern": "LVDS1_N"
+      },
+      {
+        "netclass": "LVDS",
+        "pattern": "LVDS2_P"
+      },
+      {
+        "netclass": "LVDS",
+        "pattern": "LVDS2_N"
+      },
+      {
+        "netclass": "LVDS",
+        "pattern": "LVDS3_P"
+      },
+      {
+        "netclass": "LVDS",
+        "pattern": "LVDS3_N"
+      },
+      {
+        "netclass": "LVDS",
+        "pattern": "LVDS4_P"
+      },
+      {
+        "netclass": "LVDS",
+        "pattern": "LVDS4_N"
+      },
+      {
+        "netclass": "Power",
+        "pattern": "^\\x2B3V3\\z$"
+      },
+      {
+        "netclass": "Power",
+        "pattern": "GND"
+      }
+    ]
   },
   "pcbnew": {
     "last_paths": {
