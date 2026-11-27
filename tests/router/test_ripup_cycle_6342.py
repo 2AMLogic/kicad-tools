@@ -37,9 +37,12 @@ from kicad_tools.router.algorithms.negotiated import (
     RIPUP_COMMITTED,
     RIPUP_SIBLING_FAILED,
     RIPUP_TRADED,
+    RIPUP_VICTIM_BUDGET,
     RIPUP_VICTIM_GEOMETRIC,
+    RIPUP_VICTIM_UNPROVEN,
     NegotiatedRouter,
     TargetedRipupOutcome,
+    report_edge_failure,
 )
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
@@ -61,13 +64,28 @@ def _neg(router: Autorouter) -> NegotiatedRouter:
     )
 
 
-def _run_ripup(fake_route_net, *, blocking=frozenset({2, 3}), history=None, **kwargs):
+def _run_ripup(
+    fake_route_net,
+    *,
+    blocking=frozenset({2, 3}),
+    history=None,
+    victim_search_drained=True,
+    **kwargs,
+):
     router = _make_router_with_four_nets()
     neg = _neg(router)
     original = {2: _stub_route(2), 3: _stub_route(3)}
     net_routes: dict[int, list] = {n: [r] for n, r in original.items()}
     routes_list: list = list(original.values())
-    with patch.object(NegotiatedRouter, "route_net_negotiated", fake_route_net):
+
+    def route_with_evidence(self_neg, pads, *args, **options):
+        routes = fake_route_net(self_neg, pads, *args, **options)
+        if not routes:
+            reason = RIPUP_VICTIM_GEOMETRIC if victim_search_drained else RIPUP_VICTIM_BUDGET
+            report_edge_failure(options.get("failure_callback"), pads[0], pads[1], reason)
+        return routes
+
+    with patch.object(NegotiatedRouter, "route_net_negotiated", route_with_evidence):
         success = neg.targeted_ripup(
             failed_net=1,
             blocking_nets=set(blocking),
@@ -108,6 +126,31 @@ def test_outcome_victim_geometric_when_the_victim_has_no_path_with_blockers_gone
     assert bool(outcome) is False
     # Still the #3470 verbatim rollback.
     assert net_routes[2] == [original[2]]
+
+
+def test_outcome_victim_budget_when_the_victim_search_stopped_at_its_cap():
+    """Issue #9900: a budget stop is not a geometric seal.
+
+    The Board 06 seed-42 pure-Python leg recorded ``victim_geometric`` ("no
+    path with blockers ripped") for USB3_RX1+/TX1 victim searches that
+    stopped at the deterministic 1M node-expansion cap with the frontier
+    still open -- the C++ backend connects the same nets on the same grid,
+    so a legal route existed.  When the failed search did NOT drain (no
+    unreachability proof), the outcome must say ``victim_budget`` instead.
+    """
+
+    def fake(self_neg, pads, *a, **k):
+        return [] if pads[0].net == 1 else [_stub_route(pads[0].net)]
+
+    success, outcome, net_routes, _routes, original = _run_ripup(fake, victim_search_drained=False)
+
+    assert success is False
+    assert outcome.reason == RIPUP_VICTIM_BUDGET
+    assert bool(outcome) is False
+    # The #3470 verbatim rollback is unchanged: a budget stop rolls back
+    # exactly like a proven-geometric failure.
+    assert net_routes[2] == [original[2]]
+    assert net_routes[3] == [original[3]]
 
 
 def test_outcome_sibling_failed_names_the_blocker_that_could_not_re_land():
@@ -312,7 +355,13 @@ def test_negotiated_run_never_rips_a_pair_more_than_twice():
     assert guard is not None
     assert guard.pair_counts, "the sealed net should have been sent to rip-up"
     assert guard.max_pair_count() <= MAX_PAIR_RIPUPS
-    assert RIPUP_VICTIM_GEOMETRIC in {o.reason for o in guard.outcomes}
+    # Issue #9900: this fixture's 20k per-net node cap cuts the victim's
+    # search before it can drain, so the seal is recorded as a budget stop
+    # (``victim_budget``), not ``victim_geometric`` -- the C++ search never
+    # proved no-path within the cap, exactly the distinction the Board 06
+    # trace demanded.  A drained search on an uncapped fixture is the
+    # ``victim_geometric`` case (test_ripup_budget_9900's negative control).
+    assert RIPUP_VICTIM_BUDGET in {o.reason for o in guard.outcomes}
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +476,9 @@ def test_victim_is_retried_with_the_ripped_copper_freed_on_the_cpp_grid(transact
         # The window itself is still open for every other net.
         assert router.grid._cpp_unmark_deferred is True
     else:
-        assert outcome.reason == RIPUP_VICTIM_GEOMETRIC
+        # This control explicitly disabled the fallback. The remaining
+        # native seal alone cannot prove the victim has no route.
+        assert outcome.reason == RIPUP_VICTIM_UNPROVEN
         assert net_routes[SEAL] == [seal]
         assert cpp._impl.at(gx, gy, layer).blocked
 

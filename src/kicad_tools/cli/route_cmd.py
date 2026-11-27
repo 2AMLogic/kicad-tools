@@ -69,6 +69,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
@@ -79,7 +80,7 @@ from kicad_tools.router.neck_report import (
     collect_necked_copper,
     format_neck_report,
 )
-from kicad_tools.sexp.scan import has_unquoted
+from kicad_tools.sexp.scan import has_unquoted, iter_parentheses
 
 from .route_deadline import record_stage, restore_stage
 from .route_exit_codes_help import ROUTE_EXIT_CODES_EPILOG, ROUTE_PERFORMANCE_EPILOG
@@ -91,7 +92,7 @@ if TYPE_CHECKING:
     from kicad_tools.router import Autorouter, LayerStack
     from kicad_tools.router.checkpoint import BestCheckpointWriter
     from kicad_tools.router.clearance_resolver import DeclaredClearanceRules
-    from kicad_tools.router.current_paths import CurrentPathSpec
+    from kicad_tools.router.current_paths import CurrentPathSpec, OperatingCase
     from kicad_tools.router.io import ClearanceViolation
     from kicad_tools.router.layer_intent import LayerIntentViolation
     from kicad_tools.router.net_names import NetClassMapResolution
@@ -99,6 +100,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.primitives import Pad, Route
     from kicad_tools.router.reporting import RouteAttemptResult
     from kicad_tools.router.routing_plan import OverflowReport, RoutingPlan
+    from kicad_tools.schema.pcb import PCB
 
 # Issue #3035: ``_auto_skip_pour_nets`` was promoted to a public helper at
 # ``kicad_tools.router.auto_pour.auto_skip_pour_nets`` so in-process router
@@ -633,6 +635,37 @@ def _record_post_route_drc(args, drc_errors: int) -> None:
         args._drc_skipped_for_time = drc_errors == DRC_SKIPPED_FOR_TIME[0]
 
 
+def _post_route_drc_only_failure(
+    args,
+    *,
+    drc_errors: int,
+    fix_result: int | None,
+    all_nets_routed: bool,
+    has_disconnected: bool,
+    other_checks_passed: bool,
+) -> bool:
+    """Whether verified post-route DRC is the run's sole failure (Issue #10057).
+
+    One definition for every finishing path, so ``summary.failure_reason =
+    "post_route_drc"`` means the same thing whether ``--auto-layers``
+    escalated or not (#6277 path invariance): the saved board is fully
+    connected, every non-DRC gate passed, the verifications actually ran,
+    and the post-route DRC still found errors. The check precedes repair:
+    fix-drc exit 0 clears those errors, and exit 3 reports a rollback.
+    The single-attempt JSON emitter calls this directly. The three escalation
+    paths store the result on ``args`` for :func:`_emit_route_json_fallback`.
+    """
+    return bool(
+        other_checks_passed
+        and all_nets_routed
+        and not has_disconnected
+        and drc_errors > 0
+        and not _unverified_checks(args)
+        and getattr(args, "_auto_fix_status", None) != "skipped_deadline"
+        and fix_result not in (0, 3)
+    )
+
+
 def _unverified_checks(args) -> list[str]:
     """Post-route checks this run skipped for ``--timeout`` (issue #6273).
 
@@ -1150,10 +1183,10 @@ def _reject_lost_route_only_bindings(args, nets_to_route: int) -> int | None:
     if not requested or nets_to_route != 0:
         return None
     under_two = getattr(args, "_route_only_nets_under_two", None) or set()
-    requested_set = set(requested)
+    requested_set = set(requested) - set(getattr(args, "_route_only_locked_nets", ()))
     if requested_set <= under_two:
-        # Preflight already warned every requested net has <2 pads -- a
-        # zero routable count is expected here, not a loader bug.
+        # Preflight already reported the requested nets with locked copper
+        # or fewer than two pads. A zero routable count is expected.
         return None
 
     # Requested nets preflight confirmed were routable (2+ pads) -- these
@@ -1311,8 +1344,40 @@ def _emit_single_pad_net_warning(
     )
 
 
-def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> tuple[str, int, int]:
-    """Strip top-level ``(segment ...)`` and ``(via ...)`` blocks from PCB content.
+_ROUTE_BLOCK_HEAD = re.compile(r"(?:\s|[#;][^\n]*\n)*(segment|via|arc)(?=[\s()]|\Z)")
+
+
+def _route_block_spans(
+    pcb_content: str, *, include_arcs: bool = False
+) -> "Iterator[tuple[str, int, int]]":
+    """Yield the kind and verbatim source span of each top-level routing form."""
+    depth = 0
+    kind = ""
+    start = 0
+    for pos, paren in iter_parentheses(pcb_content):
+        if paren == "(":
+            if depth == 1:
+                head = _ROUTE_BLOCK_HEAD.match(pcb_content, pos + 1)
+                if head and (include_arcs or head[1] != "arc"):
+                    kind, start = head[1], pos
+            depth += 1
+        else:
+            depth -= 1
+            if depth == 1 and kind:
+                yield kind, start, pos + 1
+                kind = ""
+    if kind:
+        # Keep the writer's handling of a truncated terminal route form.
+        yield kind, start, len(pcb_content)
+
+
+def _strip_route_blocks(
+    pcb_content: str,
+    collect: list[str] | None = None,
+    *,
+    replaced_arc_nets: frozenset[str] = frozenset(),
+) -> tuple[str, int, int]:
+    """Strip top-level segments, vias, and arcs on nets explicitly being replaced.
 
     Issue #2976: When ``_stage_input_for_auto_pour`` aliases ``pcb_path`` to
     ``output_path`` (so the user's input file isn't mutated by ``auto_pour``),
@@ -1329,9 +1394,8 @@ def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> t
     The fix is to remove any top-level routed-element blocks before
     inserting fresh ones: the in-memory router state is the source of
     truth, and the new ``route_sexp`` already contains every segment and
-    via that should appear in the output.  Footprints, pads, zones, and
-    other PCB structure are preserved because we only strip blocks whose
-    first token is ``segment`` or ``via``.
+    via that should appear in the output. Authored arcs stay in their source
+    form unless the run replaces their net's existing copper.
 
     Args:
         pcb_content: Original PCB file content.
@@ -1340,87 +1404,37 @@ def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> t
             existing-copper replacement notice lists the affected nets from
             these blocks).
 
+        replaced_arc_nets: Also remove source track arcs on these rerouted nets.
+
     Returns:
         Tuple of ``(stripped_content, segments_removed, vias_removed)``.
         Counts are returned so callers can log a diagnostic when a stale
         write is observed.
     """
-    # Walk the content counting depth, identifying top-level forms whose
-    # first token is "segment" or "via" and excising them.  Footprints
-    # contain their own (pad ...) blocks, never (segment ...) or top-level
-    # (via ...), so stripping at depth=1 is safe.
-    out: list[str] = []
-    i = 0
-    n = len(pcb_content)
-    depth = 0
-    in_string = False
-    prev_char = ""
-    segments_removed = 0
-    vias_removed = 0
-    while i < n:
-        ch = pcb_content[i]
-        if ch == '"' and prev_char != "\\":
-            in_string = not in_string
-            out.append(ch)
-            prev_char = ch
-            i += 1
-            continue
-        if not in_string and ch == "(":
-            # Peek at the token following the paren.
-            j = i + 1
-            while j < n and pcb_content[j].isspace():
-                j += 1
-            token_start = j
-            while (
-                j < n
-                and not pcb_content[j].isspace()
-                and pcb_content[j] != "("
-                and pcb_content[j] != ")"
-            ):
-                j += 1
-            token = pcb_content[token_start:j]
-            if depth == 1 and token in ("segment", "via"):
-                # Skip the entire form: find matching ")".
-                form_depth = 1
-                k = j
-                form_in_string = False
-                form_prev = ""
-                while k < n and form_depth > 0:
-                    c = pcb_content[k]
-                    if c == '"' and form_prev != "\\":
-                        form_in_string = not form_in_string
-                    elif not form_in_string:
-                        if c == "(":
-                            form_depth += 1
-                        elif c == ")":
-                            form_depth -= 1
-                    form_prev = c
-                    k += 1
-                if token == "segment":
-                    segments_removed += 1
-                else:
-                    vias_removed += 1
-                if collect is not None:
-                    collect.append(pcb_content[token_start - 1 : k])
-                # Skip whitespace that was preceding this form (trailing
-                # newline/tab from the previous emission) to keep the
-                # resulting file tidy.
-                while out and out[-1] in (" ", "\t"):
-                    out.pop()
-                # Also drop a single trailing newline so we collapse the
-                # blank line the form previously occupied.
-                if out and out[-1] == "\n":
-                    out.pop()
-                i = k
-                prev_char = ")"
+    pieces: list[str] = []
+    cursor = 0
+    segments_removed = vias_removed = 0
+    if replaced_arc_nets:
+        from kicad_tools.router.optimizer.pcb import parse_net_names, resolve_block_net
+
+        net_names = parse_net_names(pcb_content)
+        name_to_id = {name: number for number, name in net_names.items()}
+    for kind, start, end in _route_block_spans(pcb_content, include_arcs=bool(replaced_arc_nets)):
+        if kind == "arc":
+            identity = resolve_block_net(pcb_content[start:end], net_names, name_to_id)
+            if identity is None or identity[1] not in replaced_arc_nets:
                 continue
-            depth += 1
-        elif not in_string and ch == ")":
-            depth -= 1
-        out.append(ch)
-        prev_char = ch
-        i += 1
-    return "".join(out), segments_removed, vias_removed
+        # Remove the indentation and one newline belonging to the old form.
+        pieces.append(pcb_content[cursor:start].rstrip(" \t").removesuffix("\n"))
+        if collect is not None:
+            collect.append(pcb_content[start:end])
+        if kind != "via":
+            segments_removed += 1
+        else:
+            vias_removed += 1
+        cursor = end
+    pieces.append(pcb_content[cursor:])
+    return "".join(pieces), segments_removed, vias_removed
 
 
 # Issue #9599 row 2: the net-declaration table ``(net 3 "NAME")`` maps stripped
@@ -1436,8 +1450,8 @@ def _baseline_copper_nets(pcb_content: str) -> tuple[int, int, list[str]]:
     """Census the input board's existing routing copper (issue #9599 row 2).
 
     Returns ``(segments, vias, sorted net names)`` carried by top-level
-    ``(segment ...)`` / ``(via ...)`` blocks -- the copper a plain ``kct
-    route`` run replaces with its own freshly routed paths.  Net id ``0``
+    ``(segment ...)`` / ``(via ...)`` blocks -- the copper an explicit full
+    reroute replaces with its own freshly routed paths.  Net id ``0``
     copper (orphans) is not attributed to any named net.
     """
     net_names: dict[int, str] = {}
@@ -1460,12 +1474,12 @@ def _baseline_copper_nets(pcb_content: str) -> tuple[int, int, list[str]]:
 
 
 def _warn_existing_copper_replacement(pcb_path: Path, args) -> None:
-    """List the existing copper a plain ``kct route`` run will replace (#9599 row 2).
+    """List the existing copper a full reroute will replace (#9599 row 2).
 
     The save path treats the in-memory router state as authoritative: every
     ``_write_routed_pcb`` call strips ALL top-level ``(segment ...)`` /
     ``(via ...)`` blocks and re-inserts only this run's routes (issue #2976).
-    Without ``--preserve-existing`` that silently removes hand-placed copper;
+    With ``--no-preserve-existing`` that removes hand-placed copper;
     this notice names every affected net before routing starts, and points at
     the flag that locks existing copper (kept verbatim as fixed obstacles and
     re-emitted unchanged, issue #5788).  Skipped for quiet / dry runs, and
@@ -1518,7 +1532,9 @@ def _board_uses_name_only_dialect(pcb_path: "Path | str") -> bool:
     return bool(_NAME_ONLY_NET_RE.search(content))
 
 
-def _insert_sexp_before_closing(pcb_content: str, sexp_fragments: str) -> str:
+def _insert_sexp_before_closing(
+    pcb_content: str, sexp_fragments: str, *, replaced_arc_nets: frozenset[str] = frozenset()
+) -> str:
     """Insert S-expression fragments before the final closing parenthesis of a PCB file.
 
     This correctly removes only the last closing parenthesis from the PCB content
@@ -1540,7 +1556,9 @@ def _insert_sexp_before_closing(pcb_content: str, sexp_fragments: str) -> str:
     Returns:
         Modified PCB content with fragments inserted before the final ``)``.
     """
-    pcb_content, _stripped_segs, _stripped_vias = _strip_route_blocks(pcb_content)
+    pcb_content, _stripped_segs, _stripped_vias = _strip_route_blocks(
+        pcb_content, replaced_arc_nets=replaced_arc_nets
+    )
     content = pcb_content.rstrip()
     if content.endswith(")"):
         content = content[:-1].rstrip()
@@ -1564,19 +1582,10 @@ def _validate_sexp_parentheses(content: str) -> bool:
         True if parentheses are balanced, False otherwise.
     """
     depth = 0
-    in_string = False
-    prev_char = ""
-    for char in content:
-        if char == '"' and prev_char != "\\":
-            in_string = not in_string
-        elif not in_string:
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth < 0:
-                    return False
-        prev_char = char
+    for _, paren in iter_parentheses(content):
+        depth += 1 if paren == "(" else -1
+        if depth < 0:
+            return False
     return depth == 0
 
 
@@ -1804,6 +1813,7 @@ def _write_routed_pcb(
     layer_count: int = 2,
     is_checkpoint: bool = False,
     guard_copper_loss: bool = False,
+    replaced_arc_nets: frozenset[str] = frozenset(),
 ) -> Path:
     """Atomically write a routed PCB file.
 
@@ -1868,7 +1878,9 @@ def _write_routed_pcb(
         original_content = update_pcb_layer_stackup(original_content, layer_count)
 
     if route_sexp:
-        output_content = _insert_sexp_before_closing(original_content, route_sexp)
+        output_content = _insert_sexp_before_closing(
+            original_content, route_sexp, replaced_arc_nets=replaced_arc_nets
+        )
     else:
         output_content = original_content
 
@@ -2067,6 +2079,9 @@ def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: b
         net_anchors=_detour_net_anchors(router),
     )
     _provide_via_connection_context(router, optimizer)
+    mask_guard = getattr(args, "_mfr_mask_guard", None)
+    if mask_guard is not None:
+        optimizer.set_mask_opening_guard(*mask_guard)
 
     # Issue #2596: snapshot per-net connectivity before optimize so any net
     # whose pad-to-pad connectivity regresses can be reverted.
@@ -3449,6 +3464,7 @@ def _make_checkpoint_callback(
     preserved_routes: "list[Route] | None" = None,
     router_provider: "Callable[[], Autorouter] | None" = None,
     source_pcb_path: Path | None = None,
+    replaced_arc_nets: frozenset[str] = frozenset(),
     best_checkpoint: "BestCheckpointWriter | None" = None,
     dry_run: bool = False,
 ):
@@ -3564,7 +3580,12 @@ def _make_checkpoint_callback(
                 route_sexp = f"{route_sexp}\n\t{kept}" if route_sexp else kept
             _copy_checkpoint_constraint_sidecars(source_pcb_path or pcb_path, dest)
             _write_routed_pcb(
-                pcb_path, dest, route_sexp, is_checkpoint=True, layer_count=layer_count
+                pcb_path,
+                dest,
+                route_sexp,
+                is_checkpoint=True,
+                layer_count=layer_count,
+                replaced_arc_nets=replaced_arc_nets,
             )
 
         with restore_stage():
@@ -3589,6 +3610,12 @@ def _make_checkpoint_callback(
 
     def _checkpoint_inner(best_routes, best_metrics) -> None:
         from kicad_tools.cli.progress import flush_print
+
+        active = router_provider() if router_provider is not None else None
+        if getattr(active, "pending_preserved_departure", None) is not None:
+            # The completed-attempt archive can retain provisional copper. The
+            # live board and best-checkpoint path must await its refill verdict.
+            return
 
         if best_checkpoint is not None:
             try:
@@ -3661,6 +3688,7 @@ def _make_checkpoint_callback(
                 route_sexp,
                 is_checkpoint=True,
                 layer_count=layer_count,
+                replaced_arc_nets=replaced_arc_nets,
             )
             record_stage("serialization", checkpoint_saved=True, checkpoint=str(output_path))
 
@@ -3685,7 +3713,11 @@ def _make_checkpoint_callback(
     def _checkpoint_completed_inner(routes, metrics) -> None:
         import tempfile
 
-        if best_checkpoint is not None:
+        active = router_provider() if router_provider is not None else None
+        if (
+            best_checkpoint is not None
+            and getattr(active, "pending_preserved_departure", None) is None
+        ):
             try:
                 _offer_best(routes, metrics, label="completed attempt")
             except Exception as exc:  # noqa: BLE001 - never abort routing
@@ -3714,7 +3746,14 @@ def _make_checkpoint_callback(
             os.close(fd)
             completed = Path(name)
             _copy_checkpoint_constraint_sidecars(source_pcb_path or pcb_path, completed)
-            _write_routed_pcb(pcb_path, completed, sexp, layer_count=layers, is_checkpoint=True)
+            _write_routed_pcb(
+                pcb_path,
+                completed,
+                sexp,
+                layer_count=layers,
+                is_checkpoint=True,
+                replaced_arc_nets=replaced_arc_nets,
+            )
             history.append(str(completed))
             record_stage("serialization", checkpoint_history=list(history))
 
@@ -3782,9 +3821,31 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
 def _capture_attempt_preserved_copper(pcb_path: Path, args) -> tuple[list["Route"], str]:
     """Capture fixed source copper once, before checkpoint writes can replace it."""
     preserve = bool(getattr(args, "preserve_existing", False))
+    replaced = frozenset(getattr(args, "_replace_existing_nets", None) or ())
     routes = _capture_preserved_routes(pcb_path) if preserve else []
+    if replaced:
+        routes = [route for route in routes if route.net_name not in replaced]
     disposition = getattr(args, "_placement_disposition", None)
     names = disposition.preserve_copper_nets if disposition is not None else frozenset()
+    if preserve and _keep_input_copper_on_routed_nets(args):
+        # The geometry model supplies routing obstacles. Keep the source forms
+        # for output as well, including locks and per-via fabrication settings.
+        text = pcb_path.read_text()
+        input_blocks: list[str] = []
+        _strip_route_blocks(text, collect=input_blocks)
+        if replaced:
+            from kicad_tools.router.optimizer.pcb import parse_net_names, resolve_block_net
+
+            net_names = parse_net_names(text)
+            by_name = {name: number for number, name in net_names.items()}
+            input_blocks = [
+                block
+                for block in input_blocks
+                if (identity := resolve_block_net(block, net_names, by_name)) is None
+                or identity[1] in names
+                or identity[1] not in replaced
+            ]
+        return routes, "\n\t".join(input_blocks)
     name_only = _board_uses_name_only_dialect(pcb_path)
     ordinary = _serialize_preserved_routes(
         [route for route in routes if route.net_name not in names], name_only=name_only
@@ -3820,6 +3881,22 @@ def _kept_preserved_net_ids(router) -> set[int]:
     if callable(method):
         return set(method())
     return set(getattr(router, "_stub_terminals", None) or {})
+
+
+def _keep_input_copper_on_routed_nets(args) -> bool:
+    """Keep hand-routed portions of open nets during incremental completion.
+
+    An explicit net or region selection may replace the selected copper.
+    A completion pass always keeps it, including on the nets it selects.
+    """
+    return bool(
+        getattr(args, "complete", False)
+        or (
+            getattr(args, "preserve_existing", False)
+            and not getattr(args, "nets", None)
+            and getattr(args, "_region_box", None) is None
+        )
+    )
 
 
 def _router_board_net_ids(router) -> dict[str, int]:
@@ -3910,14 +3987,13 @@ def _dedupe_preserved_sexp(
     drop_names = {r.net_name for r in dropped if r.net_name}
     if not dropped:
         return preserved_sexp
-    from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks
+    from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks, resolve_block_net
 
     spans = []
     for kind in ("segment", "via"):
         for start, end, block in _extract_balanced_blocks(preserved_sexp, kind):
-            num = re.search(r"\(net\s+(\d+)\s*\)", block)
-            name = re.search(r'\(net\s+"((?:\\.|[^"\\])*)"\s*\)', block)
-            if (num and int(num.group(1)) in drop_ids) or (name and name.group(1) in drop_names):
+            identity = resolve_block_net(block, {}, {})
+            if identity is not None and (identity[0] in drop_ids or identity[1] in drop_names):
                 spans.append((start, end))
     result = preserved_sexp
     for start, end in sorted(spans, reverse=True):
@@ -4160,6 +4236,7 @@ def _finalize_routes(
     aggregate_segment_drop_threshold: float = 0.5,
     preserve_existing: bool = False,
     preserved_routes: list["Route"] | None = None,
+    captured_copper_sexp: str | None = None,
     pcb_path: "Path | str | None" = None,
 ) -> tuple[str, dict, dict]:
     """Run cleanup, compute statistics, and generate S-expressions.
@@ -4226,9 +4303,17 @@ def _finalize_routes(
     from kicad_tools.cli.progress import flush_print
     from kicad_tools.router.connectivity_invariant import (
         ConnectivityRegressionError,
+        discard_orphan_escape_stubs,
         enforce_connectivity_invariant,
         snapshot_connectivity,
     )
+
+    # A temporary pad-to-via stub can touch one pad without connecting it to
+    # another pad. Drop these before the snapshot so rollback protects actual
+    # connections and does not restore a failed escape.
+    pre_cleanup_segments = sum(len(r.segments) for r in router.routes)
+    pre_cleanup_vias = sum(len(r.vias) for r in router.routes)
+    orphan_stubs = discard_orphan_escape_stubs(router)
 
     # Issue #3124: snapshot per-net connectivity *before* cleanup so we
     # can revert any net that loses a reachable pad during the cleanup
@@ -4241,9 +4326,9 @@ def _finalize_routes(
     # so that metrics reflect the segments actually written to the output
     # file.  The cleanup is safe (it restores segments whose removal would
     # fragment a net).  See io.py for the canonical ordering.
-    pre_cleanup_segments = sum(len(r.segments) for r in router.routes)
-    pre_cleanup_vias = sum(len(r.vias) for r in router.routes)
     cleanup_stats = router.cleanup_artifacts()
+    if orphan_stubs:
+        cleanup_stats["orphan_escape_routes_removed"] += orphan_stubs
     post_cleanup_segments = sum(len(r.segments) for r in router.routes)
     post_cleanup_vias = sum(len(r.vias) for r in router.routes)
 
@@ -4335,6 +4420,11 @@ def _finalize_routes(
     # ``_audited_trace_copper`` never has to re-derive (or guess) it.  Always
     # set -- an empty list is the meaningful "nothing preserved" answer.
     _emitted_preserved: list[Route] = []
+    emit_captured_input = (
+        preserve_existing
+        and captured_copper_sexp is not None
+        and getattr(router, "_preserve_listed_copper", False)
+    )
     if preserve_existing:
         source_routes = preserved_routes if preserved_routes is not None else router.existing_routes
         disposition = getattr(router, "placement_disposition", None)
@@ -4346,7 +4436,7 @@ def _finalize_routes(
                 if route.net_name not in disposition.preserve_copper_nets
                 and route not in neutral_routes
             ]
-        if source_routes:
+        if source_routes or emit_captured_input:
             routed_net_ids = {r.net for r in router.routes}
             # Issue #4170 (Phase 2b-1): a stub net IS routed (the in-region
             # reconnection) but its OUTSIDE boundary-stub copper must still be
@@ -4362,12 +4452,15 @@ def _finalize_routes(
             # a name-only board the two can differ once kct has rewritten the
             # staged file, so each preserved route is matched by net name.
             board_net_ids = _router_board_net_ids(router)
-            preserved_sexp = _serialize_preserved_routes(
-                source_routes,
-                exclude_net_ids=routed_net_ids,
-                name_only=name_only,
-                board_net_ids=board_net_ids,
-            )
+            if emit_captured_input:
+                preserved_sexp = captured_copper_sexp or ""
+            else:
+                preserved_sexp = _serialize_preserved_routes(
+                    source_routes,
+                    exclude_net_ids=routed_net_ids,
+                    name_only=name_only,
+                    board_net_ids=board_net_ids,
+                )
             _emitted_preserved = [
                 _rekey_preserved_route(r, _preserved_route_router_net(r, board_net_ids))
                 for r in source_routes
@@ -4386,7 +4479,9 @@ def _finalize_routes(
 
     placement_copper = getattr(router, "placement_preserved_copper", "")
     if placement_copper:
-        route_sexp = f"{route_sexp}\n\t{placement_copper}" if route_sexp else placement_copper
+        # The full input capture already contains placement-excluded nets.
+        if not emit_captured_input:
+            route_sexp = f"{route_sexp}\n\t{placement_copper}" if route_sexp else placement_copper
         _emitted_preserved.extend(getattr(router, "placement_preserved_routes", ()))
 
     # Issue #4699: hand the gate the exact preserved set that was written.
@@ -4519,6 +4614,7 @@ def _reset_partial_save_state() -> None:
     _interrupt_state["placement_text"] = None
     _interrupt_state["partial_save_info"] = None
     _interrupt_state["source_copper"] = None
+    _interrupt_state["replaced_arc_nets"] = frozenset()
     _interrupt_state["source_routes"] = None
 
 
@@ -4939,7 +5035,11 @@ def _save_partial_results() -> bool:
             check_kicad_lock(cast(Path, save_path))
 
             # Insert routes before final closing parenthesis
-            output_content = _insert_sexp_before_closing(original_content, route_sexp)
+            output_content = _insert_sexp_before_closing(
+                original_content,
+                route_sexp,
+                replaced_arc_nets=_interrupt_state.get("replaced_arc_nets", frozenset()),
+            )
 
             # Issue #4898: this SIGINT-triggered save previously used a plain
             # ``write_text`` -- no tmp file, no fsync, no ``os.replace`` --
@@ -5475,6 +5575,386 @@ def _write_net_class_map_sidecar(
             print(f"  Net-class-map sidecar: {sidecar_path}")
 
 
+#: ``meta`` key recording the exact-name ``netclass_assignments`` the route
+#: step wrote into the sibling ``.kicad_pro`` (Issue #10133): a ``{net_name:
+#: class_name}`` mapping.  A re-run drops an entry only when it still names
+#: the class kct recorded -- an entry the user re-pointed at another class in
+#: KiCad is authored intent and survives untouched.
+KCT_NETCLASS_ASSIGNMENTS_META_KEY = "kct_netclass_assignments"
+
+
+def _assignment_targets(value: object) -> list[str] | None:
+    """Normalise a schema-3 string or schema-4/5 array assignment to ``[cls, ...]``."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return list(value)
+    return None
+
+
+def _project_min_clearance_floor(project: dict) -> float:
+    """Minimum clearance floor declared in ``board.design_settings`` (0.0 if unset)."""
+    import math
+
+    board = project.get("board")
+    ds = board.get("design_settings") if isinstance(board, dict) else None
+    if not isinstance(ds, dict):
+        return 0.0
+    floors: list[float] = []
+    rules = ds.get("rules")
+    if isinstance(rules, dict):
+        val = rules.get("min_clearance")
+        if (
+            not isinstance(val, bool)
+            and isinstance(val, (int, float))
+            and math.isfinite(val)
+            and val > 0
+        ):
+            floors.append(float(val))
+    defaults = ds.get("defaults")
+    if isinstance(defaults, dict):
+        val = defaults.get("clearance_min")
+        if (
+            not isinstance(val, bool)
+            and isinstance(val, (int, float))
+            and math.isfinite(val)
+            and val > 0
+        ):
+            floors.append(float(val))
+    return max(floors, default=0.0)
+
+
+def _write_netclasses_to_project(
+    output_path: Path,
+    net_class_map: dict | None,
+    quiet: bool = False,
+    loaded_net_class_map: dict | None = None,
+    via_drill: float | None = None,
+) -> None:
+    """Declare the classes the router routed with in the sibling ``.kicad_pro``.
+
+    Issue #10133: the router classifies every net and serializes the result
+    to the ``<stem>.net_class_map.json`` sidecar, but nothing told KiCad --
+    the project's ``net_settings`` kept a flat ``Default``, so Board Setup
+    showed classes unrelated to the copper and KiCad's own DRC did not know
+    the intended widths.  This writes one ``net_settings.classes`` entry per
+    router class actually used -- ``track_width``, ``clearance`` (floored at
+    the project's ``board.design_settings`` minimum clearance, matching what
+    ``ClearanceResolver`` actually enforces) and ``via_diameter`` from the
+    router's :class:`~kicad_tools.router.rules.NetClassRouting` -- and assigns
+    each routed net by exact name in ``net_settings.netclass_assignments``
+    and in literal project patterns so the schematic sees those classes too.  GND and power
+    rails land in their own dedicated classes because the classifier gives
+    them non-``Default`` classes ("Ground", "Power", ...).
+
+    Authored intent always wins, through the existing merge helpers:
+
+    * :func:`~kicad_tools.core.project_file.add_netclass_definition` merges
+      into a same-named class -- only the passed keys are written and the
+      four floor keys keep the larger value (#7385) -- so hand-authored
+      classes, colours and diff-pair keys survive verbatim.  Note that
+      ``keep_stricter=True`` is one-directional: if a user lowers a floor key
+      on a kct-declared class below the router's value, a later route raises
+      it back to the router's floor.  One exception (Issue #10555):
+      ``track_width`` is written exactly, so it may go down, for a class
+      that the project's *pre-mutation* state proves kct created and nobody
+      edited since -- its :func:`~kicad_tools.manufacturers.project_generator.stamp_kct_project`
+      digest validates, and ``meta.kct_router_netclasses`` records its name
+      -- provided the router's aggregated width for it is positive.  The
+      DRC-constraint sidecar writer runs first and creates such a class as a
+      clone of ``Default`` (Issue #6390), so a ``Default`` wider than the
+      routed width would otherwise leave the project declaring a width the
+      copper does not use.  The exception covers width alone: clearance, via
+      diameter and via drill keep the floor merge.  A class that fails
+      either check -- a missing or stale stamp (a hand edit anywhere,
+      including a width raised in KiCad, is what stale means), or a
+      same-named class kct never recorded -- keeps the floor merge for
+      width too, so an authored width is never lowered here;
+    * a net a hand-authored pattern or explicit assignment already
+      classifies keeps its authored class (the #6390 rule).  Provenance under
+      ``meta.kct_netclass_assignments`` records ``{net: class_name}`` so a
+      re-run drops only assignments that still carry kct's own class (along
+      with unedited #6390 ``meta.kct_router_netclasses`` assignments) -- an
+      entry the user re-pointed at another class in KiCad survives untouched,
+      while unedited kct assignments are refreshed idempotently.
+
+    Non-fatal exactly like the sidecar writes: a missing ``.kicad_pro``, a
+    read-only directory, an unreadable project or an authored netclass block
+    that cannot be evaluated safely each degrade to a warning and never fail
+    the route.  A kct-stamped project (#6390 AC5) is re-stamped after the
+    merge so the renamed-output conflict check still recognises it; a
+    hand-authored project is never stamped here.  A no-op merge (identical
+    bytes) leaves the file untouched.
+
+    Args:
+        output_path: Path to the routed PCB file; the project is its
+            ``.kicad_pro`` sibling.
+        net_class_map: The autorouter's ``{net_name: NetClassRouting}`` map.
+            Empty/``None`` writes nothing, mirroring the sidecar writer.
+        quiet: If True, suppress the confirmation and warning lines.
+        loaded_net_class_map: The user's loaded ``--net-class-map`` entries,
+            merged over ``net_class_map`` -- the same effective map the
+            sidecar and DRC-constraint writes use (#4428 round-trip
+            fidelity).
+        via_drill: The board-wide via drill the router actually drills
+            (``router.rules.via_drill``; ``NetClassRouting`` carries only the
+            diameter), written as newly-created classes' ``via_drill``.
+            ``None`` leaves the helper default / authored value in place.
+    """
+    import json
+    import math
+
+    from kicad_tools.core.project_clearance import netclass_assignment_value
+    from kicad_tools.core.project_file import (
+        add_netclass_definition,
+        get_net_settings,
+        load_project,
+        save_project,
+    )
+
+    effective_map = dict(net_class_map or {})
+    if loaded_net_class_map:
+        effective_map.update(loaded_net_class_map)
+    if not effective_map:
+        return
+
+    project_path = output_path.with_suffix(".kicad_pro")
+    if not project_path.exists():
+        if not quiet:
+            print(
+                f"  Warning: no {project_path.name} beside the routed board; "
+                "net classes not written to the project"
+            )
+        return
+
+    try:
+        project = load_project(project_path)
+    except (OSError, ValueError) as e:
+        if not quiet:
+            print(f"  Warning: could not read {project_path.name}: {e}")
+        return
+
+    from kicad_tools.manufacturers.project_generator import (
+        _authored_netclass_members,
+        add_router_patterns,
+        board_net_names,
+        is_kct_owned_project,
+        remove_router_patterns,
+        router_netclass_provenance,
+        stamp_kct_project,
+        validate_router_netclass_containers,
+    )
+
+    try:
+        validate_router_netclass_containers(project)
+    except ValueError as e:
+        if not quiet:
+            print(
+                f"  Warning: net classes not assigned in {project_path.name}: "
+                f"authored netclasses cannot be evaluated safely ({e})"
+            )
+        return
+
+    # Re-stamp decision taken BEFORE mutating: only a project whose stamp
+    # currently validates stays kct-owned across this write.  Stamping a
+    # hand-authored project here would let a later renamed-output route
+    # overwrite the user's project silently.
+    restamp = is_kct_owned_project(project)
+
+    # Drop the exact-name assignments a previous route recorded ONLY when they
+    # still carry the class kct wrote; an entry whose target class the user
+    # changed in KiCad stays in place so _authored_netclass_members preserves it.
+    meta = project.get("meta")
+    raw_record = (
+        meta.pop(KCT_NETCLASS_ASSIGNMENTS_META_KEY, None) if isinstance(meta, dict) else None
+    )
+    recorded: dict[str, str] = (
+        {
+            net: cls_name
+            for net, cls_name in raw_record.items()
+            if isinstance(net, str) and isinstance(cls_name, str) and cls_name
+        }
+        if isinstance(raw_record, dict)
+        else {}
+    )
+
+    settings_raw = project.get("net_settings")
+    raw_assignments = (
+        settings_raw.get("netclass_assignments") if isinstance(settings_raw, dict) else None
+    )
+    r_classes, r_nets = router_netclass_provenance(project)
+    remove_router_patterns(project, set(recorded).union(r_nets))
+    assignments_mutated = False
+    if isinstance(raw_assignments, dict):
+        for net, recorded_cls in recorded.items():
+            if net in raw_assignments and _assignment_targets(raw_assignments[net]) == [
+                recorded_cls
+            ]:
+                raw_assignments.pop(net, None)
+                assignments_mutated = True
+
+        # kct's own #6390 assignments (_write_drc_constraint_sidecars) are not
+        # authored intent either, provided they were not hand-edited to a
+        # different class.
+        r_owned_classes = set(r_classes)
+        for net in r_nets:
+            if net in recorded or net not in raw_assignments:
+                continue
+            targets = _assignment_targets(raw_assignments[net])
+            expected_cls = str(getattr(effective_map.get(net), "name", "") or "")
+            if (
+                targets is not None
+                and len(targets) == 1
+                and (targets[0] in r_owned_classes or (expected_cls and targets[0] == expected_cls))
+            ):
+                raw_assignments.pop(net, None)
+                assignments_mutated = True
+
+    # Only nets the board actually carries (the #6390 filter): a loaded user
+    # map may name nets that are not on this board.
+    board_nets = board_net_names(output_path)
+    names = set(effective_map) if board_nets is None else set(effective_map) & board_nets
+    names.discard("")
+
+    assigned: dict[str, str] = {}
+    declared: list[str] = []
+    if names:
+        try:
+            authored = _authored_netclass_members(project, sorted(names))
+        except ValueError as e:
+            # The authored netclass block cannot be evaluated safely: kct
+            # must not guess which nets it classifies (#6390 rule).  Leave
+            # the existing project untouched on disk.
+            if not quiet:
+                print(
+                    f"  Warning: net classes not assigned in {project_path.name}: "
+                    f"authored netclasses cannot be evaluated safely ({e})"
+                )
+            return
+
+        min_clearance_floor = _project_min_clearance_floor(project)
+        existing_classes_list = (
+            settings_raw.get("classes") if isinstance(settings_raw, dict) else None
+        ) or []
+        existing_class_names = {
+            c.get("name")
+            for c in existing_classes_list
+            if isinstance(c, dict) and isinstance(c.get("name"), str)
+        }
+        default_cls = next(
+            (
+                c
+                for c in existing_classes_list
+                if isinstance(c, dict) and c.get("name") == "Default"
+            ),
+            None,
+        )
+        default_via_drill: float | None = None
+        if isinstance(default_cls, dict):
+            vd = default_cls.get("via_drill")
+            if (
+                not isinstance(vd, bool)
+                and isinstance(vd, (int, float))
+                and math.isfinite(vd)
+                and vd > 0
+            ):
+                default_via_drill = float(vd)
+
+        # A class the map gives two values keeps the stricter (larger) one --
+        # the #6390 clearance rule, applied to every floor this write owns.
+        classes: dict[str, dict[str, float]] = {}
+        members: dict[str, list[str]] = {}
+        for net in sorted(names):
+            routing = effective_map[net]
+            class_name = str(getattr(routing, "name", "") or "")
+            if not class_name or class_name == "Default":
+                continue
+            if net in authored:
+                continue
+            agg = classes.setdefault(class_name, {"width": 0.0, "clearance": 0.0, "via": 0.0})
+            agg["width"] = max(agg["width"], float(getattr(routing, "trace_width", 0.0) or 0.0))
+            agg["clearance"] = max(
+                agg["clearance"], float(getattr(routing, "clearance", 0.0) or 0.0)
+            )
+            agg["via"] = max(agg["via"], float(getattr(routing, "via_size", 0.0) or 0.0))
+            members.setdefault(class_name, []).append(net)
+
+        if classes:
+            settings = get_net_settings(project)
+            current_assignments = settings.get("netclass_assignments")
+            assignments: dict[str, object] = (
+                dict(current_assignments) if isinstance(current_assignments, dict) else {}
+            )
+            for class_name in sorted(classes):
+                agg = classes[class_name]
+                cls_via_drill = (
+                    via_drill
+                    if via_drill is not None
+                    else (None if class_name in existing_class_names else default_via_drill)
+                )
+                clearance_val = max(agg["clearance"], min_clearance_floor)
+                if (
+                    restamp
+                    and class_name in r_classes
+                    and class_name in existing_class_names
+                    and agg["width"] > 0
+                ):
+                    add_netclass_definition(
+                        project, class_name, track_width=agg["width"], keep_stricter=False
+                    )
+                add_netclass_definition(
+                    project,
+                    class_name,
+                    track_width=agg["width"] if agg["width"] > 0 else None,
+                    clearance=clearance_val if clearance_val > 0 else None,
+                    via_diameter=agg["via"] if agg["via"] > 0 else None,
+                    via_drill=cls_via_drill,
+                )
+                declared.append(class_name)
+                for net in members[class_name]:
+                    assignments[net] = netclass_assignment_value(settings, class_name)
+                    assigned[net] = class_name
+            settings["netclass_assignments"] = dict(sorted(assignments.items()))
+        elif (
+            assignments_mutated
+            and isinstance(settings_raw, dict)
+            and isinstance(raw_assignments, dict)
+        ):
+            settings_raw["netclass_assignments"] = dict(sorted(raw_assignments.items()))
+    elif (
+        assignments_mutated and isinstance(settings_raw, dict) and isinstance(raw_assignments, dict)
+    ):
+        settings_raw["netclass_assignments"] = dict(sorted(raw_assignments.items()))
+
+    if assigned:
+        add_router_patterns(project, assigned, board_nets if board_nets is not None else names)
+        project.setdefault("meta", {})[KCT_NETCLASS_ASSIGNMENTS_META_KEY] = dict(
+            sorted(assigned.items())
+        )
+    if restamp:
+        stamp_kct_project(project)
+
+    payload = json.dumps(project, indent=2)
+    try:
+        if payload == project_path.read_text(encoding="utf-8"):
+            return  # nothing changed -- leave the file (and its mtime) alone
+    except OSError:
+        pass
+    try:
+        save_project(project, project_path)
+    except OSError as e:
+        # Non-fatal: a blocked / read-only output directory must not fail
+        # the route.
+        if not quiet:
+            print(f"  Warning: could not write net classes to {project_path.name}: {e}")
+        return
+    if not quiet and assigned:
+        print(
+            f"  Net classes written to project: {project_path.name} "
+            f"({', '.join(sorted(set(declared)))})"
+        )
+
+
 def _write_routing_plan_sidecar(
     output_path: Path,
     routing_plan: "RoutingPlan | None",
@@ -5774,6 +6254,7 @@ def _write_current_paths_sidecar(
     current_path_specs: "Sequence[CurrentPathSpec] | None",
     quiet: bool = False,
     input_path: Path | None = None,
+    current_path_cases: "Sequence[OperatingCase]" = (),
 ) -> None:
     """Persist the declared current-path intent next to the routed PCB (#4980).
 
@@ -5819,7 +6300,7 @@ def _write_current_paths_sidecar(
         dump_current_path_specs,
     )
 
-    if not current_path_specs:
+    if not current_path_specs and not current_path_cases:
         return
 
     sidecar_path = output_path.parent / CURRENT_PATHS_SIDECAR_BASENAME
@@ -5830,7 +6311,7 @@ def _write_current_paths_sidecar(
         diverted = True
 
     try:
-        payload = dump_current_path_specs(list(current_path_specs))
+        payload = dump_current_path_specs(current_path_specs or (), current_path_cases)
         sidecar_path.write_text(json.dumps(payload, indent=2))
     except (OSError, TypeError, ValueError) as e:
         if not quiet:
@@ -5878,10 +6359,11 @@ def _preload_current_paths(args, pcb_path: Path) -> int:
     """
     from kicad_tools.router.current_paths import (
         discover_current_paths_sidecar,
-        load_current_path_specs,
+        load_current_path_sidecar,
     )
 
     args._loaded_current_paths = []
+    args._loaded_current_path_cases = []
     # The file the specs actually came from (explicit OR auto-discovered).
     # Threaded to the sidecar writer so the derived ``current_paths.json``
     # never rewrites the source file in place -- an auto-discovered sidecar
@@ -5930,7 +6412,9 @@ def _preload_current_paths(args, pcb_path: Path) -> int:
         return 1
 
     try:
-        args._loaded_current_paths = load_current_path_specs(cp_path)
+        sidecar = load_current_path_sidecar(cp_path)
+        args._loaded_current_paths = sidecar.specs
+        args._loaded_current_path_cases = sidecar.cases
     except (OSError, ValueError) as e:
         if explicit is not None:
             print(f"Error: parsing current-paths JSON: {e}", file=sys.stderr)
@@ -6458,6 +6942,7 @@ def run_post_route_drc(
     time_left: float | None = None,
     drc_cost_estimate: float = 0.0,
     edge_clearance: float | None = None,
+    current_path_cases: "Sequence[OperatingCase]" = (),
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -6586,6 +7071,7 @@ def run_post_route_drc(
         current_path_specs,
         quiet=quiet,
         input_path=current_paths_input_path,
+        current_path_cases=current_path_cases,
     )
 
     # Issue #5519 (Epic #5510, Phase 1): persist the report-only
@@ -6649,6 +7135,21 @@ def run_post_route_drc(
         edge_clearance=edge_clearance,
     )
 
+    # Issue #10133: declare the classes the router routed with in the
+    # project's ``net_settings`` (one class per used router class plus one
+    # exact-name ``netclass_assignments`` entry per routed net), so KiCad's
+    # Board Setup and native DRC see the widths the copper actually uses.
+    # Deliberately AFTER the constraint sidecars above: they create / stage /
+    # merge the destination ``.kicad_pro``, and this merge must land in the
+    # final file rather than be clobbered by -- or trip the conflict check of
+    # -- the staged regeneration.
+    _write_netclasses_to_project(
+        output_path,
+        _effective_class_map or None,
+        quiet=quiet,
+        via_drill=getattr(getattr(router, "rules", None), "via_drill", None),
+    )
+
     # Issue #6273: the sidecars above are cheap and always written; the
     # verification below loads KiCad and refills every zone.  Do not start it
     # when the hard --timeout cannot cover it -- the supervisor would kill the
@@ -6679,6 +7180,7 @@ def run_post_route_drc(
             # Empty/None leaves ``check_path_ampacity`` a no-op, so the
             # flag-off route stays byte-identical to the pre-#4980 verdict.
             current_path_specs=current_path_specs,
+            current_path_cases=current_path_cases,
         )
         results = checker.check_all()
         # Recorded even with no declared paths (an empty set): the entry is
@@ -8011,7 +8513,7 @@ def _canonicalize_routed_uuids(output_path: Path, *, args=None) -> None:
 
 
 def _fill_zones_after_route(
-    output_path: Path, quiet: bool = False, *, router=None, args=None
+    output_path: Path, quiet: bool = False, *, router=None, args=None, require_saved: bool = False
 ) -> None:
     """Fill copper-pour zones after routing completes.
 
@@ -8039,10 +8541,12 @@ def _fill_zones_after_route(
     Args:
         output_path: Path to the routed PCB file (modified in place).
         quiet: Suppress informational output.
+        require_saved: Also verify selective placement fills against a full native refill.
     """
     record_stage("native-zone-fill")
     if args is not None:
         args._placement_repair_error = None
+        args._zone_fill_verified = False
     _canonicalize_routed_uuids(output_path, args=args)
     disposition = getattr(router, "placement_disposition", None)
     if disposition is not None and disposition.preserve_copper_nets:
@@ -8079,6 +8583,16 @@ def _fill_zones_after_route(
 
                 write_native_zone_clearance_rules(output_path)
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
+            if require_saved:
+                # Selective filling intentionally leaves protected pours fixed.
+                # A new through via must still clear them in the saved board.
+                from kicad_tools.cli.runner import find_kicad_cli
+                from kicad_tools.export.manufacturing import _saved_zone_fill_matches_native_refill
+
+                cli = find_kicad_cli()
+                args._zone_fill_verified = (
+                    cli is not None and _saved_zone_fill_matches_native_refill(output_path, cli)
+                )
             if not quiet:
                 print("  Zone fill: complete; placement-excluded copper preserved")
         except Exception as exc:
@@ -8121,6 +8635,8 @@ def _fill_zones_after_route(
     if not has_unquoted(text, r"\(zone[ \n\t]"):
         # Nothing to fill -- skip silently to avoid log noise on the
         # majority of boards that have no copper pours.
+        if args is not None:
+            args._zone_fill_verified = True
         return
 
     if not quiet:
@@ -8177,7 +8693,20 @@ def _fill_zones_after_route(
     _fill_kwargs: dict = {}
     if args is not None and _finishing_time_left(args) is not None:
         _fill_kwargs["time_left"] = lambda: _finishing_time_left(args)
-    result = run_fill_zones(output_path, kicad_cli=kicad_cli, **_fill_kwargs)
+    if getattr(args, "_preserved_departure_trial", False) is True:
+        # Preserve the input's thermal settings on this speculative first
+        # fill. Ask KiCad to save its actual fill once; the oracle below
+        # decides whether any power connection needs additional copper.
+        from kicad_tools.cli.runner import _run_fill_zones_via_drc
+
+        remaining = _finishing_time_left(args)
+        if remaining is not None and remaining <= 0:
+            return
+        result = _run_fill_zones_via_drc(output_path, None, kicad_cli, timeout=remaining)
+        if not result.refill_saved:
+            return
+    else:
+        result = run_fill_zones(output_path, kicad_cli=kicad_cli, **_fill_kwargs)
     if args is not None:
         # Issue #6273: the measured KiCad load + fill time of THIS board is
         # the cost estimate the later kicad-cli stages (oracle DRC rounds,
@@ -8199,6 +8728,8 @@ def _fill_zones_after_route(
 
     # Validate net format after zone fill -- kicad-cli may corrupt nets.
     report = validate_net_format(output_path)
+    if args is not None:
+        args._zone_fill_verified = report.valid and result.refill_saved
     if not report.valid:
         logger.warning(
             "Net format corruption detected after zone fill: "
@@ -9153,9 +9684,11 @@ def _apply_plane_via_reservation(
     ``find_all_plane_nets`` set the oracle stage closes); ``route_via=
     "manual"`` nets are not pours and are left alone.  Off with
     ``--no-plane-via-reservation``, and skipped when a placement disposition
-    preserves copper (the oracle stage does not run there either).  Never
-    raises: a failure is a warning and routing proceeds unreserved.
+    preserves copper (the oracle stage does not run there either). On the
+    initial route a missing reservation is advisory. A staged retry must
+    actually reserve the pad that triggered it.
     """
+    requested: frozenset[str] = getattr(args, "_retry_plane_pads", frozenset())
     if getattr(args, "no_plane_via_reservation", False):
         return
     names = set(getattr(args, "_auto_skipped_net_names", None) or ())
@@ -9212,11 +9745,24 @@ def _apply_plane_via_reservation(
             min_pour_footprint_pads=(
                 2 if getattr(args, "reserve_pour_only_passives", True) else None
             ),
+            stranded_pads=requested,
         )
-    except Exception as exc:  # advisory: never fail a route over a reservation
+    except Exception as exc:
+        if requested:
+            raise
         logger.warning("Plane-via reservation skipped: %s", exc)
         return
     args._plane_via_reservation = reservation
+    args._plane_reservation_nets = frozenset(nets)
+    if requested:
+        sites = _reserved_plane_via_sites(args) or {}
+        missing = requested.difference(sites)
+        if missing:
+            raise ValueError(f"No legal plane via and stub for {', '.join(sorted(missing))}")
+        if not quiet:
+            for pad in sorted(requested):
+                x, y = sites[pad][0]
+                print(f"    Reserved {pad} at ({x:g}, {y:g}) mm (sheet coordinates)")
     links = getattr(reservation, "array_links", None) or []
     if links and not quiet:
         # Issue #6673: same-pour ball clusters of an area array on a layer
@@ -9486,6 +10032,22 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
             flush_print(
                 f"  Net-class map: merged {len(resolution.resolved)}/{resolution.total} "
                 f"sidecar entries{pour_note}"
+            )
+
+    floor = getattr(args, "_mfr_min_trace_floor", None)
+    if floor and getattr(args, "_explicit_trace_width", None) is None:
+        # Sidecar overrides have already received their own floor diagnostic.
+        project_classes = {
+            net: router.net_class_map[net]
+            for net in getattr(router, "authored_net_widths", {})
+            if net in router.net_class_map and not (loaded and net in resolution.resolved)
+        }
+        for name, width in _sub_floor_net_class_widths(project_classes, floor):
+            print(
+                f"WARNING: Project net class {name} uses {width:.4g}mm traces, below the "
+                f"{args.manufacturer} minimum trace width {floor:.4g}mm. "
+                f"`kct check --mfr {args.manufacturer}` will report dimension_trace_width.",
+                file=sys.stderr,
             )
 
     # Issue #4605: stash the ``spatial_keepouts`` rule-area filter block on
@@ -10772,6 +11334,55 @@ def _complete_pour_nets_with_oracle(
             _canonicalize_routed_uuids(output_path, args=args)
 
 
+def _publish_preserved_departure(pcb_path, output_path, route_sexp, args, router, quiet) -> bool:
+    """Publish the targeted breakout only after the saved refill and pour oracle agree."""
+    from copy import copy
+
+    from .route_receipt import relocate
+
+    source = Path(args.pcb)
+    _copy_checkpoint_constraint_sidecars(source, output_path)
+    with tempfile.TemporaryDirectory(prefix=".kct-departure-", dir=output_path.parent) as directory:
+        staged = Path(directory) / output_path.name
+        _copy_checkpoint_constraint_sidecars(output_path, staged)
+        _write_routed_pcb(
+            pcb_path,
+            staged,
+            route_sexp,
+            guard_copper_loss=True,
+            replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
+        )
+        trial = copy(args)
+        trial._preserved_departure_trial = True
+        _fill_zones_after_route(staged, quiet=quiet, router=router, args=trial)
+        _complete_pour_nets_with_oracle(staged, args=trial, quiet=quiet, router=router)
+        verified = False
+        try:
+            _run_post_save_stitching(trial, staged, router=router, pour_pass_ran=True, quiet=quiet)
+            verified = getattr(trial, "_zone_fill_verified", False) and getattr(
+                trial, "_pour_connectivity_verified", False
+            )
+        finally:
+            if not verified:
+                # Retain the source even if the post-stitch refill raised
+                # before this speculative departure could be published.
+                relocate({staged: None})
+                _write_routed_pcb(source, output_path, "", guard_copper_loss=True)
+        if not verified:
+            return False
+
+        moves: list[tuple[Path, Path | None]] = [
+            (output_path.with_suffix(ext), staged.with_suffix(ext))
+            for ext in (".kicad_pro", ".kicad_dru")
+            if staged.with_suffix(ext).is_file()
+        ]
+        _publish_transaction([*moves, (output_path, staged)])
+        del trial._preserved_departure_trial
+        vars(args).update(vars(trial))
+        relocate({staged: output_path})
+        return True
+
+
 def _pour_closer_net_class_map(router, args) -> dict | None:
     """The router's effective net-class map for the pour closer (Issue #6374).
 
@@ -10803,10 +11414,15 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     from kicad_tools.router.oracle_completion import (
         DEFAULT_ORACLE_ROUNDS,
         STOP_DEADLINE,
+        STOP_NO_CLOSER,
+        STOP_NO_PROGRESS,
         STOP_NOT_RUN,
     )
 
     args._stranded_pour_links = 0
+    args._pour_connectivity_verified = False
+    args._oracle_changed_copper = False
+    args._exhausted_mixed_plane_pads = frozenset()
     # Issue #6273: True when the check was cut by --timeout before KiCad
     # reported anything -- the count above is then unknown, not 0.
     args._stranded_pour_unknown = False
@@ -10840,6 +11456,7 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             return 0
         pour_nets = set(find_all_plane_nets(load_pcb(output_path)))
         if not pour_nets:
+            args._pour_connectivity_verified = True
             return 0
 
         def refill(path: Path) -> object:
@@ -10874,6 +11491,8 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
         )
         if not quiet:
             print("\n--- KiCad Oracle Completion (pour nets) ---")
+        # If the closer raises mid-edit, its incoming fill is no longer proven.
+        args._oracle_changed_copper = True
         result = run_oracle_completion(
             output_path,
             oracle=_make_pour_oracle(args),
@@ -10892,6 +11511,7 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             # regression merely for being below the project's via floors.
             declared_via=(closer.via_size, closer.via_drill),
         )
+        args._oracle_changed_copper = any(round_.kept for round_ in result.rounds)
     except Exception as exc:  # advisory machinery must never fail a route
         logger.warning("Oracle completion skipped: %s", exc)
         return 0
@@ -10922,7 +11542,27 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
                 print("  stranded-pour status UNKNOWN -- the run is reported unverified")
         return 0
     args._stranded_pour_links = result.final_links
+    args._pour_connectivity_verified = result.final_links == 0
     args._oracle_completion = result
+    reserved_nets: frozenset[str] = getattr(args, "_plane_reservation_nets", frozenset())
+    if (
+        result.stop_reason in (STOP_NO_CLOSER, STOP_NO_PROGRESS)
+        and reserved_nets
+        and closer.exhausted_stitch_pads
+        and router is not None
+    ):
+        from kicad_tools.router.plane_via_sites import stranded_mixed_pair_pads
+
+        unresolved = {
+            pad
+            for link in closer.canonical_stranded_links(output_path, result.final_link_details)
+            if link.net in reserved_nets
+            for pad in (link.a.pad_key, link.b.pad_key)
+            if pad is not None
+        }
+        args._exhausted_mixed_plane_pads = stranded_mixed_pair_pads(
+            router.grid._pads, pour_nets, unresolved & closer.exhausted_stitch_pads
+        )
     if not quiet:
         print(
             f"  {result.initial_links} -> {result.final_links} unconnected pour link(s) "
@@ -11580,6 +12220,32 @@ def _warn_unresolved_net_class_map(resolution, board_net_names, nearest_fn) -> N
     print("\n".join(lines), file=sys.stderr)
 
 
+def _apply_default_silk_pass(
+    output_path: Path, args, *, layers: int | None, quiet: bool
+) -> dict | None:
+    """Run the default silk legalisation pass on the finished board (#9799).
+
+    Applies the shared ``legalize_silk`` pass (#9795 phase 1) to the written
+    output -- after copper is saved and zones filled, before post-route DRC
+    judges silk -- and prints what it fixed and could not fix.  Skipped
+    entirely (silk byte-identical) under ``--no-silk-fix`` or ``--dry-run``;
+    a pass that cannot run is a warning, never a routing failure.
+
+    Returns the pass document (for the JSON report tail) or ``None``.
+    """
+    if getattr(args, "no_silk_fix", False) or getattr(args, "dry_run", False):
+        return None
+    from .silk_default_pass import run_default_silk_pass
+
+    return run_default_silk_pass(
+        output_path,
+        mfr=getattr(args, "manufacturer", None),
+        layers=layers,
+        copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+        quiet=quiet,
+    )
+
+
 def _resolve_mfr_design_rules(args, layer_stack):
     """Resolve the manufacturer :class:`DesignRules` used for ampacity advisories.
 
@@ -11615,6 +12281,18 @@ DEFAULT_TRACE_WIDTH_MM = 0.2
 # authored in mm at 4 decimal places (0.1524 = 6 mil), so 1e-9 only absorbs
 # float representation error, never a real 0.0001mm difference.
 _TRACE_WIDTH_EPS = 1e-9
+
+
+def _extra_load_width_kwargs(args, tier_width: float | None = None) -> dict:
+    """Optional #10189 kwargs for ``load_pcb_for_routing`` (omitted when unset)."""
+    extra: dict = {}
+    explicit = getattr(args, "_explicit_trace_width", None)
+    if explicit is not None:
+        extra["explicit_trace_width"] = float(tier_width if tier_width is not None else explicit)
+    replaced = getattr(args, "_replace_existing_nets", None)
+    if replaced:
+        extra["ignore_existing_nets"] = replaced
+    return extra
 
 
 def _effective_trace_width(args) -> float:
@@ -11766,6 +12444,68 @@ def _sub_floor_net_class_widths(net_class_map, floor: float) -> list[tuple[str, 
     return sorted(worst.items(), key=lambda kv: (kv[1], kv[0]))
 
 
+def _uniform_board_mask_margin(pcb_path) -> float | None:
+    """The board's solder-mask expansion when no pad overrides it, else ``None``.
+
+    The trace optimizer's mask-opening guard (Issue #9424) models each pad's
+    opening as its copper grown by one margin.  A per-pad or per-footprint
+    ``solder_mask_margin``, or a custom rule file that touches the mask, makes
+    that false. Nonzero minimum web widths can merge adjacent openings, so
+    board or project settings that require this also disable the guard. A board
+    that declares no ``pad_to_mask_clearance`` has no expansion (0.0).
+    """
+    import json
+
+    from kicad_tools.sexp import parse_string
+    from kicad_tools.validate.mask_geometry import board_mask_margin_from_sexp
+
+    try:
+        board = parse_string(Path(pcb_path).read_text(errors="replace"))
+        setup = board.find_child("setup")
+        minimum = setup.find_child("solder_mask_min_width") if setup is not None else None
+        if minimum is not None and minimum.get_float(0) != 0:
+            return None
+        project = Path(pcb_path).with_suffix(".kicad_pro")
+        if project.is_file():
+            settings = json.loads(project.read_text()).get("board", {}).get("design_settings", {})
+            rules_settings = settings.get("rules", {})
+            if any(
+                rules_settings.get(key, 0)
+                for key in ("solder_mask_min_width", "solder_mask_clearance")
+            ):
+                return None
+        if board.find("solder_mask_margin") is not None:
+            return None
+        rules = Path(pcb_path).with_suffix(".kicad_dru")
+        if rules.is_file() and "solder_mask" in rules.read_text(errors="replace"):
+            return None
+        margin, _ = board_mask_margin_from_sexp(board)
+        return margin
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _resolve_route_mask_guard(manufacturer, pcb_path) -> tuple[float, float] | None:
+    """``(clearance, mask_margin)`` for the trace optimizer's mask-opening guard.
+
+    Issue #9424.  The clearance is the cited mask policy ``kct check --mfr``
+    judges ``mask_to_copper`` with; the margin comes from
+    :func:`_uniform_board_mask_margin`.  ``None`` -- no manufacturer, no cited
+    policy, or a board without one mask margin -- keeps the guard off.
+    """
+    if not manufacturer:
+        return None
+    from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+    request = default_request_for_manufacturer(str(manufacturer))
+    if request is None or request.policy is None:
+        return None
+    margin = _uniform_board_mask_margin(pcb_path)
+    if margin is None:
+        return None
+    return request.policy.clearance_mm, margin
+
+
 def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False) -> int:
     """Resolve the trace-width default/floor from the manufacturer profile.
 
@@ -11859,7 +12599,11 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
         else None
     )
 
+    args._mfr_mask_guard = _resolve_route_mask_guard(manufacturer, pcb_path)
+
     explicit_width = getattr(args, "trace_width", None)
+    with contextlib.suppress(AttributeError):
+        args._explicit_trace_width = float(explicit_width) if explicit_width is not None else None
     if explicit_width is None:
         resolved = DEFAULT_TRACE_WIDTH_MM if floor is None else max(DEFAULT_TRACE_WIDTH_MM, floor)
         args.trace_width = resolved
@@ -13663,6 +14407,7 @@ def route_with_layer_escalation(
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path
     _reset_partial_save_state()
+    _interrupt_state["replaced_arc_nets"] = getattr(args, "_replace_existing_nets", frozenset())
     _interrupt_state["source_copper"] = _preserved_sexp
     _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
@@ -13785,6 +14530,7 @@ def route_with_layer_escalation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
         preserved_routes=_preserved_routes,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
@@ -13953,6 +14699,7 @@ def route_with_layer_escalation(
                     # copper is loaded as grid obstacles + populated into
                     # router.existing_routes so it survives the route pass.
                     load_existing_routes=getattr(args, "preserve_existing", False),
+                    **_extra_load_width_kwargs(args),
                     # Issue #4148: region-bounded routing.  When set, cells
                     # outside the board-relative box are marked as obstacles.
                     region=getattr(args, "_region_box", None),
@@ -13963,7 +14710,7 @@ def route_with_layer_escalation(
                     # (it now derives from --per-net-timeout on every lattice run),
                     # and --timeout supplies an absolute ceiling alongside it.
                     localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                    preserve_listed_copper=bool(getattr(args, "complete", False)),
+                    preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                     lattice_link_budget_s=_resolve_lattice_link_budget(args),
                     # Issue #4798: bound by THIS attempt's fair slice, not the
                     # whole remaining run budget -- otherwise the lattice's
@@ -14574,6 +15321,7 @@ def route_with_layer_escalation(
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        captured_copper_sexp=_preserved_sexp,
         pcb_path=pcb_path,
     )
     # Update result with post-cleanup stats
@@ -14626,6 +15374,7 @@ def route_with_layer_escalation(
             # dropped preserved set aborts loudly instead of overwriting the
             # board with only the freshly-routed net.
             guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
+            replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
         )
 
     if not quiet:
@@ -14655,22 +15404,35 @@ def route_with_layer_escalation(
         quiet=quiet,
     )
 
-    # Issue #7377: --stitch-power-planes runs on every tail, after the save
-    # and before the zone fill (same position as the single-attempt path).
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
     # Fill copper-pour zones now that traces exist (issue #2516).
     # Must run BEFORE DRC so the DRC sees filled zones rather than bare
     # zone outlines and does not flag zone-to-trace clearance against
     # unfilled polygons.
-    if final_result.nets_routed > 0:
+    run_pour_pass = final_result.nets_routed > 0
+    if run_pour_pass:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+    _run_post_save_stitching(
+        args,
+        output_path,
+        router=final_result.router,
+        pour_pass_ran=run_pour_pass,
+        quiet=quiet,
+    )
+
+    # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
+    # after copper is written and before post-route DRC judges silk.
+    args._route_silk_fix = _apply_default_silk_pass(
+        output_path, args, layers=final_result.layer_count, quiet=quiet
+    )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
+    # Issue #10057: stays 0 when DRC was skipped or nothing routed, so the
+    # DRC-only failure reason cannot apply to a board nobody checked.
+    drc_errors = 0
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
@@ -14709,6 +15471,7 @@ def route_with_layer_escalation(
             # current, and the specs are re-emitted next to the routed board
             # for kct check auto-discovery.
             current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_path_cases=getattr(args, "_loaded_current_path_cases", ()),
             current_paths_input_path=getattr(args, "_current_paths_input_path", None),
             # Issue #5519 (Epic #5510, Phase 1): thread the report-only
             # RoutingPlan so it is serialized to
@@ -14750,9 +15513,35 @@ def route_with_layer_escalation(
     # Issue #9597: report plane-zone crossings (and echo hard refusals).
     _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
-    # Issue #6376: carry a verified-open regression into ``final_result``
-    # before the banner and before ``args._last_layer_result`` is stashed.
+    # Account for saved-board opens before deciding what the banner and JSON report.
     _apply_output_verification(final_result, final_stats, _output_verification)
+
+    # Issue #10057: fail on verified DRC errors, the way the single-attempt
+    # path always has (maintainer decision).  When post-route DRC is the
+    # sole failure on a fully connected board this tail exits 3, and the
+    # stash below lets _emit_route_json_fallback attach the same
+    # ``summary.failure_reason = "post_route_drc"`` the direct emitter
+    # would -- computed once here so the key and the exit code cannot
+    # disagree.
+    _drc_only_failure = _post_route_drc_only_failure(
+        args,
+        drc_errors=drc_errors,
+        fix_result=fix_result,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        has_disconnected=_output_verification.has_disconnected,
+        other_checks_passed=(
+            not _new_layer_intent_violations(_layer_intent)
+            and not _pairwise
+            and not _shorts
+            and _stranded_pour_escalation_exit(0, args) == 0
+            and not getattr(args, "_placement_fill_error", None)
+            and not getattr(args, "_placement_repair_error", None)
+            and not _placement_blocked(args)
+            and not _output_verification.regressed
+        ),
+    )
+    with contextlib.suppress(AttributeError, TypeError):
+        args._post_route_drc_result = final_result if _drc_only_failure else None
 
     # Final summary
     if not quiet:
@@ -14797,6 +15586,20 @@ def route_with_layer_escalation(
                 args,
                 output_path,
                 f"Design requires minimum {final_result.layer_count} layers",
+            )
+        elif final_result.success and _drc_only_failure:
+            # Issue #10057: SUCCESS must be unreachable while verified
+            # post-route DRC errors are the run's sole failure (exit 3,
+            # JSON verdict "failed"), mirroring the single-attempt path's
+            # "ROUTING FAILED" banner for the same condition.
+            print("ROUTING FAILED: DRC violations detected")
+            print(
+                f"  All signal nets routed on {final_result.layer_count} layers, but "
+                f"post-route DRC found {drc_errors} error(s); manufacturing is blocked."
+            )
+            print(
+                f"  Run 'kct check {output_path} --mfr "
+                f"{getattr(args, 'manufacturer', 'jlcpcb')}' for full details (exit code 3)."
             )
         elif final_result.success:
             print(f"SUCCESS: Design requires minimum {final_result.layer_count} layers")
@@ -14869,6 +15672,11 @@ def route_with_layer_escalation(
         # documented exit-3 contract ("meets threshold but DRC violations
         # detected") already covers this case semantically.
         if fix_result == 3:
+            return 3
+        # Issue #10057: a fully connected board whose verified post-route DRC
+        # failed exits 3 here too (see the banner branch above); the JSON
+        # fallback reports failure_reason="post_route_drc" for it.
+        if _drc_only_failure:
             return 3
         # Issue #6273: a clean result whose DRC / stranded-pour check was
         # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
@@ -15061,6 +15869,7 @@ def route_with_rule_relaxation(
     _reset_partial_save_state()
     # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
     # so the partial save takes the preserved input copper from here.
+    _interrupt_state["replaced_arc_nets"] = getattr(args, "_replace_existing_nets", frozenset())
     _interrupt_state["source_copper"] = _preserved_sexp
     _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
@@ -15080,6 +15889,7 @@ def route_with_rule_relaxation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
         preserved_routes=_preserved_routes,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
@@ -15193,6 +16003,7 @@ def route_with_rule_relaxation(
                     strict_drc=False,
                     # Issue #3155: incremental routing (see route_with_layer_escalation).
                     load_existing_routes=getattr(args, "preserve_existing", False),
+                    **_extra_load_width_kwargs(args, tier.trace_width),
                     # Issue #4148: region-bounded routing (see main()).
                     region=getattr(args, "_region_box", None),
                     # Issue #4472 (epic #4465, Phase 2): --complete localizes the
@@ -15202,7 +16013,7 @@ def route_with_rule_relaxation(
                     # (it now derives from --per-net-timeout on every lattice run),
                     # and --timeout supplies an absolute ceiling alongside it.
                     localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                    preserve_listed_copper=bool(getattr(args, "complete", False)),
+                    preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                     lattice_link_budget_s=_resolve_lattice_link_budget(args),
                     # Issue #4798: bound by THIS tier's fair slice, not the
                     # whole remaining run budget.
@@ -15572,6 +16383,7 @@ def route_with_rule_relaxation(
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        captured_copper_sexp=_preserved_sexp,
         pcb_path=pcb_path,
     )
     # Update result with post-cleanup stats
@@ -15624,6 +16436,7 @@ def route_with_rule_relaxation(
             # dropped preserved set aborts loudly instead of overwriting the
             # board with only the freshly-routed net.
             guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
+            replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
         )
 
     if not quiet:
@@ -15654,19 +16467,32 @@ def route_with_rule_relaxation(
         quiet=quiet,
     )
 
-    # Issue #7377: --stitch-power-planes runs on every tail, after the save
-    # and before the zone fill (same position as the single-attempt path).
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
     # Fill copper-pour zones now that traces exist (issue #2516).
-    if final_result.nets_routed > 0:
+    run_pour_pass = final_result.nets_routed > 0
+    if run_pour_pass:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+    _run_post_save_stitching(
+        args,
+        output_path,
+        router=final_result.router,
+        pour_pass_ran=run_pour_pass,
+        quiet=quiet,
+    )
+
+    # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
+    # after copper is written and before post-route DRC judges silk.
+    args._route_silk_fix = _apply_default_silk_pass(
+        output_path, args, layers=final_result.layer_count, quiet=quiet
+    )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
+    # Issue #10057: stays 0 when DRC was skipped or nothing routed, so the
+    # DRC-only failure reason cannot apply to a board nobody checked.
+    drc_errors = 0
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
@@ -15705,6 +16531,7 @@ def route_with_rule_relaxation(
             # current, and the specs are re-emitted next to the routed board
             # for kct check auto-discovery.
             current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_path_cases=getattr(args, "_loaded_current_path_cases", ()),
             current_paths_input_path=getattr(args, "_current_paths_input_path", None),
             # Issue #5519 (Epic #5510, Phase 1): thread the report-only
             # RoutingPlan so it is serialized to
@@ -15746,9 +16573,35 @@ def route_with_rule_relaxation(
     # Issue #9597: report plane-zone crossings (and echo hard refusals).
     _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
-    # Issue #6376: carry a verified-open regression into ``final_result``
-    # before the banner and before ``args._last_layer_result`` is stashed.
+    # Account for saved-board opens before deciding what the banner and JSON report.
     _apply_output_verification(final_result, final_stats, _output_verification)
+
+    # Issue #10057: fail on verified DRC errors, the way the single-attempt
+    # path always has (maintainer decision).  When post-route DRC is the
+    # sole failure on a fully connected board this tail exits 3, and the
+    # stash below lets _emit_route_json_fallback attach the same
+    # ``summary.failure_reason = "post_route_drc"`` the direct emitter
+    # would -- computed once here so the key and the exit code cannot
+    # disagree.
+    _drc_only_failure = _post_route_drc_only_failure(
+        args,
+        drc_errors=drc_errors,
+        fix_result=fix_result,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        has_disconnected=_output_verification.has_disconnected,
+        other_checks_passed=(
+            not _new_layer_intent_violations(_layer_intent)
+            and not _pairwise
+            and not _shorts
+            and _stranded_pour_escalation_exit(0, args) == 0
+            and not getattr(args, "_placement_fill_error", None)
+            and not getattr(args, "_placement_repair_error", None)
+            and not _placement_blocked(args)
+            and not _output_verification.regressed
+        ),
+    )
+    with contextlib.suppress(AttributeError, TypeError):
+        args._post_route_drc_result = final_result if _drc_only_failure else None
 
     # Final summary
     if not quiet:
@@ -15788,6 +16641,20 @@ def route_with_rule_relaxation(
         elif final_result.success and _unverified_checks(args):
             # Issue #6273: never "SUCCESS" for a board nobody verified.
             _print_unverified_banner(args, output_path, "Routing complete with adaptive rules")
+        elif final_result.success and _drc_only_failure:
+            # Issue #10057: SUCCESS must be unreachable while verified
+            # post-route DRC errors are the run's sole failure (exit 3,
+            # JSON verdict "failed"), mirroring the single-attempt path's
+            # "ROUTING FAILED" banner for the same condition.
+            print("ROUTING FAILED: DRC violations detected")
+            print(
+                f"  All signal nets routed (tier {final_result.tier} rules), but "
+                f"post-route DRC found {drc_errors} error(s); manufacturing is blocked."
+            )
+            print(
+                f"  Run 'kct check {output_path} --mfr "
+                f"{getattr(args, 'manufacturer', 'jlcpcb')}' for full details (exit code 3)."
+            )
         elif final_result.success:
             print("SUCCESS: Routing complete with adaptive rules")
             if final_result.tier > 0:
@@ -15845,6 +16712,11 @@ def route_with_rule_relaxation(
         # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
+            return 3
+        # Issue #10057: a fully connected board whose verified post-route DRC
+        # failed exits 3 here too (see the banner branch above); the JSON
+        # fallback reports failure_reason="post_route_drc" for it.
+        if _drc_only_failure:
             return 3
         # Issue #6273: a clean result whose DRC / stranded-pour check was
         # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
@@ -17534,6 +18406,7 @@ def route_with_combined_escalation(
     _reset_partial_save_state()
     # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
     # so the partial save takes the preserved input copper from here.
+    _interrupt_state["replaced_arc_nets"] = getattr(args, "_replace_existing_nets", frozenset())
     _interrupt_state["source_copper"] = _preserved_sexp
     _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
@@ -17553,6 +18426,7 @@ def route_with_combined_escalation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
         preserved_routes=_preserved_routes,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
@@ -17710,6 +18584,7 @@ def route_with_combined_escalation(
                         strict_drc=False,
                         # Issue #3155: incremental routing (see route_with_layer_escalation).
                         load_existing_routes=getattr(args, "preserve_existing", False),
+                        **_extra_load_width_kwargs(args, tier.trace_width),
                         # Issue #4148: region-bounded routing (see main()).
                         region=getattr(args, "_region_box", None),
                         # Issue #4472 (epic #4465, Phase 2): --complete localizes the
@@ -17719,7 +18594,7 @@ def route_with_combined_escalation(
                         # (it now derives from --per-net-timeout on every lattice run),
                         # and --timeout supplies an absolute ceiling alongside it.
                         localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                        preserve_listed_copper=bool(getattr(args, "complete", False)),
+                        preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                         lattice_link_budget_s=_resolve_lattice_link_budget(args),
                         # Issue #4798: bound by THIS cell's fair slice, not the
                         # whole remaining run budget.
@@ -18130,6 +19005,7 @@ def route_with_combined_escalation(
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        captured_copper_sexp=_preserved_sexp,
         pcb_path=pcb_path,
     )
     # Update result with post-cleanup stats
@@ -18180,6 +19056,7 @@ def route_with_combined_escalation(
             # dropped preserved set aborts loudly instead of overwriting the
             # board with only the freshly-routed net.
             guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
+            replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
         )
 
     if not quiet:
@@ -18211,19 +19088,32 @@ def route_with_combined_escalation(
         quiet=quiet,
     )
 
-    # Issue #7377: --stitch-power-planes runs on every tail, after the save
-    # and before the zone fill (same position as the single-attempt path).
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
     # Fill copper-pour zones now that traces exist (issue #2516).
-    if final_result.nets_routed > 0:
+    run_pour_pass = final_result.nets_routed > 0
+    if run_pour_pass:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+    _run_post_save_stitching(
+        args,
+        output_path,
+        router=final_result.router,
+        pour_pass_ran=run_pour_pass,
+        quiet=quiet,
+    )
+
+    # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
+    # after copper is written and before post-route DRC judges silk.
+    args._route_silk_fix = _apply_default_silk_pass(
+        output_path, args, layers=final_result.layer_count, quiet=quiet
+    )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
+    # Issue #10057: stays 0 when DRC was skipped or nothing routed, so the
+    # DRC-only failure reason cannot apply to a board nobody checked.
+    drc_errors = 0
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
@@ -18262,6 +19152,7 @@ def route_with_combined_escalation(
             # current, and the specs are re-emitted next to the routed board
             # for kct check auto-discovery.
             current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_path_cases=getattr(args, "_loaded_current_path_cases", ()),
             current_paths_input_path=getattr(args, "_current_paths_input_path", None),
             # Issue #5519 (Epic #5510, Phase 1): thread the report-only
             # RoutingPlan so it is serialized to
@@ -18303,9 +19194,35 @@ def route_with_combined_escalation(
     # Issue #9597: report plane-zone crossings (and echo hard refusals).
     _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
-    # Issue #6376: carry a verified-open regression into ``final_result``
-    # before the banner and before ``args._last_layer_result`` is stashed.
+    # Account for saved-board opens before deciding what the banner and JSON report.
     _apply_output_verification(final_result, final_stats, _output_verification)
+
+    # Issue #10057: fail on verified DRC errors, the way the single-attempt
+    # path always has (maintainer decision).  When post-route DRC is the
+    # sole failure on a fully connected board this tail exits 3, and the
+    # stash below lets _emit_route_json_fallback attach the same
+    # ``summary.failure_reason = "post_route_drc"`` the direct emitter
+    # would -- computed once here so the key and the exit code cannot
+    # disagree.
+    _drc_only_failure = _post_route_drc_only_failure(
+        args,
+        drc_errors=drc_errors,
+        fix_result=fix_result,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        has_disconnected=_output_verification.has_disconnected,
+        other_checks_passed=(
+            not _new_layer_intent_violations(_layer_intent)
+            and not _pairwise
+            and not _shorts
+            and _stranded_pour_escalation_exit(0, args) == 0
+            and not getattr(args, "_placement_fill_error", None)
+            and not getattr(args, "_placement_repair_error", None)
+            and not _placement_blocked(args)
+            and not _output_verification.regressed
+        ),
+    )
+    with contextlib.suppress(AttributeError, TypeError):
+        args._post_route_drc_result = final_result if _drc_only_failure else None
 
     # Final summary
     if not quiet:
@@ -18349,6 +19266,21 @@ def route_with_combined_escalation(
                 output_path,
                 f"Minimum viable config = {final_result.layer_count} layers + "
                 f"tier {final_result.tier} rules",
+            )
+        elif final_result.success and _drc_only_failure:
+            # Issue #10057: SUCCESS must be unreachable while verified
+            # post-route DRC errors are the run's sole failure (exit 3,
+            # JSON verdict "failed"), mirroring the single-attempt path's
+            # "ROUTING FAILED" banner for the same condition.
+            print("ROUTING FAILED: DRC violations detected")
+            print(
+                f"  All signal nets routed ({final_result.layer_count} layers + "
+                f"tier {final_result.tier} rules), but post-route DRC found "
+                f"{drc_errors} error(s); manufacturing is blocked."
+            )
+            print(
+                f"  Run 'kct check {output_path} --mfr "
+                f"{getattr(args, 'manufacturer', 'jlcpcb')}' for full details (exit code 3)."
             )
         elif final_result.success:
             print(
@@ -18409,6 +19341,11 @@ def route_with_combined_escalation(
         # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
+            return 3
+        # Issue #10057: a fully connected board whose verified post-route DRC
+        # failed exits 3 here too (see the banner branch above); the JSON
+        # fallback reports failure_reason="post_route_drc" for it.
+        if _drc_only_failure:
             return 3
         # Issue #6273: a clean result whose DRC / stranded-pour check was
         # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
@@ -18790,19 +19727,28 @@ def _warn_bus_flags_ignored_early(args, router, multi_res_plan=None) -> None:
         _warn_bus_flags_ignored(args, reason)
 
 
-def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
+class _PostStitchRefillError(RuntimeError):
+    """KiCad did not save a verified fill around the proposed stitch copper."""
+
+
+def _run_post_save_stitching(
+    args, output_path: Path, *, router, pour_pass_ran: bool, quiet: bool = False
+):
     """Run ``--stitch-power-planes`` on the saved board; shared by every tail (#7377).
 
-    Must run after the routed board is saved and verified, and before the
-    copper-pour zone fill so the fill and DRC see the stitching vias.  Returns
-    the ``run_stitch`` result, or ``None`` when the flag is off, ``--dry-run``
-    is set, or the board has no plane nets.
+    The stitcher checks pads against the pour left by signal routing and oracle
+    completion. A plane-only board skips that ordinary pass, so run it here
+    before deciding which pads still need copper. If stitching edits the board,
+    repeat the fill and connectivity check on the geometry that will ship.
     """
     if not getattr(args, "stitch_power_planes", False) or args.dry_run:
         return None
 
     from kicad_tools.cli.stitch_cmd import find_all_plane_nets, run_stitch
     from kicad_tools.core.sexp_file import load_pcb as load_stitch_pcb
+    from kicad_tools.sidecars import PROJECT_SIDECAR_SUFFIXES, copy_project_sidecars
+
+    from .route_receipt import relocate
 
     if not quiet:
         print("\n--- Stitching Power Planes ---")
@@ -18814,18 +19760,60 @@ def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
             print("  No power plane nets found (no zones with assigned nets)")
         return None
 
+    if not pour_pass_ran:
+        _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
+        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
+
     net_names = list(plane_nets.keys())
     if not quiet:
         print(f"  Found {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
 
-    stitch_result = run_stitch(
-        pcb_path=output_path,
-        net_names=net_names,
-        via_size=args.via_diameter,  # Use same via size as routing
-        drill=args.via_drill,
-        clearance=args.clearance,
-        dry_run=False,
-    )
+    # Keep the published board and project together while the new via or
+    # trace still crosses the previous fill. Only promote the refilled copy.
+    with tempfile.TemporaryDirectory(prefix=".kct-stitch-", dir=output_path.parent) as directory:
+        staged = Path(directory) / output_path.name
+        shutil.copy2(output_path, staged)
+        copy_project_sidecars(output_path, staged)
+        refresh_fill = not getattr(args, "_zone_fill_verified", False) or getattr(
+            args, "_oracle_changed_copper", False
+        )
+        if refresh_fill:
+            _fill_zones_after_route(
+                staged, quiet=quiet, router=router, args=args, require_saved=True
+            )
+            if not args._zone_fill_verified:
+                relocate({staged: None})
+                raise _PostStitchRefillError(
+                    "Could not verify a saved zone refill before stitching."
+                )
+        stitch_result = run_stitch(
+            pcb_path=staged,
+            net_names=net_names,
+            via_size=args.via_diameter,
+            drill=args.via_drill,
+            clearance=args.clearance,
+            dry_run=False,
+            fill_verified=True,
+        )
+        added_copper = bool(stitch_result.vias_added or stitch_result.traces_added)
+        if added_copper:
+            _fill_zones_after_route(
+                staged, quiet=quiet, router=router, args=args, require_saved=True
+            )
+            if not args._zone_fill_verified:
+                relocate({staged: None})
+                raise _PostStitchRefillError(
+                    "Post-stitch zone refill could not be verified. Discarded the proposed stitch."
+                )
+        if refresh_fill or added_copper:
+            moves: list[tuple[Path, Path | None]] = [
+                (output_path.with_suffix(ext), staged.with_suffix(ext))
+                for ext in PROJECT_SIDECAR_SUFFIXES
+                if staged.with_suffix(ext).is_file()
+            ]
+            _publish_transaction([*moves, (output_path, staged)])
+            relocate({staged: output_path})
+            _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
 
     if not quiet:
         if stitch_result.vias_added:
@@ -20169,6 +21157,7 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
     Returns 0 on success (or when ``--nets`` is absent) and a non-zero exit
     code (with a printed error) otherwise.
     """
+    args._replace_existing_nets = frozenset()
     requested_raw = getattr(args, "nets", None)
     if not requested_raw:
         return 0
@@ -20238,7 +21227,26 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
 
     # Invert into the skip machinery: skip every board net NOT requested.
     requested_set = set(requested_unique)
-    effective_skip = sorted(board_nets - requested_set)
+    locked_arc_nets: set[str] = set()
+    arc_nets = {arc.net_name for arc in pcb.arcs} & (requested_set - set(under_two))
+    if arc_nets and not getattr(args, "region", None) and not getattr(args, "complete", False):
+        # A whole-net reroute replaces source curves along with its old straight
+        # tracks. Bounded and incremental routes may still depend on the curves.
+        from kicad_tools.core.pcb_item_locks import locked_copper_nets
+
+        net_names = {number: net.name for number, net in pcb.nets.items()}
+        locked_arc_nets = arc_nets & locked_copper_nets(pcb._sexp, net_names)
+        disposition = getattr(args, "_placement_disposition", None)
+        if disposition is not None:
+            arc_nets -= disposition.preserve_copper_nets
+        args._replace_existing_nets = frozenset(arc_nets - locked_arc_nets)
+        if locked_arc_nets:
+            print(
+                "Warning: --nets retained locked copper on " + ", ".join(sorted(locked_arc_nets)),
+                file=sys.stderr,
+            )
+    args._route_only_locked_nets = locked_arc_nets
+    effective_skip = sorted((board_nets - requested_set) | locked_arc_nets)
     args.skip_nets = ",".join(effective_skip)
     # Marker: route-only mode.  The (large) inverted skip set must NOT be
     # forwarded as force_pour_nets (that would try to pour ~every net).
@@ -20269,6 +21277,85 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
             file=sys.stderr,
         )
     return 0
+
+
+def _stale_width_connected_nets(args, pcb_path: Path, pcb: "PCB", connected: list[str]) -> set[str]:
+    """Connected nets whose existing copper disagrees with authored width (#10189).
+
+    Under an auto-selected ``preserve_existing`` re-run (no explicit
+    ``--preserve-existing`` or ``--resume``), compare copper against widths from
+    project netclasses or ``--net-class-map``. An explicit ``--trace-width``
+    overrides the project width for nets with an authored declaration.
+    """
+    import json
+    from itertools import chain
+
+    from kicad_tools.core.pcb_item_locks import locked_copper_nets
+    from kicad_tools.core.project_clearance import ProjectClearanceError, authored_netclass_widths
+    from kicad_tools.router.net_names import resolve_net_class_map_keys
+    from kicad_tools.schema.pcb import Arc
+
+    explicit_width = getattr(args, "trace_width", None)
+    target: dict[str, float] = {}
+    project_path = Path(getattr(args, "pcb", pcb_path)).with_suffix(".kicad_pro")
+    if project_path.is_file():
+        try:
+            project = json.loads(project_path.read_text(encoding="utf-8"))
+            for net_name, nw in authored_netclass_widths(project, connected).items():
+                if nw.width > 0:
+                    target[net_name] = (
+                        explicit_width if explicit_width and explicit_width > 0 else nw.width
+                    )
+        except (OSError, ValueError, ProjectClearanceError):
+            # Surface canonical project errors at load_pcb_for_routing time.
+            pass
+
+    net_names = {number: net.name for number, net in pcb.nets.items()}
+    loaded = getattr(args, "_loaded_net_class_map", None)
+    if loaded:
+        # An open net on another sheet can share a connected net's suffix.
+        # Only an unambiguous board-wide match may release preserved copper.
+        resolution = resolve_net_class_map_keys(loaded, net_names.values())
+        for net_name, key in resolution.resolved.items():
+            routing = loaded[key]
+            if routing.route_via == "manual":
+                target.pop(net_name, None)
+            elif routing.trace_width > 0:
+                target[net_name] = routing.trace_width
+
+    if not target:
+        return set()
+
+    disposition = getattr(args, "_placement_disposition", None)
+    preserved_placement = (
+        disposition.preserve_copper_nets if disposition is not None else frozenset()
+    )
+    # Estimate the trunk from the copper area at each width (centerline
+    # length times width). This is independent of the number of segments:
+    # a short wide join or a narrow pad escape need not set the net's width.
+    candidates = (target.keys() & set(connected)) - preserved_placement
+    areas: dict[str, dict[float, float]] = {}
+    for track in chain(pcb.segments, pcb.arcs):
+        if track.net_name in candidates:
+            length = track.length if isinstance(track, Arc) else math.dist(track.start, track.end)
+            by_width = areas.setdefault(track.net_name, {})
+            by_width[track.width] = by_width.get(track.width, 0.0) + length * track.width
+
+    stale = set()
+    for name, by_width in areas.items():
+        trunk_width = max(by_width, key=lambda width: (by_width[width], width))
+        if abs(trunk_width - target[name]) > 1e-4:
+            stale.add(name)
+    if pcb.arcs:
+        from kicad_tools.router.preserve_existing import detached_off_width_arc_nets
+
+        # An older writer could leave an off-width arc behind an already
+        # corrected trunk. Preserve connected neck-downs on the same net.
+        stale.update(detached_off_width_arc_nets(pcb, {n: target[n] for n in candidates - stale}))
+    if stale:
+        # Re-routing replaces the whole net, including vias and group members.
+        stale.difference_update(locked_copper_nets(pcb._sexp, net_names))
+    return stale
 
 
 def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
@@ -20323,9 +21410,11 @@ def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
         return 0
 
     from kicad_tools.router.preserve_existing import fully_connected_nets
+    from kicad_tools.schema.pcb import PCB
 
     try:
-        connected = fully_connected_nets(pcb_path)
+        pcb = PCB.load(pcb_path)
+        connected = fully_connected_nets(pcb=pcb)
     except Exception as e:  # pragma: no cover - a detector that cannot run
         # must never widen the preserved set (and must never fail the route).
         if not getattr(args, "quiet", False):
@@ -20338,6 +21427,14 @@ def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
 
     if not connected:
         return 0
+
+    if getattr(args, "_auto_preserve_existing", False):
+        stale = _stale_width_connected_nets(args, pcb_path, pcb, connected)
+        if stale:
+            args._replace_existing_nets = frozenset(stale)
+            connected = [n for n in connected if n not in stale]
+            if not connected:
+                return 0
 
     args._preserved_connected_nets = list(connected)
     if not getattr(args, "quiet", False):
@@ -20474,6 +21571,11 @@ def _extend_skip_for_preserved_nets(args, skip_nets: list[str]) -> list[str]:
     preserved = list(getattr(args, "_preserved_connected_nets", None) or [])
     added = [n for n in preserved if n not in skip_nets]
     skip_nets.extend(added)
+    # Only a net the pathfinder will route can replace its input copper.
+    # This list includes both explicit exclusions and automatically skipped pours.
+    replaced = getattr(args, "_replace_existing_nets", None)
+    if replaced:
+        args._replace_existing_nets = replaced.difference(skip_nets)
     return added
 
 
@@ -20878,15 +21980,13 @@ def _route_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--preserve-existing",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
-            "Incremental routing (Issue #3155): load existing "
-            "(segment ...)/(via ...) copper as immovable obstacles and "
-            "re-emit it unchanged, so only unconnected nets are routed. "
-            "Preserves manually-routed nets, skipped nets' geometry, and "
-            "standalone stitch vias across a route pass. Default off (full "
-            "re-route, existing copper is replaced by freshly routed nets)."
+            "Keep existing tracks and vias as fixed copper and route open connections. "
+            "Enabled by default when the input has top-level segments or vias. "
+            "Use --no-preserve-existing for a full reroute. "
+            "--complete, --nets, --region and a resumed checkpoint require preservation."
         ),
     )
     parser.add_argument(
@@ -22143,6 +23243,20 @@ def _route_parser() -> argparse.ArgumentParser:
             "flag for performance-critical use or when running separate validation."
         ),
     )
+    # Issue #9799 (#9795 phase 3): the shared silk legalisation pass runs on
+    # the finished board by default; this is the opt-out that leaves authored
+    # silk byte-identical.
+    parser.add_argument(
+        "--no-silk-fix",
+        dest="no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) that "
+            "otherwise runs on the written board before post-route DRC and "
+            "names what it fixed and could not fix. With this flag authored "
+            "silk is left byte-identical (Issue #9799)."
+        ),
+    )
     # Issue #4178: hard-gate on native (kicad-cli) DRC actually running.
     parser.add_argument(
         "--strict-drc",
@@ -23208,6 +24322,7 @@ def _budget_retry_static_eligible(args) -> bool:
     """
     return not (
         getattr(args, "dry_run", False)
+        or getattr(args, "_retry_plane_pads", None)
         or getattr(args, "complete", False)
         or getattr(args, "resume", None)
         or getattr(args, "checkpoint", None)
@@ -23474,7 +24589,7 @@ def _chain_complete_argv(
       ``--net-class-map`` -- the fab tier, determinism and net classes.
     * ``--complete-exclude-nets`` -- rebuilt from ``excluded_nets``.
     * ``--per-net-iterations``, ``--deterministic-budget`` -- the search budget.
-    * ``--quiet``, ``--skip-drc``, ``--allow-offboard``,
+    * ``--quiet``, ``--skip-drc``, ``--no-silk-fix``, ``--allow-offboard``,
       ``--no-plane-via-reservation``, ``--no-reserve-pour-only-passives``.
     * ``--layers`` (Issue #8674) unless it is ``auto``: the operator's stack is
       passed by name, so the inner pass builds the same explicit stack instead
@@ -23626,6 +24741,7 @@ def _chain_complete_argv(
     for flag, attr in (
         ("--quiet", "quiet"),
         ("--skip-drc", "skip_drc"),
+        ("--no-silk-fix", "no_silk_fix"),
         ("--allow-offboard", "allow_offboard"),
         ("--no-plane-via-reservation", "no_plane_via_reservation"),
         ("--deterministic-budget", "deterministic_budget"),
@@ -24001,7 +25117,7 @@ def _staged_export_report_path(original: str) -> Path:
 
 def _budget_retry_argv(
     argv: list[str] | None,
-    grid_mm: float,
+    grid_mm: float | None,
     staged: Path,
     report_map: dict[str, Path] | None = None,
 ) -> list[str]:
@@ -24104,7 +25220,7 @@ def _budget_retry_argv(
                 return [f"{tok.partition('=')[0]}={new_value}"]
             return [f"{tok[:2]}{new_value}"]
 
-        if dest == "grid":
+        if dest == "grid" and grid_mm is not None:
             out.extend(_respell(f"{grid_mm:g}"))
             grid_set = True
         elif dest == "output":
@@ -24123,7 +25239,7 @@ def _budget_retry_argv(
         else:
             out.extend(head[i : i + consumed])
         i += consumed
-    if not grid_set:
+    if grid_mm is not None and not grid_set:
         out.extend(["--grid", f"{grid_mm:g}"])
     if not output_set:
         out.extend(["-o", str(staged)])
@@ -24205,12 +25321,11 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
 
     from kicad_tools.router.partial_rescue import partially_connected_signal_nets
     from kicad_tools.router.stuck_classifier import (
-        _search_failures_sidecar_path,
         is_budget_search_failure,
         load_search_failures_sidecar,
     )
 
-    from .route_deadline import CONTROL_ENV, DEADLINE_ENV
+    from .route_deadline import DEADLINE_ENV
 
     manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
     # Issue #9620 review: the retry is judged against the nets THIS batch
@@ -24279,11 +25394,116 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             f"retrying the batch once on a {retry_grid:g}mm grid "
             f"({first_grid:g}mm x2{capped}) ---"
         )
+    return _stage_route_retry(args, argv, result, output, before, _open_nets, retry_grid=retry_grid)
+
+
+def _plane_retry_eligible(args) -> bool:
+    """Only a fresh whole-board run can replay its input with extra reservations."""
+    return not (
+        getattr(args, "_retry_plane_pads", None)
+        or getattr(args, "no_plane_via_reservation", False)
+        or getattr(args, "allow_stranded_pour_pads", False)
+        or getattr(args, "dry_run", False)
+        or getattr(args, "complete", False)
+        or getattr(args, "resume", None)
+        or getattr(args, "checkpoint", None)
+        or getattr(args, "nets", None)
+        or getattr(args, "region", None)
+        or _interrupt_pending()
+    )
+
+
+def _chain_stranded_plane_pass(args, argv, result: int, started: float) -> int:
+    """Retry a real, exhausted mixed-pad stitch with its site reserved before signals."""
+    pads: frozenset[str] = getattr(args, "_exhausted_mixed_plane_pads", frozenset())
+    if (
+        not pads
+        or result not in (3, 4)
+        or not _plane_retry_eligible(args)
+        or getattr(args, "_pour_completion_cut_by_timeout", False)
+        or getattr(args, "_allow_stranded_pour_pads", False)
+    ):
+        return result
+    from . import route_receipt
+    from .route_deadline import DEADLINE_ENV
+
+    pcb = Path(args.pcb)
+    output = Path(args.output) if args.output else pcb.with_stem(pcb.stem + "_routed")
+    invocation = route_receipt._current.get()
+    if invocation is None or output.absolute() not in invocation.published:
+        return result
+    try:
+        if output.samefile(pcb):
+            # An in-place first run replaced the original layout.
+            return result
+    except OSError:
+        # A disappeared input or output leaves nothing to replay or compare.
+        return result
+    deadline = os.environ.get(DEADLINE_ENV)
+    if deadline is not None:
+        now = time.monotonic()
+        if float(deadline) - now < max(_BUDGET_RETRY_MIN_BUDGET_S, now - started):
+            return result
+
+    def remaining(board: Path) -> list[str]:
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+        from kicad_tools.lvs.copper_lvs import compare_partitions
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        analyzer = NetStatusAnalyzer(board, strict=True)
+        checked = analyzer.analyze()
+        connected_pads = {p.full_name for net in checked.nets for p in net.connected_pads}
+        # Per-net connectivity cannot see two otherwise-complete nets touching.
+        # Compare the physical islands against the ORIGINAL pad assignments.
+        source = PCB.load(pcb)
+        expected: dict[tuple[str, str], str | None] = {
+            (fp.reference, pad.number): source.nets[pad.net_number].name
+            for fp in source.footprints
+            for pad in fp.pads
+            if fp.reference and pad.number and pad.net_number and pad.net_number in source.nets
+        }
+        islands, bindings = ConnectivityValidator(analyzer.pcb).extract_pad_occurrences()
+        copper = compare_partitions(expected, islands, pad_bindings=bindings)
+        absent = expected.keys() - set(bindings.values())
+        return [
+            *sorted(pads - connected_pads),
+            *sorted(f"{ref}.{pin}" for ref, pin in absent),
+            *(f"{m.kind} {m.pad_a}/{m.pad_b}" for m in copper.mismatches),
+            *(net.net_name for net in (*checked.incomplete, *checked.unrouted, *checked.stranded)),
+        ]
+
+    if not getattr(args, "quiet", False):
+        print(
+            f"\n--- Reserving exhausted plane stitch sites before retry: {', '.join(sorted(pads))} ---"
+        )
+    return _stage_route_retry(args, argv, result, output, sorted(pads), remaining, plane_pads=pads)
+
+
+def _stage_route_retry(
+    args,
+    argv: list[str] | None,
+    result: int,
+    output: Path,
+    before: list[str],
+    remaining_nets: Callable[[Path], list[str]],
+    *,
+    retry_grid: float | None = None,
+    plane_pads: frozenset[str] = frozenset(),
+) -> int:
+    """Run one candidate against fresh input and publish its board and reports atomically."""
+    from kicad_tools.router.stuck_classifier import _search_failures_sidecar_path
+
+    from .route_deadline import CONTROL_ENV
+
+    quiet = bool(getattr(args, "quiet", False))
+    kind = "plane-sites" if plane_pads else "coarser"
+    label = "Plane-site retry" if plane_pads else "Coarser-grid retry"
     # Issue #9620 review: staging lives in a private per-invocation directory
     # (unique, dot-prefixed) -- a ``<stem>.coarser*`` glob next to -o matched
     # unrelated files (an input named ``board.coarser.kicad_pcb`` was deleted
     # before the retry could read it; a ``board.coarser-notes.txt`` was lost).
-    stage_dir = _fresh_staging_dir(output, "coarser")
+    stage_dir = _fresh_staging_dir(output, kind)
     staged = stage_dir / output.name
     staged_reports: dict[str, Path] = {}
     retry_argv = _budget_retry_argv(argv, retry_grid, staged, staged_reports)
@@ -24322,10 +25542,14 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
         try:
             if json_capture is not None:
                 _route_json_capture = json_capture
-            retry_rc = _main_impl(retry_argv)
+            retry_rc = (
+                _main_impl(retry_argv, plane_pads=plane_pads)
+                if plane_pads
+                else _main_impl(retry_argv)
+            )
             if staged.is_file():
                 try:
-                    after = _open_nets(staged)
+                    after = remaining_nets(staged)
                 except Exception:
                     # Issue #9620 review: an unreadable connectivity report
                     # means the open-net count is unknown, never zero -- an
@@ -24337,10 +25561,7 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             # keep unwinding -- the finally below still restores the receipt
             # and supervisor control, and the outer finally discards staging.
             if not quiet:
-                print(
-                    f"  Coarser-grid retry failed ({type(exc).__name__}: {exc}); "
-                    "keeping the first result"
-                )
+                print(f"  {label} failed ({type(exc).__name__}: {exc}); keeping the first result")
             retry_rc, after = None, before
         finally:
             if json_capture is not None:
@@ -24350,9 +25571,11 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             if control and control_snapshot is not None:
                 _restore_supervisor_control(control, control_snapshot)
         if (
-            retry_rc not in _BUDGET_RETRY_ACCEPT_EXITS
+            retry_rc is None
+            or retry_rc not in ({0} if plane_pads else _BUDGET_RETRY_ACCEPT_EXITS)
             or not staged.is_file()
             or after is None
+            or (plane_pads and after)
             or len(after) >= len(before)
         ):
             if not quiet:
@@ -24362,8 +25585,7 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
                     else f"{len(after)} open vs {len(before)}"
                 )
                 print(
-                    "  Coarser-grid retry did not route more nets "
-                    f"(exit {retry_rc}, {why}); first result kept"
+                    f"  {label} did not route more nets (exit {retry_rc}, {why}); first result kept"
                 )
             return result
         # Promotion: the retry's diagnostics travel with its board, as ONE
@@ -24383,10 +25605,7 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             _promote_staging_dir(stage_dir, output, staged, args, extra_moves)
         except OSError as exc:
             if not quiet:
-                print(
-                    f"  Coarser-grid retry could not publish its artifacts ({exc}); "
-                    "first result kept"
-                )
+                print(f"  {label} could not publish its artifacts ({exc}); first result kept")
             return result
         _adopt_constraint_receipt(output, staged, inner_invocation, outer_invocation)
         if json_capture:
@@ -24400,7 +25619,9 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
         # Also runs on RouteDeadlineExpired / KeyboardInterrupt: -o was never
         # touched before promotion, so only staging needs removing.
         _discard()
-    if not quiet:
+    if not quiet and plane_pads:
+        print(f"  {label} connected the written board; promoted")
+    elif not quiet and retry_grid is not None:
         print(
             f"  Coarser-grid retry routed {len(before) - len(after)} more net(s) "
             f"on the {retry_grid:g}mm grid; promoted"
@@ -24411,9 +25632,11 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
     return retry_rc
 
 
-def _main_impl(argv: list[str] | None = None) -> int:
+def _main_impl(argv: list[str] | None = None, *, plane_pads: frozenset[str] = frozenset()) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
+    args._retry_plane_pads = plane_pads
+    started = time.monotonic()
     if getattr(args, "nogood_cache", False):
         # Issue #6353: experiment-only plumbing; read by Autorouter lazily.
         os.environ["KCT_NOGOOD_CACHE"] = "1"
@@ -24459,17 +25682,14 @@ def _main_impl(argv: list[str] | None = None) -> int:
                         )
                         json_stream.flush()
                     return 1
+            # Placement is diagnosed inside the route. Hold JSON until finish()
+            # has inspected the board that was actually written.
             capture = (
-                json_stream.capture()
-                if json_stream is not None
-                and (
-                    gate is not None
-                    or _route_json_capture is not None
-                    or _budget_retry_static_eligible(args)
-                )
-                else contextlib.nullcontext(None)
+                json_stream.capture() if json_stream is not None else contextlib.nullcontext(None)
             )
+            placement_fields: dict = {}
             handed_off = False
+            document = ""
             with capture as held:
                 try:
                     try:
@@ -24484,6 +25704,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                                 args._lint_gate_output = str(gate.output)
                                 args.output = str(staged)
                         result = _run_main_impl(args, parser, argv)
+                        result = _chain_stranded_plane_pass(args, argv, result, started)
                         # Issue #9620: the budget-only coarser retry re-routes the
                         # whole batch before the chained completion pass, so its
                         # classification reads the grid pass's own give-up labels
@@ -24492,6 +25713,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
                         # completion pass a no-op.
                         result = _chain_budget_coarser_pass(args, argv, result)
                         result = _chain_complete_pass(args, argv, result)
+                    except _PostStitchRefillError as exc:
+                        print(f"Error: {exc}", file=sys.stderr)
+                        result = EXIT_UNVERIFIED
                     except BaseException:
                         if gate is not None:
                             # Never leave an unjudged board at --output.
@@ -24505,40 +25729,38 @@ def _main_impl(argv: list[str] | None = None) -> int:
                         finally:
                             _lint_gate_unstage_args(args, gate, requested_output)
                         result = outcome.exit_code(result)
-                    exit_code = finish(args, result)
+                    exit_code = finish(args, result, json_fields=placement_fields)
                     if json_stream is not None and not json_stream.written:
                         # The layer/rule-escalation paths (the default) never reached
                         # the direct-route JSON emitter; publish the same document
                         # for the final router so --format json always yields one.
                         _emit_route_json_fallback(args, exit_code)
                 finally:
-                    if _route_json_capture is not None and held is not None:
-                        # Issue #9620 review: an inner (retry) run hands its
-                        # JSON document to the requesting outer run -- consumed
-                        # exactly once there; the inner never also writes it
-                        # locally (its nested json guard would land the
-                        # document on stderr).
-                        _route_json_capture.append(held.getvalue())
-                        handed_off = True
-            retry_json = getattr(args, "_budget_retry_json_document", None)
-            if held is not None and json_stream is not None and not handed_off:
+                    if held is not None:
+                        # A promoted retry's diagnostics describe the published
+                        # board. Its final placement report comes from finish().
+                        document = (
+                            getattr(args, "_budget_retry_json_document", None) or held.getvalue()
+                        )
+                        if placement_fields:
+                            import json
+
+                            payload = json.loads(document) if document.strip() else {}
+                            payload.update(placement_fields)
+                            document = json.dumps(payload, indent=2) + "\n"
+                        if _route_json_capture is not None:
+                            # The requesting outer run publishes the inner retry
+                            # exactly once, after it decides which board to keep.
+                            _route_json_capture.append(document)
+                            handed_off = True
+            if json_stream is not None and not handed_off:
                 if gate is not None and outcome is not None:
                     from .route_lint_gate import merge_into_json_document
 
-                    json_stream.write(
-                        merge_into_json_document(
-                            retry_json if retry_json else held.getvalue(),
-                            outcome,
-                            exit_code,
-                            relocate=gate.relocate,
-                        )
+                    document = merge_into_json_document(
+                        document, outcome, exit_code, relocate=gate.relocate
                     )
-                elif retry_json:
-                    # The coarser retry promoted its board (Issue #9620): its
-                    # document, not the first pass's, describes -o now.
-                    json_stream.write(retry_json)
-                else:
-                    json_stream.write(held.getvalue())
+                json_stream.write(document)
                 json_stream.flush()
             return exit_code
     except DRCConstraintPropagationError as exc:
@@ -24595,19 +25817,20 @@ def _lint_gate_unstage_args(args, gate, requested_output) -> None:
 def _emit_route_json_fallback(args, exit_code: int) -> None:
     """Emit the routing-diagnostics JSON for runs that bypassed it (issue #5938).
 
-    ``route_with_layer_escalation`` (the default path) prints only a prose
-    summary, so ``kct route --format json`` used to put no JSON on stdout at
-    all.  The escalation wrappers stash their final result on
-    ``args._last_layer_result``; reuse :func:`print_routing_diagnostics_json`
-    on it so both paths share one document shape.  Runs that never built a
-    router (dry runs, early validation exits) get a minimal ``exit_code``
-    document instead.
+    Layer escalation retains its selected result for diagnostics. All three
+    escalation paths also retain the result whose verified DRC alone failed.
+    Adaptive paths preserve the top-level exit code and verdict that callers
+    receive on their other outcomes.
     """
     import json
 
     from kicad_tools.json_stdout import json_stdout
 
-    last = getattr(args, "_last_layer_result", None)
+    silk_fix = getattr(args, "_route_silk_fix", None)
+    layer_result = getattr(args, "_last_layer_result", None)
+    drc_result = getattr(args, "_post_route_drc_result", None) if exit_code == 3 else None
+    last = drc_result if drc_result is not None else layer_result
+    verdict = _verdict_for_exit(exit_code)
     if last is not None:
         from kicad_tools.router import print_routing_diagnostics_json
 
@@ -24621,19 +25844,22 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
                 nets_to_route_ids=multi_pad_ids,
                 single_pad_count=getattr(last, "single_pad_count", 0),
                 # Issue #6239: the exit code is the run's single final verdict.
-                verdict=_verdict_for_exit(exit_code),
+                verdict=verdict,
                 grid_selection=getattr(args, "_grid_selection", None),
+                silk_fix=silk_fix,
+                post_route_drc_only=drc_result is not None,
+                exit_code=exit_code if layer_result is None else None,
             )
             return
         except Exception as exc:  # pragma: no cover - defensive
             print(f"Warning: could not build routing diagnostics JSON: {exc}", file=sys.stderr)
-    print(
-        json.dumps(
-            {"exit_code": exit_code, "verdict": _verdict_for_exit(exit_code)},
-            indent=2,
-        ),
-        file=json_stdout(),
-    )
+    document = {"exit_code": exit_code, "verdict": verdict}
+    if drc_result is not None:
+        # The verified failure still matters if rich diagnostic formatting fails.
+        document["summary"] = {"verdict": verdict, "failure_reason": "post_route_drc"}
+    if silk_fix is not None:
+        document["silk_fix"] = silk_fix
+    print(json.dumps(document, indent=2), file=json_stdout())
 
 
 def _dry_run_layer_counts(pcb_path: Path, args, argv) -> tuple[list[int], bool]:
@@ -25055,6 +26281,22 @@ def _run_main_impl(args, parser, argv) -> int:
         rc = _parse_and_apply_region(args, pcb_path, _region_arg)
         if rc != 0:
             return rc
+
+    # Scoped modes and a loaded checkpoint have already selected preservation.
+    # Use the same top-level forms that the writer can remove (#9627). Pads,
+    # graphics and zone fills alone do not turn on incremental routing.
+    if args.preserve_existing is None:
+        try:
+            args.preserve_existing = (
+                next(_route_block_spans(pcb_path.read_text(), include_arcs=True), None) is not None
+            )
+        except (OSError, UnicodeError) as exc:
+            print(f"Error reading input routing copper from {pcb_path}: {exc}", file=sys.stderr)
+            return 1
+        args._auto_preserve_existing = bool(args.preserve_existing)
+    else:
+        args._auto_preserve_existing = False
+        _warn_existing_copper_replacement(pcb_path, args)
 
     # Issue #5788: a bare --preserve-existing must honour its own --help ("only
     # unconnected nets are routed") -- detect the nets that are ALREADY fully
@@ -25533,12 +26775,6 @@ def _run_main_impl(args, parser, argv) -> int:
             grid_explicit=grid_auto_result is None,
         )
 
-    # Issue #9599 row 2: name the existing copper this run is about to
-    # replace.  All preserve-flag coercions (--nets / --region / --complete)
-    # have run above, so a False ``preserve_existing`` here means the run
-    # really will strip the input board's routing copper at its first write.
-    _warn_existing_copper_replacement(pcb_path, args)
-
     # Issue #3352 (P_AS3): --auto-pcb-size wraps the layer escalation path
     # with an outer size-escalation loop.  Q5 decision: --auto-pcb-size
     # IMPLIES --auto-layers unless --no-auto-layers was explicit (the
@@ -25870,6 +27106,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 strict_drc=False,  # Only fail on hard constraint (grid > clearance)
                 # Issue #3155: incremental routing (see route_with_layer_escalation).
                 load_existing_routes=getattr(args, "preserve_existing", False),
+                **_extra_load_width_kwargs(args),
                 # Issue #4148: region-bounded routing (see main()).
                 region=getattr(args, "_region_box", None),
                 # Issue #4472 (epic #4465, Phase 2): --complete localizes the
@@ -25879,7 +27116,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 # (it now derives from --per-net-timeout on every lattice run),
                 # and --timeout supplies an absolute ceiling alongside it.
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                preserve_listed_copper=bool(getattr(args, "complete", False)),
+                preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                 lattice_link_budget_s=_resolve_lattice_link_budget(args),
                 lattice_deadline=_lattice_absolute_deadline(args),
                 lattice_max_iterations=getattr(args, "lattice_iterations", None),
@@ -25963,6 +27200,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 validate_drc=not args.force,
                 strict_drc=False,
                 load_existing_routes=getattr(args, "preserve_existing", False),
+                **_extra_load_width_kwargs(args),
                 # Issue #4148: region-bounded routing (see main()).
                 region=getattr(args, "_region_box", None),
                 # Issue #4472 (epic #4465, Phase 2): --complete localizes the
@@ -25972,7 +27210,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 # (it now derives from --per-net-timeout on every lattice run),
                 # and --timeout supplies an absolute ceiling alongside it.
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                preserve_listed_copper=bool(getattr(args, "complete", False)),
+                preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                 lattice_link_budget_s=_resolve_lattice_link_budget(args),
                 lattice_deadline=_lattice_absolute_deadline(args),
                 lattice_max_iterations=getattr(args, "lattice_iterations", None),
@@ -26010,6 +27248,16 @@ def _run_main_impl(args, parser, argv) -> int:
     # Issue #1841: Tell the autorouter which pour nets lack zones
     router._pour_nets_without_zones = set(_no_zone)
 
+    requested_nets = getattr(args, "_route_only_nets", ()) or ()
+    if (
+        not args.dry_run
+        and args.preserve_existing
+        and args.strategy == "basic"
+        and _resolve_escape_routing_flag(args) is True
+        and len(requested_nets) == 1
+    ):
+        router.preserved_departure_net = next(iter(requested_nets))
+
     # Set up Ctrl+C handling to save partial results.  Issue #4559: the
     # handler (and the router pinned here) is restored/released by
     # ``_process_state_guard`` when ``main()`` exits -- mirroring the
@@ -26021,6 +27269,7 @@ def _run_main_impl(args, parser, argv) -> int:
     # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
     # so the partial save takes the preserved input copper (captured above,
     # before routing) from here.
+    _interrupt_state["replaced_arc_nets"] = getattr(args, "_replace_existing_nets", frozenset())
     _interrupt_state["source_copper"] = _preserved_sexp
     _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
@@ -26632,6 +27881,7 @@ def _run_main_impl(args, parser, argv) -> int:
             float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
             quiet=quiet,
             preserved_sexp=_preserved_sexp,
+            replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
             preserved_routes=_preserved_routes,
             router_provider=lambda: router,
             source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
@@ -27139,6 +28389,9 @@ def _run_main_impl(args, parser, argv) -> int:
         # ``--placement-delta-feedback`` already disables the cache up front
         # (above); this covers the auto arm, which cannot know in advance that
         # it will fire.
+        if getattr(router, "pending_preserved_departure", None) is not None:
+            # A route-only cache cannot carry a verified refill or its power repairs.
+            use_cache = False
         if use_cache and _moved_placement_path is not None:
             use_cache = False
             if not quiet:
@@ -27197,6 +28450,7 @@ def _run_main_impl(args, parser, argv) -> int:
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        captured_copper_sexp=_preserved_sexp,
         pcb_path=pcb_path,
     )
 
@@ -27378,6 +28632,7 @@ def _run_main_impl(args, parser, argv) -> int:
         return _stop_rc
 
     # Save output
+    departure = getattr(router, "pending_preserved_departure", None)
     output_content = ""  # Tracks written content for output connectivity verification
     if args.dry_run:
         if not quiet:
@@ -27403,14 +28658,24 @@ def _run_main_impl(args, parser, argv) -> int:
 
             # Issue #2808: atomic write via _write_routed_pcb.  No layer
             # escalation in this flow, so layer_count defaults to 2 (no-op).
-            _write_routed_pcb(
-                pcb_path,
-                output_path,
-                combined_sexp,
-                # Issue #4413: abort rather than overwrite when a
-                # preserve/nets/region save would drop nearly all copper.
-                guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
-            )
+            if departure is None:
+                _write_routed_pcb(
+                    pcb_path,
+                    output_path,
+                    combined_sexp,
+                    guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
+                    replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
+                )
+            elif not _publish_preserved_departure(
+                pcb_path, output_path, combined_sexp, args, router, quiet
+            ):
+                router.routes[:] = [route for route in router.routes if route.net != departure.net]
+                departure.reason = (
+                    "Preserved breakout declined: native refill did not verify all pour connections"
+                )
+                router.routing_failures.append(departure)
+                stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
+                print(f"  {departure.reason}. Kept the input board.", file=sys.stderr)
 
             # We need output_content for the connectivity verification below;
             # re-read since the atomic write left output_path with the final
@@ -27450,15 +28715,22 @@ def _run_main_impl(args, parser, argv) -> int:
         )
     output_verification_regressed = output_verification.regressed
 
-    # Run power plane stitching if requested
-    _run_post_save_stitching(args, output_path, quiet=quiet)
+    if departure is None:
+        # Fill before DRC so KiCad sees poured copper (issue #2516). A
+        # provisional departure already ran both steps on its staged board.
+        run_pour_pass = not args.dry_run and stats["nets_routed"] > 0
+        if run_pour_pass:
+            _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
+            _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
+        _run_post_save_stitching(
+            args, output_path, router=router, pour_pass_ran=run_pour_pass, quiet=quiet
+        )
 
-    # Fill copper-pour zones now that traces (and any stitching vias)
-    # are in place (issue #2516).  Must run BEFORE DRC so the DRC sees
-    # filled zones rather than bare zone outlines.
-    if not args.dry_run and stats["nets_routed"] > 0:
-        _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
-        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
+    # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
+    # after copper is written and before post-route DRC judges silk.
+    args._route_silk_fix = _apply_default_silk_pass(
+        output_path, args, layers=layer_stack.num_layers, quiet=quiet
+    )
 
     _rss.mark("post-fill-zones")
 
@@ -27503,6 +28775,7 @@ def _run_main_impl(args, parser, argv) -> int:
             # current, and the specs are re-emitted next to the routed board
             # for kct check auto-discovery.
             current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_path_cases=getattr(args, "_loaded_current_path_cases", ()),
             current_paths_input_path=getattr(args, "_current_paths_input_path", None),
             # Issue #5519 (Epic #5510, Phase 1): thread the report-only
             # RoutingPlan so it is serialized to
@@ -27614,21 +28887,20 @@ def _run_main_impl(args, parser, argv) -> int:
 
     # Issue #6239: the single final verdict, mirroring the banner chain below
     # (and the exit code), so ``--format json`` reports what the text path does.
+    other_checks_passed = (
+        layer_intent_new_count == 0
+        and pairwise_violation_count == 0
+        and short_violation_count == 0
+        and not input_clearance_errors
+        and not stranded_pour_blocking
+        and not getattr(args, "_placement_fill_error", None)
+        and not getattr(args, "_placement_repair_error", None)
+        and not _placement_blocked(args)
+        and not output_verification_regressed
+    )
     _final_verdict = (
         "success"
-        if (
-            layer_intent_new_count == 0
-            and not (pairwise_violation_count > 0 and drc_passed)
-            and short_violation_count == 0
-            and not input_clearance_errors
-            and not stranded_pour_blocking
-            and not getattr(args, "_placement_fill_error", None)
-            and not getattr(args, "_placement_repair_error", None)
-            and not _placement_blocked(args)
-            and not output_verification_regressed
-            and drc_passed
-            and (all_nets_routed or meets_threshold)
-        )
+        if other_checks_passed and drc_passed and (all_nets_routed or meets_threshold)
         else "failed"
     )
     # Issue #6273: a would-be success whose DRC / stranded-pour check was
@@ -27809,6 +29081,22 @@ def _run_main_impl(args, parser, argv) -> int:
             routing_plan=_routing_plan_json,
             verdict=_final_verdict,
             grid_selection=getattr(args, "_grid_selection", None),
+            silk_fix=args._route_silk_fix,
+            # Consumers that finish the copper can recheck DRC on the final board.
+            # Every other exit-3 cause keeps its original failure verdict.
+            # Issue #10057: the condition lives in the shared
+            # _post_route_drc_only_failure helper so the escalation paths
+            # (via _emit_route_json_fallback) report the identical key.
+            post_route_drc_only=_post_route_drc_only_failure(
+                args,
+                drc_errors=drc_errors,
+                fix_result=fix_result,
+                all_nets_routed=all_nets_routed,
+                has_disconnected=output_verification.has_disconnected,
+                # The pre-save seg-seg gate runs on this path only; a seg-seg
+                # violation is another exit-3 cause, not a DRC-only failure.
+                other_checks_passed=other_checks_passed and seg_seg_violation_count == 0,
+            ),
         )
 
     # Save partial results on clean partial exit (not just SIGINT)
@@ -27869,6 +29157,10 @@ def _run_main_impl(args, parser, argv) -> int:
     # 1 = Fatal failure — no nets routed, no useful output
     # 2 = Partial routing — some nets routed but below --min-completion threshold
     # 3 = Meets threshold but DRC violations detected (includes seg-seg violations).
+    #     Issue #10057: the escalation tails (layer / rule-relaxation /
+    #     combined -- the default ``--auto-layers`` path among them) return 3
+    #     for the same fully-connected-DRC-only condition, so every finishing
+    #     path agrees on the code and on ``summary.failure_reason``.
     #     Issue #2852: also returned when --auto-fix rolled back due to a
     #     connectivity regression (fix-drc exit 3) — semantically the same
     #     contract ("routing succeeded but DRC is dirty"); callers cannot

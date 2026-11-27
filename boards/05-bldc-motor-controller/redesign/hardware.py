@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from math import cos, radians, sin
 from pathlib import Path
 
-from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
+from kicad_tools.manufacturers.attach_zone_dru import ATTACH_ZONE_EXCLUDED_NETS_META_KEY
+from kicad_tools.operations.pintype import annotate_pcb_pintypes, pad_pin_info_map
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schematic.models.schematic import Schematic
 from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
@@ -15,7 +16,7 @@ ROOT = Path(__file__).resolve().parent
 R = "Resistor_SMD:R_0805_2012Metric"
 C = "Capacitor_SMD:C_0805_2012Metric"
 DRV_FP = "board05_revB:TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias"
-LDO_FP = "Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias"
+LDO_FP = "board05_revB:TI_DGN0008C_Lands1.4x0.45_EP1.57x1.89_ThermalVias"
 # Installed KiCad models with the correct visible body and lead geometry.
 # Their hidden exposed-pad dimensions are approximate; fabrication uses pads.
 MODEL_ALIASES = {
@@ -613,32 +614,42 @@ def _apply_silk_stroke_edit(fp, ref, edit):
 def generate(output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    build_schematic().write(output / "bldc_controller.kicad_sch")
-    schematic = parse_file(output / "bldc_controller.kicad_sch")
+    sch_path = output / "bldc_controller.kicad_sch"
+    build_schematic().write(sch_path)
+    schematic = parse_file(sch_path)
+    pcb = build_pcb()
     identities = {part.ref: part for part in parts()}
     for symbol in schematic.find_all("symbol"):
         properties = {node.get_string(0): node for node in symbol.find_all("property")}
         reference = properties.get("Reference")
         if reference and reference.get_string(1) in identities:
             part = identities[reference.get_string(1)]
+            # KiCad exports the library's "~" placeholder as an empty datasheet.
+            datasheet = properties["Datasheet"].get_string(1)
+            pcb.set_footprint_property(part.ref, "Datasheet", "" if datasheet == "~" else datasheet)
             for key, value in [("LCSC", part.lcsc), ("MPN", part.mpn)]:
+                pcb.set_footprint_property(part.ref, key, value)
                 symbol.append(
                     parse_string(
                         f'(property "{key}" {json.dumps(value)} (at 0 0 0) '
                         "(effects (font (size 1.27 1.27)) hide))"
                     )
                 )
-    (output / "bldc_controller.kicad_sch").write_text(serialize_sexp(schematic))
-    build_pcb().save(output / "bldc_controller.kicad_pcb")
-    # Issue #6025: carry schematic pin names/types onto the pads right after
-    # the unrouted PCB is written.  build.py copies this board before
-    # replaying routing.json, so the routed PCB inherits the ``(pintype ...)``
-    # evidence ``kct detect-mistakes`` reads for rails.
-    annotation = annotate_pcb_file_pintypes(
-        output / "bldc_controller.kicad_pcb", output / "bldc_controller.kicad_sch"
-    )
+    sch_path.write_text(serialize_sexp(schematic))
+    pins = pad_pin_info_map(sch_path, pcb)
+    annotation = annotate_pcb_pintypes(pcb, sch_path, pins)
     if annotation.missing_pads:
         raise RuntimeError(f"pads without a schematic pin: {annotation.missing_pads}")
+    unused_nets = []
+    for (ref, number), pin in pins.items():
+        if pin.no_connect:
+            if number in identities[ref].nets:
+                raise ValueError(f"{ref}.{number} is both connected and marked unused")
+            function = pin.pinfunction.replace("/", "{slash}")
+            name = f"unconnected-({ref}-{function}-Pad{number})"
+            pcb.assign_net_to_footprint_pad(ref, number, name)
+            unused_nets.append(name)
+    pcb.save(output / "bldc_controller.kicad_pcb")
     shutil.copy2(ROOT / "board05_revB.kicad_sym", output / "board05_revB.kicad_sym")
     shutil.copytree(
         ROOT / "board05_revB.pretty", output / "board05_revB.pretty", dirs_exist_ok=True
@@ -659,6 +670,8 @@ def generate(output):
     (output / "bldc_controller.kicad_pro").write_text(
         json.dumps(
             {
+                # Naming these pads must not admit them to a routing clearance exemption.
+                "meta": {ATTACH_ZONE_EXCLUDED_NETS_META_KEY: sorted(unused_nets)},
                 "board": {
                     "design_settings": {
                         "rules": {

@@ -8,6 +8,7 @@ a time.
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,11 @@ from kicad_tools.validate.rules.reinforcement_incomplete import (
     reinforcement_waived_nets,
 )
 from kicad_tools.validate.rules.waivers import Waiver
-from tests.test_pcb_reinforce import _add_th_pad_footprint, _straight_run_pcb
+from tests.test_pcb_reinforce import (
+    _add_th_pad_footprint,
+    _straight_run_pcb,
+    _write_single_pad_footprint_lib,
+)
 
 NET = "FUSED_LINE"
 
@@ -831,14 +836,14 @@ class TestFullyWiredLegs:
     """
 
     def test_complete_board_yields_the_leg(self):
-        legs = ReinforcementIncompleteRule(specs=[_spec()]).fully_wired_legs(
-            _reinforced(), _rules()
-        )
+        pcb = _reinforced()
+        legs = ReinforcementIncompleteRule(specs=[_spec()]).fully_wired_legs(pcb, _rules())
         assert len(legs) == 1
         (leg,) = legs
         assert leg.net == NET
         assert leg.layer == "F.Cu"
         assert leg.gauge == 16
+        assert [anchor.via for anchor in leg.anchors] == _anchors(pcb)
         assert leg.width == pytest.approx(2.0)
         assert leg.points[0] == pytest.approx((20.0, 50.0))
         assert leg.points[-1] == pytest.approx((120.0, 50.0))
@@ -895,3 +900,75 @@ class TestFullyWiredLegs:
         rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires)
         assert _subchecks(rule.check(pcb, _rules())) == []  # complete...
         assert rule.fully_wired_legs(pcb, _rules()) == []  # ...but wire-less
+
+
+@pytest.mark.parametrize("gauge", [14, 16])
+def test_two_taps_without_a_derivable_wire_leg_reports_skipped(gauge, tmp_path, capsys):
+    from kicad_tools.cli import main
+    from kicad_tools.pcb.reinforcement_sidecar import sidecar_path
+    from kicad_tools.physics.wire_gauge import anchor_drill_for_awg
+    from kicad_tools.router.current_paths import dump_current_path_specs
+
+    mod_path = _write_single_pad_footprint_lib(tmp_path)
+    pcb = PCB.create(width=160, height=100, center=False)
+    pins = {"J1": (20, 40), "J2": (120, 40), "Q1": (50, 65), "Q2": (90, 65)}
+    for ref, (x, y) in pins.items():
+        pcb.add_footprint_from_file(mod_path, ref, x, y)
+        pcb.assign_net_to_footprint_pad(ref, "1", NET)
+    junctions = [pins["J1"], (50, 40), (90, 40), pins["J2"]]
+    for start, end in zip(junctions, junctions[1:], strict=False):
+        pcb.add_trace(start, end, width=2.0, layer="F.Cu", net=NET)
+    specs = [_spec()]
+    for ref in ("Q1", "Q2"):
+        x, y = pins[ref]
+        pcb.add_trace((x, 40), (x, y), width=2.0, layer="F.Cu", net=NET)
+        specs.append(
+            CurrentPathSpec(
+                name=ref,
+                net_name=NET,
+                source=PathEndpoint(ref, "1"),
+                sink=PathEndpoint("J2", "1"),
+                continuous_a=10.0,
+                reinforcement_eligible=True,
+            )
+        )
+    pcb.add_trace((20, 15), (30, 15), width=1.0, layer="F.Cu", net="DANGLING")
+    drill = anchor_drill_for_awg(gauge)
+    pcb.add_via(15, 15, net=NET, size=drill + 0.5, drill=drill)
+    wires = [{"net": NET, "wire_gauge_awg": gauge}] if gauge != 16 else []
+    rule = ReinforcementIncompleteRule(specs=specs, wires=wires)
+    findings = rule.check(pcb, _rules())
+    assert _subchecks(findings) == ["skipped"]
+    assert "2 junctions" in findings.violations[0].message
+    assert rule.fully_wired_legs(pcb, _rules()) == []
+
+    board = tmp_path / "board.kicad_pcb"
+    pcb.save(board)
+    paths = tmp_path / "paths.json"
+    paths.write_text(json.dumps(dump_current_path_specs(specs)))
+    if wires:
+        sidecar_path(board).write_text(json.dumps({"version": 1, "wires": wires}))
+
+    rc = main(
+        [
+            "check",
+            str(board),
+            "--mfr",
+            "jlcpcb",
+            "--current-paths",
+            str(paths),
+            "--drc-only",
+            "--format",
+            "json",
+        ]
+    )
+    assert rc == 2
+    violations = json.loads(capsys.readouterr().out)["violations"]
+    (skipped,) = [v for v in violations if v["rule_id"] == "reinforcement_incomplete"]
+    assert "[skipped]" in skipped["message"] and "2 junctions" in skipped["message"]
+    assert skipped["layer"] == "F.Cu"
+    ampacity = [v for v in violations if v["rule_id"] == "path_ampacity"]
+    assert len(ampacity) == 8
+    assert all(v["severity"] == "error" for v in ampacity)
+    (dangling,) = [v for v in violations if v["rule_id"] == "track_dangling"]
+    assert "DANGLING" in dangling["message"]

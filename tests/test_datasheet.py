@@ -1571,6 +1571,38 @@ class TestDatasheetCLI:
     """Tests for datasheet CLI commands."""
 
     # Search/download CLI tests
+    @pytest.mark.parametrize(
+        ("command", "handler"),
+        [("extract-package", "_extract_package"), ("suggest-footprint", "_suggest_footprint")],
+    )
+    def test_public_package_commands(self, command, handler):
+        from kicad_tools.cli import main
+
+        with patch(f"kicad_tools.cli.datasheet_cmd.{handler}", return_value=1) as run:
+            assert (
+                main(
+                    [
+                        "datasheet",
+                        command,
+                        "body.pdf",
+                        "--pages",
+                        "2-3",
+                        "-o",
+                        "body.json",
+                        "--format",
+                        "json",
+                    ]
+                )
+                == 1
+            )
+        (args,) = run.call_args.args
+        assert (args.pdf, args.pages, args.output, args.format) == (
+            "body.pdf",
+            "2-3",
+            "body.json",
+            "json",
+        )
+
     def test_search_command_text_format(self, capsys):
         """Test search command with text output."""
         from kicad_tools.cli.datasheet_cmd import main

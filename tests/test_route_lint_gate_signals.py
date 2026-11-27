@@ -22,6 +22,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import patch
 
@@ -37,6 +38,8 @@ from kicad_tools.cli.route_lint_gate import (
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "projects"
+# Leave time for the process snapshot and cleanup before CI's 60-second watchdog.
+_SIGNAL_CASE_TIMEOUT_S = 40
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 
@@ -47,7 +50,7 @@ SHORT = (
 
 _DRIVER = textwrap.dedent(
     """
-    import sys, time
+    import os, sys, time
     from pathlib import Path
     from unittest.mock import patch
 
@@ -58,13 +61,19 @@ _DRIVER = textwrap.dedent(
     argv = sys.argv[3:]
     SEG = {seg!r}
 
+    def publish_ready(staged_board):
+        # The parent sends its signal as soon as the ready file exists.
+        pending = ready.with_suffix(".tmp")
+        pending.write_text(str(staged_board))
+        os.replace(pending, ready)
+
     def fake_route(args, parser, argv_):
         src, out = Path(args.pcb), Path(args.output)
         text = src.read_text()
         i = text.rstrip().rfind(")")
         out.write_text(text[:i] + SEG + text[i:])
         if mode == "route":
-            ready.write_text(str(out))
+            publish_ready(out)
             time.sleep(300)
         return 0
 
@@ -72,7 +81,7 @@ _DRIVER = textwrap.dedent(
 
     def slow_check(a):
         if mode == "lint" and ".lint-gate-" in a[0]:
-            ready.write_text(a[0])
+            publish_ready(a[0])
             time.sleep(300)
         return real_check(a)
 
@@ -95,32 +104,118 @@ def _staging_dirs(directory: Path) -> list[Path]:
     return [p for p in directory.iterdir() if ".lint-gate-" in p.name]
 
 
+def _captured_pipe_fds(pid: str, pipes: dict[str, str]) -> str:
+    if not pipes:
+        return "unavailable (procfs pipe identities unavailable)"
+    matches = []
+    try:
+        for fd in (Path("/proc") / pid / "fd").iterdir():
+            try:
+                pipe = pipes.get(os.readlink(fd))
+            except FileNotFoundError:
+                continue  # the process closed this descriptor during the snapshot
+            if pipe is not None:
+                matches.append(f"{pipe} fd={fd.name}")
+    except OSError as exc:
+        matches.append(f"unavailable ({exc.strerror})")
+    if len(pipes) < 2:
+        matches.append("unavailable (one captured pipe identity missing)")
+    return ", ".join(sorted(matches)) or "none"
+
+
+def _signal_group_snapshot(pgid: int, pipes: dict[str, str]) -> str:
+    """Find survivors by process group even after the driver has been reaped."""
+    try:
+        table = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,ppid=,pgid=,stat=,comm="],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"process snapshot unavailable ({exc})"
+    members = []
+    for line in table.splitlines():
+        fields = line.split(maxsplit=4)
+        if len(fields) == 5 and fields[2] == str(pgid):
+            members.append(f"{line.strip()} | {_captured_pipe_fds(fields[0], pipes)}")
+    return "\n".join(members) or "no group members visible"
+
+
 def _run_and_signal(tmp_path: Path, mode: str, argv: list[str], sig: int) -> tuple[int, str, Path]:
     driver = tmp_path / "driver.py"
     driver.write_text(_DRIVER)
     ready = tmp_path / "ready"
+    started = time.monotonic()
+    deadline = started + _SIGNAL_CASE_TIMEOUT_S
     proc = subprocess.Popen(
         [sys.executable, str(driver), mode, str(ready), *argv],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
     )
+    assert proc.stdout is not None and proc.stderr is not None
+    # Keep both identities before communicate() can close a stream at EOF.
+    # Match every descriptor held by a survivor, including a renamed/dup'd fd.
+    pipes: dict[str, str] = {}
+    for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+        with suppress(OSError):
+            pipes[os.readlink(f"/proc/self/fd/{stream.fileno()}")] = name
+
+    exited_at: float | None = None
+    ready_at = signal_at = "pending"
+    drained = False
     try:
-        deadline = time.monotonic() + 120
-        while not ready.exists():
-            if proc.poll() is not None:
-                out, err = proc.communicate()
-                pytest.fail(f"driver exited early ({proc.returncode}):\n{out}\n{err}")
-            if time.monotonic() > deadline:
-                pytest.fail("driver never reached the signal point")
+        while not ready.exists() and proc.poll() is None:
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(proc.args, _SIGNAL_CASE_TIMEOUT_S)
             time.sleep(0.05)
-        proc.send_signal(sig)
-        _out, err = proc.communicate(timeout=60)
+        if ready.exists():
+            ready_at = f"{time.monotonic() - started:.3f}s"
+            proc.send_signal(sig)
+            signal_at = f"{time.monotonic() - started:.3f}s"
+        # communicate() retains bytes across timeouts. Drain both pipes in
+        # short intervals until the driver's own exit is observed, then drain
+        # any inherited writers against the same original deadline.
+        while True:
+            if exited_at is None and proc.poll() is not None:
+                exited_at = time.monotonic() - started
+            remaining = max(0.0, deadline - time.monotonic())
+            interval = min(0.025, remaining) if exited_at is None else remaining
+            try:
+                out, err = proc.communicate(timeout=interval)
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    raise
+        drained = True
+        if ready_at == "pending":
+            pytest.fail(f"driver exited early ({proc.returncode}):\n{out}\n{err}")
+    except subprocess.TimeoutExpired:
+        elapsed = time.monotonic() - started
+        rc = proc.poll()
+        status = "still running"
+        if rc is not None:
+            observed = elapsed if exited_at is None else exited_at
+            status = f"exited with {rc} at {observed:.3f}s (observed)"
+        pytest.fail(
+            f"driver deadline at {elapsed:.3f}s, ready={ready_at}, signal={signal_at}, "
+            f"driver {status}\nPID PPID PGID STAT COMMAND | CAPTURED PIPE FDS\n"
+            f"{_signal_group_snapshot(proc.pid, pipes)}"
+        )
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.communicate()
-    return proc.returncode, err, Path(ready.read_text())
+        if not drained:
+            with suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.stdout.close()
+            proc.stderr.close()
+            proc.wait(timeout=3)
+    staged_board = ready.read_text()
+    if not staged_board:
+        pytest.fail(f"driver published an empty ready file: {ready}")
+    return proc.returncode, err, Path(staged_board)
 
 
 def _rejected(output: Path) -> Path:

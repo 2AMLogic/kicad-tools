@@ -115,9 +115,17 @@ def pcb_matches_spec(pcb_path: str | Path, kct_path: str | Path, spec: object) -
     nothing to contradict, so it matches (the pre-#9637 behaviour is kept), and
     so does a spec that sits in the same directory as the PCB.
     """
-    pcb_path = Path(pcb_path)
     project = getattr(spec, "project", None)
     artifacts = getattr(project, "artifacts", None)
+    # Recipe fixtures copy their spec beside the PCB (#7320), and versioned
+    # schematic aliases can share the directory of the named board (#4350).
+    if Path(kct_path).parent.resolve() == Path(pcb_path).parent.resolve():
+        return True
+    return pcb_matches_artifacts(pcb_path, kct_path, artifacts)
+
+
+def pcb_matches_artifacts(pcb_path: str | Path, kct_path: str | Path, artifacts: object) -> bool:
+    """Match any declared PCB path, including its routed or optimized stages."""
     named: list[str] = [
         n
         for n in (getattr(artifacts, "pcb", None), getattr(artifacts, "pcb_routed", None))
@@ -125,16 +133,9 @@ def pcb_matches_spec(pcb_path: str | Path, kct_path: str | Path, spec: object) -
     ]
     if not named:
         return True
-
     base = Path(kct_path).parent
-    # A spec sitting in the PCB's own directory is that board's spec (a recipe
-    # fixture copies its spec beside the PCB, issue #7320; versioned boards
-    # such as ``board_v24`` sit beside the spec of ``board``, issue #4350).
-    # Only a spec found one directory up can describe a *different* revision.
-    if base.resolve() == pcb_path.parent.resolve():
-        return True
     wanted = {_artifact_stem_key(base / n) for n in named}
-    return _artifact_stem_key(pcb_path) in wanted
+    return _artifact_stem_key(Path(pcb_path)) in wanted
 
 
 # How a schematic was found, reported by ``kct check`` (issue #9637).
@@ -151,16 +152,19 @@ def resolve_schematic_with_source(pcb_path: str | Path) -> tuple[Path | None, st
     ``sibling``, ``.kicad_pro pairing`` or ``sole schematic`` (``None`` when no
     schematic was resolved).
     """
-    pcb_path = Path(pcb_path)
+    pcb = Path(pcb_path)
+    return resolve_schematic_with_spec(pcb, project_spec_for_pcb(pcb))
+
+
+def resolve_schematic_with_spec(
+    pcb_path: Path, kct_path: Path | None
+) -> tuple[Path | None, str | None]:
+    """Resolve the schematic with the same project declaration the caller will track."""
     project_dir = pcb_path.parent
 
     # 1. Try project.kct artifacts.schematic (next to the PCB, then one up),
     #    but only when this PCB is the board the spec names (issue #9637).
-    kct_path = project_dir / "project.kct"
-    if not kct_path.exists():
-        kct_path = project_dir.parent / "project.kct"
-
-    if kct_path.exists():
+    if kct_path is not None:
         try:
             from kicad_tools.spec import load_spec
 
@@ -263,14 +267,8 @@ def resolve_target_fab_for_pcb(pcb_path: str | Path) -> str | None:
         The declared ``target_fab`` profile id (e.g. ``"jlcpcb-tier1"``) if a
         ``project.kct`` declares one, else ``None``.
     """
-    pcb_path = Path(pcb_path)
-    project_dir = pcb_path.parent
-
-    kct_path = project_dir / "project.kct"
-    if not kct_path.exists():
-        kct_path = project_dir.parent / "project.kct"
-
-    if not kct_path.exists():
+    kct_path = project_spec_for_pcb(Path(pcb_path))
+    if kct_path is None:
         return None
 
     try:
@@ -291,7 +289,7 @@ def resolve_target_fab_for_pcb(pcb_path: str | Path) -> str | None:
     return None
 
 
-def _project_kct_for_pcb(pcb_path: Path) -> Path | None:
+def project_spec_for_pcb(pcb_path: Path) -> Path | None:
     """``project.kct`` next to the PCB, else one directory up (same search order)."""
     kct_path = pcb_path.parent / "project.kct"
     if not kct_path.exists():
@@ -315,7 +313,7 @@ def resolve_declared_currents_for_pcb(pcb_path: str | Path) -> list[str]:
 
     Returns ``[]`` when no ``project.kct`` is found or it is unreadable.
     """
-    kct_path = _project_kct_for_pcb(Path(pcb_path))
+    kct_path = project_spec_for_pcb(Path(pcb_path))
     if kct_path is None:
         return []
     try:
@@ -365,7 +363,7 @@ def resolve_declared_reference_height_for_pcb(pcb_path: str | Path) -> float | N
         is_valid_declared_reference_height,
     )
 
-    kct_path = _project_kct_for_pcb(Path(pcb_path))
+    kct_path = project_spec_for_pcb(Path(pcb_path))
     if kct_path is None:
         return None
     try:

@@ -42,6 +42,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import sys
@@ -852,23 +853,138 @@ def apply_router_coupled_pairs(
     return project_data
 
 
-def _remove_router_netclasses(project_data: dict) -> None:
-    """Drop the classes / assignments a previous kct pass declared (#6390)."""
+def validate_router_netclass_containers(project: dict) -> None:
+    """Check containers used by both writers before removing their previous entries."""
+    if not isinstance(project, dict):
+        raise ValueError("project must be an object")
+    settings = project.get("net_settings", {})
+    if not isinstance(settings, dict):
+        raise ValueError("net_settings must be an object")
+    patterns = settings.get("netclass_patterns")
+    if patterns is not None and not isinstance(patterns, list):
+        raise ValueError("net_settings.netclass_patterns must be an array")
+    if not isinstance(settings.get("classes", []), list):
+        raise ValueError("net_settings.classes must be an array")
+    meta = project.get("meta", {})
+    if not isinstance(meta, dict):
+        raise ValueError("meta must be an object")
+    if not isinstance(meta.get("kct_netclass_patterns", {}), dict):
+        raise ValueError("meta.kct_netclass_patterns must be an object")
+    record = meta.get(ROUTER_NETCLASSES_META_KEY)
+    if isinstance(record, dict) and any(
+        not isinstance(record.get(key, []), list) for key in ("classes", "assignments")
+    ):
+        raise ValueError(f"meta.{ROUTER_NETCLASSES_META_KEY} requires arrays of classes and nets")
+
+
+def remove_router_patterns(project: dict, nets: Iterable[str]) -> None:
+    """Remove only unchanged pattern rows emitted by kct for these nets."""
+    meta = project.get("meta", {})
+    owned = meta.get("kct_netclass_patterns") if isinstance(meta, dict) else None
+    if not isinstance(owned, dict):
+        return
+    rows = (project.get("net_settings") or {}).get("netclass_patterns") or []
+    removed = set()
+    for net in nets:
+        entry = owned.pop(net, None)
+        if isinstance(entry, dict) and all(
+            isinstance(entry.get(k), str) for k in ("pattern", "netclass")
+        ):
+            removed.add((entry["pattern"], entry["netclass"]))
+    # Remove one copy of each generated row. Edited rows and extra authored
+    # copies keep their relative order, even on a large board.
+    keep = []
+    for row in rows:
+        if isinstance(row, dict) and row.keys() == {"pattern", "netclass"}:
+            pair = (row["pattern"], row["netclass"])
+            if all(isinstance(v, str) for v in pair) and pair in removed:
+                removed.remove(pair)
+                continue
+        keep.append(row)
+    rows[:] = keep
+    if not owned:
+        meta.pop("kct_netclass_patterns")
+
+
+def add_router_patterns(project: dict, assigned: dict[str, str], inventory: set[str]) -> None:
+    """Mirror the PCB class cache into assignments the schematic can resolve."""
+    from kicad_tools.core.netclass_diagnostics import literal_netclass_pattern
+
+    if not assigned:
+        return
+    settings = project["net_settings"]
+    if settings.get("netclass_patterns") is None:
+        settings["netclass_patterns"] = []
+    owned = project.setdefault("meta", {}).setdefault("kct_netclass_patterns", {})
+    for net, target in sorted(assigned.items()):
+        entry = {"netclass": target, "pattern": literal_netclass_pattern(net, inventory)}
+        settings["netclass_patterns"].append(entry)
+        owned[net] = entry.copy()
+
+
+def _remove_router_netclasses(project_data: dict, *, keep_definitions: bool = False) -> None:
+    """Drop the classes / assignments a previous kct pass declared (#6390).
+
+    When ``meta.kct_netclass_assignments`` (#10133) also records the class kct
+    assigned each net to, an entry whose target class the user has since
+    changed in KiCad is authored intent and is left intact.
+
+    ``keep_definitions`` (Issue #10555) still drops those assignments and the
+    patterns, but leaves the recorded class *definitions* in ``net_settings``
+    for :func:`apply_router_netclasses` to treat as authored: the caller
+    could not prove the project is still kct-owned, so a definition may
+    carry a hand edit that regenerating it from ``Default`` would erase.
+    """
     classes, nets = router_netclass_provenance(project_data)
+    remove_router_patterns(project_data, nets)
     meta = project_data.get("meta")
+    recorded_classes = meta.get("kct_netclass_assignments") if isinstance(meta, dict) else None
     if isinstance(meta, dict):
         meta.pop(ROUTER_NETCLASSES_META_KEY, None)
     settings = project_data.get("net_settings")
     if not isinstance(settings, dict):
         return
-    if classes and isinstance(settings.get("classes"), list):
-        settings["classes"] = [
-            c for c in settings["classes"] if not (isinstance(c, dict) and c.get("name") in classes)
-        ]
     assignments = settings.get("netclass_assignments")
     if nets and isinstance(assignments, dict):
         for net in nets:
+            if isinstance(recorded_classes, dict) and isinstance(recorded_classes.get(net), str):
+                cur = assignments.get(net)
+                norm = (
+                    [cur]
+                    if isinstance(cur, str) and cur
+                    else cur
+                    if isinstance(cur, list)
+                    else None
+                )
+                if norm != [recorded_classes[net]]:
+                    continue
             assignments.pop(net, None)
+
+    if keep_definitions:
+        return
+
+    # A surviving pattern or assignment makes its class definition authored too.
+    if classes:
+        removable = set(classes)
+        for row in settings.get("netclass_patterns") or []:
+            if isinstance(row, dict) and isinstance(row.get("netclass"), str):
+                removable.discard(row["netclass"])
+        if isinstance(assignments, dict):
+            for target in assignments.values():
+                if isinstance(target, str):
+                    removable.discard(target)
+                elif isinstance(target, list):
+                    removable.difference_update(name for name in target if isinstance(name, str))
+        if "classes" in settings:
+            settings["classes"] = [
+                c
+                for c in settings["classes"]
+                if not (
+                    isinstance(c, dict)
+                    and isinstance(c.get("name"), str)
+                    and c["name"] in removable
+                )
+            ]
 
 
 def _authored_netclass_members(project_data: dict, net_names: list[str]) -> set[str]:
@@ -897,6 +1013,8 @@ def apply_router_netclasses(
     project_data: dict,
     net_class_map: Mapping[str, NetClassRouting],
     net_names: Iterable[str] | None = None,
+    *,
+    keep_unverified_definitions: bool = False,
 ) -> dict:
     """Declare the router's stricter net classes in a project (Issue #6390).
 
@@ -909,8 +1027,8 @@ def apply_router_netclasses(
     This writes every router class whose clearance exceeds the project's
     ``Default`` clearance into ``net_settings.classes`` (a clone of
     ``Default`` with ``name`` and ``clearance`` overridden) and assigns its
-    nets by exact name in ``netclass_assignments`` -- never patterns, whose
-    native-verified subset cannot express names like ``+5V`` -- in the shape
+    nets in both schematic-visible literal patterns and the PCB assignment
+    cache. The latter uses the shape
     the block's schema reads (schema 3 strings, otherwise arrays; see
     :func:`~kicad_tools.core.project_clearance.netclass_assignment_value`).
 
@@ -918,7 +1036,15 @@ def apply_router_netclasses(
 
     * the classes / assignments a previous kct pass declared (recorded under
       ``meta.kct_router_netclasses``) are replaced, everything else is left
-      alone;
+      alone -- unless ``keep_unverified_definitions`` is set (Issue #10555):
+      then only their assignments and patterns are refreshed, and the class
+      *definitions* stay and count as authored below.  The caller sets it
+      when it could not prove the project is still kct-owned (no valid
+      stamp), because a hand edit -- a track width raised in KiCad -- is
+      exactly what invalidates the stamp, and regenerating the class from
+      ``Default`` would erase it.  A kept definition is neither rebuilt nor
+      re-recorded, so the later project write (Issue #10133) keeps treating
+      it as authored as well;
     * a net an authored pattern or assignment already classifies keeps its
       authored class;
     * a router class whose name collides with an authored class of a
@@ -937,12 +1063,23 @@ def apply_router_netclasses(
             map.  An empty map removes the previously declared classes.
         net_names: The board's nets; map entries for other nets are ignored.
             ``None`` uses every map key.
+        keep_unverified_definitions: Keep the class definitions a previous
+            pass recorded under ``meta.kct_router_netclasses`` instead of
+            replacing them (Issue #10555); see above.
 
     Returns:
         The same ``project_data`` dict.
     """
-    _remove_router_netclasses(project_data)
-    names = set(net_class_map) if net_names is None else set(net_names) & set(net_class_map)
+    try:
+        validate_router_netclass_containers(project_data)
+    except ValueError as exc:
+        _warn(
+            f"router net classes not declared: authored netclasses cannot be evaluated safely ({exc})"
+        )
+        return project_data
+    _remove_router_netclasses(project_data, keep_definitions=keep_unverified_definitions)
+    inventory = set(net_class_map) if net_names is None else set(net_names)
+    names = inventory.intersection(net_class_map)
     names.discard("")
     settings = project_data.setdefault("net_settings", {})
     classes = settings.setdefault("classes", [])
@@ -1026,6 +1163,7 @@ def apply_router_netclasses(
     if not assigned:
         return project_data
     classes.extend(new_classes)
+    add_router_patterns(project_data, {net: net_class_map[net].name for net in assigned}, inventory)
     settings["netclass_assignments"] = dict(sorted(assignments.items()))
     project_data.setdefault("meta", {})[ROUTER_NETCLASSES_META_KEY] = {
         "classes": declared,
@@ -1406,6 +1544,7 @@ def apply_attach_zone_dru_rules(
     rules: DesignRules,
     project_data: dict,
     board: Path,
+    zone_clearances: Sequence[tuple[str, str, float]] | None = None,
 ) -> str:
     """Merge the attach-zone managed block into ``.kicad_dru`` text (#8048).
 
@@ -1422,6 +1561,7 @@ def apply_attach_zone_dru_rules(
         eligible_net_names,
         has_designer_clearance_rule,
         merge_attach_zone_block,
+        pad_zone_clearance_rules,
     )
 
     zones: tuple = ()
@@ -1455,7 +1595,10 @@ def apply_attach_zone_dru_rules(
                 "kct check will not exempt attach-zone copper",
                 file=sys.stderr,
             )
-    merged = merge_attach_zone_block(dru_text, zones, floor)
+    if zone_clearances is None:
+        zone_clearances = zone_clearance_targets(board) if zones else ()
+    pad_rules = pad_zone_clearance_rules(zones, zone_clearances, project_data, floor)
+    merged = merge_attach_zone_block(dru_text, zones, floor, pad_zone_rules=pad_rules)
     return merged if merged is not None else dru_text
 
 
@@ -1620,6 +1763,15 @@ def write_drc_constraints(
     :mod:`kicad_tools.manufacturers.netclass_dru`).  ``None`` keeps whatever
     a previous route declared.
 
+    Issue #10555: the incoming project is checked for a valid kct stamp
+    *before* it is merged or stamped here.  Without one, the definitions of
+    the classes a previous route recorded are kept -- only their assignments
+    and patterns are refreshed -- and treated as authored classes (see
+    :func:`apply_router_netclasses`).  A hand edit, such as a track width
+    raised in KiCad, is exactly what invalidates the stamp; regenerating the
+    class from ``Default`` would erase it before the final project write
+    (Issue #10133) ever saw it.
+
     Router coupled pairs (Issue #6429): ``router_coupled_pairs`` lists the
     ``(P, N)`` pairs the router coupled-routed.  Those KiCad's
     ``isCoupledDiffPair()`` does not recognise by name are recorded under
@@ -1765,9 +1917,16 @@ def write_drc_constraints(
     pro_path = pcb_path.with_suffix(".kicad_pro")
     written: list[Path] = []
 
-    if pro_path.exists():
+    try:
+        original_project = pro_path.stat()
+    except FileNotFoundError:
+        original_project = None
+
+    owned_before_merge = False
+    if original_project is not None:
         try:
             project_data = json.loads(pro_path.read_text(encoding="utf-8"))
+            owned_before_merge = is_kct_owned_project(project_data)
             merge_project_rules(project_data, rules, preserve_board_rules=preserve_board_rules)
             if manufacturer_id:
                 project_data.setdefault("meta", {})["manufacturer"] = manufacturer_id
@@ -1795,6 +1954,7 @@ def write_drc_constraints(
             project_data,
             router_net_classes,
             board_net_names(board) if board.exists() else None,
+            keep_unverified_definitions=not owned_before_merge,
         )
     if router_coupled_pairs is not None:
         apply_router_coupled_pairs(
@@ -1803,9 +1963,7 @@ def write_drc_constraints(
             board_net_names(board) if board.exists() else None,
         )
     stamp_kct_project(project_data)
-    pro_path.write_text(json.dumps(project_data, indent=2), encoding="utf-8")
-    written.append(pro_path)
-
+    # Validate and render the rules before touching either live sidecar.
     if write_dru:
         from .dru_generator import merge_dru_floors
 
@@ -1883,7 +2041,11 @@ def write_drc_constraints(
         )
         # Issue #6443: one native diff_pair_gap rule per router-coupled pair.
         if router_pair_gaps is not None or router_pair_limits is not None:
-            from .netclass_dru import merge_pair_gap_block, pair_gap_block_rules, pair_limit_rules
+            from .netclass_dru import (
+                merge_pair_gap_block,
+                pair_gap_block_rules,
+                pair_limit_rules,
+            )
 
             on_board = board_net_names(board) if board.exists() else None
             gap_rules = pair_gap_block_rules(router_pair_gaps or [], on_board)
@@ -1893,7 +2055,50 @@ def write_drc_constraints(
         # Issue #8048: attach zones lift the router-class floors.  Merged after
         # the pair-gap block so a re-write that keeps both blocks (``None``)
         # reproduces the same bytes: this block always ends the file.
-        merged_dru = apply_attach_zone_dru_rules(merged_dru, rules, project_data, board)
+        merged_dru = apply_attach_zone_dru_rules(
+            merged_dru, rules, project_data, board, zone_targets
+        )
+
+    content = json.dumps(project_data, indent=2)
+    conflict = f"{pro_path.name} changed while rendering DRC constraints"
+    # Create exclusively or open without truncating. Verify the descriptor we
+    # will write through, so a later rename cannot redirect us to an editor's save.
+    flags = os.O_WRONLY
+    if original_project is None:
+        flags |= os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(pro_path, flags, 0o666)
+    except FileExistsError as exc:
+        raise ValueError(conflict) from exc
+    except FileNotFoundError as exc:
+        if original_project is None:
+            raise
+        raise ValueError(conflict) from exc
+    except PermissionError as exc:
+        # A replacement can itself be read-only. Distinguish that conflict
+        # from a write failure on the original project.
+        if original_project is not None and not os.path.samestat(original_project, pro_path.stat()):
+            raise ValueError(conflict) from exc
+        raise
+    with os.fdopen(fd, "w", encoding="utf-8") as project:
+        current = os.fstat(fd)
+        if original_project is not None and (
+            not os.path.samestat(original_project, current)
+            or original_project.st_ctime_ns != current.st_ctime_ns
+            or original_project.st_mtime_ns != current.st_mtime_ns
+            or original_project.st_size != current.st_size
+        ):
+            raise ValueError(conflict)
+        project.write(content)
+        project.truncate()
+        try:
+            published = pro_path.stat()
+        except FileNotFoundError as exc:
+            raise ValueError(conflict) from exc
+        if not os.path.samestat(current, published):
+            raise ValueError(conflict)
+    written.append(pro_path)
+    if write_dru:
         dru_path.write_text(merged_dru, encoding="utf-8")
         written.append(dru_path)
         # The sidecar is on disk now; tell the user if the engine they have

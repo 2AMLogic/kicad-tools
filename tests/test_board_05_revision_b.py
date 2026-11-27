@@ -1,12 +1,19 @@
 """Real revision-B component pinout, procurement and copper provenance guards."""
 
 import importlib.util
+import io
+import shutil
+import subprocess
 import sys
+import xml.etree.ElementTree as ET
+import zipfile
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.sidecars import net_class_map_sidecar_names
 
 SOURCE = Path(__file__).resolve().parents[1] / "boards/05-bldc-motor-controller/redesign"
 
@@ -22,6 +29,51 @@ def load(name):
 @pytest.fixture(scope="module")
 def hardware():
     return load("hardware")
+
+
+def test_driver_thermal_mask_opening_belongs_to_grounded_pad_29(tmp_path, hardware):
+    path = tmp_path / "rev-b.kicad_pcb"
+    hardware.build_pcb().save(path)
+    driver = PCB.load(path).get_footprint("U2")
+    (opening,) = [pad for pad in driver.pads if "F.Mask" in pad.layers and pad.position == (0, 0)]
+    assert (opening.number, opening.net_name) == ("29", "GND")
+    assert set(opening.layers) == {"F.Cu", "F.Mask"}
+    assert opening.size == (3.1, 5.18)
+    (land,) = [pad for pad in driver.pads if pad.number == "29" and pad.layers == ["F.Cu"]]
+    assert land.position == opening.position
+    assert land.size == (3.4, 9.7)
+    stencil = [pad for pad in driver.pads if pad.layers == ["F.Paste"]]
+    assert len(stencil) == 4
+    assert all(not pad.number and not pad.net_name for pad in stencil)
+
+    # Compare the copper edge of each grounded barrel outside the exposed mask
+    # opening with the nearest edge of that opening, in footprint coordinates.
+    barrels = [pad for pad in driver.pads if pad.type == "thru_hole" and pad.number == "29"]
+    assert len(barrels) == 24
+    assert all(pad.net_name == "GND" and pad.drill == 0.2 for pad in barrels)
+    half_width, half_height = (dimension / 2 for dimension in opening.size)
+    assert all(abs(pad.position[0]) <= half_width for pad in barrels)
+    webs = sorted(
+        abs(pad.position[1]) - half_height - pad.size[1] / 2
+        for pad in barrels
+        if abs(pad.position[1]) > half_height
+    )
+    assert len(webs) == 12
+    assert webs[:6] == pytest.approx([0.26] * 6)
+
+
+def test_u3_library_keeps_stock_silkscreen_with_ti_signal_lands(hardware):
+    from kicad_tools.sexp import parse_file
+
+    _, name = hardware.LDO_FP.split(":")
+    footprint = parse_file(SOURCE / "board05_revB.pretty" / f"{name}.kicad_mod")
+    outline = [
+        (shape.name, shape.find_child("stroke").find_child("width").get_float(0))
+        for shape in footprint.children
+        if shape.name in {"fp_line", "fp_poly", "fp_arc", "fp_rect", "fp_circle"}
+        and shape.find_child("layer").get_string(0) == "F.SilkS"
+    ]
+    assert sorted(outline) == [("fp_line", 0.12)] * 6 + [("fp_poly", 0.12)]
 
 
 def test_real_driver_current_comparator_and_power(hardware):
@@ -55,20 +107,115 @@ def test_all_parts_have_exact_procurement_and_physical_pins(hardware, tmp_path):
     assert pcb.get_footprint("C1").name.endswith("CP_Elec_8x10.5_PolarityMark")
 
 
+@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="native schematic netlist required")
+def test_generated_board_matches_native_schematic_before_and_after_replay(tmp_path, hardware):
+    from kicad_tools.cli.pcb_sync_netlist import _copper_net_usage
+
+    hardware.generate(tmp_path)
+    board = tmp_path / "bldc_controller.kicad_pcb"
+    xml = tmp_path / "native.xml"
+    subprocess.run(
+        [
+            "kicad-cli",
+            "sch",
+            "export",
+            "netlist",
+            board.with_suffix(".kicad_sch"),
+            "--format",
+            "kicadxml",
+            "-o",
+            xml,
+        ],
+        check=True,
+    )
+    native = ET.parse(xml)
+    components = native.findall("./components/comp")
+    assert len(components) == 42
+    assert len({c.findtext("./fields/field[@name='LCSC']") for c in components}) == 22
+    unused = {}
+    connected = {}
+    for net in native.findall("./nets/net"):
+        nodes = net.findall("node")
+        for node in nodes:
+            pin = (node.attrib["ref"], node.attrib["pin"])
+            if "no_connect" in node.attrib["pintype"]:
+                assert len(nodes) == 1
+                unused[pin] = net.attrib["name"].replace("/", "{slash}")
+            else:
+                connected[pin] = net.attrib["name"]
+    assert len(connected) == 149
+    assert set(unused) == {
+        ("U1", "7"),
+        ("U1", "8"),
+        ("U1", "19"),
+        ("U1", "22"),
+        ("U1", "27"),
+        ("U1", "31"),
+        ("U2", "21"),
+        ("U3", "2"),
+        ("U3", "6"),
+    }
+    assert len(set(unused.values())) == 9
+    routed = tmp_path / "routed.kicad_pcb"
+    shutil.copyfile(board, routed)
+    load("routing").apply_routing(routed)
+    for path in (board, routed):
+        pcb = PCB.load(path)
+        net_pads = Counter(pad.net_name for fp in pcb.footprints for pad in fp.pads)
+        assert not _copper_net_usage(pcb).keys() & set(unused.values())
+        for c in components:
+            ref = c.attrib["ref"]
+            fp = pcb.get_footprint(ref)
+            for field in ("LCSC", "MPN"):
+                assert fp.properties[field] == c.findtext(f"./fields/field[@name='{field}']")
+            assert fp.properties["Datasheet"] == c.findtext("datasheet", "")
+            for pad in fp.pads:
+                if not pad.number:
+                    continue
+                pin = (ref, pad.number)
+                if pin in unused:
+                    assert pad.net_name == unused[pin] and net_pads[pad.net_name] == 1
+                    assert "no_connect" in pad.pintype
+                else:
+                    assert pad.net_name == connected[pin]
+
+
+@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="native schematic parity required")
+def test_editable_parity_rejects_missing_schematic(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(SOURCE))
+    board = tmp_path / "missing.kicad_pcb"
+    shutil.copyfile(SOURCE.parent / "output/bldc_controller_routed.kicad_pcb", board)
+    with pytest.raises(RuntimeError, match="could not load the matching schematic"):
+        load("package").verify_editable_project(board)
+
+
 def test_reference_copper_rejects_a_changed_real_net(tmp_path, hardware):
     routing = load("routing")
-    path = tmp_path / "board.kicad_pcb"
-    hardware.build_pcb().save(path)
+    hardware.generate(tmp_path)
+    path = tmp_path / "bldc_controller.kicad_pcb"
     original = routing.geometry_fingerprint(path)
     routing.apply_routing(path)
     assert routing.geometry_fingerprint(path) == original
+    from kicad_tools.sexp import parse_file, serialize_sexp
+
+    def copper(board):
+        return [
+            serialize_sexp(node)
+            for node in parse_file(board).children
+            if node.name in {"segment", "via", "zone"}
+        ]
+
+    published = tmp_path / "published.kicad_pcb"
+    shutil.copyfile(SOURCE.parent / "output/bldc_controller.kicad_pcb", published)
+    routing.apply_routing(published)
+    assert copper(path) == copper(published)
     assert PCB.load(path).segments
     from kicad_tools.router.quantize import segment_angle_census
 
     assert not segment_angle_census(path)[1], (
         "Reviewed copper must preserve the fleet 45-degree policy"
     )
-    hardware.build_pcb().save(path)
+    hardware.generate(tmp_path)
     changed = PCB.load(path)
     changed.assign_net_to_footprint_pad("U2", "12", "GND")
     changed.save(path)
@@ -85,6 +232,86 @@ def test_thermal_vias_keep_real_smt_ics_in_cpl(hardware):
         is_through_hole_footprint(pcb.get_footprint(ref))
         for ref in ["J1", "J2", "J3", "J4", "J5", "RV1"]
     )
+
+
+def test_package_checks_42_placements_with_board_only_fiducials(tmp_path, hardware, monkeypatch):
+    from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+    monkeypatch.setitem(sys.modules, "hardware", hardware)
+    package = load("package")
+    routed = tmp_path / "board.kicad_pcb"
+    hardware.build_pcb().save(routed)
+    assert run_add_fiducials(routed, sides="populated") == 0
+    assert len(PCB.load(routed).footprints) == 45
+
+    refs = [part.ref for part in hardware.parts()]
+    package.verify_placements(routed, refs)
+    with pytest.raises(
+        ValueError, match=r"CPL placement mismatch.*missing \['J1'\].*extra \['FID1'\]"
+    ):
+        package.verify_placements(routed, ["FID1" if ref == "J1" else ref for ref in refs])
+    with pytest.raises(ValueError, match=r"CPL placement mismatch.*extra \['U2'\]"):
+        package.verify_placements(routed, [*refs, "U2"])
+
+
+def test_reissued_reports_identify_the_routed_board_revision():
+    import pdfplumber
+    import yaml
+
+    output = SOURCE.parent / "output"
+    revision = PCB.load(output / "bldc_controller_routed.kicad_pcb").revision
+    assert revision
+    with zipfile.ZipFile(output / "manufacturing.zip") as bundle:
+        front_matter = bundle.read("report.md").decode().split("---", 2)[1]
+        date = yaml.safe_load(front_matter)["date"]
+        assert date.partition(" | ")[0] == f"Rev {revision}"
+        with pdfplumber.open(io.BytesIO(bundle.read("report.pdf"))) as pdf:
+            assert date in (pdf.pages[0].extract_text() or "").splitlines()
+
+
+def test_reissued_editable_project_preserves_motor_width_rules():
+    output = SOURCE.parent / "output"
+    with zipfile.ZipFile(output / "manufacturing.zip") as bundle:
+        project_bytes = bundle.read("kicad_project.zip")
+    with zipfile.ZipFile(io.BytesIO(project_bytes)) as project:
+        names = net_class_map_sidecar_names("bldc_controller")
+        (map_member,) = [name for name in project.namelist() if name in names]
+        assert project.read(map_member) == (output / "net_class_map.json").read_bytes()
+        rules = project.read("bldc_controller.kicad_dru")
+        assert rules == (output / "bldc_controller_routed.kicad_dru").read_bytes()
+        assert rules.count(b"Ampacity Min Width") == 2
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "bldc_controller_routed.kicad_pcb",
+        "bldc_controller_routed.kicad_pro",
+        "bldc_controller_routed.kicad_dru",
+        "net_class_map.json",
+    ],
+)
+def test_export_rejects_a_late_change_to_checked_inputs(tmp_path, hardware, monkeypatch, filename):
+    import json
+
+    from kicad_tools.drc.report_binding import sha256_file
+
+    monkeypatch.setitem(sys.modules, "hardware", hardware)
+    package = load("package")
+    routed = tmp_path / "bldc_controller_routed.kicad_pcb"
+    for suffix in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
+        routed.with_suffix(suffix).write_text("checked input")
+    (tmp_path / "net_class_map.json").write_text("checked map")
+    evidence = tmp_path / "readiness"
+    evidence.mkdir()
+    (evidence / "kct-check.json").write_text(json.dumps({"pcb_sha256": sha256_file(routed)}))
+
+    def change_input(*args, **kwargs):
+        (tmp_path / filename).write_text("changed during export")
+
+    monkeypatch.setattr(package.subprocess, "run", change_input)
+    with pytest.raises(RuntimeError, match="export changed the checked Board 05 input"):
+        package.export_package(tmp_path)
 
 
 def test_unrouted_board_carries_silk_dfm_corrections(hardware):

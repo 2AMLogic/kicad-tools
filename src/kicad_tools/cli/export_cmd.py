@@ -29,6 +29,14 @@ STACKUP_ID_CHOICES: tuple[str, ...] = ("JLC04161H-3313", "JLC04161H-7628")
 STACKUP_ID_HELP = (
     "Verify this factory construction against actual PCB layers and bundle ordering metadata"
 )
+# Likewise shared with the unified ``kct export`` subparser (Issue #10492).
+VERIFY_REVIEWED_COPPER_HELP = (
+    "Publish only when every copper layer of the package's Gerbers equals a native plot of "
+    "the saved board, taken before any rule was written or zone refilled (Issue #10492). "
+    "Changed copper withholds the package, leaves the checked-out sources untouched and "
+    "writes a diagnostic report beside the output directory; the manifest names the "
+    "reviewed PCB by SHA-256. Cannot be combined with --no-gerbers"
+)
 
 
 def _boards_arg(value: str) -> int:
@@ -145,6 +153,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not emit ampacity track_width floors into the sibling .kicad_dru",
     )
     parser.add_argument(
+        "--no-silk-fix",
+        dest="no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) that "
+            "otherwise runs on the board before preflight and plotting judge "
+            "silk (Issue #9799). With this flag authored silk is byte-identical."
+        ),
+    )
+    parser.add_argument(
         "--keep-versions",
         action="store_true",
         help="Preserve versioned vN/ report directories (default: flat report/ directory)",
@@ -174,6 +192,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-spec",
         action="store_true",
         help="Disable BOM enrichment from .kct project spec",
+    )
+    parser.add_argument(
+        "--project-root",
+        metavar="DIR",
+        help="Root for project-relative export inputs (defaults to the PCB directory)",
     )
     parser.add_argument(
         "--spec",
@@ -307,6 +330,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include through-hole components in CPL (only needed for fabs whose CPL excludes them by default; JLCPCB includes them)",
     )
     parser.add_argument(
+        "--via-land-overlap",
+        action="store_true",
+        help=(
+            "Measure the shipped PCBA archive for plated via drills that overlap the "
+            "solder-mask opening, stencil opening and an SMD land on the same face; adds "
+            "the via_land_overlap preflight result to the JSON output and manifest "
+            "(Issue #10357)"
+        ),
+    )
+    parser.add_argument(
+        "--verify-reviewed-copper",
+        dest="verify_reviewed_copper",
+        action="store_true",
+        help=VERIFY_REVIEWED_COPPER_HELP,
+    )
+    parser.add_argument(
         "--format",
         dest="output_format",
         default="text",
@@ -336,6 +375,7 @@ def build_manufacturing_config(
     auto_lcsc: bool = True,
     no_spec: bool = False,
     spec_path: Path | None = None,
+    project_root: Path | None = None,
     merge_lcsc: bool = True,
     merge_lcsc_from: Path | None = None,
     bom_source: str = "schematic",
@@ -354,6 +394,9 @@ def build_manufacturing_config(
     vscore_layers: list[str] | None = None,
     keep_versions: bool = False,
     keep_build_artifacts: bool = False,
+    silk_fix: bool = True,
+    via_land_overlap: bool = False,
+    verify_reviewed_copper: bool = False,
 ) -> ManufacturingConfig:
     """Build the ``PreflightConfig`` + ``ManufacturingConfig`` ``kct export`` uses.
 
@@ -406,6 +449,7 @@ def build_manufacturing_config(
         auto_lcsc=auto_lcsc,
         no_spec=no_spec,
         spec_path=spec_path,
+        project_root=project_root,
         merge_lcsc=merge_lcsc,
         merge_lcsc_from=merge_lcsc_from,
         bom_source=bom_source,
@@ -416,6 +460,9 @@ def build_manufacturing_config(
         gerber_config=gerber_config,
         latest_report_only=not keep_versions,
         keep_build_artifacts=keep_build_artifacts,
+        silk_fix=silk_fix,
+        via_land_overlap=via_land_overlap,
+        verify_reviewed_copper=verify_reviewed_copper,
     )
 
 
@@ -451,6 +498,14 @@ def run_export(args: argparse.Namespace) -> int:
     else:
         pcb_path = input_path
 
+    root_arg = getattr(args, "project_root", None)
+    project_root = Path(root_arg).resolve() if root_arg else None
+    if project_root is not None and (
+        not project_root.is_dir() or not pcb_path.resolve().is_relative_to(project_root)
+    ):
+        print(f"Error: --project-root must be a directory containing {pcb_path}", file=sys.stderr)
+        return 1
+
     spec_arg = getattr(args, "spec", None)
     spec_path = Path(spec_arg) if spec_arg else None
     if spec_path is not None and not spec_path.is_file():
@@ -465,6 +520,18 @@ def run_export(args: argparse.Namespace) -> int:
         and not merge_lcsc_from.is_file()
     ):
         print(f"Error: --merge-lcsc-from file not found: {merge_lcsc_from}", file=sys.stderr)
+        return 1
+
+    # Issue #10492: refused here, before any output directory exists.  The
+    # library refuses the same combination for callers that build the config
+    # themselves.
+    verify_reviewed_copper = getattr(args, "verify_reviewed_copper", False)
+    if verify_reviewed_copper and args.no_gerbers:
+        print(
+            "Error: --verify-reviewed-copper compares the package's Gerber copper with the "
+            "saved board, so it cannot be combined with --no-gerbers.",
+            file=sys.stderr,
+        )
         return 1
 
     # Determine output directory
@@ -482,6 +549,7 @@ def run_export(args: argparse.Namespace) -> int:
         auto_lcsc=args.auto_lcsc and not args.no_auto_lcsc,
         no_spec=getattr(args, "no_spec", False),
         spec_path=spec_path,
+        project_root=project_root,
         merge_lcsc=not getattr(args, "no_merge_lcsc", False),
         merge_lcsc_from=merge_lcsc_from,
         bom_source=getattr(args, "bom_source", "schematic"),
@@ -500,6 +568,9 @@ def run_export(args: argparse.Namespace) -> int:
         vscore_layers=list(getattr(args, "vscore_layer", None) or []),
         keep_versions=getattr(args, "keep_versions", False),
         keep_build_artifacts=getattr(args, "keep_build_artifacts", False),
+        silk_fix=not getattr(args, "no_silk_fix", False),
+        via_land_overlap=getattr(args, "via_land_overlap", False),
+        verify_reviewed_copper=verify_reviewed_copper,
     )
 
     pkg = ManufacturingPackage(
@@ -515,13 +586,30 @@ def run_export(args: argparse.Namespace) -> int:
     if args.dry_run:
         result = pkg.export(output_dir, dry_run=True)
         if output_format == "json":
-            print(json.dumps({"dry_run": True, "files": [f.name for f in result.all_files]}))
+            print(
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "files": [f.name for f in result.all_files],
+                        "errors": result.errors,
+                    }
+                )
+            )
         else:
             print("Dry run -- the following files would be generated:")
             print(f"  Output directory: {result.output_dir}")
             for f in result.all_files:
                 print(f"  - {f.name}")
-        return 0
+            if verify_reviewed_copper:
+                # Issue #10492: nothing is prepared or plotted on a dry run.
+                print("  (The reviewed-copper comparison runs on a real export, not on a dry run.)")
+        # A refusal the real run would raise (Issue #10431: an invalid
+        # purchasing row) must not hide behind a dry run's file listing.
+        if result.errors:
+            print(f"\n{len(result.errors)} error(s) during dry run:", file=sys.stderr)
+            for err in result.errors:
+                print(f"  - {err}", file=sys.stderr)
+        return 0 if result.success else 1
 
     # Normal run with progress output
     quiet = getattr(args, "global_quiet", False)
@@ -551,6 +639,13 @@ def run_export(args: argparse.Namespace) -> int:
             print(f"  - {warn}")
         print()
 
+    # Issue #9799: name the default silk pass's result and unresolved items.
+    if result.silk_fix and output_format == "text" and not quiet:
+        from .silk_default_pass import print_silk_pass_result
+
+        print_silk_pass_result(result.silk_fix)
+        print()
+
     # JSON output mode
     if output_format == "json":
         json_result: dict = {
@@ -563,6 +658,12 @@ def run_export(args: argparse.Namespace) -> int:
             json_result["warnings"] = result.warnings
         if result.preflight_results:
             json_result["preflight"] = [pr.to_dict() for pr in result.preflight_results]
+        if result.silk_fix is not None:
+            # Issue #9799: the default silk legalisation pass outcome.
+            json_result["silk_fix"] = result.silk_fix
+        if result.reviewed_copper is not None:
+            # Issue #10492: the reviewed-copper comparison, published or withheld.
+            json_result["reviewed_copper"] = result.reviewed_copper
         print(json.dumps(json_result, indent=2))
         return 0 if result.success else 1
 
@@ -595,12 +696,29 @@ def run_export(args: argparse.Namespace) -> int:
                 print()
                 for line in enrichment.summary_lines():
                     print(f"  {line}")
+        # Issue #10431: the supplementary purchasing list, and what is still
+        # undecided in it, so an unresolved selection is never only in a file.
+        if result.purchasing_path:
+            print(f"  [ok] Purchasing list: {result.bundle_relpath(result.purchasing_path)}")
+            if result.purchasing_pending:
+                print(f"  {len(result.purchasing_pending)} purchasing selection(s) still pending:")
+                for description in result.purchasing_pending:
+                    print(f"    - {description}")
         if result.report_path:
             print(f"  [ok] Report: {result.report_path.name}")
         if result.project_zip_path:
             print(f"  [ok] Project ZIP: {result.project_zip_path.name}")
         if result.manifest_path:
             print(f"  [ok] Manifest: {result.manifest_path.name}")
+        # Issue #10492: name the board whose saved copper the package was verified against.
+        reviewed_copper = result.reviewed_copper
+        if reviewed_copper is not None and reviewed_copper["status"] == "identical":
+            reviewed_pcb = reviewed_copper["reviewed_pcb"]
+            print(
+                f"  [ok] Reviewed copper: all {len(reviewed_copper['layers'])} layer(s) equal "
+                f"the saved {reviewed_pcb['name']} (sha256 {reviewed_pcb['sha256']}); the "
+                "checked-out sources were not modified"
+            )
 
     if result.errors:
         print(f"\n{len(result.errors)} error(s) during export:", file=sys.stderr)

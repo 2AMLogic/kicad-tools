@@ -44,8 +44,35 @@ ProgressCallback = Callable[[str, dict], None]
 RIPUP_COMMITTED = "committed"
 RIPUP_BUDGET_EXHAUSTED = "budget_exhausted"
 RIPUP_VICTIM_GEOMETRIC = "victim_geometric"
+RIPUP_VICTIM_BUDGET = "victim_budget"
+RIPUP_VICTIM_REFUSED = "victim_commit_refused"
+RIPUP_VICTIM_UNPROVEN = "victim_unproven"
 RIPUP_SIBLING_FAILED = "sibling_failed"
 RIPUP_TRADED = "traded"
+
+
+@dataclass
+class EdgeFailureCallback:
+    """Receive a negotiated edge's cause alongside its two pads.
+
+    Only a search that just returned no route supplies ``None``: its stop
+    telemetry can still be read synchronously. A two-pad provider supplies
+    no such evidence.
+    """
+
+    record: Callable[[Pad, Pad, str | None], None]
+
+    def __call__(self, source: Pad, target: Pad) -> None:
+        self.record(source, target, RIPUP_VICTIM_UNPROVEN)
+
+
+def report_edge_failure(
+    callback: Callable[[Pad, Pad], None] | None, source: Pad, target: Pad, reason: str | None
+) -> None:
+    if isinstance(callback, EdgeFailureCallback):
+        callback.record(source, target, reason)
+    elif callback is not None:
+        callback(source, target)
 
 
 class EscapeAttempts:
@@ -107,7 +134,10 @@ class TargetedRipupOutcome:
     ``if success:`` callers keep their meaning.
 
     Attributes:
-        reason: One of the ``RIPUP_*`` constants.
+        reason: One of the RIPUP_* constants. Every failed edge must have
+            a drained-search proof for victim_geometric. An exhausted budget
+            records victim_budget, a commit veto records victim_commit_refused,
+            and a search with insufficient evidence records victim_unproven.
         failed_net: The victim the rip-up was for.
         ripped: Blockers that were actually ripped (after the budget filter).
         dropped: Blockers the caller named that the per-net
@@ -1204,7 +1234,7 @@ class NegotiatedRouter:
         present_cost_factor: float,
         mark_route_callback: callable,
         per_net_timeout: float | None = None,
-        failure_callback: callable | None = None,
+        failure_callback: Callable[[Pad, Pad], None] | None = None,
     ) -> list[Route]:
         """Route a single net in negotiated mode.
 
@@ -1258,6 +1288,20 @@ class NegotiatedRouter:
             ``self._last_timeout_failures`` so audit logs can differentiate
             "ran out of net budget" from "no path / via-blocked".
         """
+
+        def commit_candidate(route: Route | None, source: Pad, target: Pad) -> Route | None:
+            reason = None
+            if route is not None:
+                if route.segments or route.vias:
+                    if mark_route_callback(route) is not False:
+                        return route
+                    reason = RIPUP_VICTIM_REFUSED
+                else:
+                    reason = RIPUP_VICTIM_UNPROVEN
+            self._record_via_blocked_failure(source.net)
+            report_edge_failure(failure_callback, source, target, reason)
+            return None
+
         if len(pad_objs) < 2:
             return []
 
@@ -1373,8 +1417,9 @@ class NegotiatedRouter:
                         # every skipped edge is still surfaced to the
                         # rip-up/retry layer via ``failure_callback``.
                         self._last_timeout_failures.add(source_pad.net)
-                        if failure_callback is not None:
-                            failure_callback(source_pad, target_pad)
+                        report_edge_failure(
+                            failure_callback, source_pad, target_pad, RIPUP_VICTIM_BUDGET
+                        )
                         continue
                     edge_timeout: float | None = remaining
                 else:
@@ -1415,23 +1460,7 @@ class NegotiatedRouter:
                         per_net_timeout=edge_timeout,
                         extra_goal_cells=goal_cells,
                     )
-                # Issue #2934: ``Route`` is a dataclass and therefore always
-                # truthy regardless of segment count.  Defensive check for
-                # an empty Route here in addition to the upstream rejection
-                # in ``_reconstruct_route``: if either guard slips
-                # (e.g., a future C++ backend path returns an empty Route),
-                # this branch still records the failure and fires
-                # ``failure_callback`` rather than silently dropping a
-                # missing-connectivity sub-route into the result list.
-                # Issue #5891: ``mark_route_callback`` may REFUSE the commit
-                # (pad-access invariant).  A refusal is a failed connection,
-                # not a silent drop -- fall through to the failure branch so
-                # ``failure_callback`` fires and the copper is never counted as
-                # committed.
-                committed: Route | None = None
-                if route is not None and (route.segments or route.vias):
-                    if mark_route_callback(route) is not False:
-                        committed = route
+                committed = commit_candidate(route, source_pad, target_pad)
                 if committed is not None:
                     routes.append(committed)
                     from .steiner import pin_steiner_arrival_layers
@@ -1444,13 +1473,6 @@ class NegotiatedRouter:
                         joined_cells.update(tree_cells.pop(source_root, set()))
                         tree_parent[source_root] = target_root
                     self._collect_route_cells(committed, joined_cells)
-                else:
-                    # Issue #2476: Capture structured via-blocked failure
-                    # diagnostics from the cpp pathfinder so the negotiated
-                    # outer loop can target rip-up at the specific blocker.
-                    self._record_via_blocked_failure(source_pad.net)
-                    if failure_callback is not None:
-                        failure_callback(source_pad, target_pad)
 
             # Issue #2481: Dedupe vias at the same (x, y) location across
             # the multi-edge RSMT sub-routes for this net.  Two RSMT edges
@@ -1469,14 +1491,7 @@ class NegotiatedRouter:
                 present_cost_factor=present_cost_factor,
                 per_net_timeout=per_net_timeout,
             )
-            # Issue #2934: Defensive check for empty Routes; see comment on
-            # the multi-edge RSMT path above for the rationale.
-            # Issue #5891: a ``False`` from the callback is a refused commit
-            # (pad-access invariant) and takes the same path as a failed search.
-            accepted: Route | None = None
-            if route is not None and (route.segments or route.vias):
-                if mark_route_callback(route) is not False:
-                    accepted = route
+            accepted = commit_candidate(route, pad_objs[0], pad_objs[1])
             if accepted is not None:
                 routes.append(accepted)
             else:
@@ -1490,10 +1505,6 @@ class NegotiatedRouter:
                         f"end=({pad_objs[1].x:.2f},{pad_objs[1].y:.2f})",
                         flush=True,
                     )
-                # Issue #2476: Capture cpp-side via-blocked diagnostic.
-                self._record_via_blocked_failure(pad_objs[0].net)
-                if failure_callback is not None:
-                    failure_callback(pad_objs[0], pad_objs[1])
 
         return routes
 
@@ -2711,6 +2722,7 @@ class NegotiatedRouter:
         progress_callback: ProgressCallback | None = None,
         net_names: dict[int, str] | None = None,
         allow_trade: bool = False,
+        refresh_foreign_context: Callable[[int], None] | None = None,
     ) -> bool:
         """Perform targeted rip-up of blocking nets and re-route.
 
@@ -2755,6 +2767,8 @@ class NegotiatedRouter:
                 blockers (and that keeps a best-state snapshot, so a losing
                 trade cannot survive to the end of the run) should opt in.
                 Default ``False`` is the pre-#6342 all-or-nothing rule.
+            refresh_foreign_context: Rebuild the pathfinder's clearance context from
+                committed copper for each search and after the transaction.
 
             The structured reason for the result is recorded on
             :attr:`last_ripup_outcome` (a :class:`TargetedRipupOutcome`).
@@ -2800,28 +2814,35 @@ class NegotiatedRouter:
             geometry, zero A* time -- strictly better than the previous
             10s-probe fresh reroute, which routinely failed and stranded
             previously-routed siblings) and return ``False`` so the caller
-            can escalate to a different strategy.
+            can escalate to a different strategy. The outcome records the
+            observed failure on the victim's edges, including skipped edges,
+            exhausted frontiers, budget stops and refused copper (#9900).
         """
         if ripup_history is None:
             ripup_history = {}
         history: dict[int, int] = ripup_history
 
         def _attempt() -> bool:
-            return self._targeted_ripup_txn(
-                failed_net,
-                blocking_nets,
-                net_routes,
-                routes_list,
-                pads_by_net,
-                present_cost_factor,
-                mark_route_callback,
-                ripup_history=history,
-                max_ripups_per_net=max_ripups_per_net,
-                per_net_timeout=per_net_timeout,
-                progress_callback=progress_callback,
-                net_names=net_names,
-                allow_trade=allow_trade,
-            )
+            try:
+                return self._targeted_ripup_txn(
+                    failed_net,
+                    blocking_nets,
+                    net_routes,
+                    routes_list,
+                    pads_by_net,
+                    present_cost_factor,
+                    mark_route_callback,
+                    ripup_history=history,
+                    max_ripups_per_net=max_ripups_per_net,
+                    per_net_timeout=per_net_timeout,
+                    progress_callback=progress_callback,
+                    net_names=net_names,
+                    allow_trade=allow_trade,
+                    refresh_foreign_context=refresh_foreign_context,
+                )
+            finally:
+                if refresh_foreign_context is not None:
+                    refresh_foreign_context(failed_net)
 
         history_before = {net: ripup_history.get(net) for net in blocking_nets}
         queue_start = self._pending_cpp_unmarks()
@@ -2829,7 +2850,17 @@ class NegotiatedRouter:
         if success or not self._cpp_rip_is_deferred():
             return success
         outcome = self.last_ripup_outcome
-        if outcome is None or outcome.reason != RIPUP_VICTIM_GEOMETRIC or not outcome.ripped:
+        if (
+            outcome is None
+            or outcome.reason
+            not in (
+                RIPUP_VICTIM_GEOMETRIC,
+                RIPUP_VICTIM_BUDGET,
+                RIPUP_VICTIM_REFUSED,
+                RIPUP_VICTIM_UNPROVEN,
+            )
+            or not outcome.ripped
+        ):
             return success
 
         # Issue #6363: the first attempt's rollback discarded the victim's
@@ -2868,6 +2899,27 @@ class NegotiatedRouter:
         """Queued C++ unmarks in the open window (0 without one)."""
         count = getattr(self.grid, "pending_cpp_unmark_count", None)
         return int(count()) if callable(count) else 0
+
+    def _failed_search_reason(self) -> str:
+        """Classify the search that just returned no route for one victim edge."""
+        from ..nogood_cache import search_failure_is_definitive
+
+        if search_failure_is_definitive(self.router):
+            return RIPUP_VICTIM_GEOMETRIC
+        get_info = getattr(self.router, "get_last_failure_info", None)
+        info = get_info() if callable(get_info) else None
+        if info and info.get("failure_reason") in (
+            self._FAILURE_TIMEOUT,
+            self._FAILURE_ITERATION_LIMIT,
+        ):
+            return RIPUP_VICTIM_BUDGET
+        python = getattr(self.router, "_py_router", self.router)
+        if (
+            getattr(python, "last_route_deadline_hit", False) is True
+            or getattr(python, "last_route_iteration_limited", False) is True
+        ):
+            return RIPUP_VICTIM_BUDGET
+        return RIPUP_VICTIM_UNPROVEN
 
     def _cpp_rip_is_deferred(self) -> bool:
         """True when a rip-up's C++-grid unmark would be queued, not applied.
@@ -2932,6 +2984,7 @@ class NegotiatedRouter:
         progress_callback: ProgressCallback | None = None,
         net_names: dict[int, str] | None = None,
         allow_trade: bool = False,
+        refresh_foreign_context: Callable[[int], None] | None = None,
     ) -> bool:
         """The :meth:`targeted_ripup` transaction body (see there)."""
         if ripup_history is None:
@@ -3006,7 +3059,9 @@ class NegotiatedRouter:
         total_steps = 1 + len(nets_to_ripup)
         start_time = time.time()
 
-        def _emit_progress(phase: str, net_id: int, index: int) -> None:
+        def _prepare_search(phase: str, net_id: int, index: int) -> None:
+            if refresh_foreign_context is not None:
+                refresh_foreign_context(net_id)
             if progress_callback is None:
                 return
             if net_names is not None:
@@ -3034,21 +3089,20 @@ class NegotiatedRouter:
         # route is exactly the stranded-stub copper this transaction must
         # never commit.
         failed_pads = pads_by_net.get(failed_net, [])
-        failed_edge_failures = 0
+        edge_failures: list[str] = []
 
-        def _count_failed_edge(_source: Pad, _target: Pad) -> None:
-            nonlocal failed_edge_failures
-            failed_edge_failures += 1
+        def record_victim_failure(_source: Pad, _target: Pad, reason: str | None) -> None:
+            edge_failures.append(reason or self._failed_search_reason())
 
         failed_net_success = False  # Issue #858: Track if failed net was routed
         if failed_pads and len(failed_pads) >= 2:
-            _emit_progress("failed_net", failed_net, 1)
+            _prepare_search("failed_net", failed_net, 1)
             routes = self.route_net_negotiated(
                 failed_pads,
                 present_cost_factor,
                 mark_route_callback,
                 per_net_timeout=per_net_timeout,
-                failure_callback=_count_failed_edge,
+                failure_callback=EdgeFailureCallback(record_victim_failure),
             )
             if routes:
                 net_routes[failed_net] = routes
@@ -3056,22 +3110,19 @@ class NegotiatedRouter:
                     self.grid.mark_route_usage(route)
                     routes_list.append(route)
                 # Issue #3470: only a FULL reroute counts as success.
-                failed_net_success = failed_edge_failures == 0
+                failed_net_success = not edge_failures
 
-        # Issue #2814 / #3470: fail fast when the failed net's A* cannot
-        # fully route even with the sibling routes cleared from the grid.
-        # The blocker is geometric (pad-clearance keepouts, board-edge
-        # limits, fixed escape routes, component bodies) rather than
-        # sibling copper, so re-routing every sibling at full
-        # ``per_net_timeout`` cannot help.  Issue #3470 replaces the old
-        # "restore siblings via fresh A* at a 10s probe timeout" repair
-        # (which routinely failed and stranded previously-routed siblings,
-        # board-05 HALL/GATE collateral) with an EXACT restore of the
-        # snapshotted pre-rip-up routes: zero A* time, zero collateral.
         if not failed_net_success:
             _rollback_to_snapshot()
-            _record(RIPUP_VICTIM_GEOMETRIC)
-            return False  # geometric blocker -- caller should escalate
+            # All failed edges must carry their own proof before the whole
+            # attempt can report a geometric failure. Otherwise preserve the
+            # first edge that stopped for a different reason.
+            reason = next(
+                (failure for failure in edge_failures if failure != RIPUP_VICTIM_GEOMETRIC),
+                RIPUP_VICTIM_GEOMETRIC if edge_failures else RIPUP_VICTIM_UNPROVEN,
+            )
+            _record(reason)
+            return False
 
         # Re-route the displaced nets
         success = failed_net_success  # Issue #858: Start with failed net success
@@ -3084,7 +3135,7 @@ class NegotiatedRouter:
         for sibling_index, net in enumerate(sibling_order, start=2):
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
-                _emit_progress("sibling", net, sibling_index)
+                _prepare_search("sibling", net, sibling_index)
                 routes = self.route_net_negotiated(
                     net_pads,
                     present_cost_factor,

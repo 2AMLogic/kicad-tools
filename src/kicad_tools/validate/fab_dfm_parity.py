@@ -208,9 +208,14 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "the 0.15 mm examined band only 1-4 spoke crossings (pour body farther "
         "out). JLCDFM listed no item for the four such pads on board 01 (relief "
         "gaps 0.2 and 0.3 mm; #8858, 2026-11-17); same-net pairs were absent, not "
-        "rated Good. Solid connections, unconnected same-net pour, a pour body "
+        "rated Good. Unconnected same-net pour, a pour body "
         "inside 0.15 mm, and pour exposed by a positive expansion keep their "
-        "verdict. Since #9420 a third shape is `within_own_footprint` at info: a "
+        "verdict. Since #9436 a further shape is `own_pour_solid` at info: a plain "
+        "pad whose effective zone connection is solid and whose fill shows the "
+        "join, at 0 mm expansion with nothing beyond the pad. The consumer board "
+        "had 13 such pads solid in their own-net pour; JLCDFM (`--mfr jlcpcb`, "
+        "2026-11-18) reported 0 danger / 0 warning for them. "
+        "Since #9420 another shape is `within_own_footprint` at info: a "
         "single plain-pad opening (not a merged region) overlapping only the "
         "same-net pad(s) of its own footprint, every owner and the exposed pad "
         "on one identical non-empty net. JLCDFM located by position at that pad "
@@ -399,6 +404,22 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         False,
         ("fiducials_missing",),
         "checked; no finding on the board.",
+    ),
+    ParityRow(
+        "trace_width",
+        ("dimension_trace_width",),
+        "partial",
+        True,
+        ("dimension_trace_width",),
+        "JLCDFM rated 0.1016 mm outer-layer tracks Danger (listed as 0.1 mm) and "
+        "0.1524 mm Good on one 4-layer board (#10173; the Danger count was not "
+        "recorded, so no recorded-board fixture carries this row). The published "
+        "capability still allows 0.1016 mm, so the `dimension_trace_width` ERROR "
+        "floor is unchanged; kct adds a WARNING for outer-layer tracks below the "
+        "stackup's optional `trace_width` dfm_thresholds `warning_mm` (0.1524 mm "
+        "on 4layer_1oz only). Stackups without that entry, and inner layers, get "
+        "no warning. Partial because the fab's Danger edge between the two "
+        "observed widths is unknown and only one stackup has evidence.",
     ),
 )
 

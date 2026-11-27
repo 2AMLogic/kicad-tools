@@ -374,6 +374,39 @@ def segment_copper_polygon(
     return line.buffer(width / 2)
 
 
+def collinear_interval_overlap(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+    d: tuple[float, float],
+    tol: float = 1e-6,
+) -> float | None:
+    """Signed interval overlap of two collinear centrelines. A negative value measures a gap."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length <= tol or math.dist(c, d) <= tol:
+        return None
+    stations = []
+    for x, y in (c, d):
+        x, y = x - a[0], y - a[1]
+        if abs(dx * y - dy * x) > tol * length:
+            return None
+        stations.append((dx * x + dy * y) / length)
+    return min(length, max(stations)) - max(0.0, min(stations))
+
+
+def collinear_overlap_length(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+    d: tuple[float, float],
+    tol: float = 1e-6,
+) -> float | None:
+    """Length shared by two finite collinear centrelines, or None for a gap or bend."""
+    overlap = collinear_interval_overlap(a, b, c, d, tol)
+    return max(0.0, overlap) if overlap is not None and overlap >= -tol else None
+
+
 def extends_collinear(
     prev_start: tuple[float, float],
     prev_end: tuple[float, float],
@@ -534,6 +567,48 @@ def pad_waiver_polygon(x: float, y: float, w: float, h: float, shape: str, rotat
     else:
         return None
     return translate(rotate(polygon, -rotation, origin=(0, 0)), x, y)
+
+
+def standard_pad_polygon(
+    cx: float, cy: float, w: float, h: float, shape: str, rotation: float, rratio: float
+):
+    """Board-space standard pad copper used by physical-gap DRC and route shortcuts."""
+    import shapely  # type: ignore[import-untyped]
+    from shapely.affinity import rotate, translate
+    from shapely.geometry import Point
+
+    if w <= 0 or h <= 0:
+        return None
+
+    if shape == "circle" or (shape in ("oval", "obround") and abs(w - h) < 1e-6):
+        # Symmetric disc -- rotation and the (origin) translate are no-ops
+        # on a circle, so build it directly at the board position.
+        return Point(cx, cy).buffer(min(w, h) / 2.0)
+
+    if shape in ("oval", "obround"):
+        # Stadium / capsule: a core rectangle shrunk by the minor
+        # half-axis on the long dimension, buffered by that radius so the
+        # short ends become true semicircles.
+        r = min(w, h) / 2.0
+        if w >= h:
+            core = shapely.box(-(w / 2.0 - r), 0.0, (w / 2.0 - r), 0.0)
+        else:
+            core = shapely.box(0.0, -(h / 2.0 - r), 0.0, (h / 2.0 - r))
+        poly = core.buffer(r)
+    elif shape == "roundrect":
+        r = rratio * min(w, h)
+        if r <= 0:
+            poly = shapely.box(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0)
+        else:
+            inner = shapely.box(-(w / 2.0 - r), -(h / 2.0 - r), (w / 2.0 - r), (h / 2.0 - r))
+            poly = inner.buffer(r, join_style=1)  # round joins -> rounded corners
+    else:  # "rect" and any unknown shape -> exact rectangle (no over-approx)
+        poly = shapely.box(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0)
+
+    # Match KiCad's forward transform, without adding footprint rotation a
+    # second time. AABB/cardinal tests cannot detect the sign error (#5227).
+    poly = rotate(poly, -rotation, origin=(0, 0), use_radians=False)
+    return translate(poly, cx, cy)
 
 
 @lru_cache(maxsize=4096)

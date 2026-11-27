@@ -17,11 +17,13 @@ import pytest
 from kicad_tools.manufacturers import write_drc_constraints
 from kicad_tools.manufacturers.attach_zone_dru import (
     DRU_ATTACH_ZONE_BLOCK_BEGIN,
+    PAD_ZONE_CLEARANCES_META_KEY,
     FloorZone,
     ZoneItem,
     build_floor_zones,
     has_designer_clearance_rule,
     merge_attach_zone_block,
+    pad_zone_clearance_rules,
 )
 from kicad_tools.router.rules import DEFAULT_NET_CLASS_MAP
 from kicad_tools.schema.pcb import PCB
@@ -152,6 +154,19 @@ def test_through_hole_net_is_a_member_on_every_layer():
     zone = FloorZone("J1", (("A", frozenset({"*.Cu"})), ("B", frozenset({"F.Cu"}))))
     assert "A.Layer" not in zone.condition().split("&& (")[1]
     assert zone.member_layers("B") == frozenset({"F.Cu"})
+
+
+def test_pad_zone_rule_can_only_tighten_an_existing_attach_exemption():
+    zone = FloorZone("U1", (("GND", frozenset({"F.Cu"})), ("SIG", frozenset({"F.Cu"}))))
+    project = {"meta": {PAD_ZONE_CLEARANCES_META_KEY: {"F.Cu": {"GND": {"U1": ["2"]}}}}}
+    targets = [("B.Cu", "GND", 0.2), ("F.Cu", "GND", 0.2), ("F.Cu", "SIG", 0.3)]
+    (rule,) = pad_zone_clearance_rules([zone], targets, project, 0.25)
+    assert zone.condition() in rule
+    assert "(constraint clearance (min 0.25mm))" in rule
+    assert pad_zone_clearance_rules([], targets, project, 0.25) == []
+    project["meta"][PAD_ZONE_CLEARANCES_META_KEY]["F.Cu"]["GND"]["U1"] = ["*"]
+    with pytest.raises(ValueError, match="literal pad"):
+        pad_zone_clearance_rules([zone], targets, project, 0.25)
 
 
 def test_exempts_requires_both_items_in_courtyard_member_nets_and_layer(tmp_path):

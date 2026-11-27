@@ -13,15 +13,13 @@ Sign off a routed `.kicad_pcb` for fabrication. This skill codifies the **sign-o
 
 ## Prerequisite
 
-The native router/DRC backend must be built in the active checkout before this skill is meaningful (Epic #4054 convention #1). Run once per checkout / worktree:
+After `uv sync`, check the native router in the project environment.
 
 ```bash
-uv run kct build-native --check   # expect: "C++ backend: available"
-# if "not installed":
-uv run kct build-native
+uv run kct build-native --check
 ```
 
-`uv sync` does **not** build the native extension. A fresh checkout or git worktree needs this step explicitly.
+`C++ backend: available` and exit code 0 satisfy this prerequisite. If the router is missing, run `uv run kct build-native` and repeat the check. Placement and DRC are optional. When either reports `not built`, continue with its Python fallback. Building those two native extensions requires a kicad-tools source checkout.
 
 The gates also need `jq` (Gates 1, 2 and 4 judge JSON reports with it) and a KiCad install for `kicad-cli` (Gate 2 resolves it itself; see there). A missing `jq` means the gates cannot be judged — refuse sign-off rather than eyeballing the JSON.
 
@@ -143,6 +141,7 @@ kct export <board.kicad_pcb> --output <dir> --mfr <tier> --drc-report <pcb-dir>/
 ```
 
 - Produces gerbers, drill, BOM, CPL, a report, and `manifest.json`.
+- **Default silk legalisation (Issue #9799).** `kct export` runs the shared `legalize_silk` pass on the board before preflight and plotting judge silk, so the gerbers, checks and hashes all describe the repaired board; the summary names every edit and each item it could not fix (those stay `kct check` findings — the pass waives nothing). The pass edits the board **in place**; an already-legal board is not re-saved, so a route → export pipeline changes nothing the second time. `--no-silk-fix` leaves authored silk byte-identical — but then Gate 1's silk warnings are the authored ones, and unacknowledged assembly-affecting silk warnings refuse tapeout. `kct readiness --generate` performs the same repair on its staged candidate *before* Gate 1, so the whole sign-off consumes one repaired board.
 - `--drc-report` hands Gate 2's report to the export preflight, whose safety floor refuses a board with shorts or unconnected items (exit 1, no manifest) independently of how Gates 1–2 were read. Without it the preflight only warns "No DRC report found" and exports anyway.
 - Deleting the old manifest first makes freshness mechanical: a `manifest.json` that exists after this block was written by this run. No manifest ⇒ no sign-off.
 - **LCSC merge source (#8260).** The export merges LCSC numbers only from `<dir>/bom_<mfr>.csv`, so a **fresh** `<dir>` has nothing to merge and the BOM comes out worse than the previous verified revision's. When a previous verified BOM exists, add `--merge-lcsc-from <previous-bundle>/bom_<mfr>.csv` (the one sanctioned addition below; a missing file is an error) or copy it into `<dir>` first. The export summary's `LCSC merge source:` line says which source was used, or "no existing BOM to merge".

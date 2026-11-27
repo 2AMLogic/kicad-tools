@@ -2,6 +2,107 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-27
+
+- **PR #5742**: fix(merge-pr): route the #8248 freshness guard's stale-checks call through the #6074/#6752 credential ladder
+- **Issue #5741** (closed): merge-pr.sh: _check_required_check_freshness's stale-checks call bypasses the #6074/#6752 permission-escalation ladder
+- **PR #5740**: fix(router): keep late keep-outs hard against route-halo refinement
+
+### 2026-09-26
+
+- **PR #5735**: test(conformance): hard-gate the route-halo refinement against kicad-cli
+- **PR #5734**: fix: give the optimizer's grid collision checker an exact narrow phase
+- **Issue #5625** (closed): router/optimizer: GridCollisionChecker and VectorCollisionChecker disagree on near-threshold copper
+
+### 2026-09-25
+
+- **PR #5728**: cleanup(router/mesh): retire merge_overlapping and segment_intersects_* helpers
+- **PR #5727**: perf(router): vectorise the coupled via predicate's raster sweeps
+- **PR #5726**: fix(mfr): warn when the emitted SMD Pad Clearance rule is inert on the installed KiCad
+- **Issue #5724** (closed): fix(mfr): warn when the emitted SMD Pad Clearance rule is inert on the installed KiCad
+- **Issue #5720** (closed): router: the coupled Python via predicate's raster sweeps dominate what is left after #5696's memo
+- **Issue #5708** (closed): Flaky perf gate (recurrence): test_dormant_partner_optimized_not_slower fails at 1.33x on shared CI runners (threshold 1.25, #3581 closed)
+- **Issue #5685** (closed): cleanup(router/mesh): retire the three helpers Epic #5509 Phase 3e left without a production caller
+
+### 2026-09-24
+
+- **PR #5725**: test(mfr): gate native SMD Pad Clearance on a measured availability probe
+- **PR #5723**: test(drc): match native DRC findings on the bare rule name
+- **PR #5722**: test: converge kicad-cli discovery on find_kicad_cli()
+- **Issue #5721** (closed): Native SMD Pad Clearance rule does not fire on kicad-cli 10.0.1 (undeclared minimum version)
+- **PR #5719**: perf(router): memoise the coupled diff-pair halo via refinement on the pure-Python fallback
+- **PR #5718**: fix(validate): stop classifying KiCad's instance-lock warning as a failed export
+- **PR #5717**: test(perf): replace the dormant-partner timing gate with a structural assertion
+- **PR #5716**: test(mfr): scope ampacity DRU fallback to what it actually guards
+- **PR #5715**: fix(router): apply the diff-pair partner clearance waiver in the coupled halo refinement (#5711), and rerun the #5410 DQ3 prefix on current main
+- **Issue #5714** (closed): test: converge kicad-cli discovery on find_kicad_cli() — 14 shutil.which sites across 12 modules
+- **Issue #5713** (closed): test(mfr): SMD Pad Clearance rule silently absent on KiCad 10.0.1 — plus a negative assertion that passes vacuously when it is
+- **Issue #5711** (closed): Coupled halo refinement: C++ arm omits the diff-pair partner-clearance waiver the Python arm applies (212-cell over-block)
+- **Issue #5707** (closed): Flaky CI: test_native_advanced_layer_matches_independent_gerber fails on kicad-cli 'Invalid lock file' (native export returned 0)
+- **Issue #5703** (closed): Native DRC assertions match on a KiCad-version-dependent description prefix (rule '...')
+- **Issue #5702** (closed): test_mfr: ampacity DRU fallback pins a stale rule-name set, fails whenever kicad-cli is off PATH
+- **PR #5698**: perf(router): read collision-grid planes directly in the optimizer's obstacle scan
+- **Issue #5696** (closed): router: memoise the coupled diff-pair halo refinement on the pure-Python fallback
+
+### 2026-09-23
+
+- **PR #5710**: feat(drc): emit SMD pad clearance floor natively, scoped by reference
+- **PR #5709**: ci: pin KiCad CI containers by digest via workflow-level KICAD_IMAGE
+- **PR #5706**: fix(ci): exclude the vendored .agents/ surface from ruff, unblocking main
+- **PR #5705**: test(mfr): measure effective native silk-clearance, not emitted values
+- **PR #5699**: fix(router): apply the fab hole-to-hole floor to same-net via drops
+- **Issue #5697** (closed): main branch: Lint & Format CI failing again — .agents/ Loom mirror not in ruff extend-exclude
+- **PR #5695**: fix(router): refine coupled diff-pair halo rejection with physical clearance
+- **PR #5692**: fix(merge-pr): warn when a partial-increment trailer is backticked
+- **PR #5691**: perf(router): memoise the per-cell via-site predicates + drop cell_known's _CellView (phase 4 of the diff-pair re-route step)
+- **Issue #5690** (closed): Partial-increment reset (#3667) silently skipped when "Part of #N" trailer is backticked
+- **PR #5689**: docs: fix inline code spans with embedded line breaks
+- **PR #5688**: perf(sexp): walk SExp trees with an explicit stack instead of nested generators
+- **Issue #5687** (closed): README.md: three inline code spans broken by mid-span line wraps
+- **PR #5686**: perf(validate): memoise each copper element's shapely geometry in the clearance rule
+- **PR #5684**: refactor(router/mesh): take ObstacleModel.is_clear's verdicts from the clearance kernel
+- **PR #5683**: ci: qualify KiCad 10.0.6 for the native mask-to-copper gate
+- **Issue #5682** (closed): ci: pin the kicad/kicad container by digest so a Docker Hub tag move can't silently change measured native behaviour
+- **PR #5681**: docs: correct autorouter example and relocated board links
+- **PR #5680**: docs: refresh README What's New for 0.21.x and bring scripts/README current
+- **Issue #5678** (closed): ci: Test job's native mask gate hard-pins KiCad 10.0.5, fails on runners with 10.0.6
+- **PR #5677**: perf(router): fast-path copper_gap dispatch for the lattice engine's pair kinds
+- **PR #5676**: fix(router): route the coupled diff-pair search through the clearance kernel (Epic #5509 Phase 3c)
+- **Issue #5672** (closed): perf(router): kernel-backed lattice clearance predicates cost ~1.7x the pre-kernel arithmetic (Epic #5509 Phase 3d follow-up)
+- **Issue #5664** (closed): [Epic #5509] Phase 3e: switch mesh engine predicate (mesh/obstacles.py) to the clearance kernel
+- **Issue #5662** (closed): [Epic #5509] Phase 3c: switch coupled diff-pair search (coupled_pathfinder.cpp + diffpair_routing.py) to the clearance kernel
+- **Issue #5059** (closed): Manufacturing profiles: verify effective silk/pad DRC coverage and preserve custom rules
+- **Issue #4507** (closed): router Phase 2 (#4431): search-time pairwise HV avoidance + C++ validate_route domain-matrix extension — make HV boards actually converge
+
+### 2026-09-22
+
+- **PR #5679**: perf(zones): skip the post-fill remediation pass's redundant first kicad-cli refill
+- **PR #5675**: refactor(router): switch the fixed-copper predicate to the shared clearance kernel (Epic #5509 Phase 3f)
+- **PR #5674**: fix(router): surface the declared-rule undercut warning on the explicit --clearance path
+- **PR #5671**: perf(router): tombstone R-tree segment deletions instead of deleting eagerly
+- **PR #5670**: refactor(router): switch the lattice engine's clearance predicates to the shared kernel (Epic #5509 Phase 3d)
+- **PR #5669**: perf(router): memoise the per-layer route-halo via probe (phase 4 of the diff-pair re-route step)
+- **PR #5667**: feat(router): read the .kicad_pro Default netclass as a clearance floor
+- **PR #5666**: fix(router): run the plan stage on a cache-hit route too
+- **Issue #5665** (closed): [Epic #5509] Phase 3f: switch fixed-copper predicate (fixed_copper.py + grid.cpp) to the clearance kernel
+- **Issue #5663** (closed): [Epic #5509] Phase 3d: switch lattice engine predicates to the clearance kernel
+- **PR #5659**: test(conformance): add seg-zone, via-zone and copper-edge pair kinds
+- **PR #5658**: perf(router): vectorize + memoize the pure-Python A* via-clearance kernel (phase 4 of the diff-pair re-route step)
+- **PR #5657**: perf(stitch): index foreign-net tracks for the pad-aware via-placement ladders
+- **Issue #5656** (closed): router: explicit --clearance never surfaces the "undercuts a declared rule" warning the resolver builds
+- **PR #5655**: feat(router): unify clearance rule resolution behind one resolver
+- **Issue #5654** (closed): router: promote .kicad_pro netclass clearance to a resolver input once the project writer stops emitting KiCad's stock 0.20mm default
+- **PR #5653**: perf(router): whole-board wall-clock attribution for the resume-exhaustion path (diff-pair re-route step)
+- **PR #5652**: feat(router,cli): overflow report with computed relief, net-status --why consumer, --plan-gate, and the fleet precision/recall table
+- **Issue #5651** (closed): router: a routing-cache hit silently suppresses the routing-plan sidecar (plan stage lives inside route_all_negotiated)
+- **PR #5649**: perf(router): vectorize CongestionMap's cell-skip scan
+- **Issue #5645** (closed): [Epic #5509] Phase 2: rule resolver unification (DRU precedence, pair matrix, fab-tier floors, trace/via symmetry)
+- **Issue #5644** (closed): [Epic #5509] Phase 1c follow-up: zone and edge pair kinds so group 18's zone/edge rules and group 10's pour/outline branches can be measured
+- **Issue #5626** (closed): conformance: add a pad-pad pair kind so Epic #5509 group 19 (drc_cpp) can be measured
+- **Issue #5613** (closed): tests/router/test_monotone_reach.py::TestDDRByteReach fails at origin/main: DDR byte bundle routes 10/11 in ~15min, DQS_P/DQS_N unroutable
+- **Issue #5521** (closed): [Epic #5510] router/cli: overflow report with computed relief, net-status --why consumer, --plan-gate/--force, and the fleet precision/recall table
+- **Issue #5510** (closed): Epic: capacity-aware routing plan on the default path — layer assignment, hard corridors, and an infeasibility certificate
+
 ### 2026-09-21
 
 - **PR #5647**: chore(release): bump version to 0.21.1

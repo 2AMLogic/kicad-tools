@@ -145,7 +145,14 @@ BOARD_07_EXPECTED_FAMILY_DELTA = {
 # 0.0891 mm via-field pattern) plus 5 different-net pad-involving gaps at
 # 0.115-0.1345 mm, below the table's pad danger edge.  The committed copper
 # did not change.
-BOARD_07_EXPECTED_GAP_ERRORS = 101
+#
+# Issue #9886 makes the facing-angle check independent of edge order. Two more
+# GND pad/trace/via gaps appear on F.Cu, 0.138553 mm near (117.305, 59.609)
+# and 0.120701 mm near (129.099, 98.385), both below the 0.15 mm pad limit.
+# Checking both tied witnesses between parallel edges also exposes a 0.070 mm
+# GND pad/trace gap at (129.050, 98.385). The two copper boundaries there
+# are at Y=98.350 and Y=98.420. The fixture has 99 same-net and 5 different-net errors.
+BOARD_07_EXPECTED_GAP_ERRORS = 104
 
 # Issue #8858: the committed board 07 fixture carries a residual
 # ``mask_to_copper`` population (162 errors on 22 net signatures, measured
@@ -181,6 +188,25 @@ BOARD_07_FIXTURE_M2C_IDENTITIES: tuple[str, ...] = (
     "TMDS_D1_P",
     "TMDS_D2_N",
     "TMDS_D2_P",
+)
+
+# Issue #9798: jlcpcb now grades silk on exposed copper, below-minimum silk
+# and silk under a body as errors.  The committed board 07 fixture carries 14
+# such findings (designators 0.80 mm tall, sitting on pads); they belong to
+# the #9795 silk-legalisation epic, so the pin excludes them by IDENTITY the
+# same way it excludes the m2c population, tracked against that open epic.
+BOARD_07_FIXTURE_SILK_IDENTITIES: tuple[tuple[str, str], ...] = (
+    ("silk_over_copper", "U3 (reference)/U3 pad 10"),
+    ("silk_over_copper", "U3 (reference)/U3 pad 9"),
+    ("silk_over_copper", "U4 (reference)/U4 pad A4"),
+    ("silk_over_copper", "U5 (reference)/U5 pad 18"),
+    ("silk_over_copper", "U5 (reference)/U5 pad 19"),
+    ("silkscreen_over_pad", "U4/pad A4"),
+    *(
+        (rule, f"{ref} (reference)")
+        for rule in ("silkscreen_text_height", "silkscreen_text_thickness")
+        for ref in ("J1", "J2", "J3", "U3")
+    ),
 )
 
 
@@ -507,6 +533,7 @@ class TestCiGateCountsGatedFamilies:
             pytest.skip("board 07 regression fixture not present")
         gate = self._load_gate()
         allowance = {("mask_to_copper", ident): 8858 for ident in BOARD_07_FIXTURE_M2C_IDENTITIES}
+        allowance.update(dict.fromkeys(BOARD_07_FIXTURE_SILK_IDENTITIES, 9795))
         blocking, advisory, outcome = gate.count_errors(BOARD_07_PCB, allowance=allowance)
         assert outcome.applied, "allowance was not applied (violations missing from payload?)"
         assert not outcome.stale, (

@@ -146,6 +146,16 @@ public:
     // Configure routable layers (skip plane layers)
     void set_routable_layers(const std::vector<int>& layers);
 
+    // Issue #8486: search dependency recording.  While recording, the cells
+    // every route_resumable() search discovered (the closed set plus the open
+    // frontier, i.e. every cell whose blocked/free state the search read) are
+    // folded into a coarse 2-D mask (layer-agnostic, ``block`` grid cells per
+    // side).  ``dependency_collect`` returns ``(rows, cols, flat mask)`` for
+    // the searches since ``dependency_begin`` and stops recording; an empty
+    // mask means the grid was resized mid-recording or nothing ran.
+    void dependency_begin(int block);
+    std::tuple<int, int, std::vector<uint8_t>> dependency_collect();
+
     // Statistics from last route
     int get_iterations() const { return last_iterations_; }
     int get_nodes_explored() const { return last_nodes_explored_; }
@@ -468,6 +478,11 @@ private:
     // Returns RouteResult with success=true if goal reached, or success=false
     // if open set exhausted / iteration limit hit.
     RouteResult run_astar_loop();
+
+    bool trace_step_vias_clear(const AStarNode& current, const Segment& step,
+                               float start_x, float start_y) const;
+    bool goal_stub_vias_clear(const AStarNode& node, float end_x, float end_y,
+                              int net, float emit_trace_width) const;
 
     // Reconstruct path from A* result.
     //
@@ -798,6 +813,18 @@ private:
     int search_flat_rows_ = 0;
     int search_flat_layers_ = 0;
     std::vector<AStarNode> search_closed_list_;
+
+    // Issue #8486: search dependency recording (see dependency_begin()).
+    bool dep_recording_ = false;
+    bool dep_search_pending_ = false;  // a recorded search's stamps are unfolded
+    int dep_block_ = 1;
+    int dep_rows_ = 0;
+    int dep_cols_ = 0;
+    int dep_src_rows_ = 0;
+    int dep_src_cols_ = 0;
+    int dep_src_layers_ = 0;
+    std::vector<uint8_t> dep_mask_;
+    void dependency_fold();
 
     // Flat-array helpers (Issue #3309).
     //

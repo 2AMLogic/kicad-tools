@@ -1,5 +1,7 @@
 """Tests for the zones CLI command, focusing on the fill subcommand."""
 
+import json
+import shlex
 import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -330,7 +332,10 @@ class TestFillSuccess:
             ret = main(["fill", str(tmp_pcb), "-o", str(out)])
             assert ret == 0
             call_args = mock_fill.call_args
-            assert call_args[0][1] == out
+            candidate, output_arg = call_args.args
+            assert candidate.name == out.name and candidate != out
+            assert output_arg is None
+            assert out.exists() and not candidate.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +406,7 @@ class TestRunFillZones:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(
                 _SUBPROCESS_RUN,
                 side_effect=FileNotFoundError("not found"),
@@ -421,7 +426,7 @@ class TestRunFillZones:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(
                 _SUBPROCESS_RUN,
                 side_effect=subprocess.SubprocessError("boom"),
@@ -467,7 +472,9 @@ class TestRunFillZonesNative:
         cmd = mock_run.call_args_list[0][0][0]
         assert "--output" in cmd
         idx = cmd.index("--output")
-        assert cmd[idx + 1] == str(out)
+        candidate = Path(cmd[idx + 1])
+        assert candidate.name == out.name and candidate != out
+        assert not candidate.exists() and out.exists()
 
     def test_native_nonzero_return_code_is_failure(self, tmp_pcb):
         from kicad_tools.cli.runner import run_fill_zones
@@ -498,7 +505,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
         ):
             result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -521,7 +528,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -532,7 +539,9 @@ class TestRunFillZonesDRCFallback:
         assert out.exists()
         # DRC should have been run on the copy, not the original
         cmd = mock_run.call_args[0][0]
-        assert str(out) == cmd[-1]
+        candidate = Path(cmd[-1])
+        assert candidate.name == out.name and candidate != out
+        assert not candidate.exists()
 
     def test_drc_violations_do_not_cause_failure(self, tmp_pcb):
         """DRC exit code != 0 due to violations is still a fill success."""
@@ -548,7 +557,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run),
         ):
             result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -562,7 +571,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN) as mock_run,
         ):
             # DRC fails to produce a report
@@ -585,7 +594,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run),
         ):
             run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -607,7 +616,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
         ):
             run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -627,7 +636,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=True),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: True),
             patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
         ):
             run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -670,7 +679,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -702,7 +711,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_nets),
         ):
             result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -732,7 +741,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_keeps_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -765,7 +774,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -792,7 +801,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run),
         ):
             result = run_fill_zones(pcb_path, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -843,7 +852,7 @@ class TestPadNetPreservation:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_pad_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -890,7 +899,7 @@ class TestPadNetPreservation:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_element_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -930,7 +939,7 @@ class TestPadNetPreservation:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_element_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -963,7 +972,7 @@ class TestPadNetPreservation:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_keeps_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -1324,7 +1333,7 @@ class TestUUIDRegenerationResilience:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_regen_uuids),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -1377,7 +1386,7 @@ class TestUUIDRegenerationResilience:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_regen_uuids),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -1429,7 +1438,7 @@ class TestUUIDRegenerationResilience:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_regen_uuids),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -1955,17 +1964,49 @@ class TestRelieveAndAsymmetryWarning:
         relieve.assert_called_once()
         assert "thermal_asymmetry: 5 -> 2" in capsys.readouterr().out
 
-    def test_fill_warns_when_asymmetry_rises(self, tmp_pcb, capsys):
+    @pytest.mark.parametrize("separate_output", [False, True], ids=["in-place", "separate-output"])
+    def test_fill_warns_when_asymmetry_rises(self, tmp_pcb, capsys, separate_output):
+        target = tmp_pcb.with_name("filled board.kicad_pcb") if separate_output else tmp_pcb
+        output_args = ["--output", str(target)] if separate_output else []
         result = MagicMock(success=True, stderr="", fill_notes=[], fill_conflicts=[])
         check = SavedFillCheck(ran=True, regressions=[], note="")
         with (
             patch(_FIND_CLI, return_value=Path("/fake/kicad-cli")),
-            patch(_RUN_FILL, return_value=result),
+            patch(_RUN_FILL, return_value=result) as fill,
             patch(_CHECK_SAVED_FILL, return_value=check),
+            patch(
+                "kicad_tools.cli.zones_cmd._thermal_asymmetry_count", side_effect=[1, 4]
+            ) as counts,
+        ):
+            assert main(["fill", str(tmp_pcb), *output_args, "--format", "json"]) == 0
+        output = capsys.readouterr()
+        assert json.loads(output.out)["thermal_asymmetry"] == {"before": 1, "after": 4}
+        assert "thermal_asymmetry findings rose 1 -> 4" in output.err
+        assert f"`{shlex.join(['kct', 'zones', 'relieve', str(target)])}`" in output.err
+        measured = fill.call_args.args[0]
+        assert [call.args[0] for call in counts.call_args_list] == [tmp_pcb, measured]
+        assert target.is_file()
+        if separate_output:
+            assert measured != target and not measured.exists()
+
+    def test_rejected_separate_fill_does_not_recommend_relief_on_the_old_output(
+        self, tmp_pcb, capsys
+    ):
+        target = tmp_pcb.with_name("previous.kicad_pcb")
+        target.write_bytes(b"previous output")
+        with (
+            patch(_FIND_CLI, return_value=Path("/fake/kicad-cli")),
+            patch(
+                _RUN_FILL, return_value=MagicMock(success=True, fill_notes=[], fill_conflicts=[])
+            ),
+            patch(_CHECK_SAVED_FILL, return_value=SavedFillCheck(ran=True, regressions=["split"])),
             patch("kicad_tools.cli.zones_cmd._thermal_asymmetry_count", side_effect=[1, 4]),
         ):
-            main(["fill", str(tmp_pcb)])
-        assert "thermal_asymmetry findings rose 1 -> 4" in capsys.readouterr().err
+            assert main(["fill", str(tmp_pcb), "--output", str(target), "--format", "json"]) != 0
+        output = capsys.readouterr()
+        assert json.loads(output.out)["thermal_asymmetry"] == {"before": 1, "after": 4}
+        assert "kct zones relieve" not in output.err
+        assert target.read_bytes() == b"previous output"
 
     def test_fill_silent_when_asymmetry_flat(self, tmp_pcb, capsys):
         result = MagicMock(success=True, stderr="", fill_notes=[], fill_conflicts=[])
@@ -2093,3 +2134,85 @@ class TestUnifiedZonesListTrailingQuiet:
         assert rc == 1
         assert "Error: File not found" in captured.err
         assert captured.out == ""
+
+
+class TestRelieveUnifiedCli:
+    """Issue #9808: ``kct zones relieve`` is reachable from the unified CLI."""
+
+    def test_unified_zones_help_lists_relieve(self, capsys):
+        from kicad_tools.cli import main as cli_main
+
+        with pytest.raises(SystemExit) as exc:
+            cli_main(["zones", "--help"])
+        assert exc.value.code == 0
+        assert "relieve" in capsys.readouterr().out
+
+    def test_unified_bare_zones_lists_relieve(self, capsys):
+        from kicad_tools.cli import main as cli_main
+
+        assert cli_main(["zones"]) == 1
+        assert "relieve" in capsys.readouterr().out
+
+    def test_unified_relieve_help_exits_0(self, capsys):
+        from kicad_tools.cli import main as cli_main
+
+        with pytest.raises(SystemExit) as exc:
+            cli_main(["zones", "relieve", "--help"])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "pcb" in out
+        assert "--output" in out
+        assert "--format" in out
+
+    def test_unified_relieve_in_place_default(self):
+        from kicad_tools.cli import main as cli_main
+
+        with patch("kicad_tools.cli.zones_cmd.main", return_value=7) as zones_main:
+            assert cli_main(["zones", "relieve", "board.kicad_pcb"]) == 7
+        zones_main.assert_called_once_with(["relieve", "board.kicad_pcb"])
+
+    def test_unified_relieve_forwards_output_and_format(self):
+        from kicad_tools.cli import main as cli_main
+
+        with patch("kicad_tools.cli.zones_cmd.main", return_value=0) as zones_main:
+            assert (
+                cli_main(
+                    [
+                        "zones",
+                        "relieve",
+                        "board.kicad_pcb",
+                        "-o",
+                        "out.kicad_pcb",
+                        "--format",
+                        "json",
+                    ]
+                )
+                == 0
+            )
+        zones_main.assert_called_once_with(
+            ["relieve", "board.kicad_pcb", "-o", "out.kicad_pcb", "--format", "json"]
+        )
+
+    def test_unified_relieve_quiet_before_command(self):
+        from kicad_tools.cli import main as cli_main
+
+        with patch("kicad_tools.cli.zones_cmd.main", return_value=0) as zones_main:
+            cli_main(["-q", "zones", "relieve", "board.kicad_pcb"])
+        zones_main.assert_called_once_with(["relieve", "board.kicad_pcb", "--quiet"])
+
+    def test_unified_relieve_quiet_after_command(self):
+        from kicad_tools.cli import main as cli_main
+
+        with patch("kicad_tools.cli.zones_cmd.main", return_value=0) as zones_main:
+            cli_main(["zones", "relieve", "board.kicad_pcb", "--quiet"])
+        zones_main.assert_called_once_with(["relieve", "board.kicad_pcb", "--quiet"])
+
+    def test_unified_relieve_missing_pcb_json(self, tmp_path, capsys):
+        import json
+
+        from kicad_tools.cli import main as cli_main
+
+        missing = tmp_path / "missing.kicad_pcb"
+        assert cli_main(["zones", "relieve", str(missing), "--format", "json"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert str(missing) in payload["error"]

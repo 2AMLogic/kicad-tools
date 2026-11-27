@@ -353,6 +353,23 @@ class TestUnknownRuleIsNamedNotAnInputDefect:
         assert "UNKNOWN" not in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("kind", "reference", "condition", "expected"),
+    [
+        ("pad", "J9", "A.Reference == 'j?'", True),
+        ("pad", "J9", "A.Reference != 'JX'", True),
+        ("pad", None, "A.Reference == 'J9'", None),
+        ("track", "", "A.Reference == '*'", False),
+        ("track", "", "A.Reference != 'JX'", False),
+        ("via", "", "A.Reference == ''", False),
+        ("via", "", "!(A.Reference == 'JX')", True),
+    ],
+)
+def test_reference_property_matches_kicad(kind, reference, condition, expected):
+    item = item_props_for_type(kind, "SIG", footprint_ref=reference)
+    assert evaluate_condition(condition, item, ItemProps("Pad", "GND")) is expected
+
+
 class TestMemberOfFootprintSemanticsMatchKicad:
     """The argument semantics of ``memberOfFootprint``, probed black-box
     against the pinned ``kicad-cli`` 10.0.6 image (#9588 review): a

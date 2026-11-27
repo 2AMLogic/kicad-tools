@@ -63,16 +63,21 @@ from kicad_tools.manufacturers.resolve import (  # noqa: F401  (re-exported; sha
     _resolve_effective_check_mfr,
 )
 from kicad_tools.pcb.reinforcement_sidecar import load_wires_if_present
+from kicad_tools.physics.stackup import stackup_copper_oz
 from kicad_tools.router.current_paths import (
     CurrentPathSpec,
+    OperatingCase,
     current_paths_sidecar_candidates,
     discover_current_paths_sidecar,
-    load_current_path_specs,
+    load_current_path_sidecar,
 )
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
 from kicad_tools.validate.coverage import collapse_reasons, coverage_to_dict
+from kicad_tools.validate.rules.bypass_distance import (
+    DEFAULT_MAX_DISTANCE_MM as DEFAULT_BYPASS_MAX_DISTANCE_MM,
+)
 from kicad_tools.validate.rules.reinforcement_incomplete import reinforcement_waived_nets
 from kicad_tools.validate.rules.schematic_fields import DEFAULT_SCH_FIELD_THRESHOLD_MM
 
@@ -1010,6 +1015,7 @@ def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
     import zlib
 
     from kicad_tools.export import verify_manifest
+    from kicad_tools.export.project_identity import archived_pcb_member
 
     candidates = [
         pcb_path.parent / "manufacturing" / "manifest.json",
@@ -1052,11 +1058,13 @@ def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
             raise ValueError("; ".join(problems))
         # The exporter stores the selected source PCB at the archive root.
         # Do not accept a same-basename nested file or a duplicate ZIP member.
+        # A board packaged under its project identity's basename is the one
+        # PCB member, filed beside the project file of the same stem (#10108).
         with zipfile.ZipFile(archive_path) as archive:
-            matches = [n for n in archive.namelist() if Path(n).name == pcb_path.name]
-            if matches != [pcb_path.name]:
+            member = archived_pcb_member(archive.namelist(), pcb_path)
+            if member is None:
                 raise ValueError("project archive must contain one exact source PCB member")
-            archived_digest = hashlib.sha256(archive.read(pcb_path.name)).hexdigest()
+            archived_digest = hashlib.sha256(archive.read(member)).hexdigest()
         if archived_digest != hashlib.sha256(pcb_path.read_bytes()).hexdigest():
             raise ValueError("routed PCB content differs from the manifest-bound project archive")
     except (
@@ -1660,6 +1668,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--prove-pour-stubs",
+        action="store_true",
+        help=(
+            "Prove redundant_copper_pour_stub findings with a native kicad-cli "
+            "zone refill per candidate branch (Issue #10137; slow, off by default)"
+        ),
+    )
+    parser.add_argument(
         "--errors-only",
         action="store_true",
         help="Show only errors, not warnings",
@@ -1986,6 +2002,21 @@ def main(argv: list[str] | None = None) -> int:
             "Override the pad_grid L2 tolerance with an explicit value "
             "in mm (e.g. ``--pad-grid-tolerance 0.02``).  Disables "
             "auto-derivation."
+        ),
+    )
+    # Issue #10141: bypass_distance maximum cap-to-designated-pin distance.
+    parser.add_argument(
+        "--bypass-max-distance",
+        dest="bypass_max_distance",
+        type=float,
+        default=DEFAULT_BYPASS_MAX_DISTANCE_MM,
+        metavar="MM",
+        help=(
+            "Maximum distance in mm between a decoupling capacitor's supply "
+            "pad and the pad of the supply pin its schematic designates "
+            "before bypass_distance warns (default 3.0; issue #10141).  "
+            "Needs a resolvable schematic; without one the category is "
+            "reported as not run."
         ),
     )
     # Issue #4595: sch_fields schematic field-geometry lint threshold.
@@ -2490,6 +2521,7 @@ def main(argv: list[str] | None = None) -> int:
     # explicit-wins / auto-discover / degrade-gracefully-on-auto-discovered-
     # malformed-file contract as --net-class-map above.
     current_path_specs: list[CurrentPathSpec] = []
+    current_path_cases: list[OperatingCase] = []
     cp_explicit = args.current_paths is not None
     cp_suppressed = bool(getattr(args, "no_current_paths", False))
     cp_candidates: list[Path] = []
@@ -2508,7 +2540,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: current-paths file not found: {cp_path}", file=sys.stderr)
             return 1
         try:
-            current_path_specs = load_current_path_specs(cp_path)
+            sidecar = load_current_path_sidecar(cp_path)
+            current_path_specs, current_path_cases = sidecar.specs, sidecar.cases
         except (OSError, ValueError) as e:
             if cp_explicit:
                 print(f"Error: parsing current-paths JSON: {e}", file=sys.stderr)
@@ -2518,6 +2551,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             current_path_specs = []
+            current_path_cases = []
         else:
             if not cp_explicit:
                 print(
@@ -2765,6 +2799,7 @@ def main(argv: list[str] | None = None) -> int:
             # graceful no-op (AC5).
             emit_measurements=True,
             physical_copper_gap_mm=getattr(args, "physical_copper_gap", None),
+            prove_pour_stubs=getattr(args, "prove_pour_stubs", False),
             # Issue #8843: net-agnostic fab view is default-on under jlcpcb.
             fab_view=effective_mfr == "jlcpcb",
             fab_view_copper_oz=resolved_copper_outer,
@@ -2778,6 +2813,7 @@ def main(argv: list[str] | None = None) -> int:
             # Issue #4980/#5124: declared branch-specific current-path
             # intent (--current-paths sidecar, auto-discovered).
             current_path_specs=current_path_specs,
+            current_path_cases=current_path_cases,
             # Issue #8746: gauge source + reinforcement-citing ampacity waivers
             # for reinforcement_incomplete.
             reinforcement_wires=load_wires_if_present(pcb_path),
@@ -2857,11 +2893,11 @@ def main(argv: list[str] | None = None) -> int:
     # schematic-sourced findings must not appear there; documented decision).
     # No schematic resolved => the closure emits nothing and never fails
     # (the #4350 loud missing-schematic stderr warning covers visibility).
-    sch_fields_active = (
-        (only_set is None or "sch_fields" in only_set)
-        and "sch_fields" not in skip_set
-        and not getattr(args, "drc_only", False)
-    )
+    # ``bypass_distance`` (Issue #10141) consumes the same resolved schematic.
+    sch_fields_active = any(
+        (only_set is None or name in only_set) and name not in skip_set
+        for name in ("sch_fields", "bypass_distance")
+    ) and not getattr(args, "drc_only", False)
     sch_path: Path | None = None
     if sch_fields_active:
         sch_path = _resolve_check_schematic(getattr(args, "schematic", None), pcb_path)
@@ -2877,6 +2913,7 @@ def main(argv: list[str] | None = None) -> int:
         pad_grid_auto_derive=pad_grid_auto_derive,
         sch_path=sch_path,
         sch_field_threshold=args.sch_field_threshold,
+        bypass_max_distance=args.bypass_max_distance,
         pcb_path=pcb_path,
         layers=layers,
         coverage=coverage,
@@ -3183,11 +3220,30 @@ def main(argv: list[str] | None = None) -> int:
         # at a wider stdout bound -- and print one remediation line naming
         # what to configure.  JSON/SARIF output is untouched (the guard
         # above); the machine report already carries the full reasons list.
+        from kicad_tools.validate.mask_copper_exposure import nominal_exposure
+
         for assessment in results.mask_copper_assessments:
             print(f"Mask-to-copper: {assessment.coverage}; passed={assessment.passed}")
-            # Issue #8991: a ``complete`` assessment with nothing to report
-            # prints only the header; the "no reason reported" placeholder is
-            # kept for non-complete states (and for any reasons present).
+            exposure = nominal_exposure(assessment)
+            artwork = (exposure["artwork_source"] or "unavailable").replace("_", " ")
+            print(f"  Nominal artwork exposure ({artwork}, {exposure['status']})")
+            for side, face in exposure["faces"].items():
+                counts = face["finding_counts"] | face["opening_counts"]
+                shown = {k: v if v is not None else "unknown" for k, v in counts.items()}
+                print(
+                    f"    {side} ({face['status']}): {shown['matched']}/{shown['plotted']} matched, "
+                    f"{shown['unresolved']} unresolved, {shown['excluded']} excluded; "
+                    f"{shown['foreign_net']} foreign-net, {shown['same_net_beyond_land']} "
+                    f"same-net beyond land, {shown['registration_or_near_pad_only']} near-pad only"
+                )
+                measured = face["measured_opening_counts"]
+                if face["status"] == "partial" and measured["evaluated"]:
+                    print(
+                        f"      Of {measured['evaluated']} fully evaluated component openings, "
+                        f"{measured['foreign_net']} expose foreign-net copper and "
+                        f"{measured['same_net_beyond_land']} expose same-net copper beyond the land"
+                    )
+            # Keep placeholder reasons out of a complete assessment (#8991).
             if assessment.reasons or assessment.coverage != "complete":
                 print(f"  {collapse_reasons(assessment.reasons, limit=_MASK_STDOUT_REASON_LIMIT)}")
             remediation = assessment.remediation
@@ -3687,19 +3743,6 @@ def resolve_net_class_map_for_board(net_class_map: dict, pcb: PCB) -> tuple[dict
     return rekeyed, resolution
 
 
-def stackup_copper_oz(pcb: PCB) -> tuple[float | None, float | None]:
-    """Outer/inner copper weight (oz) from the board's declared stackup, if any."""
-    try:
-        from kicad_tools.physics.stackup import Stackup
-
-        derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
-    except Exception:  # noqa: BLE001 - never crash `check` on a stackup parse quirk
-        return (None, None)
-    if derived is None:
-        return (None, None)
-    return derived
-
-
 @dataclass
 class CheckRuleSet:
     """The rule set ``kct check --mfr <mfr>`` applies to a board (Issue #6431).
@@ -3787,10 +3830,12 @@ def build_check_rule_set(
             notes.append(f"ignoring malformed courtyard-waivers sidecar {cw_path}: {exc}")
 
     current_path_specs: list[CurrentPathSpec] = []
+    current_path_cases: list[OperatingCase] = []
     cp_path = discover_current_paths_sidecar(project_pcb_path)
     if cp_path is not None:
         try:
-            current_path_specs = load_current_path_specs(cp_path)
+            sidecar = load_current_path_sidecar(cp_path)
+            current_path_specs, current_path_cases = sidecar.specs, sidecar.cases
         except (OSError, ValueError) as exc:
             notes.append(f"ignoring malformed current-paths sidecar {cp_path}: {exc}")
 
@@ -3831,6 +3876,7 @@ def build_check_rule_set(
         courtyard_waivers=courtyard_waivers,
         strict_connectivity=True,
         current_path_specs=current_path_specs,
+        current_path_cases=current_path_cases,
         reinforcement_wires=load_wires_if_present(project_pcb_path),
         declared_spec_currents=resolve_declared_currents_for_pcb(project_pcb_path),
     )
@@ -3952,6 +3998,7 @@ def run_selected_checks(
     pad_grid_auto_derive: bool = True,
     sch_path: Path | None = None,
     sch_field_threshold: float = DEFAULT_SCH_FIELD_THRESHOLD_MM,
+    bypass_max_distance: float = DEFAULT_BYPASS_MAX_DISTANCE_MM,
     pcb_path: Path | None = None,
     layers: int | None = None,
     coverage: dict | None = None,
@@ -3978,6 +4025,8 @@ def run_selected_checks(
             (the #4350 missing-schematic stderr warning already covers
             visibility).  Must default to ``None`` so library callers
             that only exercise PCB-scoped checks are unaffected.
+        bypass_max_distance: ``bypass_distance`` maximum cap-pad-to-pin-pad
+            distance in mm (Issue #10141).
         sch_field_threshold: ``sch_field_offset`` distance threshold in
             mm (issue #4595; strictly-greater-than comparison).
         pcb_path: Path of the ``.kicad_pcb`` under check, used by the
@@ -4044,6 +4093,15 @@ def run_selected_checks(
         results.merge(check_schematic_wire_symbol(sch_path))
         return results
 
+    # Issue #10141: bypass-cap distance to the schematic-designated pin.  A
+    # closure so the resolved schematic path reaches the checker method; it
+    # always calls that method (which no-ops without a schematic) and coverage
+    # records the missing input as ``unknown``, never a pass.
+    def _bypass_distance_check() -> DRCResults:
+        return checker.check_bypass_distance(
+            schematic_path=sch_path, max_distance_mm=bypass_max_distance
+        )
+
     # Issue #4540: LLM-free doc-drift lint (kct:doc-pin markers vs
     # machine ground truth).  Dispatched as a CLI-level closure (like
     # ``pad_grid`` / ``sch_fields``) because it needs the PCB *path* to
@@ -4077,6 +4135,22 @@ def run_selected_checks(
             copper_layers=effective_layers,
         )
 
+    # Issue #10139: sidecar vs project vs copper agreement on net classes.
+    # CLI-level closure (like ``netclass_floor``) because it needs the PCB
+    # *path* to locate the sibling ``.kicad_pro``.  The sidecar is the map
+    # ``kct check`` already discovered (stem-keyed probe, #4601/#4634) and
+    # resolved onto board net names -- ``--no-net-class-map`` therefore
+    # disables it too.  No map -> silent no-op.
+    def _netclass_agreement_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.validate.rules.netclass_agreement import check_netclass_agreement
+
+        # Board-relative -> sheet-absolute like every ``checker.check_*`` (#8493).
+        return checker._absolutize(
+            check_netclass_agreement(pcb_path, checker.pcb, checker.net_class_map)
+        )
+
     # Issue #6249: authored ``.kicad_pro`` netclass clearances on routed copper
     # (parity with ``kicad-cli pcb drc`` after #6243).  CLI-level closure for
     # the same reason as ``netclass_floor``: it needs the PCB *path*.
@@ -4096,21 +4170,9 @@ def run_selected_checks(
     # Issue #8435: pour-slot advisory.  CLI-level closure because the netclass
     # clearances come from the sibling ``.kicad_pro`` (needs the PCB *path*).
     def _pour_slot_check() -> DRCResults:
-        clearances: dict[str, float] = {}
-        if pcb_path is not None:
-            try:
-                from kicad_tools.core.project_clearance import authored_netclass_clearances
-                from kicad_tools.validate.rules.netclass_clearance_copper import load_project
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 
-                project = load_project(pcb_path)
-                if project is not None:
-                    names = [n.name for n in checker.pcb.nets.values() if n.name]
-                    clearances = {
-                        n: v.clearance
-                        for n, v in authored_netclass_clearances(project, names).items()
-                    }
-            except Exception:  # advisory: fall back to the zone clearance alone
-                clearances = {}
+        clearances = BoardClearanceRules.from_board(pcb_path) if pcb_path else None
         return checker.check_pour_slot(clearances)
 
     # Issue #7292: ``project.kct`` requirements vs the routed board.  CLI-level
@@ -4212,6 +4274,7 @@ def run_selected_checks(
         "dimensions": checker.check_dimensions,
         "doc_drift": _doc_drift_check,
         "board_id": checker.check_board_id,
+        "bypass_distance": _bypass_distance_check,
         "edge": checker.check_edge_clearances,
         "fiducials": checker.check_fiducials,
         "sharp_trace_corner": checker.check_sharp_trace_corner,
@@ -4221,6 +4284,7 @@ def run_selected_checks(
         "match_group_length_skew": checker.check_match_group_length_skew,
         "model_coverage": _model_coverage_check,
         "routing_policy": checker.check_routing_policy,
+        "netclass_agreement": _netclass_agreement_check,
         "netclass_clearance_copper": _netclass_clearance_copper_check,
         "netclass_floor": _netclass_floor_check,
         "netlist": checker.check_netlist,
@@ -4644,6 +4708,7 @@ def _apply_dfm_table(
     if assumed:
         stackup += " (assumed: no stackup/--copper weight declared)"
     table_version = profile.dfm_thresholds.version
+    checker.design_rules = profile.apply_dfm_floors(checker.design_rules, entry)
     if entry is None:
         copper_weights["dfm_table"] = {
             "version": table_version,
@@ -4658,7 +4723,6 @@ def _apply_dfm_table(
         )
         return True
     t = entry.thresholds
-    checker.design_rules = profile.apply_dfm_floors(checker.design_rules, entry)
     copper_weights["dfm_table"] = {
         "version": table_version,
         "stackup": stackup,

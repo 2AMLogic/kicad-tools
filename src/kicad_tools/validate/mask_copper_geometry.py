@@ -26,7 +26,7 @@ from .mask_geometry import _validate_structure
 #: apart. Do not add a version here without repeating that comparison; an
 #: unqualified build must keep failing loudly rather than silently attributing
 #: mask geometry from an unverified plot profile.
-QUALIFIED_NATIVE_VERSIONS = ("10.0.5", "10.0.6")
+QUALIFIED_NATIVE_VERSIONS = ("10.0.5", "10.0.6", "10.0.8")
 
 #: Custom-rule constraint names this checker may reason about during native
 #: object attribution. Module-level so the non-native suite can pin membership
@@ -202,16 +202,12 @@ def _resolve_native_python_command(
 
 
 def unqualified_native_version_reason(native_version: str) -> str:
-    """Refusal for a KiCad build outside ``QUALIFIED_NATIVE_VERSIONS``, with a way forward.
-
-    The refusal itself is unchanged -- an unqualified plot profile must keep
-    failing loudly -- but, like the no-interpreter reason (#8946), it names
-    what to do instead of only what went wrong (#9009).
-    """
+    """Describe the effect on sign-off and how to run a qualified plot profile."""
     return (
         "Native object attribution requires a qualified KiCad plot profile "
-        f"({', '.join(QUALIFIED_NATIVE_VERSIONS)}); got "
-        f"{native_version or 'no version'}. Set KCT_KICAD_DOCKER=1 to run both "
+        f"({', '.join(QUALIFIED_NATIVE_VERSIONS)}). The version probe got "
+        f"{native_version or 'no version'}, leaving mask_to_copper unevaluated "
+        "and blocking sign-off. Set KCT_KICAD_DOCKER=1 to run both "
         "native passes in the pinned kicad/kicad image (docker required), or "
         "install a qualified KiCad release."
     )
@@ -450,23 +446,13 @@ def inspect_attributed_mask_geometry(
                 margin_source = "native-default (no explicit object/footprint/board margin)"
             # Source identity for triage messages (issue #9038): the owning
             # footprint's Reference and the pad number, so a finding can say
-            # `pad:R1/1` instead of an opaque UUID. Additive to the internal
-            # object dict; the report schema does not carry it.
-            pad_ref = None
-            if feature["kind"].startswith("pad:"):
-                number = feature["node"].get_string(0)
-                reference = None
-                if parent_node is not None:
-                    reference = next(
-                        (
-                            child.get_string(1)
-                            for child in parent_node.iter_children()
-                            if child.name == "property" and child.get_string(0) == "Reference"
-                        ),
-                        None,
-                    )
-                if reference and number:
-                    pad_ref = f"{reference}/{number}"
+            # `pad:R1/1` instead of an opaque UUID. Unnumbered openings
+            # retain their footprint reference for the aperture inventory.
+            reference = _footprint_reference(parent_node) if parent_node is not None else None
+            is_pad = feature["kind"].startswith("pad:")
+            number = feature["node"].get_string(0) if is_pad else None
+            pad_ref = f"{reference}/{number}" if reference and number else None
+            pad_property = feature["node"].find_child("property") if is_pad else None
             # Authored via drill (issue #8858). The native via copper is a solid
             # disk, so the hole is not in its geometry; the within-own-pad
             # classification needs it to keep a via-in-pad (drill inside the
@@ -497,6 +483,10 @@ def inspect_attributed_mask_geometry(
                 "margin_mm": item["margin_mm"],
                 "margin_source": margin_source,
                 "pad_ref": pad_ref,
+                "footprint_ref": reference,
+                "footprint_name": parent_node.get_string(0) if parent_node is not None else None,
+                "pad_type": feature["node"].get_string(1) if is_pad else None,
+                "pad_property": pad_property.get_string(0) if pad_property is not None else None,
                 "drill_mm": drill_mm,
                 "width_mm": width_mm,
                 "endpoints_mm": endpoints_mm,

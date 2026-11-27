@@ -2,6 +2,7 @@
 
 import json
 import math
+import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -568,6 +569,29 @@ class TestReconcilerAnalyze:
         Path(sch_path).unlink()
         Path(pcb_path).unlink()
 
+    def test_analyze_matches_mounting_hole_with_schematic_symbol(self):
+        """A mounting hole drawn in the schematic matches its PCB footprint."""
+        hole = "MountingHole:MountingHole_4.3mm_M4"
+        bom_items = [self._make_bom_item("P101", "CONN_1", hole)]
+        footprints = [
+            self._make_mock_footprint("P101", "CONN_1", hole),
+            self._make_mock_footprint("H1", "", hole),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert [m.schematic_ref for m in analysis.matches] == ["P101"]
+        assert analysis.schematic_orphans == []
+        assert analysis.pcb_orphans == []
+        assert analysis.add_footprint_actions == []
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
     def test_analyze_medium_confidence_match(self):
         """Test that value+footprint matching produces medium confidence."""
         bom_items = [
@@ -900,6 +924,7 @@ class TestReconcilerApplyAddFootprint:
             rotation=0.0,
             layer="F.Cu",
             value="100nF",
+            schematic_path=reconciler._schematic_path,
         )
 
     def test_add_footprint_library_not_found(self):
@@ -1428,6 +1453,7 @@ class TestReconcilerApplyUpdateFootprint:
             rotation=90.0,
             layer="F.Cu",
             value="100nF",
+            schematic_path=reconciler._schematic_path,
         )
 
         # Verify the temporary reference was renamed to the real one
@@ -3100,6 +3126,52 @@ class TestPadNetMismatches:
         load.return_value.save.assert_called_once_with(str(out))
         assert changes[0].applied
 
+    @pytest.mark.parametrize(
+        ("visibility", "joined"),
+        [("(hide yes)", True), ("hide", True), ("(hide no)", False), ("", False)],
+    )
+    def test_hidden_power_pin_joins_net_by_name(self, tmp_path, visibility, joined):
+        """Issue #8988: a legacy power symbol (no library ``(power)`` flag)
+        names its net through a hidden ``power_in`` pin, as KiCad does, so
+        two such symbols on separate wires are one net. A visible pin, by
+        ``(hide no)`` or by omission, names no net."""
+        lib = f"""
+    (symbol "demo:R" (property "Reference" "R" (at 0 0 0))
+      (symbol "R_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))))
+    (symbol "demo:VPP" (property "Reference" "#PWR" (at 0 0 0))
+      (symbol "VPP_0_0"
+        (pin power_in line (at 0 0 90) (length 0) {visibility} (name "VPP") (number "1"))))"""
+        parts = []
+        for i, x in enumerate((100, 120), 1):
+            parts.append(
+                f'(symbol (lib_id "demo:R") (at {x} 100 0) (unit 1) (uuid "r{i}")'
+                f' (property "Reference" "R{i}" (at {x} 100 0)))'
+                f' (symbol (lib_id "demo:VPP") (at {x} 90 0) (unit 1) (uuid "p{i}")'
+                f' (property "Reference" "#PWR{i}" (at {x} 90 0)))'
+                f" (wire (pts (xy {x} 90) (xy {x} 96.19)) (uuid w{i}))"
+            )
+        sch = tmp_path / "a.kicad_sch"
+        sch.write_text(
+            f'(kicad_sch (version 20231120) (generator "test") (uuid "root")'
+            f" (lib_symbols {lib}) {' '.join(parts)})"
+        )
+        fps = "".join(
+            f'(footprint "R" (layer "F.Cu") (at {x} 100) (property "Reference" "R{i}")'
+            f' (pad "1" smd rect (at 0 -1) (size 1 1) (layers "F.Cu") (net 1 "VPP"))'
+            f' (pad "2" smd rect (at 0 1) (size 1 1) (layers "F.Cu")))'
+            for i, x in enumerate((100, 120), 1)
+        )
+        pcb = tmp_path / "a.kicad_pcb"
+        pcb.write_text(
+            f'(kicad_pcb (version 20240108) (generator "test") (net 0 "") (net 1 "VPP") {fps})'
+        )
+        rec = Reconciler.__new__(Reconciler)
+        rec._schematic_path = sch
+        rec._pcb_path = pcb
+        assert (rec._find_pad_net_mismatches() == []) is joined
+
     def test_strict_assign_failure_is_reported(self):
         rec = self._reconciler()
         with patch("kicad_tools.operations.netlist.export_netlist", side_effect=OSError("boom")):
@@ -3452,3 +3524,81 @@ class TestRemovedPadScanProjectLib:
         assert a.to_dict()["scan_gaps"] == [gap]
         assert a.to_dict()["summary"]["scan_gaps"] == 1
         assert "Removed-pad scan gaps" in a.summary()
+
+
+@pytest.mark.parametrize("scenario", ["add", "swap", "existing"])
+@pytest.mark.parametrize("empty_alias_first", [False, True])
+def test_sync_purchasing_fields_round_trip(tmp_path, scenario, empty_alias_first):
+    """A schematic purchasing change must survive a PCB save and a second sync."""
+    from kicad_tools.schema.bom import extract_bom_from_pcb
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
+
+    project = tmp_path / "project"
+    shutil.copytree(TestRemovedPadScanProjectLib.FIXTURE, project)
+    library_part = project / "scanlib.pretty" / "ProjFP.kicad_mod"
+    library_part.write_text(
+        library_part.read_text().replace(
+            '(layer "F.Cu")', '(layer "F.Cu") (property "JLCPCB" "C9999")', 1
+        )
+    )
+    sch = project / "removed_pad_scan.kicad_sch"
+    pcb = project / "removed_pad_scan.kicad_pcb"
+    populated = '(property "LCSC_PN" "C1234") (property "PN" "0012")'
+    empty = '(property "LCSC" "") (property "MFR_PN" " ")'
+    fields = f"{empty} {populated}" if empty_alias_first else f"{populated} {empty}"
+    sch.write_text(
+        sch.read_text().replace('(property "Reference"', f'{fields} (property "Reference"')
+    )
+    board = parse_string(pcb.read_text())
+    fp = board.find("footprint")
+    if scenario == "add":
+        board.children.remove(fp)
+    else:
+        if scenario == "existing":
+            fp.children[0].value = "scanlib:ProjFP"
+        fp.append(parse_string('(property "JLC" "C0000" (at 3 4) (layer "F.Fab") (hide yes))'))
+        fp.append(parse_string('(property "Manufacturer" "Board source")'))
+        fp.append(parse_string('(property "Mfg" " ")'))
+    pcb.write_text(board.to_string())
+    rec = Reconciler(schematic=sch, pcb=pcb)
+    # This minimal library fixture has no pin model for the native netlist exporter.
+    with (
+        patch.object(rec, "_find_pad_net_mismatches", return_value=[]),
+        patch.object(rec, "_assign_nets"),
+    ):
+        plan = rec.analyze()
+        assert not plan.is_in_sync
+        original = pcb.read_bytes()
+        preview = rec.apply(plan, dry_run=True)
+        assert all(not change.applied for change in preview)
+        assert pcb.read_bytes() == original
+        if scenario == "existing":
+            updates = {
+                action["property"]: action["new_value"]
+                for match in plan.matches
+                for action in match.actions
+                if action["type"] == "update_property"
+            }
+            assert updates == {"JLC": "C1234", "MPN": "0012"}
+            assert {c.property_name: c.new_value for c in preview if c.property_name} == updates
+        assert any(change.applied for change in rec.apply(plan, dry_run=False))
+        placed = PCB.load(pcb).get_footprint("R1")
+        item = next(part for part in extract_bom_from_pcb(str(pcb)).items if part.reference == "R1")
+        assert (item.lcsc, item.mpn) == ("C1234", "0012")
+        assert placed.properties["MPN"] == "0012"
+        if scenario in {"add", "swap"}:
+            assert placed.properties["JLCPCB"] == "C1234"
+        if scenario == "add":
+            assert placed.properties["LCSC"] == "C1234"
+        else:
+            assert placed.properties["JLC"] == "C1234"
+            assert placed.properties["Manufacturer"] == "Board source"
+            assert item.manufacturer == "Board source"
+            assert "LCSC" not in placed.properties
+        if scenario == "existing":
+            prop = next(
+                n for n in placed._sexp_node.find_children("property") if n.get_string(0) == "JLC"
+            )
+            assert prop.find("at").get_float(0) == 3
+        assert rec.analyze().is_in_sync

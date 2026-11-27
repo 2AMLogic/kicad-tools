@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests._fixture_silk_findings import FORMER_BOARD06_SILK, FORMER_BOARD07_SILK
+
 ROOT = Path(__file__).resolve().parents[1]
 TOLERANCE = ROOT / ".github" / "routed-drc-tolerance.yml"
 BOARD06_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
@@ -127,72 +129,17 @@ def with_board07_synthetic(gate):
 # exactly the tangent seats #9124 rejects, so none is pending re-baselining.
 BOARD07_GAP_NETS: tuple[str, ...] = ()
 
-# Issue #8858 (board 07 increment, measured 2026-11-18, pinned image, seed-42
-# regen at main 163f4a175): every ``mask_to_copper`` error net signature the
-# regeneration carries.  Three independent regenerations (two in the pinned
-# image, one on a worker through KCT_KICAD_DOCKER) reproduced all 19
-# signatures and their per-net counts exactly (54 findings: 52 violation +
-# 2 uncertain, all same-net).  The committed allowance must list exactly
-# these; a net that starts failing or stops failing trips the gate.
-BOARD07_MASK_NETS = (
-    "+1V8",
-    "A0",
-    "A2",
-    "A3",
-    "A5",
-    "A7",
-    "DM0",
-    "DQ0",
-    "DQ1",
-    "DQ2",
-    "DQ3",
-    "DQ4",
-    "DQ5",
-    "DQ6",
-    "DQ7",
-    "GND",
-    "MIPI_CLK_P",
-    "TMDS_D2_N",
-    "TMDS_D2_P",
-)
+# The complete four-layer recipe clears the last nine mask net signatures (#9892).
+BOARD07_MASK_NETS: tuple[str, ...] = ()
 
 # #9124 drained the PCIE_RX+ face-aligned corner wedge (a tangent via seat)
 # alongside board 07's six; #9208 drained the USB2_D- annulus-vs-own-net-TRACE
 # slit (via re-seated 0.1 mm further out, C++ own-net-trace band check).
-# The #9019 taper repair cleared the U4.1 MIPI_CLK+ gap. The two remaining
-# GND gaps share one identity in the seed-42 allowance.
-BOARD06_GAP_NETS = ("GND",)
+# #9019 cleared the MIPI_CLK+ taper and #9846 cleared the GND stitch stubs.
+BOARD06_GAP_NETS: tuple[str, ...] = ()
 
-# Issue #8858 (measured 2026-11-18, pinned image, seed-42 regen at main
-# 304c70e2c): every ``mask_to_copper`` error net signature the regeneration
-# carries.  Two independent regenerations reproduced all 22 signatures and
-# their per-net counts exactly (200 findings: 122 same-net pass-throughs,
-# 78 same-net own-pad entries).  The committed allowance must list exactly
-# these; a net that starts failing or stops failing trips the gate.
-BOARD06_MASK_NETS = (
-    "+1V2",
-    "+3V3",
-    "GND",
-    "MIPI_CLK+",
-    "MIPI_CLK-",
-    "MIPI_D0+",
-    "MIPI_D0-",
-    "MIPI_RST",
-    "PCIE_RX+",
-    "PCIE_RX-",
-    "PCIE_TX+",
-    "PCIE_TX-",
-    "USB2_D+",
-    "USB2_D-",
-    "USB3_RX1+",
-    "USB3_RX1-",
-    "USB3_RX2+",
-    "USB3_RX2-",
-    "USB3_TX1-",
-    "USB3_TX2+",
-    "USB_CC1",
-    "USB_CC2",
-)
+# The seed-42 recipe clears all 22 former mask identities (#8858).
+BOARD06_MASK_NETS: tuple[str, ...] = ()
 
 
 def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
@@ -207,13 +154,7 @@ def mask_allowance(nets: tuple[str, ...]) -> dict:
 
 
 def test_board07_committed_allowance():
-    """Issue #9124's tangent-seat rejection drained the last six fab-view
-    ``physical_copper_gap`` entries (the re-sited gateway fan vias'
-    tangency wedges), and issue #8858's board 07 increment added the
-    seed-42 regen's ``mask_to_copper`` net signatures (net-signature keyed
-    -- the board is regenerated each CI run, so the mask rule's
-    opening/conductor UUID items are ephemeral): board 07's allowance
-    holds exactly those 19 mask nets."""
+    """Every mask and copper-gap error on the repaired fixture must block."""
     gate = load("check_matchgroup_coverage")
     expected = fab_gap_allowance(BOARD07_GAP_NETS)
     expected.update(mask_allowance(BOARD07_MASK_NETS))
@@ -354,16 +295,8 @@ def with_board06_synthetic(gate):
 
 
 def test_board06_committed_allowance():
-    """Issue #7548 emptied the skew entry: board 06's allowance holds the
-    #8957 fab-view ``physical_copper_gap`` nets plus, since issue #8858, the
-    seed-42 regen's ``mask_to_copper`` net signatures (both net-signature
-    keyed -- the board is regenerated each CI run, so geometry-keyed
-    identities are ephemeral: the gap rule's items are via/track refs and
-    the mask rule's items are opening/conductor UUIDs).  #9124's
-    tangent-seat rejection drained the PCIE_RX+ face-aligned corner wedge
-    and #9208's C++ own-net-trace slit refusal drained the USB2_D-
-    trace-population finding (both entries deleted; see the allowance
-    comment in check_diffpair_coverage.py)."""
+    """Board 06 permits its measured mask identities. The skew (#7548) and
+    physical gap (#9019, #9846) populations have drained."""
     gate = load("check_diffpair_coverage")
     expected = fab_gap_allowance(BOARD06_GAP_NETS)
     expected.update(mask_allowance(BOARD06_MASK_NETS))
@@ -542,24 +475,152 @@ def test_board06_measured_mask_population_passes_and_drains():
     stops exposing goes stale and forces its entry out."""
     gate = load("check_diffpair_coverage")
     found = [mask_violation(net) for net in BOARD06_MASK_NETS]
-    # The #8957 slit population fires alongside the mask findings.
     found += [gap_violation((net,)) for net in BOARD06_GAP_NETS]
     ids = identities_of(found)
     assert gate.unexpected_baseline_errors(BOARD06_KEY, rule_counts(found), ids) == {}
     assert gate.unallowed_blocking(BOARD06_KEY, found) == []
     assert gate.stale_allowances(BOARD06_KEY, ids) == []
-    recurring_gap = found + [gap_violation(("MIPI_CLK+",))]
-    assert gate.unallowed_blocking(BOARD06_KEY, recurring_gap) == [
-        ("physical_copper_gap", "MIPI_CLK+")
-    ]
-    regressed = found + [mask_violation("ADDR_BUS")]
-    assert gate.unallowed_blocking(BOARD06_KEY, regressed) == [("mask_to_copper", "ADDR_BUS")]
-    last_mask_net = BOARD06_MASK_NETS[-1]
-    drained = [
-        v for v in found if not (v["rule_id"] == "mask_to_copper" and v["nets"] == [last_mask_net])
-    ]
-    stale = gate.stale_allowances(BOARD06_KEY, identities_of(drained))
-    assert stale == [("mask_to_copper", last_mask_net, 8858)]
+    for net in ("GND", "MIPI_CLK+"):
+        recurring_gap = found + [gap_violation((net,))]
+        assert gate.unallowed_blocking(BOARD06_KEY, recurring_gap) == [("physical_copper_gap", net)]
+    for net in (
+        "ADDR_BUS",
+        "MIPI_RST",
+        "USB_CC1",
+        "USB_CC2",
+        "PCIE_TX+",
+        "PCIE_TX-",
+        "PCIE_RX+",
+        "PCIE_RX-",
+        "USB2_D+",
+        "USB2_D-",
+        "USB3_TX2+",
+        "USB3_RX1+",
+        "USB3_RX1-",
+    ):
+        regressed = found + [mask_violation(net)]
+        assert gate.unallowed_blocking(BOARD06_KEY, regressed) == [("mask_to_copper", net)]
+    # Reinstall the retired RX1 identity on this isolated gate to exercise
+    # stale detection even after every real allowance has been removed.
+    retired = ("mask_to_copper", "USB3_RX1+")
+    gate.DIFFPAIR_ALLOWANCES[BOARD06_KEY][retired] = 8858
+    assert gate.stale_allowances(BOARD06_KEY, ids) == [(*retired, 8858)]
+
+
+def test_board06_unmodified_clock_exits_are_rejected():
+    """Issue #10083: the clock exits' two allowances are gone, so a fixture that
+    still carries the original 11 clock findings (5 on MIPI_CLK+, 6 on
+    MIPI_CLK-) fails the committed gate, while the repaired fixture passes."""
+    gate = load("check_diffpair_coverage")
+    assert not {
+        (rule, net)
+        for rule, net in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+        if net.startswith("MIPI_CLK")
+    }
+    repaired = [mask_violation(net) for net in BOARD06_MASK_NETS]
+    assert gate.unallowed_blocking(BOARD06_KEY, repaired) == []
+    unmodified = repaired + [mask_violation("MIPI_CLK+")] * 5 + [mask_violation("MIPI_CLK-")] * 6
+    assert sorted(gate.unallowed_blocking(BOARD06_KEY, unmodified)) == sorted(
+        [("mask_to_copper", "MIPI_CLK+")] * 5 + [("mask_to_copper", "MIPI_CLK-")] * 6
+    )
+    assert gate.unexpected_baseline_errors(
+        BOARD06_KEY, rule_counts(unmodified), identities_of(unmodified)
+    ) == {"mask_to_copper": 2}  # the two newly unallowed net identities
+
+
+def test_board06_tx1_mask_findings_fail_the_fixture_gate():
+    gate = load("check_diffpair_coverage")
+    assert ("mask_to_copper", "USB3_TX1-") not in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+    others = [mask_violation(net) for net in BOARD06_MASK_NETS]
+    assert gate.unallowed_blocking(BOARD06_KEY, others) == []
+    both_exits = [mask_violation("USB3_TX1-")] * 4
+    assert (
+        gate.unallowed_blocking(BOARD06_KEY, others + both_exits)
+        == [("mask_to_copper", "USB3_TX1-")] * 4
+    )
+
+
+def test_board06_unmodified_ground_entry_is_rejected():
+    """Issue #9891: the U1.32 ground entry's GND allowance is gone, so a fixture
+    that still carries the original two GND findings fails the committed gate
+    on exactly those two errors, while the repaired fixture passes."""
+    gate = load("check_diffpair_coverage")
+    assert not {
+        (rule, net)
+        for rule, net in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+        if net == "GND" and rule == "mask_to_copper"
+    }
+    repaired = [mask_violation(net) for net in BOARD06_MASK_NETS]
+    assert gate.unallowed_blocking(BOARD06_KEY, repaired) == []
+    unmodified = repaired + [mask_violation("GND")] * 2
+    assert sorted(gate.unallowed_blocking(BOARD06_KEY, unmodified)) == sorted(
+        [("mask_to_copper", "GND")] * 2
+    )
+    assert gate.unexpected_baseline_errors(
+        BOARD06_KEY, rule_counts(unmodified), identities_of(unmodified)
+    ) == {"mask_to_copper": 1}  # the one newly unallowed net identity
+
+
+def test_board06_unmodified_data_exits_are_rejected():
+    """Issue #10113: the data exits' two allowances are gone, so a fixture that
+    still carries the original six data findings (2 on MIPI_D0+, 4 on
+    MIPI_D0-) fails the committed gate on exactly those six errors, while the
+    repaired fixture passes."""
+    gate = load("check_diffpair_coverage")
+    assert not {
+        (rule, net)
+        for rule, net in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+        if net.startswith("MIPI_D0")
+    }
+    repaired = [mask_violation(net) for net in BOARD06_MASK_NETS]
+    assert gate.unallowed_blocking(BOARD06_KEY, repaired) == []
+    unmodified = repaired + [mask_violation("MIPI_D0+")] * 2 + [mask_violation("MIPI_D0-")] * 4
+    assert sorted(gate.unallowed_blocking(BOARD06_KEY, unmodified)) == sorted(
+        [("mask_to_copper", "MIPI_D0+")] * 2 + [("mask_to_copper", "MIPI_D0-")] * 4
+    )
+    assert gate.unexpected_baseline_errors(
+        BOARD06_KEY, rule_counts(unmodified), identities_of(unmodified)
+    ) == {"mask_to_copper": 2}  # the two newly unallowed net identities
+
+
+def test_board06_rejects_six_returning_power_mask_findings():
+    gate = load("check_diffpair_coverage")
+    repaired = [mask_violation(net) for net in BOARD06_MASK_NETS]
+    assert gate.unallowed_blocking(BOARD06_KEY, repaired) == []
+    power = [net for net in ("+3V3", "+1V2") for _ in range(3)]
+    original = repaired + [mask_violation(net) for net in power]
+    assert sorted(gate.unallowed_blocking(BOARD06_KEY, original)) == sorted(
+        ("mask_to_copper", net) for net in power
+    )
+
+
+@pytest.mark.parametrize(
+    ("module", "key", "former_silk", "mask_nets"),
+    [
+        ("check_diffpair_coverage", BOARD06_KEY, FORMER_BOARD06_SILK, BOARD06_MASK_NETS),
+        ("check_matchgroup_coverage", BOARD07_KEY, FORMER_BOARD07_SILK, BOARD07_MASK_NETS),
+    ],
+)
+def test_repaired_silk_finding_is_rejected_if_it_returns(module, key, former_silk, mask_nets):
+    gate = load(module)
+    baseline = [mask_violation(net) for net in mask_nets]
+    assert gate.stale_allowances(key, identities_of(baseline)) == []
+    assert gate.unallowed_blocking(key, baseline) == []
+
+    for rule, item in former_silk:
+        found = [*baseline, violation(rule, item)]
+        assert gate.unallowed_blocking(key, found) == [(rule, item)]
+        assert gate.unexpected_baseline_errors(key, rule_counts(found), identities_of(found)) == {
+            rule: 1
+        }
+
+
+@pytest.mark.parametrize(
+    "net", ["A0", "A2", "A3", "A5", "A7", "GND", "MIPI_CLK_P", "TMDS_D2_N", "TMDS_D2_P"]
+)
+def test_board07_repaired_mask_exit_blocks_if_it_returns(net):
+    gate = load("check_matchgroup_coverage")
+    assert gate.unallowed_blocking(BOARD07_KEY, [mask_violation(net)]) == [("mask_to_copper", net)]
 
 
 def test_regenerated_population_passes_and_a_new_net_fails():
@@ -620,13 +681,7 @@ def _stub_matchgroup(
 
 class TestBoard07CheckBoard:
     def test_clean_reroute_passes_on_the_committed_allowance(self, monkeypatch, tmp_path, capsys):
-        """Issue #5333: the measured ``--differential-pairs`` re-route has no
-        blocking finding beyond the committed allowance's entries, and every
-        committed entry fires, so nothing is stale.  #8858: the committed
-        entries carry two rule_ids now (the drained fab-gap set and the
-        ``mask_to_copper`` net signatures), so the synthetic measurements
-        reuse each entry's own rule_id -- an entry judged under the wrong
-        rule reads unallowed."""
+        """The complete fixture has zero blocking findings and no stale allowances."""
         gate = load("check_matchgroup_coverage")
         found = [
             violation(rule, net) for rule, net in sorted(gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS)

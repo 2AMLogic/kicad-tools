@@ -3,13 +3,16 @@
 Covers _parse_reference(), _extract_symbols_from_text(),
 _apply_reference_rename(), run_re_annotate() with dry-run,
 backup, prefix filtering, start-from, per-sheet mode,
-multi-unit components, power symbol exclusion, and
-hierarchical schematic traversal.
+multi-unit components, power symbol exclusion, hierarchical
+schematic traversal, and the read-only --check order report.
 """
 
 import json
 from pathlib import Path
 
+import pytest
+
+from kicad_tools.cli import main as kct
 from kicad_tools.cli.sch_re_annotate import (
     _add_project_instance,
     _apply_reference_rename,
@@ -20,6 +23,7 @@ from kicad_tools.cli.sch_re_annotate import (
     _extract_symbols_from_text,
     _format_reference,
     _parse_reference,
+    main,
     run_re_annotate,
 )
 
@@ -435,6 +439,265 @@ SEQUENTIAL_SCHEMATIC = """\
 \t)
 )
 """
+
+# Schematic whose reference order disagrees with position order:
+# the top resistor is R2 and the bottom one is R1.
+SWAPPED_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R2"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R2") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 80 0)
+\t\t(property "Reference" "R1"
+\t\t\t(at 100 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 84 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R1") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+# Resistors in position order, capacitors swapped: for --prefix filter tests.
+RC_MIXED_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R1"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R1") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 80 0)
+\t\t(property "Reference" "R2"
+\t\t\t(at 100 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 84 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R2") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:C")
+\t\t(at 120 50 0)
+\t\t(property "Reference" "C2"
+\t\t\t(at 120 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "100nF"
+\t\t\t(at 120 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 120 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "33333333-3333-3333-3333-333333333333")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "C2") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:C")
+\t\t(at 120 80 0)
+\t\t(property "Reference" "C1"
+\t\t\t(at 120 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "1uF"
+\t\t\t(at 120 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 120 84 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "55555555-5555-5555-5555-555555555555")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "C1") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+# Multi-unit symbols: U2 (units A and B) sits above U1, so the component
+# numbers rank opposite to their positions.
+MULTI_UNIT_SWAPPED_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "U2A"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "U2A") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 60 0)
+\t\t(property "Reference" "U2B"
+\t\t\t(at 100 58 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 62 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 64 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "U2B") (unit 2))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 80 0)
+\t\t(property "Reference" "U1A"
+\t\t\t(at 100 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 84 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "33333333-3333-3333-3333-333333333333")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "U1A") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+# Multi-unit symbols sharing one base number: never an order disagreement.
+MULTI_UNIT_SAME_BASE_SCHEMATIC = MULTI_UNIT_SWAPPED_SCHEMATIC.replace("U2A", "U1A").replace(
+    "U2B", "U1B"
+)
+
+# Child sheet whose single resistor is numbered below the parent's, so the
+# continuous numbering order disagrees while per-sheet numbering agrees.
+CHILD_LOW_NUMBER_SCHEMATIC = CHILD_SCHEMATIC.replace('"R14"', '"R1"').replace(
+    '(reference "R14")', '(reference "R1")'
+)
 
 
 # Schematic with unannotated components (multi-project scenario)
@@ -916,6 +1179,303 @@ class TestRunReAnnotate:
         assert '"Reference" "R2"' in text
         assert '"Reference" "R5"' not in text
         assert '"Reference" "R10"' not in text
+
+
+def _series_partners(*, crossed=True, names=("SER_A", "SER_B")):
+    """Keep both rows in the same position order. Only the connections change."""
+    from kicad_tools.schematic.models import Schematic
+
+    sch = Schematic.load(str(Path(__file__).parent / "fixtures/electrical_rating/leds.kicad_sch"))
+    sch.symbols = [s for s in sch.symbols if s.reference in {"D1", "D2", "R1", "R2"}]
+    sch.labels.clear()
+    for sym in sch.symbols:
+        is_led = sym.reference.startswith("D")
+        if is_led:
+            sym.y += 15
+        pin = sym.pin_position("1" if is_led else "2")
+        end = (pin[0], round(pin[1] + (-2.54 if is_led else 2.54), 2))
+        sch.add_wire(pin, end, snap=False)
+        column = int(sym.reference[1:]) - 1
+        name = names[1 - column if is_led and crossed else column]
+        sch.add_label(name, *end, snap=False)
+    return sch
+
+
+class TestPartnerOrder:
+    def test_crossed_report_names_both_pairs_and_preserves_input(self, tmp_path, capsys):
+        path = tmp_path / "pair.kicad_sch"
+        _series_partners().write(path)
+        before = path.read_bytes()
+        assert main([str(path), "--check", "--format", "json"]) == 1
+        report = json.loads(capsys.readouterr().out)
+        assert report["out_of_order"] == []
+        assert report["total"] == 2
+        assert [(p["parts"], p["net"]) for p in report["partner_inversions"]] == [
+            (["D1", "R2"], "SER_B"),
+            (["D2", "R1"], "SER_A"),
+        ]
+        assert main([str(path), "--check", "--backup"]) == 1
+        out = capsys.readouterr().out
+        assert "D1/R2" in out and "D2/R1" in out
+        assert "power" in out.lower() and "shared" in out and "multiple" in out
+        assert path.read_bytes() == before
+        assert list(tmp_path.iterdir()) == [path]
+
+    def test_aligned_pairs_are_clean(self, tmp_path, capsys):
+        path = tmp_path / "pair.kicad_sch"
+        _series_partners(crossed=False).write(path)
+        assert main([str(path), "--check", "--format", "json"]) == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["total"] == 0
+        assert report["partner_inversions"] == []
+
+    @pytest.mark.parametrize("args", [["--prefix", "R"], ["--unannotated-only"]])
+    def test_filters_exclude_partner_comparison(self, tmp_path, capsys, args):
+        path = tmp_path / "pair.kicad_sch"
+        _series_partners().write(path)
+        assert main([str(path), "--check", "--format", "json", *args]) == 0
+        assert json.loads(capsys.readouterr().out) == {
+            "check": True,
+            "out_of_order": [],
+            "total": 0,
+        }
+
+    @pytest.mark.parametrize("net", ["GND", "+5V"])
+    def test_named_rails_do_not_establish_partners(self, tmp_path, capsys, net):
+        path = tmp_path / "pair.kicad_sch"
+        _series_partners(names=(net, "SER_B")).write(path)
+        assert main([str(path), "--check", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["total"] == 0
+
+    def test_power_flag_on_two_pin_net(self, tmp_path, capsys):
+        from kicad_tools.operations.netlist import build_netlist_from_schematic
+        from kicad_tools.schematic.models.elements import PowerSymbol
+
+        path = tmp_path / "pair.kicad_sch"
+        sch = _series_partners()
+        label = next(label for label in sch.labels if label.text == "SER_A")
+        sch.power_symbols.append(
+            PowerSymbol("power:PWR_FLAG", label.x, label.y, reference="#FLG01")
+        )
+        sch.write(path)
+        # The ordinary netlist still contains just the two component pins.
+        nets = build_netlist_from_schematic(path).nets
+        assert {n.reference for n in next(n for n in nets if n.name == "SER_A").nodes} == {
+            "D2",
+            "R1",
+        }
+        assert main([str(path), "--check", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["total"] == 0
+
+    def test_supply_input_on_signal_named_net(self, tmp_path, capsys):
+        path = tmp_path / "pair.kicad_sch"
+        _series_partners().write(path)
+        # Both test LEDs have this facing pin. Only its electrical type changes.
+        marker = '(pin passive line (at 0 3.81 270) (length 1.27) (name "K")'
+        text = path.read_text()
+        assert marker in text
+        path.write_text(text.replace(marker, marker.replace("passive", "power_in")))
+        assert main([str(path), "--check", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["total"] == 0
+
+    def test_shared_net_is_skipped(self, tmp_path, capsys):
+        path = tmp_path / "pair.kicad_sch"
+        sch = _series_partners()
+        r2 = next(sym for sym in sch.symbols if sym.reference == "R2")
+        sch.add_label("SER_A", *r2.pin_position("1"), snap=False, validate_connection=False)
+        sch.write(path)
+        assert main([str(path), "--check", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["total"] == 0
+
+    def test_second_candidate_excluded_even_if_filtered_out(self, tmp_path, capsys):
+        path = tmp_path / "pair.kicad_sch"
+        sch = _series_partners()
+        r2 = next(sym for sym in sch.symbols if sym.reference == "R2")
+        thermistor = sch.add_symbol("Device:R", 140, 50, ref="RT1", value="NTC")
+        for pin in (r2.pin_position("1"), thermistor.pin_position("1")):
+            sch.add_label("EXTRA", *pin, snap=False, validate_connection=False)
+        sch.write(path)
+        assert main([str(path), "--check", "--prefix", "D,R", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["total"] == 0
+
+    @pytest.mark.parametrize("separate_unit", [False, True])
+    def test_unwired_third_pin_disqualifies_a_part(self, tmp_path, capsys, separate_unit):
+        path = tmp_path / "pair.kicad_sch"
+        _series_partners().write(path)
+        # The package still has a third pin if it belongs to an unplaced unit.
+        extra_pin = '(pin passive line (at 3.81 0 180) (length 1.27) (name "NC") (number "3"))'
+        marker = '(symbol "LED_1_1"'
+        definition = (
+            f'(symbol "LED_2_1" {extra_pin}) {marker}' if separate_unit else f"{marker} {extra_pin}"
+        )
+        text = path.read_text().replace(marker, definition)
+        path.write_text(text)
+        assert main([str(path), "--check", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out) == {
+            "check": True,
+            "out_of_order": [],
+            "total": 0,
+        }
+
+    def test_per_sheet_compares_only_pairs_on_the_same_sheet(self, tmp_path, capsys):
+        from kicad_tools.sexp import parse_string
+
+        parent = tmp_path / "parent.kicad_sch"
+        child = tmp_path / "sub.kicad_sch"
+        for path, keep in [(parent, {"D1", "R2"}), (child, {"D2", "R1"})]:
+            sch = _series_partners()
+            sch.symbols = [sym for sym in sch.symbols if sym.reference in keep]
+            sch.write(path)
+        root = parse_string(parent.read_text())
+        root.append(parse_string(PARENT_SCHEMATIC).get("sheet"))
+        parent.write_text(root.to_string())
+        inputs = {path: path.read_bytes() for path in (parent, child)}
+        for args, expected in [([], 2), (["--per-sheet"], 0)]:
+            assert main([str(parent), "--check", "--format", "json", *args]) == int(expected > 0)
+            report = json.loads(capsys.readouterr().out)
+            assert len(report["partner_inversions"]) == expected
+        assert {path: path.read_bytes() for path in inputs} == inputs
+
+
+class TestCheckMode:
+    def test_existing_positional_check_argument_keeps_the_schematic_read_only(
+        self, tmp_path, capsys
+    ):
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        before = sch.read_bytes()
+
+        assert run_re_annotate(sch, False, False, ["R"], 1, False, "json", False, False, True) == 0
+
+        report = json.loads(capsys.readouterr().out)
+        assert report["check"] is True and report["out_of_order"] == []
+        assert sch.read_bytes() == before
+
+    def test_check_swapped_exits_nonzero_and_lists_mapping(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, SWAPPED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 1
+        out = capsys.readouterr().out
+        assert "R2 -> R1" in out
+        assert "R1 -> R2" in out
+        assert "R:" in out
+
+    def test_check_never_modifies_files(self, tmp_path):
+        sch = _write_sch(tmp_path, SWAPPED_SCHEMATIC)
+        original = sch.read_text()
+        ret = run_re_annotate(schematic_path=sch, backup=True, check=True)
+        assert ret == 1
+        assert sch.read_text() == original
+        # --check never writes backups either
+        assert list(tmp_path.glob("*_backup_*")) == []
+
+    def test_check_ordered_exits_zero(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, SEQUENTIAL_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 0
+        assert "agree" in capsys.readouterr().out
+
+    def test_check_gaps_are_not_order_disagreements(self, tmp_path, capsys):
+        """R1, R5 in position order: a gap, but the order agrees."""
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 0
+        assert capsys.readouterr().out.strip() == (
+            "All reference numbers agree with schematic position order."
+        )
+
+    def test_check_prefix_filter_agreeing_prefix(self, tmp_path):
+        sch = _write_sch(tmp_path, RC_MIXED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, prefixes=["R"], check=True)
+        assert ret == 0
+
+    def test_check_prefix_filter_swapped_prefix(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, RC_MIXED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, prefixes=["C"], check=True)
+        assert ret == 1
+        out = capsys.readouterr().out
+        assert "C2 -> C1" in out
+        assert "C1 -> C2" in out
+        # The agreeing R prefix is filtered out
+        assert "R2 ->" not in out
+
+    def test_check_json_output(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, SWAPPED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, format="json", check=True)
+        assert ret == 1
+        data = json.loads(capsys.readouterr().out)
+        assert data["check"] is True
+        assert data["total"] == 2
+        entries = data["out_of_order"]
+        assert {e["old"] for e in entries} == {"R1", "R2"}
+        for e in entries:
+            assert e["prefix"] == "R"
+            assert e["uuid"]
+            assert e["new"] in ("R1", "R2")
+            assert e["old"] != e["new"]
+
+    def test_check_json_clean_outputs_document(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, SEQUENTIAL_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, format="json", check=True)
+        assert ret == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data == {"check": True, "out_of_order": [], "total": 0}
+
+    def test_check_continuous_mode_spans_sheets(self, tmp_path, capsys):
+        parent = tmp_path / "parent.kicad_sch"
+        parent.write_text(PARENT_SCHEMATIC)
+        child = tmp_path / "sub.kicad_sch"
+        child.write_text(CHILD_LOW_NUMBER_SCHEMATIC)
+        # Continuous: R order is R3, R7 (parent) then R1 (child) -> inverted
+        ret = run_re_annotate(schematic_path=parent, backup=False, check=True)
+        assert ret == 1
+        out = capsys.readouterr().out
+        assert "R1 -> R3" in out
+
+    def test_check_per_sheet_scopes_each_sheet(self, tmp_path):
+        parent = tmp_path / "parent.kicad_sch"
+        parent.write_text(PARENT_SCHEMATIC)
+        child = tmp_path / "sub.kicad_sch"
+        child.write_text(CHILD_LOW_NUMBER_SCHEMATIC)
+        # Per-sheet: parent R3,R7 and child R1 each agree within their sheet
+        ret = run_re_annotate(schematic_path=parent, backup=False, per_sheet=True, check=True)
+        assert ret == 0
+
+    def test_check_unannotated_excluded(self, tmp_path):
+        """R? has no number to rank, so it cannot disagree."""
+        sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
+        original = sch.read_text()
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 0
+        assert sch.read_text() == original
+
+    def test_check_multi_unit_swapped(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, MULTI_UNIT_SWAPPED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 1
+        out = capsys.readouterr().out
+        assert "U2A -> U1A" in out
+        assert "U2B -> U1B" in out
+        assert "U1A -> U2A" in out
+
+    def test_check_multi_unit_same_base_agrees(self, tmp_path):
+        sch = _write_sch(tmp_path, MULTI_UNIT_SAME_BASE_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 0
+
+    def test_check_power_symbols_excluded(self, tmp_path):
+        sch = _write_sch(tmp_path, POWER_SCHEMATIC)
+        original = sch.read_text()
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 0
+        assert sch.read_text() == original
+
+    def test_main_check_flag(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, SWAPPED_SCHEMATIC)
+        ret = main(["--check", str(sch)])
+        assert ret == 1
+        assert "R2 -> R1" in capsys.readouterr().out
+        ordered = _write_sch(tmp_path, SEQUENTIAL_SCHEMATIC, name="ordered.kicad_sch")
+        assert main(["--check", str(ordered)]) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -2066,3 +2626,715 @@ class TestIncludePower:
         # Power symbols remain unannotated
         assert '"Reference" "#PWR?"' in text
         assert '"Reference" "#FLG?"' in text
+
+
+# ---------------------------------------------------------------------------
+# --pcb board sync
+# ---------------------------------------------------------------------------
+
+
+def _pcb_footprint(ref: str, uuid: str) -> str:
+    return (
+        '  (footprint "Resistor_SMD:R_0402"\n'
+        '    (layer "F.Cu")\n'
+        f'    (uuid "{uuid}")\n'
+        "    (at 100 100)\n"
+        f'    (property "Reference" "{ref}" (at 0 -1.5 0) (layer "F.SilkS"))\n'
+        '    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))\n'
+        '    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))\n'
+        '    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))\n'
+        "  )\n"
+    )
+
+
+def _make_pcb(refs: list[str]) -> str:
+    body = "".join(_pcb_footprint(ref, f"fp-{ref.lower()}") for ref in refs)
+    return (
+        "(kicad_pcb\n"
+        "  (version 20240108)\n"
+        '  (generator "test")\n'
+        "  (layers\n"
+        '    (0 "F.Cu" signal)\n'
+        '    (31 "B.Cu" signal)\n'
+        "  )\n"
+        '  (net 0 "")\n'
+        '  (net 1 "GND")\n'
+        f"{body})\n"
+    )
+
+
+def _write_pcb(
+    tmp_path: Path,
+    content: str,
+    name: str = "test.kicad_pcb",
+) -> Path:
+    p = tmp_path / name
+    p.write_text(content)
+    return p
+
+
+def _board_refs(path: Path) -> set[str]:
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(path)
+    return {fp.reference for fp in pcb.footprints}
+
+
+# Schematic whose symbols sort to R3 (y=50), R8 (y=80), R10 (y=110):
+# mapping R3->R1, R8->R2, R10->R3 (R10->R3 chains onto R3->R1).
+CHAIN_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R3"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R3") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 80 0)
+\t\t(property "Reference" "R8"
+\t\t\t(at 100 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R8") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 110 0)
+\t\t(property "Reference" "R10"
+\t\t\t(at 100 108 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "1k"
+\t\t\t(at 100 112 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(uuid "33333333-3333-3333-3333-333333333333")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R10") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+# Multi-unit: U2A (y=50), U2B (y=80), U5A (y=110) -> U1A, U1B, U2A.
+# Board carries base refs U2, U5 -> U1, U2 (a collision chain).
+MULTI_UNIT_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:OpAmp")
+\t\t(at 100 50 0)
+\t\t(unit 1)
+\t\t(property "Reference" "U2A"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "half1"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "U2A") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:OpAmp")
+\t\t(at 100 80 0)
+\t\t(unit 2)
+\t\t(property "Reference" "U2B"
+\t\t\t(at 100 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "half2"
+\t\t\t(at 100 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "U2B") (unit 2))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:OpAmp")
+\t\t(at 100 110 0)
+\t\t(unit 1)
+\t\t(property "Reference" "U5A"
+\t\t\t(at 100 108 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "other"
+\t\t\t(at 100 112 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(uuid "33333333-3333-3333-3333-333333333333")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "U5A") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+# KiCad stores each gate's unit number separately from the package reference.
+NATIVE_UNIT_SCHEMATIC = (
+    MULTI_UNIT_SCHEMATIC.replace('"U2A"', '"U2"').replace('"U2B"', '"U2"').replace('"U5A"', '"U5"')
+)
+
+
+class TestPcbSync:
+    @pytest.mark.parametrize("paired", [True, False], ids=["paired", "schematic"])
+    @pytest.mark.parametrize("scope", [[], ["--per-sheet"]], ids=["continuous", "per-sheet"])
+    def test_native_units_share_one_reference(self, tmp_path, capsys, paired, scope):
+        sch = _write_sch(tmp_path, NATIVE_UNIT_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["U2", "U5"]))
+        args = [
+            "sch",
+            "re-annotate",
+            str(sch),
+            *(["--pcb", str(pcb)] if paired else []),
+            *scope,
+            "--start-from",
+            "81",
+            "--format",
+            "json",
+        ]
+        before = sch.read_bytes(), pcb.read_bytes()
+        assert kct([*args, "--dry-run"]) == 0
+        preview = json.loads(capsys.readouterr().out)
+        assert (sch.read_bytes(), pcb.read_bytes()) == before
+        assert kct(args) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert [(m["old"], m["new"]) for m in result["mappings"]] == [
+            ("U2", "U81"),
+            ("U2", "U81"),
+            ("U5", "U82"),
+        ]
+        assert preview["mappings"] == result["mappings"]
+        if paired:
+            assert result["pcb"] == {"path": str(pcb), "renamed": 2, "warnings": []}
+            assert _board_refs(pcb) == {"U81", "U82"}
+        else:
+            assert "pcb" not in result
+            assert pcb.read_bytes() == before[1]
+        assert sch.read_text().count('(property "Reference" "U81"') == 2
+        assert sch.read_text().count('(reference "U81")') == 2
+
+    def test_schematic_only_suffixed_units_keep_their_numeric_group(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, MULTI_UNIT_SCHEMATIC.replace('"U2A"', '"U02A"'))
+        assert kct(["sch", "re-annotate", str(sch), "--start-from", "81", "--format", "json"]) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert [m["new"] for m in result["mappings"]] == ["U81A", "U81B", "U82A"]
+
+    def test_padded_source_is_distinct_from_unpadded_footprint(self, tmp_path, capsys):
+        from kicad_tools.schema.pcb import PCB
+
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC.replace('"R5"', '"R01"'))
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R01", "C3"]))
+        args = [
+            "sch",
+            "re-annotate",
+            str(sch),
+            "--pcb",
+            str(pcb),
+            "--prefix",
+            "R",
+            "--start-from",
+            "81",
+            "--format",
+            "json",
+        ]
+        assert kct(args) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result["pcb"] == {"path": str(pcb), "renamed": 2, "warnings": []}
+        assert {fp.uuid: fp.reference for fp in PCB.load(pcb).footprints} == {
+            "fp-r1": "R81",
+            "fp-r01": "R82",
+            "fp-c3": "C3",
+        }
+        assert all(f'(property "Reference" "{ref}"' in sch.read_text() for ref in ("R81", "R82"))
+
+    @pytest.mark.parametrize(
+        ("old", "new"), [("(unit 2)", "(unit 1)"), ("Device:OpAmp", "Device:Other")]
+    )
+    def test_ambiguous_native_package_is_refused_before_backup(self, tmp_path, capsys, old, new):
+        sch = _write_sch(tmp_path, NATIVE_UNIT_SCHEMATIC.replace(old, new, 1))
+        pcb = _write_pcb(tmp_path, _make_pcb(["U2", "U5"]))
+        before = {p: p.read_bytes() for p in tmp_path.iterdir()}
+        assert kct(["sch", "re-annotate", str(sch), "--pcb", str(pcb), "--backup"]) == 1
+        assert "Ambiguous schematic reference 'U2'" in capsys.readouterr().err
+        assert {p: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+    @pytest.mark.parametrize("paired", [True, False], ids=["paired", "schematic"])
+    def test_units_on_different_sheets_cannot_split_one_package(self, tmp_path, capsys, paired):
+        parent = PARENT_SCHEMATIC.replace('"R3"', '"U9"').replace('"R7"', '"U1"')
+        child = (
+            CHILD_SCHEMATIC.replace('"R14"', '"U1"')
+            .replace('(property "Reference" "U1"', '(unit 2)\n\t\t(property "Reference" "U1"')
+            .replace('(reference "U1") (unit 1)', '(reference "U1") (unit 2)')
+        )
+        sch = _write_sch(tmp_path, parent.replace("Device:R", "Device:OpAmp"))
+        sub = _write_sch(tmp_path, child.replace("Device:R", "Device:OpAmp"), "sub.kicad_sch")
+        pcb = _write_pcb(tmp_path, _make_pcb(["U9", "U1", "C5"]))
+        before = {p: p.read_bytes() for p in tmp_path.iterdir()}
+        args = ["sch", "re-annotate", str(sch), "--prefix", "U"]
+        if paired:
+            args += ["--pcb", str(pcb)]
+        assert kct([*args, "--per-sheet", "--backup"]) == 1
+        assert "Units of 'U1' would receive different references" in capsys.readouterr().err
+        assert {p: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+        assert kct(args) == 0
+        assert '(property "Reference" "U2"' in sch.read_text()
+        assert '(property "Reference" "U2"' in sub.read_text()
+        if paired:
+            assert _board_refs(pcb) == {"U1", "U2", "C5"}
+        else:
+            assert pcb.read_bytes() == before[pcb]
+
+    def test_board_references_match_renamed_schematic(self, tmp_path):
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        assert ret == 0
+
+        # Schematic: R1, R5 -> R1, R2 and C3 -> C1
+        assert _board_refs(pcb) == {"R1", "R2", "C1"}
+        sch_text = sch.read_text()
+        assert '"Reference" "R2"' in sch_text
+        assert '"Reference" "C1"' in sch_text
+
+    def test_collision_chain_applied_safely(self, tmp_path):
+        sch = _write_sch(tmp_path, CHAIN_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R3", "R8", "R10"]))
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        assert ret == 0
+
+        assert _board_refs(pcb) == {"R1", "R2", "R3"}
+        assert "_TEMP_" not in pcb.read_text()
+
+    def test_multi_unit_refs_map_to_board_base_refs(self, tmp_path):
+        sch = _write_sch(tmp_path, MULTI_UNIT_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["U2", "U5"]))
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        assert ret == 0
+
+        assert _board_refs(pcb) == {"U1", "U2"}
+        sch_text = sch.read_text()
+        assert '"Reference" "U1A"' in sch_text
+        assert '"Reference" "U1B"' in sch_text
+        assert '"Reference" "U2A"' in sch_text
+
+    def test_dry_run_leaves_both_files_untouched(self, tmp_path):
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before = sch.read_text()
+        pcb_before = pcb.read_text()
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=True, backup=False, pcb_path=pcb)
+        assert ret == 0
+
+        assert sch.read_text() == sch_before
+        assert pcb.read_text() == pcb_before
+
+    def test_missing_pcb_file_exits_1_schematic_untouched(self, tmp_path):
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        sch_before = sch.read_text()
+
+        ret = run_re_annotate(
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
+            pcb_path=tmp_path / "missing.kicad_pcb",
+        )
+        assert ret == 1
+        assert sch.read_text() == sch_before
+
+    def test_unloadable_pcb_exits_1_before_schematic_write(self, tmp_path):
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        sch_before = sch.read_text()
+        pcb = _write_pcb(tmp_path, "(not a pcb\n")
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        assert ret == 1
+        assert sch.read_text() == sch_before
+
+    @pytest.mark.parametrize("options", [{}, {"dry_run": True}, {"check": True}])
+    def test_invalid_pcb_is_rejected_when_refs_are_already_sequential(
+        self, tmp_path, capsys, options
+    ):
+        sch = _write_sch(tmp_path, SEQUENTIAL_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, "(this-is-not-a-kicad-board)")
+        before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+
+        assert run_re_annotate(sch, pcb_path=pcb, format="json", **options) == 1
+
+        captured = capsys.readouterr()
+        assert str(pcb) in captured.err
+        assert captured.out == ""
+        assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+
+    def test_unannotated_entry_skipped_on_board_with_warning(self, tmp_path, capsys):
+        # UNANNOTATED_SCHEMATIC: R1 stays, R? -> R2 (schematic-only change).
+        sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1"]))
+        pcb_before = pcb.read_text()
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        assert ret == 0
+
+        assert '"Reference" "R2"' in sch.read_text()
+        assert pcb.read_text() == pcb_before
+        captured = capsys.readouterr()
+        assert "R?" in captured.out
+        assert "ambiguous" in captured.out
+
+    def test_board_ref_absent_from_pcb_warns_not_errors(self, tmp_path, capsys):
+        # Board lacks the R5 footprint the schematic renames.
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "C3"]))
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        assert ret == 0
+
+        assert _board_refs(pcb) == {"R1", "C1"}
+        captured = capsys.readouterr()
+        assert "'R5' not found in PCB" in captured.out
+        assert '"Reference" "R2"' in sch.read_text()
+
+    def test_json_output_single_document_with_pcb_section(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+
+        ret = run_re_annotate(
+            schematic_path=sch,
+            dry_run=True,
+            backup=False,
+            format="json",
+            pcb_path=pcb,
+        )
+        assert ret == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["dry_run"] is True
+        assert data["pcb"]["path"] == str(pcb)
+        assert data["pcb"]["renamed"] == 2
+        assert isinstance(data["pcb"]["warnings"], list)
+
+    def test_json_empty_mapping_still_single_document(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, SEQUENTIAL_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "C1"]))
+
+        ret = run_re_annotate(
+            schematic_path=sch,
+            dry_run=True,
+            backup=False,
+            format="json",
+            pcb_path=pcb,
+        )
+        assert ret == 0
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["total"] == 0
+        assert data["pcb"]["renamed"] == 0
+
+    def test_backup_covers_board_too(self, tmp_path):
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=True, pcb_path=pcb)
+        assert ret == 0
+
+        assert list(tmp_path.glob("test_backup_*.kicad_pcb"))
+        assert _board_refs(pcb) == {"R1", "R2", "C1"}
+
+
+class TestPcbPairedWriteSafety:
+    """Issue #10145 review: paired save must be recoverable and collision-free."""
+
+    def test_late_pcb_write_failure_is_recoverable(self, tmp_path, monkeypatch):
+        from kicad_tools.schema.pcb import PCB
+
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before = sch.read_bytes()
+        pcb_before = pcb.read_bytes()
+
+        def boom(self, path):
+            raise OSError("Operation not permitted")
+
+        with monkeypatch.context() as m:
+            m.setattr(PCB, "save", boom)
+            ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        assert ret == 1
+        # Neither file changed, so the identical command can be retried.
+        assert sch.read_bytes() == sch_before
+        assert pcb.read_bytes() == pcb_before
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        assert ret == 0
+        assert _board_refs(pcb) == {"R1", "R2", "C1"}
+        assert '"Reference" "R2"' in sch.read_text()
+
+    def test_schematic_write_failure_rolls_back_board(self, tmp_path, monkeypatch):
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before = sch.read_bytes()
+        pcb_before = pcb.read_bytes()
+
+        real_write_text = Path.write_text
+
+        def fail_sch(self, *a, **kw):
+            if self.suffix == ".kicad_sch":
+                raise OSError("disk full")
+            return real_write_text(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "write_text", fail_sch)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        monkeypatch.undo()
+
+        assert ret == 1
+        assert sch.read_bytes() == sch_before
+        assert pcb.read_bytes() == pcb_before
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        assert ret == 0
+        assert _board_refs(pcb) == {"R1", "R2", "C1"}
+
+    def test_schematic_backup_failure_leaves_both_sources_untouched(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A refused schematic backup must not leave the board renamed."""
+        import kicad_tools.cli.sch_re_annotate as mod
+
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before = sch.read_bytes()
+        pcb_before = pcb.read_bytes()
+
+        real_backup = mod.create_backup
+
+        def refuse_sch_backup(path):
+            if path.suffix == ".kicad_sch":
+                raise PermissionError("read-only directory")
+            return real_backup(path)
+
+        monkeypatch.setattr(mod, "create_backup", refuse_sch_backup)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=True, pcb_path=pcb)
+        monkeypatch.undo()
+
+        assert ret == 1
+        assert "backup" in capsys.readouterr().err.lower()
+        assert sch.read_bytes() == sch_before
+        assert pcb.read_bytes() == pcb_before
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=True, pcb_path=pcb)
+        assert ret == 0
+        assert _board_refs(pcb) == {"R1", "R2", "C1"}
+        assert '"Reference" "R2"' in sch.read_text()
+
+    def test_per_sheet_duplicate_board_targets_rejected_before_write(self, tmp_path, capsys):
+        parent = tmp_path / "parent.kicad_sch"
+        parent.write_text(PARENT_SCHEMATIC)
+        child = tmp_path / "sub.kicad_sch"
+        child.write_text(CHILD_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R3", "R7", "R14", "C5"]))
+        before = (parent.read_bytes(), child.read_bytes(), pcb.read_bytes())
+
+        ret = run_re_annotate(
+            schematic_path=parent,
+            dry_run=False,
+            backup=False,
+            per_sheet=True,
+            pcb_path=pcb,
+        )
+        assert ret == 1
+        assert "duplicate" in capsys.readouterr().err
+        assert (parent.read_bytes(), child.read_bytes(), pcb.read_bytes()) == before
+
+    def test_refused_backup_json_emits_only_after_successful_publication(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Refused backup under --format json must not report completed renames."""
+        import kicad_tools.cli.sch_re_annotate as mod
+
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before = sch.read_bytes()
+        pcb_before = pcb.read_bytes()
+
+        real_backup = mod.create_backup
+
+        def refuse_sch_backup(path):
+            if path.suffix == ".kicad_sch":
+                raise PermissionError("read-only directory")
+            return real_backup(path)
+
+        monkeypatch.setattr(mod, "create_backup", refuse_sch_backup)
+        ret = main([str(sch), "--pcb", str(pcb), "--backup", "--format", "json"])
+        monkeypatch.undo()
+
+        captured = capsys.readouterr()
+        assert ret == 1
+        assert captured.out.strip() == ""
+        assert "backup" in captured.err.lower()
+        assert "no files were modified" in captured.err.lower()
+        assert sch.read_bytes() == sch_before
+        assert pcb.read_bytes() == pcb_before
+
+        # Dry run still emits the proposed mapping in JSON.
+        ret = main([str(sch), "--pcb", str(pcb), "--dry-run", "--format", "json"])
+        assert ret == 0
+        dry_data = json.loads(capsys.readouterr().out)
+        assert dry_data["dry_run"] is True
+        assert dry_data["total"] == 2
+        assert dry_data["pcb"]["renamed"] == 2
+
+        # Writable retry publishes both files and reports completed renames.
+        ret = main([str(sch), "--pcb", str(pcb), "--backup", "--format", "json"])
+        assert ret == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["dry_run"] is False
+        assert data["total"] == 2
+        assert data["pcb"]["path"] == str(pcb)
+        assert data["pcb"]["renamed"] == 2
+        assert data["pcb"]["warnings"] == []
+        assert _board_refs(pcb) == {"R1", "R2", "C1"}
+        assert '"Reference" "R2"' in sch.read_text()
+
+    def test_write_failure_json_does_not_claim_completed_renames(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A late PCB write refusal under --format json must not report completed renames."""
+        from kicad_tools.schema.pcb import PCB
+
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before = sch.read_bytes()
+        pcb_before = pcb.read_bytes()
+
+        def boom(self, path):
+            raise OSError("Operation not permitted")
+
+        def refuse_restore(path, data):
+            assert path == pcb
+            raise PermissionError("board is read-only")
+
+        with monkeypatch.context() as m:
+            m.setattr(PCB, "save", boom)
+            m.setattr(Path, "write_bytes", refuse_restore)
+            ret = main([str(sch), "--pcb", str(pcb), "--format", "json"])
+
+        captured = capsys.readouterr()
+        assert ret == 1
+        assert captured.out.strip() == ""
+        assert "Operation not permitted" in captured.err
+        assert "could not restore" not in captured.err.lower()
+        assert sch.read_bytes() == sch_before
+        assert pcb.read_bytes() == pcb_before
+
+        # Retry succeeds and reports completed renames.
+        ret = main([str(sch), "--pcb", str(pcb), "--format", "json"])
+        assert ret == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["dry_run"] is False
+        assert data["total"] == 2
+        assert data["pcb"]["renamed"] == 2
+        assert _board_refs(pcb) == {"R1", "R2", "C1"}
+
+    @pytest.mark.parametrize("board_restore_error", [None, "before_write", "after_write"])
+    def test_partial_schematic_write_reports_final_pair(
+        self, tmp_path, monkeypatch, capsys, board_restore_error
+    ):
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before, pcb_before = sch.read_bytes(), pcb.read_bytes()
+        write_text = Path.write_text
+        write_bytes = Path.write_bytes
+
+        def interrupt_schematic(path, text, *args, **kwargs):
+            if path == sch:
+                write_bytes(path, b"part of the new schematic")
+                raise OSError("schematic write interrupted")
+            return write_text(path, text, *args, **kwargs)
+
+        def restore(path, data):
+            if path == pcb and board_restore_error == "before_write":
+                raise PermissionError("board restore refused")
+            count = write_bytes(path, data)
+            if path == pcb and board_restore_error == "after_write":
+                raise OSError("failure after the bytes reached disk")
+            return count
+
+        with monkeypatch.context() as m:
+            m.setattr(Path, "write_text", interrupt_schematic)
+            m.setattr(Path, "write_bytes", restore)
+            ret = main([str(sch), "--pcb", str(pcb), "--format", "json"])
+
+        captured = capsys.readouterr()
+        assert ret == 1 and not captured.out.strip()
+        assert "schematic write interrupted" in captured.err
+        assert sch.read_bytes() == sch_before
+        if board_restore_error == "before_write":
+            assert pcb.read_bytes() != pcb_before
+            assert f"could not restore {pcb}" in captured.err
+            assert "may be out of sync" in captured.err.lower()
+            assert "no files were modified" not in captured.err.lower()
+            assert "match their original contents" not in captured.err.lower()
+        else:
+            assert pcb.read_bytes() == pcb_before
+            assert "could not restore" not in captured.err.lower()
+            assert "may be out of sync" not in captured.err.lower()

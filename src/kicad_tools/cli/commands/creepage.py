@@ -38,13 +38,26 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 EXIT_HV_UNCLASSIFIED = 2
 
 
+def _unique_exception_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    fields = {}
+    for key, value in pairs:
+        if key in fields:
+            raise ValueError(f"duplicate key {key!r}")
+        fields[key] = value
+    return fields
+
+
 def run_creepage_command(args) -> int:
     """Handle the ``creepage`` command.  Returns the process exit code."""
     from kicad_tools._shapely import has_shapely
     from kicad_tools.creepage.engine import (
         SELV_WORKING_VOLTAGE_V,
+        BoardThicknessError,
+        CreepageExceptionError,
         apply_census_waivers,
+        board_net_key,
         compute_creepage_census,
+        creepage_exceptions_from_dict,
         mains_suspect_nets,
         pair_bounds_from_dict,
         pair_bounds_unmapped_nets,
@@ -88,6 +101,10 @@ def run_creepage_command(args) -> int:
         )
         return 1
 
+    pcb = PCB.load(pcb_path)
+    net_class = getattr(args, "net_class", "HV") or "HV"
+    selected_pairs = [(a, b) for a, b in (getattr(args, "pairs", None) or [])] or None
+
     # --- Optional per-net voltage map (#4371) --------------------------------
     # When supplied, the required creepage/clearance is derived PER PAIR from
     # |V_a - V_b| instead of a single global --working-voltage.  It requires a
@@ -112,8 +129,14 @@ def run_creepage_command(args) -> int:
         try:
             _vm_raw = json.loads(vmap_path.read_text())
             voltage_map, edge_voltage = voltage_map_from_dict(_vm_raw)
-            pair_bounds = pair_bounds_from_dict(_vm_raw)  # #8043
-            for _n in pair_bounds_unmapped_nets(pair_bounds, voltage_map):
+            if selected_pairs:
+                key = board_net_key(pcb)
+                pair_bounds = pair_bounds_from_dict(_vm_raw, net_key=key)
+                unmapped = pair_bounds_unmapped_nets(pair_bounds, voltage_map, net_key=key)
+            else:
+                pair_bounds = pair_bounds_from_dict(_vm_raw)
+                unmapped = pair_bounds_unmapped_nets(pair_bounds, voltage_map)
+            for _n in unmapped:
                 print(
                     f"Warning: _pair_bounds names net {_n!r} absent from the voltage map",
                     file=sys.stderr,
@@ -209,22 +232,48 @@ def run_creepage_command(args) -> int:
             print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
             return 1
 
-    pcb = PCB.load(pcb_path)
-    net_class = getattr(args, "net_class", "HV") or "HV"
+    # --- Scoped per-pad-pair exceptions (#10317) -----------------------------
+    # An explicitly supplied JSON file of reviewed, component-bound waivers.
+    # Structural validation happens here; board validation (the selector
+    # resolves, the two pads sit on two different nets) happens inside the
+    # census and fails the run loudly -- an invalid or ambiguous selector can
+    # never waive a finding.
+    exceptions = None
+    exc_arg = getattr(args, "exceptions", None)
+    if exc_arg:
+        exc_path = Path(exc_arg)
+        if not exc_path.exists():
+            print(f"Error: creepage-exceptions file not found: {exc_path}", file=sys.stderr)
+            return 1
+        try:
+            data = json.loads(exc_path.read_text(), object_pairs_hook=_unique_exception_fields)
+            exceptions = creepage_exceptions_from_dict(data)
+        except json.JSONDecodeError as e:
+            print(f"Error: parsing creepage-exceptions JSON: {e}", file=sys.stderr)
+            return 1
+        except (TypeError, ValueError) as e:
+            print(f"Error: invalid creepage-exceptions structure: {e}", file=sys.stderr)
+            return 1
 
     # Voltage-derived census membership (issue #4401): when a voltage map is
     # supplied, a high-|V| net whose routing class is not HV must still enter
     # the census.  Gate the union on the map's presence so the no-map path is
     # byte-identical to before.
-    hv_nets = resolve_hv_nets(
-        pcb,
-        net_class,
-        net_class_map,
-        voltage_map=voltage_map,
-        edge_voltage=edge_voltage,
-        census_threshold=(
-            getattr(args, "census_threshold", 30.0) if voltage_map is not None else None
-        ),
+    # Selected-pair diagnostic (#10342): the requested pairs replace HV
+    # classification entirely, so no class/threshold selection is made.
+    hv_nets = (
+        {}
+        if selected_pairs is not None
+        else resolve_hv_nets(
+            pcb,
+            net_class,
+            net_class_map,
+            voltage_map=voltage_map,
+            edge_voltage=edge_voltage,
+            census_threshold=(
+                getattr(args, "census_threshold", 30.0) if voltage_map is not None else None
+            ),
+        )
     )
     # Attach-zone waiver (#8028): zones come from the SAME builder the router's
     # #4506 exemption uses, so search, route gate and census agree on geometry.
@@ -240,6 +289,8 @@ def run_creepage_command(args) -> int:
             min_mm,
             net_class=net_class,
             board=str(pcb_path),
+            order_thickness_mm=getattr(args, "order_thickness_mm", None),
+            project_board=getattr(args, "project_board", None) or pcb_path,
             # In map mode the requirement varies per pair, so the report-level
             # scalar requirement / working voltage are null (per-pair).
             required_creepage_mm=required_creepage_mm,
@@ -258,7 +309,24 @@ def run_creepage_command(args) -> int:
             insulation=insulation,
             attach_zones=attach_zones,
             pair_bounds=pair_bounds or None,
+            exceptions=exceptions,
+            selected_pairs=selected_pairs,
         )
+    except BoardThicknessError as e:
+        if fmt == "json":
+            error = {"error": str(e), "passed": False, "gate_passed": False}
+            if e.declarations_mm:
+                error["board_thickness_source"] = "unresolved"
+                error["board_thickness_declarations_mm"] = e.declarations_mm
+            print(json.dumps(error, indent=2))
+        else:
+            print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except CreepageExceptionError as e:
+        # A scoped exception whose selector does not resolve on the board
+        # (#10317): fail loud, waive nothing.
+        print(f"Error: invalid creepage exception: {e}", file=sys.stderr)
+        return 1
     except StandardLookupError as e:
         # A per-pair |ΔV| out of the table's range (map mode): fail LOUD, never
         # silently pass a safety-critical audit.
@@ -273,6 +341,13 @@ def run_creepage_command(args) -> int:
         report, waive_same_footprint=bool(getattr(args, "waive_same_footprint", False))
     )
 
+    # Scoped exceptions that matched no census row (#10317): their net pair was
+    # not audited, so they waived nothing -- surface that loudly so a typo in
+    # the exception file (or a changed net-class selection) cannot silently
+    # pass a board the operator believes is waived.
+    for desc in report.exceptions_unused or []:
+        print(f"Warning: creepage exception matched no census row: {desc}", file=sys.stderr)
+
     # Vacuity guard (issue #4354): a census that resolves ZERO HV nets is only
     # legitimately "nothing to audit" on a genuinely low-voltage board.  When
     # the board carries mains-named copper OR a mains-level working voltage was
@@ -281,7 +356,7 @@ def run_creepage_command(args) -> int:
     # this is never mistaken for a clean board.
     mains_suspects: list[str] = []
     guard_triggered = False
-    if not report.has_hv_nets:
+    if not report.has_hv_nets and not report.is_selected_diagnostic:
         from kicad_tools.creepage.engine import _norm_net_key
 
         declared = {_norm_net_key(k): v for k, v in declared_non_hv.items()}
@@ -305,10 +380,20 @@ def run_creepage_command(args) -> int:
     show_witness = bool(getattr(args, "witness", False))
     if fmt == "json":
         print(json.dumps(report.to_dict(), indent=2))
+    elif report.is_selected_diagnostic:
+        _render_table_selected(report, show_witness=show_witness)
     elif report.uses_standard:
         _render_table_standard(report, guard_triggered=guard_triggered, show_witness=show_witness)
     else:
         _render_table(report, guard_triggered=guard_triggered, show_witness=show_witness)
+
+    if fmt != "json" and report.board_thickness_mm is not None:
+        print(
+            f"Cross-face board thickness: {report.board_thickness_mm:g} mm ({report.board_thickness_source})"
+        )
+        if report.board_thickness_declarations_mm:
+            cad = report.board_thickness_declarations_mm
+            print(f"PCB declarations: header {cad['general']:g} mm, stackup {cad['stackup']:g} mm.")
 
     if guard_triggered:
         _warn_hv_unclassified(report, mains_suspects, working_voltage)
@@ -358,17 +443,39 @@ def _warn_hv_unclassified(
 
 
 def _result_token(p: CreepagePair) -> str:
-    """Per-row result token: WAIVED for a waived failing pair, else PASS/FAIL."""
-    if p.waived and not p.passed:
-        return "WAIVED"
-    return "PASS" if p.passed else "FAIL"
+    """Per-row result token: FAIL whenever the row still gates, else PASS/WAIVED.
+
+    A row fails the gate when any un-waived metric fails (#10317) -- including
+    a partially waived pad pair (creepage waived, air clearance failing).  A
+    row whose every failure is covered (broad waiver, attach-zone residual or
+    a scoped exception) shows WAIVED; the raw failure stays visible in JSON.
+    """
+    if not p.gate_row_passed:
+        return "FAIL"
+    return "PASS" if p.passed else "WAIVED"
 
 
 def _rel_token(p: CreepagePair) -> str:
-    """Compact footprint-relationship token for the census tables (#4403)."""
+    """Compact footprint-relationship token for the census tables (#4403).
+
+    A #10317 per-pad-pair row carries the reviewed identity instead of the
+    bare marker: ``R1.1-2`` names the component and its pad pair.
+    """
     if p.relationship == "attach_zone":
         return "attach-zn"
+    if p.relationship == "same_footprint" and p.pad_numbers is not None:
+        return f"{p.footprint_ref}.{p.pad_numbers[0]}-{p.pad_numbers[1]}"
     return "same-ftpt" if p.relationship == "same_footprint" else "board"
+
+
+def _print_reviewed_exceptions(report: CreepageReport) -> None:
+    for p in report.pairs:
+        for metric, reason in sorted(p.exception_waivers.items()):
+            print(
+                f"Reviewed exception: {p.footprint_ref} pads "
+                f"{(p.pad_numbers or ('?', '?'))[0]}-{(p.pad_numbers or ('?', '?'))[1]} "
+                f"({p.net_a} vs {p.net_b}) {metric} waived -- {reason}"
+            )
 
 
 def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
@@ -380,9 +487,9 @@ def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
     audit``).
     """
     total = len(report.pairs)
-    waived = [p for p in report.pairs if p.waived]
-    gate_failures = [p for p in report.pairs if not p.passed and not p.waived]
+    gate_failures = [p for p in report.pairs if not p.gate_row_passed]
     same_fp = [p for p in report.pairs if p.relationship == "same_footprint"]
+    scoped = any(p.exception_waivers for p in report.pairs)
 
     # Issue #8277: an ``attach-zn`` row is waived only when the copper OUTSIDE
     # the zone still clears; say why one that is not waived still gates.
@@ -397,18 +504,27 @@ def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
                 f"(layer {p.residual_layer})."
             )
 
-    if waived:
+    # Reviewed per-pad-pair exceptions (#10317): name the component, the pads,
+    # the waived metric and the reason right above the verdict so the waiver is
+    # auditable from the table alone.
+    _print_reviewed_exceptions(report)
+
+    if scoped or any(p.waived for p in report.pairs):
+        waived_count = report.gate_waived_count
+        waived_note = (
+            "(same-footprint / attach-zone -- qualify at the component, not the layout)"
+            if not scoped
+            else "(same-footprint / attach-zone / reviewed exceptions -- see above)"
+        )
         if gate_failures:
             print(
                 f"FAIL (gate): {len(gate_failures)}/{total} board pair(s) fail "
-                f"{unit_desc}; {len(waived)} pair(s) WAIVED "
-                "(same-footprint / attach-zone -- qualify at the component, not the layout)."
+                f"{unit_desc}; {waived_count} pair(s) WAIVED {waived_note}."
             )
         else:
             print(
-                f"PASS (gate): {total - len(waived)}/{total} pair(s) clear "
-                f"{unit_desc}; {len(waived)} pair(s) WAIVED "
-                "(same-footprint / attach-zone -- qualify at the component, not the layout)."
+                f"PASS (gate): {total - waived_count}/{total} pair(s) clear "
+                f"{unit_desc}; {waived_count} pair(s) WAIVED {waived_note}."
             )
         return
 
@@ -432,6 +548,78 @@ def _witness_cell(p: CreepagePair) -> str:
         return "-"
     x, y = w["point_a_mm"]
     return f"{x:.3f},{y:.3f} {w['item_a']} -> {w['item_b']}"
+
+
+def _render_table_selected(report: CreepageReport, *, show_witness: bool = False) -> None:
+    """Print the limited selected-pair diagnostic table (#10342)."""
+    from kicad_tools.creepage.engine import SELECTED_PAIR_NOTICE
+    from kicad_tools.creepage.standards import DISCLAIMER
+
+    print("*** LIMITED DIAGNOSTIC -- SELECTED NET PAIRS ONLY ***")
+    print(SELECTED_PAIR_NOTICE)
+    print(f"Board: {report.board}")
+    if report.uses_standard:
+        print(
+            f"Standard: {report.standard} {report.standard_edition}  |  "
+            f"Pollution degree: {report.pollution_degree}  |  "
+            f"Material group: {report.material_group}  |  Insulation: {report.insulation}"
+        )
+        if report.uses_voltage_map:
+            print("Voltage source: per-pair |dV| (voltage-map, selected endpoints only)")
+        elif report.working_voltage is not None:
+            print(f"Working voltage: {report.working_voltage:g} V")
+        print(f"NOTE: {DISCLAIMER}")
+    if report.min_mm is not None:
+        print(f"Manual minimum creepage (--min): {report.min_mm:.3f} mm")
+    requested = ", ".join(f"{a}--{b}" for a, b in (report.selected_pairs or []))
+    print(f"Requested pairs ({len(report.selected_pairs or [])}): {requested}")
+    print()
+
+    if report.pairs:
+        header = (
+            f"{'Net A':<14} {'Net B':<14} {'Layer':<11} {'Clnce':>8} {'ReqCl':>8} "
+            f"{'Creep':>8} {'ReqCr':>8} {'Margin':>8} {'dV':>8} {'Govern':>8} {'Rel':>10} {'Result':>7}"
+        )
+        if show_witness:
+            header += "  Witness (A point, A item -> B item)"
+        print(header)
+        print("-" * len(header))
+        for p in report.pairs:
+            req_cl = (
+                f"{p.required_clearance_mm:.3f}" if p.required_clearance_mm is not None else "-"
+            )
+            req_cr = f"{p.required_creepage_mm:.3f}" if p.required_creepage_mm is not None else "-"
+            dv = f"{p.governing_voltage_v:.1f}" if p.governing_voltage_v is not None else "-"
+            print(
+                f"{p.net_a:<14} {p.net_b:<14} {p.layer:<11} {p.clearance_mm:>8.3f} {req_cl:>8} "
+                f"{p.creepage_mm:>8.3f} {req_cr:>8} {p.margin_mm:>8.3f} {dv:>8} "
+                f"{p.governing_bound:>8} {_rel_token(p):>10} {_result_token(p):>7}"
+                + (f"  {_witness_cell(p)}" if show_witness else "")
+            )
+            rules = [
+                f"{k}: {v.get('table_id', '?')}"
+                for k, v in (p.provenance or {}).items()
+                if k in ("creepage", "clearance") and isinstance(v, dict)
+            ]
+            if rules:
+                print(f"    rule -> {'; '.join(rules)}")
+        print()
+
+    for u in report.unresolved_pairs:
+        print(f"UNMEASURED: {u['nets'][0]} -- {u['nets'][1]}: {u['reason']} ({u['detail']})")
+    if report.unresolved_pairs:
+        print()
+
+    _print_reviewed_exceptions(report)
+    passed = sum(p.passed for p in report.pairs)
+    waived = report.gate_waived_count
+    failures = len(report.pairs) - passed - waived
+    verdict = "PASS" if report.gate_passed else "FAIL"
+    print(
+        f"{verdict} (limited diagnostic): {passed} measured row(s) clear their bound, "
+        f"{waived} failing row(s) waived, {failures} unwaived failure(s), "
+        f"{len(report.unresolved_pairs)} unmeasured pair(s). This is NOT a full-board result."
+    )
 
 
 def _render_table(

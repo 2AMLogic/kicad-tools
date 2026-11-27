@@ -19,6 +19,8 @@ from kicad_tools.placement.cost import (
     PlacementCostConfig,
     compute_creepage_violation,
     compute_domain_cohesion,
+    compute_sheet_cohesion,
+    compute_sheet_order,
     compute_wirelength,
     evaluate_placement,
 )
@@ -396,3 +398,336 @@ class TestEvaluatePlacementCohesion:
             **self._common(PlacementCostConfig(mode=CostMode.WEIGHTED_SUM, cohesion_weight=0.0)),
         )
         assert score.total - baseline.total == pytest.approx(3.0 * score.breakdown.cohesion)
+
+
+# ---------------------------------------------------------------------------
+# Schematic-sheet grouping (issue #10146)
+# ---------------------------------------------------------------------------
+
+_SHEET_A = "/root"
+_SHEET_B = "/root/power/"
+
+
+def _sheet_layout() -> list[ComponentPlacement]:
+    """Three parts per sheet, each sheet an L-shaped spread.
+
+    Sheet A: R1 (0, 0), R2 (10, 0), R3 (0, 20).
+    Sheet B: U1 (50, 50), U2 (60, 50), U3 (50, 90).
+    """
+    return [
+        ComponentPlacement(reference="R1", x=0.0, y=0.0),
+        ComponentPlacement(reference="R2", x=10.0, y=0.0),
+        ComponentPlacement(reference="R3", x=0.0, y=20.0),
+        ComponentPlacement(reference="U1", x=50.0, y=50.0),
+        ComponentPlacement(reference="U2", x=60.0, y=50.0),
+        ComponentPlacement(reference="U3", x=50.0, y=90.0),
+    ]
+
+
+_SHEETS = {
+    "R1": _SHEET_A,
+    "R2": _SHEET_A,
+    "R3": _SHEET_A,
+    "U1": _SHEET_B,
+    "U2": _SHEET_B,
+    "U3": _SHEET_B,
+}
+
+
+class TestComputeSheetCohesion:
+    def test_spread_matches_domain_formulation(self) -> None:
+        """Same partition through the domain term gives the same number.
+
+        Fixture groups are deliberately at/above ``_SHEET_GROUP_MIN_MEMBERS``
+        (3), so the two terms' differing member floors are not exercised.
+        """
+        placements = _sheet_layout()
+        assert compute_sheet_cohesion(placements, _SHEETS) == pytest.approx(
+            compute_domain_cohesion(placements, _SHEETS)
+        )
+
+    def test_tighter_sheet_costs_less(self) -> None:
+        spread = compute_sheet_cohesion(_sheet_layout(), _SHEETS)
+        tight = [
+            ComponentPlacement(reference="R1", x=0.0, y=0.0),
+            ComponentPlacement(reference="R2", x=1.0, y=0.0),
+            ComponentPlacement(reference="R3", x=0.0, y=1.0),
+            ComponentPlacement(reference="U1", x=50.0, y=50.0),
+            ComponentPlacement(reference="U2", x=51.0, y=50.0),
+            ComponentPlacement(reference="U3", x=50.0, y=51.0),
+        ]
+        assert compute_sheet_cohesion(tight, _SHEETS) < spread
+
+    def test_sheet_with_fewer_than_three_members_skipped(self) -> None:
+        placements = [
+            ComponentPlacement(reference="R1", x=0.0, y=0.0),
+            ComponentPlacement(reference="R2", x=30.0, y=0.0),  # only 2 on sheet A
+            ComponentPlacement(reference="U1", x=50.0, y=50.0),
+            ComponentPlacement(reference="U2", x=60.0, y=50.0),
+            ComponentPlacement(reference="U3", x=50.0, y=90.0),
+        ]
+        sheets = {"R1": _SHEET_A, "R2": _SHEET_A, "U1": _SHEET_B, "U2": _SHEET_B, "U3": _SHEET_B}
+        only_b = compute_sheet_cohesion(
+            [p for p in placements if p.reference != "R1" and p.reference != "R2"], sheets
+        )
+        assert compute_sheet_cohesion(placements, sheets) == pytest.approx(only_b)
+
+    def test_single_sheet_is_zero(self) -> None:
+        placements = _sheet_layout()
+        single = dict.fromkeys(_SHEETS, _SHEET_A)
+        assert compute_sheet_cohesion(placements, single) == 0.0
+
+    def test_none_map_is_zero(self) -> None:
+        assert compute_sheet_cohesion(_sheet_layout(), None) == 0.0
+
+    def test_refs_absent_from_map_skipped(self) -> None:
+        placements = _sheet_layout()
+        partial = {"U1": _SHEET_B, "U2": _SHEET_B, "U3": _SHEET_B}  # R* unmapped
+        only_b = compute_sheet_cohesion(
+            [p for p in placements if p.reference.startswith("U")], partial
+        )
+        assert compute_sheet_cohesion(placements, partial) == pytest.approx(only_b)
+
+
+class TestComputeSheetOrder:
+    def test_schematic_order_along_x_is_zero(self) -> None:
+        placements = [
+            ComponentPlacement(reference="R1", x=0.0, y=0.0),
+            ComponentPlacement(reference="R2", x=10.0, y=0.0),
+            ComponentPlacement(reference="R3", x=20.0, y=0.0),
+            ComponentPlacement(reference="U1", x=50.0, y=0.0),
+            ComponentPlacement(reference="U2", x=60.0, y=0.0),
+            ComponentPlacement(reference="U3", x=70.0, y=0.0),
+        ]
+        assert compute_sheet_order(placements, _SHEETS) == 0.0
+
+    def test_inverted_order_reports_inversion_depth(self) -> None:
+        placements = [
+            ComponentPlacement(reference="R3", x=0.0, y=0.0),
+            ComponentPlacement(reference="R2", x=10.0, y=0.0),
+            ComponentPlacement(reference="R1", x=20.0, y=0.0),
+            ComponentPlacement(reference="U1", x=50.0, y=0.0),
+            ComponentPlacement(reference="U2", x=60.0, y=0.0),
+            ComponentPlacement(reference="U3", x=70.0, y=0.0),
+        ]
+        # Pairs (R1,R2): 10, (R1,R3): 20, (R2,R3): 10 -- 40 mm of inversions
+        # over 3 pairs: mean inversion depth 40/3 mm.
+        assert compute_sheet_order(placements, _SHEETS) == pytest.approx(40.0 / 3)
+
+    def test_fully_reversed_bucket_is_scale_stable(self) -> None:
+        # A fully reversed bucket on a 10 mm pitch has mean inversion depth
+        # (k+1)/3 * 10 mm, i.e. linear in k -- not the O(k^2) raw sum.
+        def reversed_bucket(k: int) -> float:
+            placements = [
+                ComponentPlacement(reference=f"R{i + 1}", x=10.0 * (k - i), y=0.0) for i in range(k)
+            ]
+            placements += [
+                ComponentPlacement(reference=f"U{i + 1}", x=1000.0 + 10.0 * i, y=0.0)
+                for i in range(3)
+            ]
+            sheets = {f"R{i + 1}": _SHEET_A for i in range(k)}
+            sheets.update({f"U{i + 1}": _SHEET_B for i in range(3)})
+            return compute_sheet_order(placements, sheets)
+
+        assert reversed_bucket(40) == pytest.approx(10.0 * 41 / 3)
+        assert reversed_bucket(40) / reversed_bucket(10) < 5.0
+
+    def test_dominant_axis_is_y_when_spread_vertically(self) -> None:
+        placements = [
+            # y is the wider extent of the R-group -> order read on y (ordered: 0).
+            ComponentPlacement(reference="R1", x=5.0, y=0.0),
+            ComponentPlacement(reference="R2", x=0.0, y=10.0),
+            ComponentPlacement(reference="R3", x=1.0, y=20.0),
+            ComponentPlacement(reference="U1", x=50.0, y=0.0),
+            ComponentPlacement(reference="U2", x=60.0, y=0.0),
+            ComponentPlacement(reference="U3", x=70.0, y=0.0),
+        ]
+        assert compute_sheet_order(placements, _SHEETS) == 0.0
+
+    def test_different_prefixes_do_not_interact(self) -> None:
+        placements = [
+            ComponentPlacement(reference="R1", x=0.0, y=0.0),
+            ComponentPlacement(reference="R2", x=10.0, y=0.0),
+            ComponentPlacement(reference="R3", x=20.0, y=0.0),
+            # C* inverted among themselves on the other sheet.
+            ComponentPlacement(reference="C3", x=50.0, y=0.0),
+            ComponentPlacement(reference="C2", x=60.0, y=0.0),
+            ComponentPlacement(reference="C1", x=70.0, y=0.0),
+        ]
+        sheets = {**_SHEETS, "C1": _SHEET_B, "C2": _SHEET_B, "C3": _SHEET_B}
+        only_c = (10.0 + 20.0 + 10.0) / 3  # mean inversion depth over 3 pairs
+        assert compute_sheet_order(placements, sheets) == pytest.approx(only_c)
+
+    def test_sheet_with_fewer_than_three_members_skipped(self) -> None:
+        placements = [
+            ComponentPlacement(reference="R1", x=20.0, y=0.0),  # inverted pair...
+            ComponentPlacement(reference="R2", x=0.0, y=0.0),  # ...but only 2 on sheet A
+            ComponentPlacement(reference="U1", x=50.0, y=0.0),
+            ComponentPlacement(reference="U2", x=60.0, y=0.0),
+            ComponentPlacement(reference="U3", x=70.0, y=0.0),
+        ]
+        sheets = {"R1": _SHEET_A, "R2": _SHEET_A, "U1": _SHEET_B, "U2": _SHEET_B, "U3": _SHEET_B}
+        assert compute_sheet_order(placements, sheets) == 0.0
+
+    def test_single_sheet_is_zero(self) -> None:
+        placements = [
+            ComponentPlacement(reference="R3", x=0.0, y=0.0),
+            ComponentPlacement(reference="R2", x=10.0, y=0.0),
+            ComponentPlacement(reference="R1", x=20.0, y=0.0),
+        ]
+        single = {"R1": _SHEET_A, "R2": _SHEET_A, "R3": _SHEET_A}
+        assert compute_sheet_order(placements, single) == 0.0
+
+    def test_none_map_is_zero(self) -> None:
+        assert compute_sheet_order(_sheet_layout(), None) == 0.0
+
+
+# A large board with three far-apart 1x1 parts: feasible by construction.
+_SHEET_BOARD = BoardOutline(min_x=-50.0, min_y=-50.0, max_x=150.0, max_y=150.0)
+_SHEET_RULES = DesignRuleSet()
+_SHEET_NETS = [Net(name="N1", pins=[("R1", "1"), ("R2", "1")])]
+
+_SHEET_PLACEMENTS = [
+    ComponentPlacement(reference="R1", x=0.0, y=0.0),
+    ComponentPlacement(reference="R2", x=40.0, y=0.0),
+    ComponentPlacement(reference="R3", x=0.0, y=40.0),
+    ComponentPlacement(reference="U1", x=80.0, y=80.0),
+    ComponentPlacement(reference="U2", x=120.0, y=80.0),
+    ComponentPlacement(reference="U3", x=80.0, y=120.0),
+]
+
+
+class TestEvaluatePlacementSheetTerms:
+    def test_absent_map_score_identical(self) -> None:
+        no_arg = evaluate_placement(_SHEET_PLACEMENTS, _SHEET_NETS, _SHEET_RULES, _SHEET_BOARD)
+        with_map = evaluate_placement(
+            _SHEET_PLACEMENTS, _SHEET_NETS, _SHEET_RULES, _SHEET_BOARD, ref_sheets=None
+        )
+        assert with_map.total == no_arg.total
+        assert with_map.breakdown.group_cohesion == 0.0
+        assert with_map.breakdown.group_order == 0.0
+
+    def test_single_sheet_score_identical(self) -> None:
+        single = dict.fromkeys(_SHEETS, _SHEET_A)
+        baseline = evaluate_placement(_SHEET_PLACEMENTS, _SHEET_NETS, _SHEET_RULES, _SHEET_BOARD)
+        got = evaluate_placement(
+            _SHEET_PLACEMENTS, _SHEET_NETS, _SHEET_RULES, _SHEET_BOARD, ref_sheets=single
+        )
+        assert got.total == baseline.total
+        assert got.breakdown.group_cohesion == 0.0
+        assert got.breakdown.group_order == 0.0
+
+    def test_multi_sheet_breakdown_populated_and_feasible(self) -> None:
+        config = PlacementCostConfig(mode=CostMode.WEIGHTED_SUM)
+        score = evaluate_placement(
+            _SHEET_PLACEMENTS, _SHEET_NETS, _SHEET_RULES, _SHEET_BOARD, config, ref_sheets=_SHEETS
+        )
+        assert score.breakdown.group_cohesion > 0.0
+        assert score.is_feasible  # soft term never gates feasibility
+
+    def test_group_cohesion_weight_scales_contribution(self) -> None:
+        placements = _SHEET_PLACEMENTS
+        off = evaluate_placement(
+            placements,
+            _SHEET_NETS,
+            _SHEET_RULES,
+            _SHEET_BOARD,
+            PlacementCostConfig(mode=CostMode.WEIGHTED_SUM, group_cohesion_weight=0.0),
+            ref_sheets=_SHEETS,
+        )
+        on = evaluate_placement(
+            placements,
+            _SHEET_NETS,
+            _SHEET_RULES,
+            _SHEET_BOARD,
+            PlacementCostConfig(mode=CostMode.WEIGHTED_SUM, group_cohesion_weight=2.0),
+            ref_sheets=_SHEETS,
+        )
+        assert on.total == pytest.approx(off.total + 2.0 * on.breakdown.group_cohesion)
+
+    def test_group_order_weight_scales_contribution(self) -> None:
+        # R3 above R2 below... inverted along x: swap R2/R3 x positions.
+        placements = [
+            ComponentPlacement(reference="R1", x=40.0, y=0.0),
+            ComponentPlacement(reference="R2", x=0.0, y=40.0),
+            ComponentPlacement(reference="R3", x=0.0, y=0.0),
+            ComponentPlacement(reference="U1", x=80.0, y=80.0),
+            ComponentPlacement(reference="U2", x=120.0, y=80.0),
+            ComponentPlacement(reference="U3", x=80.0, y=120.0),
+        ]
+        off = evaluate_placement(
+            placements,
+            _SHEET_NETS,
+            _SHEET_RULES,
+            _SHEET_BOARD,
+            PlacementCostConfig(mode=CostMode.WEIGHTED_SUM, group_order_weight=0.0),
+            ref_sheets=_SHEETS,
+        )
+        on = evaluate_placement(
+            placements,
+            _SHEET_NETS,
+            _SHEET_RULES,
+            _SHEET_BOARD,
+            PlacementCostConfig(mode=CostMode.WEIGHTED_SUM, group_order_weight=1.0),
+            ref_sheets=_SHEETS,
+        )
+        assert on.breakdown.group_order > 0.0
+        assert on.total == pytest.approx(off.total + on.breakdown.group_order)
+
+    def test_excluded_from_lexicographic_infeasible_branch(self) -> None:
+        overlapping = [
+            ComponentPlacement(reference="R1", x=0.0, y=0.0),
+            ComponentPlacement(reference="R2", x=0.0, y=0.0),
+            ComponentPlacement(reference="R3", x=0.0, y=40.0),
+            ComponentPlacement(reference="U1", x=80.0, y=80.0),
+            ComponentPlacement(reference="U2", x=120.0, y=80.0),
+            ComponentPlacement(reference="U3", x=80.0, y=120.0),
+        ]
+        off = evaluate_placement(
+            overlapping,
+            _SHEET_NETS,
+            _SHEET_RULES,
+            _SHEET_BOARD,
+            PlacementCostConfig(
+                mode=CostMode.LEXICOGRAPHIC, group_cohesion_weight=0.0, group_order_weight=0.0
+            ),
+            ref_sheets=_SHEETS,
+        )
+        on = evaluate_placement(
+            overlapping,
+            _SHEET_NETS,
+            _SHEET_RULES,
+            _SHEET_BOARD,
+            PlacementCostConfig(
+                mode=CostMode.LEXICOGRAPHIC, group_cohesion_weight=1e6, group_order_weight=1e6
+            ),
+            ref_sheets=_SHEETS,
+        )
+        assert not off.is_feasible
+        assert on.total == off.total
+
+    def test_included_in_lexicographic_feasible_branch(self) -> None:
+        off = evaluate_placement(
+            _SHEET_PLACEMENTS,
+            _SHEET_NETS,
+            _SHEET_RULES,
+            _SHEET_BOARD,
+            PlacementCostConfig(
+                mode=CostMode.LEXICOGRAPHIC, group_cohesion_weight=0.0, group_order_weight=0.0
+            ),
+            ref_sheets=_SHEETS,
+        )
+        on = evaluate_placement(
+            _SHEET_PLACEMENTS,
+            _SHEET_NETS,
+            _SHEET_RULES,
+            _SHEET_BOARD,
+            PlacementCostConfig(
+                mode=CostMode.LEXICOGRAPHIC, group_cohesion_weight=1.0, group_order_weight=1.0
+            ),
+            ref_sheets=_SHEETS,
+        )
+        assert off.is_feasible and on.is_feasible
+        assert on.total == pytest.approx(
+            off.total + on.breakdown.group_cohesion + on.breakdown.group_order
+        )

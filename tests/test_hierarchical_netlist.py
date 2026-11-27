@@ -9,6 +9,8 @@ net merging, and handles edge cases gracefully.
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from kicad_tools.operations.netlist import (
     _collect_hierarchy_components,
     _count_hierarchy_sheets,
@@ -17,6 +19,8 @@ from kicad_tools.operations.netlist import (
     build_netlist_from_schematic,
     export_netlist,
 )
+from kicad_tools.schematic.models import Schematic
+from kicad_tools.sexp import parse_file, parse_string
 
 FIXTURES = Path(__file__).parent / "fixtures" / "hierarchical"
 
@@ -102,15 +106,18 @@ class TestBuildNetlistHierarchical:
         assert len(netlist.components) == 6
 
     def test_shared_subsheet_referenced_twice(self):
-        """Same .kicad_sch used by two sheet instances loads once (circular guard)."""
+        """A reused sheet without placement annotations has one set of pin bindings."""
         netlist = build_netlist_from_schematic(FIXTURES / "root_shared.kicad_sch")
         refs = {c.reference for c in netlist.components}
-        # root has R1; sub_b has R3, R4.
-        # sub_b is referenced twice but the file is the same, so circular
-        # detection means it loads only once. The second reference is skipped.
         assert "R1" in refs
         assert "R3" in refs
         assert "R4" in refs
+        assert [
+            net.name
+            for net in netlist.nets
+            for node in net.nodes
+            if (node.reference, node.pin) == ("R3", "1")
+        ] == ["Net-(R3-1)"]
 
     def test_missing_subsheet_no_crash(self):
         """A missing sub-sheet file does not crash the build."""
@@ -247,6 +254,246 @@ class TestGetSheetEntries:
 class TestHierarchicalLabelNetMerging:
     """Tests for cross-sheet net merging via hierarchical labels and sheet pins."""
 
+    @pytest.mark.parametrize("connected", [True, False], ids=["wired-port", "isolated-port"])
+    def test_child_local_alias_follows_only_its_wired_port(self, tmp_path, connected):
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        parent.write_bytes((FIXTURES / parent.name).read_bytes())
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        doc.add(parse_string('(label "CHILD_ALIAS" (at 80 46.19 0))'))
+        if not connected:
+            (wire,) = doc.find_all("wire")
+            doc.remove(wire)
+        child.write_text(doc.to_string())
+
+        assert Schematic.load(child).get_net_for_pin("R5", "1") == "CHILD_ALIAS"
+        extracted = Schematic.load(parent).extract_netlist(hierarchical=True)
+        pin_nets = {str(pin): name for name, pins in extracted.items() for pin in pins}
+        exported = build_netlist_from_schematic(parent)
+        export_nets = {
+            f"{node.reference}.{node.pin}": net.name for net in exported.nets for node in net.nodes
+        }
+        for names in (pin_nets, export_nets):
+            assert names["R1.1"] == "/I2C_SDA"
+            assert names["R5.1"] == ("/I2C_SDA" if connected else "/ChildWithLabels/CHILD_ALIAS")
+
+    @pytest.mark.parametrize("connected", [True, False], ids=["wired", "disconnected"])
+    @pytest.mark.parametrize("reverse_ports", [False, True], ids=["sda-first", "thru-first"])
+    def test_child_wire_joins_parent_nets(self, tmp_path, connected, reverse_ports):
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        doc = parse_file(FIXTURES / parent.name)
+        doc.add(
+            parse_string(
+                '(symbol (lib_id "Device:R") (at 90 60 0) (unit 1) '
+                '(property "Reference" "R2") (property "Value" "10k"))'
+            )
+        )
+        doc.add(parse_string("(wire (pts (xy 90 56.19) (xy 130 56.19)))"))
+        doc.add(parse_string('(label "SDA" (at 90 56.19 0))'))
+        doc.find("sheet").add(parse_string('(pin "THRU" input (at 130 56.19 180))'))
+        parent.write_text(doc.to_string())
+
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        sda = doc.find("hierarchical_label")
+        doc.add(parse_string('(hierarchical_label "THRU" (shape input) (at 80 46.19 0))'))
+        if reverse_ports:
+            doc.remove(sda)
+            doc.add(sda)
+        if not connected:
+            doc.remove(doc.find("wire"))
+        child.write_text(doc.to_string())
+
+        extracted = Schematic.load(parent).extract_netlist(hierarchical=True)
+        pin_nets = {str(pin): name for name, pins in extracted.items() for pin in pins}
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=None):
+            exported = export_netlist(parent, fallback=True)
+        export_nets = {
+            f"{node.reference}.{node.pin}": net.name for net in exported.nets for node in net.nodes
+        }
+        for names in (pin_nets, export_nets):
+            assert names["R1.1"] == "/I2C_SDA"
+            assert names["R2.1"] == names["R5.1"] == ("/I2C_SDA" if connected else "/SDA")
+
+    @pytest.mark.parametrize("child_global", [True, False])
+    @pytest.mark.parametrize("nested", [True, False])
+    def test_port_preserves_child_global(self, tmp_path, child_global, nested):
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        doc = parse_file(FIXTURES / parent.name)
+        doc.add(parse_string('(global_label "SDA" (at 80 53.81 0))'))
+        parent.write_text(doc.to_string())
+
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        if child_global:
+            doc.add(parse_string('(global_label "SDA" (at 80 46.19 0))'))
+        if nested:
+            (tmp_path / "leaf.kicad_sch").write_text(doc.to_string())
+            doc = parse_file(FIXTURES / child.name)
+            for symbol in doc.find_all("symbol"):
+                doc.remove(symbol)
+            doc.add(
+                parse_string(
+                    '(sheet (property "Sheetfile" "leaf.kicad_sch") '
+                    '(pin "SDA" input (at 80 46.19 180)))'
+                )
+            )
+        child.write_text(doc.to_string())
+
+        for names in self._hierarchy_pin_maps(parent):
+            assert names["R1.2"] == "SDA"
+            assert names["R1.1"] == names["R5.1"] == ("SDA" if child_global else "/I2C_SDA")
+
+    @pytest.mark.parametrize("connected", [True, False])
+    def test_bridged_parent_global_beats_local(self, tmp_path, connected):
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        doc = parse_file(FIXTURES / parent.name)
+        doc.remove(doc.find("label"))
+        doc.add(parse_string('(global_label "Z_BUS" (at 80 40 0))'))
+        doc.add(parse_string('(label "A_LOCAL" (at 80 53.81 0))'))
+        doc.add(parse_string("(wire (pts (xy 80 53.81) (xy 130 53.81)))"))
+        doc.find("sheet").add(parse_string('(pin "THRU" input (at 130 53.81 180))'))
+        parent.write_text(doc.to_string())
+
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        doc.add(parse_string('(hierarchical_label "THRU" (at 80 46.19 0))'))
+        if not connected:
+            doc.remove(doc.find("wire"))
+        child.write_text(doc.to_string())
+
+        for names in self._hierarchy_pin_maps(parent):
+            assert names["R1.1"] == "Z_BUS"
+            assert names["R1.2"] == names["R5.1"] == ("Z_BUS" if connected else "/A_LOCAL")
+
+    @pytest.mark.parametrize(
+        "parent_kind,child_kind,name,parent_net,child_net",
+        [
+            ("global_label", "label", "Z_BUS", "Z_BUS", "/ChildWithLabels/Z_BUS"),
+            ("label", "label", "A_BUS", "/A_BUS", "/ChildWithLabels/A_BUS"),
+            ("global_label", "global_label", "Z_BUS", "Z_BUS", "Z_BUS"),
+        ],
+    )
+    def test_independent_child_label_scope(
+        self, tmp_path, parent_kind, child_kind, name, parent_net, child_net
+    ):
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        doc = parse_file(FIXTURES / parent.name)
+        doc.add(parse_string(f'({parent_kind} "{name}" (at 130 40 0))'))
+        parent.write_text(doc.to_string())
+
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        doc.add(parse_string(f'({child_kind} "{name}" (at 100 46.19 0))'))
+        child.write_text(doc.to_string())
+
+        for names in self._hierarchy_pin_maps(parent):
+            assert names["R1.1"] == names["R5.1"] == parent_net
+            assert names["R6.1"] == child_net
+
+    @pytest.mark.parametrize("sibling_label", ["OTHER", "SHARED"])
+    def test_sibling_sheet_label_does_not_rename_unrelated_net(self, tmp_path, sibling_label):
+        """Issue #10334: an unrelated sheet's label text must not rename a net."""
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        doc = parse_file(FIXTURES / parent.name)
+        doc.add(
+            parse_string(
+                '(sheet (at 130 80) (size 40 30) (uuid "sheet-child-b-uuid") '
+                '(property "Sheetname" "ChildB") '
+                '(property "Sheetfile" "child_b.kicad_sch") '
+                '(pin "SDA" input (at 130 90 180) (uuid "sheet-pin-b-uuid")))'
+            )
+        )
+        parent.write_text(doc.to_string())
+
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        doc.add(parse_string('(label "SHARED" (at 100 46.19 0))'))
+        child.write_text(doc.to_string())
+
+        # The second child is a copy with its own references and UUIDs; its R8.1
+        # carries the label whose text is edited, and its SDA port is unwired
+        # in the parent.
+        text = (FIXTURES / child.name).read_text()
+        for old, new in (("R5", "R7"), ("R6", "R8"), ("child-", "child-b-")):
+            text = text.replace(old, new)
+        doc = parse_string(text)
+        doc.add(parse_string(f'(label "{sibling_label}" (at 100 46.19 0))'))
+        (tmp_path / "child_b.kicad_sch").write_text(doc.to_string())
+
+        for nets in self._hierarchy_net_maps(parent):
+            assert nets["/ChildWithLabels/SHARED"] == {"R6.1"}
+            assert nets[f"/ChildB/{sibling_label}"] == {"R8.1"}
+            assert nets["/ChildB/SDA"] == {"R7.1"}
+            assert nets["/I2C_SDA"] == {"R1.1", "R5.1"}
+            assert nets["Net-(R6-2)"] == {"R6.2"}
+
+    def test_literal_global_label_collides_with_qualified_local_name(self, tmp_path):
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        doc = parse_file(FIXTURES / parent.name)
+        doc.add(parse_string('(global_label "/ChildWithLabels/SHARED" (at 80 53.81 0))'))
+        parent.write_text(doc.to_string())
+
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        doc.add(parse_string('(label "SHARED" (at 100 46.19 0))'))
+        child.write_text(doc.to_string())
+
+        for nets in self._hierarchy_net_maps(parent):
+            assert nets["/ChildWithLabels/SHARED"] == {"R1.2"}
+            assert nets["/ChildWithLabels/SHARED#2"] == {"R6.1"}
+
+    @staticmethod
+    def _hierarchy_net_maps(parent):
+        extracted = Schematic.load(parent).extract_netlist(hierarchical=True)
+        yield {name: {str(pin) for pin in pins} for name, pins in extracted.items()}
+        built = build_netlist_from_schematic(parent)
+        yield {net.name: {f"{n.reference}.{n.pin}" for n in net.nodes} for net in built.nets}
+
+    def test_qualified_power_labels_count_as_power_nets(self, tmp_path):
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        parent.write_text((FIXTURES / parent.name).read_text().replace('"I2C_SDA"', '"+5V"'))
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        doc.add(parse_string('(label "VBUS" (at 100 46.19 0))'))
+        child.write_text(doc.to_string())
+
+        netlist = build_netlist_from_schematic(parent)
+        assert {"/+5V", "/ChildWithLabels/VBUS"} <= {net.name for net in netlist.nets}
+        summary = netlist.summary()
+        assert summary["power_net_count"] == 2
+        assert summary["signal_net_count"] == 3
+        assert summary["net_count"] == 5
+
+    def test_flat_sheet_entries_are_read_once(self):
+        path = FIXTURES / "child_with_hlabels.kicad_sch"
+        with patch(
+            "kicad_tools.operations.netlist._get_sheet_entries", wraps=_get_sheet_entries
+        ) as entries:
+            build_netlist_from_schematic(path)
+        entries.assert_called_once_with(path)
+
+    def test_single_sheet_local_label_keeps_bare_name(self, tmp_path):
+        """The qualification applies to multi-sheet designs; a flat sheet is unchanged."""
+        sch = tmp_path / "flat.kicad_sch"
+        sch.write_bytes((FIXTURES / "child_with_hlabels.kicad_sch").read_bytes())
+        doc = parse_file(sch)
+        doc.add(parse_string('(label "LOCAL" (at 100 46.19 0))'))
+        sch.write_text(doc.to_string())
+
+        for names in self._hierarchy_pin_maps(sch):
+            assert names["R6.1"] == "LOCAL"
+
+    @staticmethod
+    def _hierarchy_pin_maps(parent):
+        extracted = Schematic.load(parent).extract_netlist(hierarchical=True)
+        yield {str(pin): name for name, pins in extracted.items() for pin in pins}
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=None):
+            exported = export_netlist(parent, fallback=True)
+        yield {
+            f"{node.reference}.{node.pin}": net.name for net in exported.nets for node in net.nodes
+        }
+
     def test_child_components_collected(self):
         """Components from child sheet with hierarchical labels are collected."""
         netlist = build_netlist_from_schematic(FIXTURES / "parent_with_pins.kicad_sch")
@@ -260,16 +507,9 @@ class TestHierarchicalLabelNetMerging:
     def test_hlabel_net_merged_with_parent_net(self):
         """Hierarchical label 'SDA' in child merges with parent's 'I2C_SDA' net."""
         _, net_dict = _collect_hierarchy_components(FIXTURES / "parent_with_pins.kicad_sch", "/")
-        # The parent has a label "I2C_SDA" connected via wire to the sheet pin "SDA".
-        # The child has a hierarchical_label "SDA" connected to R5 pin 1.
-        # After merging, the child's "SDA" net should be unified under "I2C_SDA".
-        #
-        # Check that "I2C_SDA" net exists and contains pins from the child
-        if "I2C_SDA" in net_dict:
-            # The "SDA" net from the child should have been merged into "I2C_SDA"
-            assert "SDA" not in net_dict, (
-                "Child's 'SDA' net should be merged into parent's 'I2C_SDA'"
-            )
+        assert {str(pin) for pin in net_dict["/I2C_SDA"]} == {"R1.1", "R5.1"}
+        assert "SDA" not in net_dict
+        assert "/ChildWithLabels/SDA" not in net_dict
 
     def test_component_count_matches_across_sheets(self):
         """Component count from hierarchy matches total placed symbols."""

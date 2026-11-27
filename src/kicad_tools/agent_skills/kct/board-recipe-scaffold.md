@@ -15,12 +15,13 @@ Scaffold a new `generate_design.py`-style board recipe for a consumer PCB, follo
 
 ## Prerequisite
 
-The native router/DRC backend must be built in the active checkout before the routing step (step 5) will run at full speed (Epic #4054 convention #1):
+After `uv sync`, check the native router in the project environment.
 
 ```bash
-uv run kct build-native --check   # expect: "C++ backend: available"
-uv run kct build-native           # if "not installed" (uv sync does NOT build it)
+uv run kct build-native --check
 ```
+
+`C++ backend: available` and exit code 0 satisfy this prerequisite. If the router is missing, run `uv run kct build-native` and repeat the check. Placement and DRC are optional. When either reports `not built`, continue with its Python fallback. Building those two native extensions requires a kicad-tools source checkout.
 
 ## Model selection
 
@@ -49,6 +50,8 @@ Emit a `<board-path>/generate_design.py` with these nine steps as functions, and
 3. **`run_erc(sch_path)`** — `kicad_tools.cli.runner.run_erc` + `kicad_tools.erc.ERCReport`. **Treat "kicad-cli not found" as skip-not-fail** (dev-machine tolerant) but **hard-fail on any ERC error violation**.
 
 4. **`create_‹circuit›_pcb(output_dir)`** — build the `.kicad_pcb` with an explicit `NETS` dict and footprints placed at **0° / 45° / 90° / 135° only**. Non-multiple-of-45° rotations hit a footprint rotation-transform ambiguity (see issue #3737 for *why* — cited as rationale, not a required read). Return the unrouted PCB path.
+
+   **Decoupling association pass-through (issue #10142).** If the recipe later runs `kct optimize-placement`, keep the schematic beside the PCB with the same file stem (`<name>.kicad_sch` next to `<name>.kicad_pcb`): the optimizer reads it and pairs each bypass cap with the supply pin its schematic designates instead of the nearest pin. To pin a cap to a specific IC pin, have the schematic step set the cap symbol's `KCT_Decouples` field to the target pin (for example `U2.14`; see `kct sch decoupling`). Do not re-encode that pairing in the PCB step; the schematic field is the single source.
 
 4.5. **`ensure_models(pcb_path)`** (in `main()`, right after step 4, before `route_pcb`) — `from kicad_tools.pcb.models3d import ensure_models`. Generated footprint text carries no `(model …)` nodes, so without this call every regeneration silently drops the 3D bodies (issue #7684). It runs the existence-checked model ladder and is pure insertion (copper, pads, zones and nets are byte-identical); library refs whose STEP file does not exist are reported in `dangling_in_library` instead of inserted. It returns an empty report, touching nothing, on a host without KiCad libraries.
 

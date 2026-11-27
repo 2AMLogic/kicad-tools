@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .arc_widths import ArcWidthEdit
 
 
 @dataclass
@@ -101,6 +105,23 @@ class OptimizationConfig:
     phase, any key whose count exceeds the input board's is attributed to the
     changed nets and those nets are rolled back."""
 
+    plan_arc_widths: Callable[[str, set[str]], dict[str, list[ArcWidthEdit]]] | None = None
+    """Compute collision-checked arc edits against the original PCB text and its locked nets."""
+
+    @property
+    def track_pass_enabled(self) -> bool:
+        return any(
+            (
+                self.merge_collinear,
+                self.eliminate_zigzags,
+                self.convert_45_corners,
+                self.remove_jogs,
+                self.compress_staircase,
+                self.pull_tight,
+                self.shorten_detours,
+            )
+        )
+
 
 @dataclass
 class NetOptimizationStats:
@@ -163,8 +184,35 @@ class OptimizationStats:
     output_verify_rolled_back: dict[str, list[str]] = field(default_factory=dict)
     # Issue #8632: verifier name -> "ran" | "unchanged" | "unavailable".
     output_checks: dict[str, str] = field(default_factory=dict)
+    # Issue #9748: how the --drc-aware referee evaluated ``mask_to_copper``:
+    # "off" (no cited policy / not drc-aware), "screened" (the conservative
+    # geometric screen ran and its count is inside the error totals), or
+    # "not_evaluated" (the pure snapshot could not model the board).
+    drc_mask_screen: str = "off"
     # Issue #7065: one row per optimized net, built after any DRC rollback.
     per_net: list[NetOptimizationStats] = field(default_factory=list)
+    # Issue #9640: nets left untouched because they own a locked track.
+    locked_nets_skipped: list[str] = field(default_factory=list)
+
+    def revert_to_input(self) -> None:
+        """Report the retained input geometry after a whole-board rollback."""
+        self.segments_after = self.segments_before
+        self.corners_after = self.corners_before
+        self.length_after = self.length_before
+        self.vias_after = self.vias_before
+        self.drc_errors_after = self.drc_errors_before
+        self.duplicates_removed = 0
+        self.nets_kept = 0
+        self.nets_connectivity_partial = 0
+        self.connectivity_partial_nets = []
+        for net in self.per_net:
+            if net.changed:
+                if not net.rolled_back:
+                    self.nets_rolled_back += 1
+                net.rolled_back = True
+                net.changed = False
+            net.segments_after = net.segments_before
+            net.length_after = net.length_before
 
     @property
     def segment_reduction(self) -> float:

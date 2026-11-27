@@ -139,9 +139,7 @@ def _is_cardinal(rotation: float) -> bool:
     return min(residual, 90.0 - residual) <= _CARDINAL_TOLERANCE_DEG
 
 
-def _lane_eligible(pad: Pad) -> bool:
-    if pad.net == 0:
-        return False  # NC pad: nothing ever routes out of it (#3201).
+def _physical_lane_eligible(pad: Pad) -> bool:
     if pad.steiner_point or pad.escape_terminal:
         return False  # Virtual / escape-terminal pads are not physical lands.
     if pad.through_hole:
@@ -153,6 +151,12 @@ def _lane_eligible(pad: Pad) -> bool:
     long_side = max(pad.width, pad.height)
     short_side = min(pad.width, pad.height)
     return long_side >= LANE_MIN_ASPECT * short_side
+
+
+def _lane_eligible(pad: Pad) -> bool:
+    if pad.net == 0:
+        return False  # NC pad: nothing ever routes out of it (#3201).
+    return _physical_lane_eligible(pad)
 
 
 def pad_lane(
@@ -319,12 +323,14 @@ def build_pad_lane_budgets(
     *,
     length: float | None = None,
     penalty_factor: float | None = None,
+    lane_owners: set[tuple[str, str]] | None = None,
 ) -> list:
     """Build ``router_cpp.PadChannelBudget`` lanes for the fine-pitch pads.
 
     Returns an empty list when the C++ backend is unavailable, when
     ``KCT_DISABLE_PAD_LANES`` is set, when no region is detected, or when
-    the length or penalty resolves to zero.
+    the length or penalty resolves to zero. When supplied, ``lane_owners``
+    selects which pads reserve a lane after computing the package geometry.
     """
     if pad_lanes_disabled():
         return []
@@ -348,6 +354,8 @@ def build_pad_lane_budgets(
 
     budgets: list = []
     for lane in collect_fine_pitch_lanes(pads, regions, length):
+        if lane_owners is not None and lane.pad_key not in lane_owners:
+            continue
         rect = lane_grid_rect(lane, grid)
         if rect is None:
             continue
@@ -413,12 +421,15 @@ class FenceLane:
 
     ``column`` identifies the pad column (package, axis, outward direction
     and the pads' shared long-axis centre coordinate); ``layer`` is the grid
-    layer index of the pad's copper.
+    layer index of the pad's copper; ``physical_pitch`` carries the column's
+    centre-to-centre spacing across all physically eligible pads (including
+    ``net == 0`` pins that emit no :class:`FenceLane` of their own).
     """
 
     column: tuple[str, str, int, float]
     lane: PadLane
     layer: int
+    physical_pitch: float | None = None
 
 
 def lane_column(lane: PadLane, pad: Pad) -> tuple[str, str, int, float]:
@@ -432,6 +443,59 @@ def lane_column(lane: PadLane, pad: Pad) -> tuple[str, str, int, float]:
     )
 
 
+def _min_centre_gap(centres: Iterable[float]) -> float | None:
+    ordered = sorted(centres)
+    gaps = [b - a for a, b in zip(ordered, ordered[1:], strict=False) if b - a > 1e-6]
+    return min(gaps) if gaps else None
+
+
+def _physical_column_slot(
+    pad: Pad,
+    body_center: tuple[float, float],
+) -> tuple[tuple[str, str, int, float], float] | None:
+    """Return ``(column_key, cross_axis_centre)`` for a physical column pad, or ``None``."""
+    if not _physical_lane_eligible(pad):
+        return None
+    cx, cy = body_center
+    if pad.width >= pad.height:
+        offset = pad.x - cx
+        if abs(offset) < pad.width * 0.5:
+            return None
+        direction = 1 if offset > 0 else -1
+        col = (str(pad.key[0]), "x", direction, round(pad.x, _COLUMN_KEY_DECIMALS))
+        return col, pad.y
+    offset = pad.y - cy
+    if abs(offset) < pad.height * 0.5:
+        return None
+    direction = 1 if offset > 0 else -1
+    col = (str(pad.key[0]), "y", direction, round(pad.y, _COLUMN_KEY_DECIMALS))
+    return col, pad.x
+
+
+def _cluster_column_pitches(
+    cluster: list[Pad],
+) -> dict[tuple[str, str, int, float], float]:
+    """Physical centre-to-centre spacing per column across ``cluster`` (including ``net == 0``)."""
+    if not cluster:
+        return {}
+    xs = [p.x for p in cluster]
+    ys = [p.y for p in cluster]
+    center = ((min(xs) + max(xs)) * 0.5, (min(ys) + max(ys)) * 0.5)
+    by_column: dict[tuple[str, str, int, float], list[float]] = {}
+    for pad in cluster:
+        slot = _physical_column_slot(pad, center)
+        if slot is None:
+            continue
+        col, pos = slot
+        by_column.setdefault(col, []).append(pos)
+    pitches: dict[tuple[str, str, int, float], float] = {}
+    for col, positions in by_column.items():
+        pitch = _min_centre_gap(positions)
+        if pitch is not None:
+            pitches[col] = pitch
+    return pitches
+
+
 def collect_fence_lanes(
     pads: Iterable[Pad],
     regions: Iterable[Any],
@@ -441,33 +505,59 @@ def collect_fence_lanes(
     """Every fine-pitch lane with its column key and pad layer index.
 
     ``layer_index`` maps a pad to its grid layer index (the autorouter passes
-    ``grid.layer_to_index(pad.layer.value)``).
+    ``grid.layer_to_index(pad.layer.value)``).  Only routable pads emit a
+    :class:`FenceLane`, while ``physical_pitch`` measures the full physical
+    column (including ``net == 0`` pins).
     """
     pad_list = list(pads)
-    by_key = {p.key: p for p in pad_list}
     out: list[FenceLane] = []
-    for lane in collect_fine_pitch_lanes(pad_list, regions, length):
-        pad = by_key.get(lane.pad_key)
-        if pad is None:
+    for region in regions:
+        refs = getattr(region, "pad_refs", None)
+        if not refs:
             continue
-        out.append(FenceLane(lane_column(lane, pad), lane, int(layer_index(pad))))
+        cluster = [p for p in pad_list if p.key in refs]
+        if not cluster:
+            continue
+        pitches = _cluster_column_pitches(cluster)
+        by_key = {p.key: p for p in cluster if _lane_eligible(p)}
+        for lane in compute_pad_lanes(cluster, length):
+            pad = by_key.get(lane.pad_key)
+            if pad is None:
+                continue
+            col = lane_column(lane, pad)
+            out.append(
+                FenceLane(
+                    col,
+                    lane,
+                    int(layer_index(pad)),
+                    physical_pitch=pitches.get(col),
+                )
+            )
     return out
 
 
 def column_pitch(fence_lanes: Iterable[FenceLane]) -> float | None:
     """Smallest centre-to-centre spacing of the lanes of one column, or ``None``."""
-    centres = sorted(
+    lanes = list(fence_lanes)
+    lane_gap = _min_centre_gap(
         ((fl.lane.y1 + fl.lane.y2) if fl.lane.axis == "x" else (fl.lane.x1 + fl.lane.x2)) * 0.5
-        for fl in fence_lanes
+        for fl in lanes
     )
-    gaps = [b - a for a, b in zip(centres, centres[1:], strict=False) if b - a > 1e-6]
-    return min(gaps) if gaps else None
+    recorded = [
+        float(fl.physical_pitch)
+        for fl in lanes
+        if fl.physical_pitch is not None and fl.physical_pitch > 1e-6
+    ]
+    candidates = [p for p in (lane_gap, *recorded) if p is not None]
+    return min(candidates) if candidates else None
 
 
 def tight_fence_lanes(
     fence_lanes: Iterable[FenceLane],
     via_diameter: Any,
     via_clearance: float,
+    *,
+    lane_owners: set[tuple[str, str]] | None = None,
 ) -> list[FenceLane]:
     """Keep the lanes of columns too tight for a via of their own nets.
 
@@ -486,6 +576,12 @@ def tight_fence_lanes(
         pitch = column_pitch(lanes)
         if pitch is None:
             continue
+        # An idle pin still sets the physical pitch. Only routing targets
+        # contribute a via diameter or reserve an exit in that column.
+        if lane_owners is not None:
+            lanes = [fl for fl in lanes if fl.lane.pad_key in lane_owners]
+        if len(lanes) < 2:
+            continue  # No other lane on this column to fence.
         footprint = max(float(via_diameter(fl.lane.net)) for fl in lanes) + float(via_clearance)
         if pitch < footprint - 1e-9:
             kept.extend(lanes)
@@ -631,3 +727,65 @@ def build_escape_fence_budgets(
         budget.source_net = int(source_net)
         budgets.append(budget)
     return budgets
+
+
+def trace_fences_cover_goal(
+    trace_fence_rects: Iterable[tuple[int, int, int, int, int]],
+    *,
+    end_metal: tuple[int, int, int, int],
+    end_layers: Iterable[int],
+    start_metal: tuple[int, int, int, int],
+    start_layers: Iterable[int],
+) -> bool:
+    """True when no legal goal cell is reachable under the trace fences (Issue #8486).
+
+    A sound-only skip test for the fenced A*: ``True`` means the fenced
+    search can **never** accept a goal, so running it would only drain its
+    budget before the unfenced retry.  The native search accepts a goal only
+    when it *pops* a node inside the end pad's metal box on a valid end
+    layer, and a node reaches the open set only by (a) being seeded from the
+    start pad's metal box on a valid start layer -- a seed needs no step, so
+    no fence can stop it -- or (b) a trace step or via landing, both of which
+    an infinite trace-fence cell refuses (a via may neither land on a fenced
+    trace cell nor inside a via fence, so trace-fence coverage also closes
+    via entry).  ``True`` therefore requires:
+
+    * the start and end metal boxes do NOT intersect on a layer valid for
+      both (no seed is a goal), and
+    * every cell of the end metal box on EVERY valid end layer is inside a
+      trace fence rect of that layer.
+
+    ``trace_fence_rects`` are ``(gx1, gy1, gx2, gy2, layer)`` tuples with
+    inclusive grid bounds -- the trace-fence half of
+    :func:`escape_fence_rects`' output (via fences, ``layer ==
+    PAD_VIA_FENCE_LAYER``, are irrelevant here: they refuse via drops only,
+    never a trace step onto the goal).  Any conservative miss (an uncovered
+    cell, an intersecting box, an empty goal box) returns ``False``: the
+    caller then runs the fenced search exactly as before.
+    """
+    ex1, ey1, ex2, ey2 = end_metal
+    if ex1 > ex2 or ey1 > ey2:
+        return False
+    end_layer_list = [int(l) for l in end_layers]
+    if not end_layer_list:
+        return False
+    sx1, sy1, sx2, sy2 = start_metal
+    if (
+        {int(l) for l in start_layers} & set(end_layer_list)
+        and sx1 <= ex2
+        and ex1 <= sx2
+        and sy1 <= ey2
+        and ey1 <= sy2
+    ):
+        return False
+    by_layer: dict[int, list[tuple[int, int, int, int]]] = {}
+    for gx1, gy1, gx2, gy2, layer in trace_fence_rects:
+        if int(layer) >= 0:
+            by_layer.setdefault(int(layer), []).append((gx1, gy1, gx2, gy2))
+    for layer in end_layer_list:
+        rects = by_layer.get(layer, ())
+        for gx in range(ex1, ex2 + 1):
+            for gy in range(ey1, ey2 + 1):
+                if not any(gx1 <= gx <= gx2 and gy1 <= gy <= gy2 for gx1, gy1, gx2, gy2 in rects):
+                    return False
+    return True

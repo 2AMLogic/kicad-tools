@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -278,6 +279,25 @@ class DRCReport:
             return parse_text_report(content, str(path))
 
 
+_ITEM_NET_RE = re.compile(r"^[^\[]*\[(.+)\] (?:on|of) ")
+_NET_TOKEN_RE = re.compile(r"\[(.+?)\](?=[\s,;:)]|$)")
+_LEGACY_TOKEN_RE = re.compile(r"\[([^\]]+)\]")
+
+
+def _bracketed_tokens(text: str) -> list[str]:
+    """Return the ``[...]`` net tokens of a KiCad item description.
+
+    A native item's layer ("on F.Cu") or footprint ("of U1") follows
+    the closing bracket. Match that boundary so punctuation and literal
+    brackets inside the net name survive. Other description formats retain
+    the generic token extraction.
+    """
+    if match := _ITEM_NET_RE.match(text):
+        return [match.group(1)]
+    tokens = _NET_TOKEN_RE.findall(text)
+    return tokens if tokens else _LEGACY_TOKEN_RE.findall(text)
+
+
 def _is_json(content: str) -> bool:
     """True for any valid JSON document, so non-object JSON is rejected rather
     than silently parsed as an empty text report (issue #8133)."""
@@ -425,7 +445,7 @@ def parse_text_report(content: str, source_file: str = "") -> DRCReport:
             current_violation["items"].append(description)
 
             # Extract net names from [NetName] pattern
-            net_matches = re.findall(r"\[([^\]]+)\]", description)
+            net_matches = _bracketed_tokens(description)
             for net in net_matches:
                 if net != "<no net>" and net not in current_violation["nets"]:
                     current_violation["nets"].append(net)
@@ -529,6 +549,7 @@ def _parse_kct_check_json(data: dict, source_file: str = "") -> DRCReport:
             locations=locations,
             items=items,
             nets=[str(n) for n in item.get("nets", [])],
+            witnesses=[str(w) for w in item.get("witnesses", [])],
             required_value_mm=item.get("required_value"),
             actual_value_mm=item.get("actual_value"),
         )
@@ -563,6 +584,61 @@ def _optional_str(value: object) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def _check_native_position(position: object, section: str) -> None:
+    if not isinstance(position, dict):
+        raise ValueError(f"expected an x/y position in {section}")
+    for axis in ("x", "y"):
+        value = position.get(axis)
+        if type(value) not in (int, float) or (
+            isinstance(value, float) and not math.isfinite(value)
+        ):
+            raise ValueError(f"expected a numeric {axis} coordinate in {section}")
+
+
+def load_native_connectivity_report(path: Path) -> DRCReport:
+    """Read KiCad's connectivity result. Only an explicit empty array means zero opens."""
+    from .geometric import read_kicad_cli_json_report
+
+    data = read_kicad_cli_json_report(path)
+    for section in ("violations", "unconnected_items", "schematic_parity"):
+        if section == "schematic_parity" and section not in data:
+            continue
+        entries = data.get(section)
+        if not isinstance(entries, list):
+            raise ValueError(f"expected a {section} list in the KiCad report")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"expected a finding object in {section}")
+            for member in ("type", "description", "severity"):
+                if _optional_str(entry.get(member)) is None:
+                    raise ValueError(f"expected a finding {member} in {section}")
+            if "pos" in entry:
+                _check_native_position(entry["pos"], section)
+            endpoints = entry.get("items")
+            if not isinstance(endpoints, list):
+                raise ValueError(f"expected an items list in {section}")
+            is_relationship = section == "unconnected_items" or entry["type"] == "unconnected_items"
+            if is_relationship and not endpoints:
+                raise ValueError(
+                    f"expected affected items for a connectivity relationship in {section}"
+                )
+            for endpoint in endpoints:
+                if not isinstance(endpoint, dict):
+                    raise ValueError(f"expected an item object in {section}")
+                for member in ("uuid", "description"):
+                    if _optional_str(endpoint.get(member)) is None:
+                        raise ValueError(f"expected an item {member} in {section}")
+                _check_native_position(endpoint.get("pos"), section)
+                net = endpoint.get("net")
+                if net is not None and not isinstance(net, str):
+                    raise ValueError(f"expected a net name in {section}")
+
+    try:
+        return _parse_kicad_cli_json(data, str(path))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid KiCad DRC finding: {exc}") from exc
 
 
 def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
@@ -632,7 +708,7 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
             # Real KiCad-cli JSON has no per-item "net" key; the net lives
             # inside the description, e.g. "Track [Net-(C11-2)] on F.Cu".
             # Mirrors the plain-text parser above (parse_text_report).
-            net_matches = re.findall(r"\[([^\]]+)\]", desc)
+            net_matches = _bracketed_tokens(desc)
             for net in net_matches:
                 if net != "<no net>" and net not in nets:
                     nets.append(net)

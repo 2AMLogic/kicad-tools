@@ -1,0 +1,25 @@
+* Issue #10527 line-sense network, biased taps.
+* Each tap replaces its 10k shunt with 4.7k to 3.3 V and 4.7k to ground.
+* The buffer is an ideal unity-gain source with a high-impedance input.
+* Neither input has protection clamps: the pin voltages are unclamped demand.
+.param VPK=187
+V1 LINE 0 SIN(0 {VPK} 60)
+V2 3V3 0 3.3
+R1 LINE MID 499k
+R2 MID SENSE 499k
+R3A SENSE 3V3 4.7k
+R3B SENSE 0 4.7k
+E1 BUF 0 SENSE 0 1
+C1 SENSE ADC 100n
+R4A ADC 3V3 4.7k
+R4B ADC 0 4.7k
+.tran 10u 100m
+.measure tran sense_min MIN v(SENSE) from=50m to=100m
+.measure tran sense_max MAX v(SENSE) from=50m to=100m
+.measure tran adc_min MIN v(ADC) from=50m to=100m
+.measure tran adc_max MAX v(ADC) from=50m to=100m
+.control
+run
+wrdata line_sense_biased.txt v(sense) v(adc)
+.endc
+.end

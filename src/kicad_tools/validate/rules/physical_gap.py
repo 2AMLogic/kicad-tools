@@ -28,6 +28,7 @@ though it never calls the kernel module directly.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -47,11 +48,10 @@ TOLERANCE = 0.001
 # Per-end shave of a gap connector for the cheap copper-crossing prefilter; twice
 # this stays within the 1e-8 mm overlap threshold, so results are unchanged.
 _CONNECTOR_SHAVE_MM = 4e-9
-# Facing screen of the slit scan: the first boundary must face the gap within
-# 25 degrees, the second within 60 degrees (cosine 0.5).  The 60-degree side is
-# public because the router derives its same-net union depth from it (issue
-# #9424, ``router.via_clearance.same_net_pad_union_depth_mm``): a via that
-# barely overlaps its own pad leaves a wedge this screen still grades.
+# Both boundaries must face the gap within 60 degrees, and at least one
+# within 25 degrees. The router uses the 60-degree threshold to derive the
+# same-net pad union depth because a via that barely overlaps its own pad
+# leaves a wedge that this screen still grades (issue #9424).
 FACING_COS_FIRST = math.cos(math.radians(25))
 FACING_COS_SECOND = 0.5
 
@@ -80,6 +80,22 @@ class CopperSource:
     # only; "" for tracks/vias/zones).  An index, not the reference or uuid, so
     # two footprints sharing a reference or a hand-duplicated uuid never alias.
     footprint: str = ""
+    # Stable across a repair even when the geometry-based public identity changes.
+    witness: str = ""
+
+
+@dataclass(frozen=True)
+class CopperGap:
+    """An open facing-edge gap, including the sources that own its two ends."""
+
+    distance: float
+    nets: tuple[str, ...]
+    ids: tuple[str, ...]
+    kinds: set[str]
+    a: Any
+    b: Any
+    layer: str
+    witnesses: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -179,7 +195,7 @@ def fab_gap_policy_from_entry(entry) -> FabGapPolicy:
     )
 
 
-def _arc_geometry(node, origin=(0.0, 0.0)):
+def track_arc_copper_geometry(node, origin=(0.0, 0.0)):
     """Flatten a modern start/mid/end track arc with <=0.1um chord error.
 
     The raw s-expression is in sheet coordinates while the loaded ``PCB``
@@ -263,7 +279,7 @@ def _fp_poly_geometry(graphic, transform):
     """
     from shapely.geometry import LineString, Polygon
 
-    points = [transform(point) for point in graphic.points]
+    points = [transform(point) for point in graphic.boundary_points]
     if len(points) < 3:
         return None
     width = graphic.stroke_width or 0.0
@@ -479,6 +495,7 @@ def _collect(pcb):
                 segment.layer,
                 net_name(segment.net_number),
                 segment_ref(segment, origin),
+                witness=getattr(segment, "uuid", ""),
             )
         )
     for fp_index, fp in enumerate(pcb.footprints):
@@ -554,6 +571,7 @@ def _collect(pcb):
                     layer,
                     net_name(via.net_number),
                     via_ref(via, origin),
+                    witness=getattr(via, "uuid", ""),
                 )
             )
     for index, zone in enumerate(pcb.zones):
@@ -580,7 +598,7 @@ def _collect(pcb):
         if layer not in layer_names:
             continue
         try:
-            geom = _arc_geometry(node, tuple(getattr(pcb, "board_origin", (0.0, 0.0))))
+            geom = track_arc_copper_geometry(node, tuple(getattr(pcb, "board_origin", (0.0, 0.0))))
         except (ValueError, TypeError) as exc:
             unsupported.append(str(exc))
             continue
@@ -644,6 +662,121 @@ def _facing_edge_pairs(tree, edges, normals, distance_mm):
     return list(zip(left[order].tolist(), right[order].tolist(), strict=True))
 
 
+def _layer_slit_candidates(local, minimum_mm):
+    """Yield each measured slit gap on one layer's copper union.
+
+    Shared by the whole-board scans and the staircase shortcut oracle
+    (Issue #9862).  ``local`` is one layer's :class:`CopperSource` list
+    (non-empty geometries); each yield is ``(distance, owner_indices, a, b)``
+    in the same order the whole-board scan visits them, already screened by
+    the tolerance window, the facing-normal test, the open-connector
+    (no third copper) test and the local-shoulder join exemption.
+    """
+    import numpy as np
+    import shapely
+    from shapely import STRtree, union_all
+    from shapely.geometry import LineString
+    from shapely.geometry.polygon import orient  # type: ignore[import-untyped]
+    from shapely.ops import nearest_points  # type: ignore[import-untyped]
+
+    union = union_all([s.geometry for s in local])
+    polygons = [union] if union.geom_type == "Polygon" else list(union.geoms)
+    edges, normals = [], []
+    for polygon in polygons:
+        polygon = orient(polygon, sign=1)
+        for ring in [polygon.exterior, *polygon.interiors]:
+            coordinates = list(ring.coords)
+            for a, b in zip(coordinates, coordinates[1:], strict=False):
+                dx, dy = b[0] - a[0], b[1] - a[1]
+                length = math.hypot(dx, dy)
+                if length <= 1e-12:
+                    continue
+                edges.append(LineString([a, b]))
+                normals.append((dy / length, -dx / length))  # outward into air
+    tree = STRtree(edges)
+    source_tree = STRtree([s.geometry for s in local])
+    prepared = np.asarray([s.geometry for s in local], dtype=object)
+    shapely.prepare(prepared)
+    boundaries = [s.geometry.boundary for s in local]
+    # One vectorised bulk query + numpy normal screen replaces ~one STRtree
+    # query and a Python dot product per edge (Issue #8843: this pass is
+    # now default-on under jlcpcb, and was ~24 s on board 07). Same pair
+    # set, same (i, j) order as the per-edge loop, so results are unchanged.
+    pairs = _facing_edge_pairs(tree, edges, normals, minimum_mm)
+    for i, j in pairs:
+        edge, other = edges[i], edges[j]
+        closest = nearest_points(edge, other)
+        candidates = [closest]
+        # Parallel exposed edges can share a whole interval of minima. GEOS
+        # can pick a different end in each direction, with different owners.
+        on_other, on_edge = nearest_points(other, edge)
+        if (on_edge, on_other) != closest:
+            candidates.append((on_edge, on_other))
+        middle = edge.interpolate(0.5, normalized=True)
+        candidates.append((middle, nearest_points(middle, other)[1]))
+        middle = other.interpolate(0.5, normalized=True)
+        candidates.append((nearest_points(middle, edge)[1], middle))
+        for a, b in candidates:
+            distance = a.distance(b)
+            if distance <= TOLERANCE or distance >= minimum_mm - TOLERANCE:
+                continue
+            dx, dy = (b.x - a.x) / distance, (b.y - a.y) / distance
+            # Unrelated copper can change the order of the union's edges.
+            facing_a = normals[i][0] * dx + normals[i][1] * dy
+            facing_b = -(normals[j][0] * dx + normals[j][1] * dy)
+            if (
+                min(facing_a, facing_b) < FACING_COS_SECOND
+                or max(facing_a, facing_b) < FACING_COS_FIRST
+            ):
+                continue
+            connector = LineString([a, b])
+            # The open connector must contain no copper from a third
+            # primitive; union provenance alone is not electrical isolation.
+            # Clip against only the sources whose bbox touches the connector
+            # (intersecting the whole-layer union dominated runtime, #8843).
+            near = source_tree.query(connector)
+            if near.size:
+                # Cheap exact prefilter: shave 4e-9 mm off each end. If the
+                # shaved line misses a source (indexed, prepared test), its
+                # overlap is confined to the two shaved ends, <= 1e-8 mm, so
+                # the ``> 1e-8`` test below could not fire for it either.
+                # Only sources the shaved line touches pay for the exact
+                # intersection.
+                ux, uy = (b.x - a.x) / distance, (b.y - a.y) / distance
+                shaved_line = LineString(
+                    [
+                        (a.x + ux * _CONNECTOR_SHAVE_MM, a.y + uy * _CONNECTOR_SHAVE_MM),
+                        (b.x - ux * _CONNECTOR_SHAVE_MM, b.y - uy * _CONNECTOR_SHAVE_MM),
+                    ]
+                )
+                touched = near[shapely.intersects(prepared[near], shaved_line)]
+                if any(
+                    connector.intersection(local[int(k)].geometry).length > 1e-8 for k in touched
+                ):
+                    continue
+            owner_indices = [
+                [
+                    int(k)
+                    for k in source_tree.query(point, predicate="dwithin", distance=TOLERANCE)
+                    if boundaries[int(k)].distance(point) <= TOLERANCE
+                ]
+                for point in (a, b)
+            ]
+            # Local shoulders at a pad escape or joined track are not
+            # slits. Exclude only the neighbourhood of the actual join,
+            # never a whole connected component or an entire source pair.
+            if any(
+                left != right
+                and local[left].geometry.intersects(local[right].geometry)
+                and connector.distance(local[left].geometry.intersection(local[right].geometry))
+                < minimum_mm
+                for left in owner_indices[0]
+                for right in owner_indices[1]
+            ):
+                continue
+            yield distance, owner_indices, a, b
+
+
 def _scan_copper_gaps(pcb, minimum_mm: float, make_finding) -> DRCResults:
     """Shared slit scan; *make_finding* severity-classifies one measured gap.
 
@@ -654,13 +787,6 @@ def _scan_copper_gaps(pcb, minimum_mm: float, make_finding) -> DRCResults:
     the finding (e.g. a gap the fab does not judge); a returned violation
     replaces any earlier one for the same copper pair when it measures closer.
     """
-    import numpy as np
-    import shapely
-    from shapely import STRtree, union_all
-    from shapely.geometry import LineString
-    from shapely.geometry.polygon import orient  # type: ignore[import-untyped]
-    from shapely.ops import nearest_points  # type: ignore[import-untyped]
-
     if not math.isfinite(minimum_mm) or minimum_mm <= 0:
         raise ValueError("Physical copper gap must be finite and positive")
     sources, unsupported = _collect(pcb)
@@ -677,122 +803,45 @@ def _scan_copper_gaps(pcb, minimum_mm: float, make_finding) -> DRCResults:
                 f"Physical gap coverage incomplete: {detail}",
             )
         )
+    findings: dict[tuple[str, tuple[str, ...], tuple[str, ...]], DRCViolation] = {}
+    for gap in iter_source_gaps(sources, minimum_mm):
+        key = gap.layer, gap.ids, gap.nets
+        if key in findings and (findings[key].actual_value or 0) <= gap.distance:
+            continue
+        violation = make_finding(
+            distance=gap.distance,
+            nets=gap.nets,
+            ids=gap.ids,
+            witnesses=gap.witnesses,
+            kinds=gap.kinds,
+            a=gap.a,
+            b=gap.b,
+            layer=gap.layer,
+            ox=ox,
+            oy=oy,
+        )
+        if violation is not None:
+            findings[key] = violation
+    for key in sorted(findings):
+        results.add(findings[key])
+    return results
+
+
+def iter_source_gaps(sources: list[CopperSource], minimum_mm: float) -> Iterator[CopperGap]:
+    """Measure open slits on the copper union, excluding shoulders at actual joins."""
     for layer in sorted({source.layer for source in sources}):
         local = [s for s in sources if s.layer == layer and not s.geometry.is_empty]
-        union = union_all([s.geometry for s in local])
-        polygons = [union] if union.geom_type == "Polygon" else list(union.geoms)
-        edges, normals = [], []
-        for polygon in polygons:
-            polygon = orient(polygon, sign=1)
-            for ring in [polygon.exterior, *polygon.interiors]:
-                coordinates = list(ring.coords)
-                for a, b in zip(coordinates, coordinates[1:], strict=False):
-                    dx, dy = b[0] - a[0], b[1] - a[1]
-                    length = math.hypot(dx, dy)
-                    if length <= 1e-12:
-                        continue
-                    edges.append(LineString([a, b]))
-                    normals.append((dy / length, -dx / length))  # outward into air
-        tree = STRtree(edges)
-        source_tree = STRtree([s.geometry for s in local])
-        prepared = np.asarray([s.geometry for s in local], dtype=object)
-        shapely.prepare(prepared)
-        boundaries = [s.geometry.boundary for s in local]
-        findings: dict[tuple[tuple[str, ...], tuple[str, ...]], DRCViolation] = {}
-        # One vectorised bulk query + numpy normal screen replaces ~one STRtree
-        # query and a Python dot product per edge (Issue #8843: this pass is
-        # now default-on under jlcpcb, and was ~24 s on board 07). Same pair
-        # set, same (i, j) order as the per-edge loop, so results are unchanged.
-        pairs = _facing_edge_pairs(tree, edges, normals, minimum_mm)
-        for i, j in pairs:
-            edge = edges[i]
-            candidates = [nearest_points(edge, edges[j])]
-            middle = edge.interpolate(0.5, normalized=True)
-            candidates.append((middle, nearest_points(middle, edges[j])[1]))
-            middle = edges[j].interpolate(0.5, normalized=True)
-            candidates.append((nearest_points(edge, middle)[0], middle))
-            for a, b in candidates:
-                distance = a.distance(b)
-                if distance <= TOLERANCE or distance >= minimum_mm - TOLERANCE:
-                    continue
-                dx, dy = (b.x - a.x) / distance, (b.y - a.y) / distance
-                # Both boundaries must face the open gap, within 25 degrees.
-                if normals[i][0] * dx + normals[i][1] * dy < FACING_COS_FIRST:
-                    continue
-                if normals[j][0] * -dx + normals[j][1] * -dy < FACING_COS_SECOND:
-                    continue
-                connector = LineString([a, b])
-                # The open connector must contain no copper from a third
-                # primitive; union provenance alone is not electrical isolation.
-                # Clip against only the sources whose bbox touches the connector
-                # (intersecting the whole-layer union dominated runtime, #8843).
-                near = source_tree.query(connector)
-                if near.size:
-                    # Cheap exact prefilter: shave 4e-9 mm off each end. If the
-                    # shaved line misses a source (indexed, prepared test), its
-                    # overlap is confined to the two shaved ends, <= 1e-8 mm, so
-                    # the ``> 1e-8`` test below could not fire for it either.
-                    # Only sources the shaved line touches pay for the exact
-                    # intersection.
-                    ux, uy = (b.x - a.x) / distance, (b.y - a.y) / distance
-                    shaved_line = LineString(
-                        [
-                            (a.x + ux * _CONNECTOR_SHAVE_MM, a.y + uy * _CONNECTOR_SHAVE_MM),
-                            (b.x - ux * _CONNECTOR_SHAVE_MM, b.y - uy * _CONNECTOR_SHAVE_MM),
-                        ]
-                    )
-                    touched = near[shapely.intersects(prepared[near], shaved_line)]
-                    if any(
-                        connector.intersection(local[int(k)].geometry).length > 1e-8
-                        for k in touched
-                    ):
-                        continue
-                owner_indices = [
-                    [
-                        int(k)
-                        for k in source_tree.query(point, predicate="dwithin", distance=TOLERANCE)
-                        if boundaries[int(k)].distance(point) <= TOLERANCE
-                    ]
-                    for point in (a, b)
-                ]
-                # Local shoulders at a pad escape or joined track are not
-                # slits. Exclude only the neighbourhood of the actual join,
-                # never a whole connected component or an entire source pair.
-                if any(
-                    left != right
-                    and local[left].geometry.intersects(local[right].geometry)
-                    and connector.distance(local[left].geometry.intersection(local[right].geometry))
-                    < minimum_mm
-                    for left in owner_indices[0]
-                    for right in owner_indices[1]
-                ):
-                    continue
-                owners = [
-                    sorted((local[k].identity, local[k].net) for k in side)
-                    for side in owner_indices
-                ]
-                ids = tuple(sorted({identity for side in owners for identity, _ in side}))
-                nets = tuple(sorted({net for side in owners for _, net in side}))
-                kinds = {local[k].kind for side in owner_indices for k in side}
-                key = ids, nets
-                if key in findings and (findings[key].actual_value or 0) <= distance:
-                    continue
-                violation = make_finding(
-                    distance=distance,
-                    nets=nets,
-                    ids=ids,
-                    kinds=kinds,
-                    a=a,
-                    b=b,
-                    layer=layer,
-                    ox=ox,
-                    oy=oy,
-                )
-                if violation is not None:
-                    findings[key] = violation
-        for key in sorted(findings):
-            results.add(findings[key])
-    return results
+        for distance, owner_indices, a, b in _layer_slit_candidates(local, minimum_mm):
+            owners = [
+                sorted((local[k].identity, local[k].net) for k in side) for side in owner_indices
+            ]
+            ids = tuple(sorted({identity for side in owners for identity, _ in side}))
+            nets = tuple(sorted({net for side in owners for _, net in side}))
+            kinds = {local[k].kind for side in owner_indices for k in side}
+            witnesses = {
+                local[k].witness or local[k].identity for side in owner_indices for k in side
+            }
+            yield CopperGap(distance, nets, ids, kinds, a, b, layer, tuple(sorted(witnesses)))
 
 
 def check_physical_copper_gap(
@@ -815,7 +864,7 @@ def check_physical_copper_gap(
     not a guarantee about acute notches, etching chemistry or stale zone fills.
     """
 
-    def make_finding(*, distance, nets, ids, kinds, a, b, layer, ox, oy):
+    def make_finding(*, distance, nets, ids, witnesses, kinds, a, b, layer, ox, oy):
         tiered_warning = error_below_mm is not None and distance >= error_below_mm
         return DRCViolation(
             "physical_copper_gap",
@@ -828,6 +877,7 @@ def check_physical_copper_gap(
             actual_value=distance,
             required_value=minimum_mm,
             items=ids,
+            witnesses=witnesses,
             nets=nets,
             closest_locations=((a.x, a.y), (b.x, b.y)),
             same_net=len(nets) == 1,
@@ -855,7 +905,7 @@ def check_physical_copper_gap_fab_view(pcb, policy: FabGapPolicy) -> DRCResults:
     from guessed edges.
     """
 
-    def make_finding(*, distance, nets, ids, kinds, a, b, layer, ox, oy):
+    def make_finding(*, distance, nets, ids, witnesses, kinds, a, b, layer, ox, oy):
         if "zone" in kinds:
             return DRCViolation(
                 "physical_copper_gap",
@@ -867,6 +917,7 @@ def check_physical_copper_gap_fab_view(pcb, policy: FabGapPolicy) -> DRCResults:
                 layer=layer,
                 actual_value=distance,
                 items=ids,
+                witnesses=witnesses,
                 nets=nets,
                 closest_locations=((a.x, a.y), (b.x, b.y)),
                 same_net=len(nets) == 1,
@@ -888,6 +939,7 @@ def check_physical_copper_gap_fab_view(pcb, policy: FabGapPolicy) -> DRCResults:
             actual_value=distance,
             required_value=edge,
             items=ids,
+            witnesses=witnesses,
             nets=nets,
             closest_locations=((a.x, a.y), (b.x, b.y)),
             same_net=len(nets) == 1,
@@ -898,6 +950,126 @@ def check_physical_copper_gap_fab_view(pcb, policy: FabGapPolicy) -> DRCResults:
         )
 
     return _scan_copper_gaps(pcb, policy.detection_edge_mm, make_finding)
+
+
+class StaircaseSlitOracle:
+    """Judge a staircase shortcut against ``physical_copper_gap`` (Issue #9862).
+
+    The staircase legality gates model netclass clearance, mask entries and
+    terminal contact, but not the net-independent copper slit floor this
+    rule enforces: same-net copper is exempt from pair clearance and absent
+    from the foreign-element list, so a shortcut whose replacement copper
+    hugs another branch of the *same* net -- or a pour -- passes every gate
+    and still opens a slit the physical-gap pass reports once applied.  This
+    oracle re-judges a candidate with this rule's own model -- copper
+    sources (filled zone polygons included), the union merge, the
+    facing-edge slit predicate, the join exemption and the tolerance --
+    evaluated against the copper that remains after the original chain is
+    removed, locally around the changed copper.
+
+    Threshold policy mirrors ``DRCChecker.check_physical_copper_gap``: an
+    explicit ``minimum_mm`` rejects any slit below it, against filled zone
+    copper on the candidate's layer too; a :class:`FabGapPolicy` grades each
+    slit by its population band, with zone-fill gaps staying informational
+    (issue #8938) and never rejecting a candidate.
+
+    Only slits the replacement copper itself takes part in reject a
+    candidate: an unrelated pre-existing slit elsewhere on the layer does
+    not.  A slit *reopened* between two remaining sources by removing the
+    chain is outside this local check.  Coverage fails closed: geometry
+    ``_collect`` cannot model exactly makes no candidate provably legal.
+    """
+
+    def __init__(
+        self, pcb, minimum_mm: float | None = None, fab_policy: FabGapPolicy | None = None
+    ):
+        if minimum_mm is None and fab_policy is None:
+            raise ValueError("one of minimum_mm / fab_policy is required")
+        if minimum_mm is not None and fab_policy is not None:
+            raise ValueError("pass only one of minimum_mm / fab_policy")
+        if minimum_mm is not None and (not math.isfinite(minimum_mm) or minimum_mm <= 0):
+            raise ValueError("Physical copper gap must be finite and positive")
+        self._pcb = pcb
+        self._minimum_mm = minimum_mm
+        self._fab_policy = fab_policy
+        scan_mm: float
+        if minimum_mm is not None:
+            scan_mm = float(minimum_mm)
+        else:
+            assert fab_policy is not None  # guaranteed by the checks above
+            scan_mm = fab_policy.detection_edge_mm
+        self._scan_mm = scan_mm
+        self._sources: dict[str, list[CopperSource]] | None = None
+        self._unsupported = False
+
+    def _layer_sources(self, layer: str) -> list[CopperSource]:
+        """This rule's copper sources for ``layer``, collected once (cached)."""
+        if self._sources is None:
+            sources, unsupported = _collect(self._pcb)
+            self._unsupported = bool(unsupported)
+            grouped: dict[str, list[CopperSource]] = {}
+            for source in sources:
+                if not source.geometry.is_empty:
+                    grouped.setdefault(source.layer, []).append(source)
+            self._sources = grouped
+        return self._sources.get(layer, [])
+
+    def rejects(self, layer: str, chain: list, candidate: list, width: float) -> bool:
+        """``True`` when the replacement must not be reported.
+
+        ``chain`` is the segment list the shortcut replaces and ``candidate``
+        the replacement polyline, checked complete at its emitted ``width``
+        against the layer's copper minus the chain.  Also ``True`` when
+        coverage is incomplete: no shortcut is then provably legal.
+        """
+        from shapely.geometry import LineString
+
+        local = self._layer_sources(layer)
+        if self._unsupported:
+            return True
+        origin = board_origin(self._pcb)
+        removed = {segment_ref(seg, origin) for seg in chain}
+        net = chain[0].net_number
+        nets = getattr(self._pcb, "nets", None) or {}
+        net_label = nets[net].name if net in nets else str(net)
+        scan_mm = self._scan_mm
+        # Local check around the changed copper: only sources that can face
+        # the replacement within the scan distance take part, so unaffected
+        # copper is never re-judged.
+        cand_geom = LineString(candidate).buffer(width / 2, quad_segs=64)
+        minx, miny, maxx, maxy = cand_geom.bounds
+        reach = scan_mm + TOLERANCE
+        windowed = []
+        for source in local:
+            if source.identity in removed:
+                continue
+            bounds = source.geometry.bounds
+            if (
+                bounds[2] < minx - reach
+                or bounds[0] > maxx + reach
+                or bounds[3] < miny - reach
+                or bounds[1] > maxy + reach
+            ):
+                continue
+            windowed.append(source)
+        candidate_index = len(windowed)
+        windowed.append(CopperSource(cand_geom, layer, net_label, "staircase-candidate"))
+        for distance, owner_indices, _a, _b in _layer_slit_candidates(windowed, scan_mm):
+            if not any(candidate_index in side for side in owner_indices):
+                continue
+            if self._blocking(distance, owner_indices, windowed):
+                return True
+        return False
+
+    def _blocking(self, distance: float, owner_indices: list, local: list) -> bool:
+        """Would this measured slit be reported (and block) under the policy?"""
+        if self._fab_policy is None:
+            return True  # explicit threshold: every scanned slit is an error
+        kinds = {local[k].kind for side in owner_indices for k in side}
+        if "zone" in kinds:
+            return False  # info-only pour gap (issue #8938): never rejects
+        band = self._fab_policy.pad if "pad" in kinds else self._fab_policy.trace
+        return band.severity_for(distance) is not None
 
 
 def check_pad_mask_bridge(pcb, copper_oz: float | None) -> DRCResults:

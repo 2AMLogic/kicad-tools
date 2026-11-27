@@ -77,6 +77,11 @@ class DRCViolation:
     required_value: float | None = None
     items: tuple[str, ...] = ()
     nets: tuple[str, ...] = ()
+    # Identity of the copper (UUID, else geometry) a finding is about, so the
+    # fix-drc repair guard can compare the same copper across a move (Issue
+    # #9424).  Never part of :attr:`key` -- ``items`` alone feeds waiver and
+    # ``--diff`` identity, and UUIDs there would break existing waivers.
+    witnesses: tuple[str, ...] = field(default=(), kw_only=True)
     # Issue #8938: True when every side of the finding sits on one net (a
     # same-net slit).  The fab cannot see nets and fails the board on such a
     # gap regardless, so the gap is still severity-graded -- this flag only
@@ -177,6 +182,7 @@ class DRCViolation:
             "required_value": self.required_value,
             "items": list(self.items),
             "nets": list(self.nets),
+            "witnesses": list(self.witnesses),
             # Issue #8938: labels the same-net class without re-deriving it
             # from ``nets`` (and stays None for rules that do not classify).
             "same_net": self.same_net,

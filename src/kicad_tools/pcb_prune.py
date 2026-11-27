@@ -74,9 +74,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from kicad_tools.physics.ampacity import required_widths_for as required_widths_for
 from kicad_tools.schema.pcb import PCB, Pad, Segment, _mm_atom
 
 if TYPE_CHECKING:
+    from kicad_tools.creepage.output_audit import CreepageAudit
     from kicad_tools.router.current_paths import CurrentPathSpec
     from kicad_tools.router.optimizer.geometry import PadMaskZone
 
@@ -322,7 +324,7 @@ class _NetModel:
         for i in seg_ids:
             self._find_held(i)
         #: hard protection: never removed (free end, locked, zone/pad/via crossing)
-        self.hard_protected = [self._is_protected(i) for i in range(n)]
+        self.hard_protected = [self.protection_reason(i) is not None for i in range(n)]
         #: any protection, overlap-only included: never snapped
         self.protected = [self.hard_protected[i] or bool(self.overlap[i]) for i in range(n)]
         #: pieces made by a covered-track split (issue #8406): never merged,
@@ -513,26 +515,26 @@ class _NetModel:
     def held_nodes(self, i: int) -> set[int]:
         return self.held[i][0] | self.held[i][1]
 
-    def _is_protected(self, i: int) -> bool:
+    def protection_reason(self, i: int) -> str | None:
         """May segment ``i`` hide a join the model does not see?
 
-        Returns ``True`` for *hard* protection.  A body that merely touches
+        Names the contact requiring hard protection.  A body that merely touches
         other same-net segments is recorded in ``self.overlap[i]`` instead:
         such a segment may still be removed when the connectivity holds over
         those body-touching neighbours too (issue #8216's spur beside a via).
         """
         s = self.nodes[i]
         if s.kind != "seg":
-            return True
+            return "only tracks are cut individually"
         if getattr(s.ref, "locked", False):
-            return True
+            return "the track is locked"
         for e in (0, 1):
             if not self.hard_anchors(i, e) and not (self.held[i][e] and not self.anch[i][e]):
                 # A free end (could be an unseen join), or an end held only by
                 # a zone outline (the fill may have a void there).  An end that
                 # rests on a same-net via / pad by overlap alone is soft
                 # (issue #8259): it is never a join, see ``held``.
-                return True
+                return "an endpoint has no proved copper anchor"
         held = self.held_nodes(i)
         hw = s.radius
         for j, o in enumerate(self.nodes):
@@ -549,18 +551,18 @@ class _NetModel:
                 if _shared_layers(s, o) and any(
                     _in_polygon(p, o.ref.polygon) for p in _seg_samples(s.a, s.b)
                 ):
-                    return True
+                    return "its body crosses a zone whose fill may contain a void"
             elif o.kind == "arc":
                 # Unmodelled copper arc: a body contact may be what feeds it.
                 if _shared_layers(s, o) and _arc_reaches(o, s.a, s.b, hw):
-                    return True
+                    return "its body contacts an arc away from its endpoint joins"
             elif _shared_layers(s, o):
                 reach = o.radius if o.kind == "via" else math.hypot(o.hx, o.hy)
                 if _pt_seg_dist(o.a, s.a, s.b) <= hw + reach + _EPS:
-                    return True
+                    return f"its body contacts a {o.kind} away from its endpoint joins"
         # Same-net zones that already anchor an end do not need protecting
         # beyond the above; a zone anchored at an end is a modelled join.
-        return False
+        return None
 
     # -- queries -------------------------------------------------------------
 
@@ -1825,11 +1827,8 @@ def _plan_contained_segments(
 ) -> None:
     """Remove segments lying wholly inside a collinear same-net track (#8368).
 
-    A shorter track on the centreline of a longer, no-narrower one adds no
-    copper, but the current-path audit splits the longer track at the short
-    one's ends and sees two parallel edges -- a loop prune could not see,
-    since the pair shares at most one endpoint.  Removing the covered track
-    removes no copper, so no ampacity check applies; the usual guards still do:
+    Removing a shorter track entirely covered by a no-narrower collinear
+    carrier preserves the conductor outline. The usual connectivity guards apply:
 
     * everything joined at the covered tracks' ends must also join the
       container by a contact that exists with them present
@@ -1882,22 +1881,21 @@ def _plan_contained_segments(
 DEFAULT_WIDE_MM = 0.5
 
 
-def _cut_ok(model: _NetModel, group: set[int], removed: set[int], baseline) -> bool:
-    """The shared acceptance test for removing ``group`` (terminals unchanged,
-    neighbours still joined, no stranded, degraded or de-centred ends).
-
-    The via / pad-side :meth:`_NetModel.decentres` check applies here exactly
-    as in :func:`_plan_net`'s generic loop pass (issue #8358): a via-closed
-    loop cut must not leave a via held on a layer only by an off-centre end.
-    """
+def _cut_obstacle(model: _NetModel, group: set[int], removed: set[int], baseline) -> str | None:
+    """First connectivity or joint that prevents removing these items."""
     touched = {k for g in group for k in model.adj[g] | model.overlap[g]} - group
-    return not (
-        model.partition(removed | group) != baseline
-        or not model.still_joined(touched, removed | group)
-        or model.strands_end(group, removed)
-        or model.degrades_ends(touched, removed, removed | group)
-        or model.decentres(touched, removed, removed | group)
-    )
+    remaining = removed | group
+    if model.partition(remaining) != baseline:
+        return "removing it would disconnect terminals"
+    if not model.still_joined(touched, remaining):
+        return "removing it would disconnect neighbouring copper"
+    if model.strands_end(group, removed):
+        return "a neighbouring track would lose its endpoint anchor"
+    if model.degrades_ends(touched, removed, remaining):
+        return "a neighbouring endpoint would be held only by a copper overlap"
+    if model.decentres(touched, removed, remaining):
+        return "a via or pad would lose its centred connection"
+    return None
 
 
 def _width(model: _NetModel, i: int) -> float:
@@ -2037,7 +2035,7 @@ def _expand_cut(
         if orphans is None:
             continue
         full = cand | orphans
-        if _cut_ok(model, full, removed, baseline):
+        if _cut_obstacle(model, full, removed, baseline) is None:
             return full
     return None
 
@@ -2047,39 +2045,6 @@ def _describe_required(required: Required, comp: set[int], model: _NetModel) -> 
         return f"{required:.3g} mm"
     layers = sorted({model.nodes[i].layers[0] for i in comp})
     return ", ".join(f"{_required_on(required, lyr):.3g} mm on {lyr}" for lyr in layers)
-
-
-def required_widths_for(pcb: PCB, current_a: float) -> dict[str, float]:
-    """IPC-2221 width (mm) a declared current needs on each copper layer.
-
-    Outer layers (``F.Cu`` / ``B.Cu``) use the external constant, inner layers
-    the internal one, each at the board's own copper weight from an explicit
-    stackup (``Stackup.outer_inner_copper_oz``; 1 oz where none is declared).
-    Issue #8368: a flat "internal, 1 oz" figure overstated the outer-layer
-    width of a 2 oz board several times over, so every cut was refused.
-    """
-    from kicad_tools.physics.ampacity import width_for_current
-
-    outer_oz = inner_oz = 1.0
-    try:
-        from kicad_tools.physics.stackup import Stackup
-
-        derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
-    except Exception:  # noqa: BLE001 - a malformed stackup falls back to 1 oz
-        derived = None
-    if derived is not None:
-        outer_oz = derived[0] or outer_oz
-        inner_oz = derived[1] or inner_oz
-    names = [layer.name for layer in pcb.copper_layers] or ["F.Cu", "B.Cu"]
-    out: dict[str, float] = {}
-    for name in names:
-        external = name in ("F.Cu", "B.Cu")
-        out[name] = width_for_current(
-            current_a,
-            outer_oz if external else inner_oz,
-            layer="external" if external else "internal",
-        )
-    return out
 
 
 def current_path_declarations(
@@ -2159,7 +2124,11 @@ def _plan_declared_loops(
         group = _group_for(model, s, removed)
         if (
             group
-            and _cut_ok(model, group, removed, baseline)
+            and (
+                any(_width(model, g) >= wide for g in group)
+                or not _ampacity_ok(model, group, required)
+            )
+            and _cut_obstacle(model, group, removed, baseline) is None
             and _via_effects(model, group, removed) is not None
         ):
             stuck.add(s)
@@ -2553,6 +2522,130 @@ class PruneResult:
     uncut_loops: list[dict[str, Any]] = field(default_factory=list)
     #: plans not applied because an edit fell outside ``--region``
     region_skipped: list[NetPlan] = field(default_factory=list)
+    #: plans dropped because applying them left a pair further under its
+    #: creepage requirement (Issue #9640); empty without ``--voltage-map``
+    creepage_rejected: list[NetPlan] = field(default_factory=list)
+    #: creepage gate report (Issue #9640): ``None`` without ``--voltage-map``
+    creepage: dict[str, Any] | None = None
+
+
+def _seg_index(pcb: PCB, seg: Segment) -> int | None:
+    def geometry(s: Segment) -> tuple:
+        return (s.net_number, s.layer, s.width, tuple(sorted((s.start, s.end))))
+
+    if seg.uuid:
+        hits = [i for i, s in enumerate(pcb.segments) if s.uuid == seg.uuid]
+    else:
+        hits = [i for i, s in enumerate(pcb.segments) if geometry(s) == geometry(seg)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _via_index(pcb: PCB, via: Any) -> int | None:
+    if via.uuid:
+        hits = [i for i, v in enumerate(pcb.vias) if v.uuid == via.uuid]
+    else:
+        hits = [
+            i
+            for i, v in enumerate(pcb.vias)
+            if v.position == via.position and v.net_number == via.net_number
+        ]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _has_pour_candidates(pcb: PCB, nets: Collection[str] | None) -> bool:
+    """Check whether a selected net has a branch that needs native verification."""
+    from kicad_tools.validate.pour_stub import discover_pour_stubs
+
+    try:
+        if not pcb.zones or not pcb.segments:
+            return False
+        return any(nets is None or branch.net in nets for branch in discover_pour_stubs(pcb))
+    except Exception as e:  # noqa: BLE001 - discovery must never fail prune
+        logger.debug("pour-stub discovery failed: %s", e)
+        return False
+
+
+def _plan_pour_stubs(
+    pcb_path: Path,
+    accepted: list[NetPlan],
+    *,
+    rule_files: Sequence[Path] | None,
+    nets: Collection[str] | None,
+) -> list[NetPlan]:
+    """One plan per net removing pad branches proven redundant on the refilled pour.
+
+    The proof runs on ``pcb_path`` with ``accepted`` applied, and each branch is
+    judged on the refilled board that lacks the branches accepted before it
+    (Issue #10138). A branch's track and via are removed together. Nothing is
+    returned unless every selected branch maps back onto untouched board copper.
+    """
+    from kicad_tools.validate.pour_stub import PourStub, select_pour_stubs
+
+    def include(branch: PourStub) -> bool:
+        return nets is None or branch.net in nets
+
+    staged = PCB.load(pcb_path)
+    if accepted:
+        apply_plans(staged, accepted)
+    picked = select_pour_stubs(staged, rule_files=rule_files, include=include)
+    if not picked:
+        return []
+    original = PCB.load(pcb_path)
+    touched_segs = {
+        i
+        for p in accepted
+        for i in (
+            *p.remove,
+            *(i for i, *_ in p.snaps),
+            *(i for i, *_ in p.extends),
+            *(i for i, _ in p.splits),
+        )
+    }
+    touched_vias = {i for p in accepted for i in p.remove_vias}
+    by_net: dict[int, NetPlan] = {}
+    for branch, _evidence in picked:
+        seg_i = _seg_index(original, branch.segment)
+        via_i = _via_index(original, branch.via) if branch.via else None
+        if (
+            seg_i is None
+            or seg_i in touched_segs
+            or (branch.via is not None and (via_i is None or via_i in touched_vias))
+        ):
+            return []
+        plan = by_net.setdefault(
+            branch.segment.net_number, NetPlan(branch.segment.net_number, branch.net)
+        )
+        plan.remove.append(seg_i)
+        plan.reasons[seg_i] = (
+            f"pad {branch.pad_name} stays bonded to the refilled pour without this branch"
+        )
+        if via_i is not None:
+            plan.remove_vias.append(via_i)
+    return [by_net[n] for n in sorted(by_net)]
+
+
+def _pour_plans_outside_region(
+    pcb: PCB, region: Region, plans: list[NetPlan], pours: list[NetPlan]
+) -> list[NetPlan]:
+    """Report all edits for each net whose newly proven pour plan crosses the box."""
+    ordinary = {p.net_number: p for p in plans}
+    skipped = []
+    for pour in pours:
+        if plan_in_region(pcb, pour, region):
+            continue
+        other = ordinary.get(pour.net_number)
+        if other is None:
+            skipped.append(pour)
+        else:
+            skipped.append(
+                replace(
+                    other,
+                    remove=[*other.remove, *pour.remove],
+                    remove_vias=[*other.remove_vias, *pour.remove_vias],
+                    reasons={**other.reasons, **pour.reasons},
+                )
+            )
+    return skipped
 
 
 def prune_board(
@@ -2568,12 +2661,21 @@ def prune_board(
     allow_default_rules: bool = False,
     nets: Collection[str] | None = None,
     region: Region | None = None,
+    creepage_audit: CreepageAudit | None = None,
+    creepage_baseline_text: str | None = None,
+    creepage_required_pairs: Mapping[Any, Any] | None = None,
 ) -> tuple[PCB, PruneResult]:
     """Plan (and optionally apply) pruning for ``pcb_path``.
 
     Returns the board (edited in memory when ``apply``) and a summary.  With
     ``kicad-cli`` available each net's plan is trial-applied to a scratch copy
     and kept only when ``pcb drc --refill-zones`` reports nothing new.
+
+    With ``creepage_audit`` (Issue #9640) each net's plan is also dropped when
+    applying it leaves any pair further under its creepage requirement than
+    ``creepage_baseline_text`` (default: ``pcb_path``'s text) -- a new failing
+    pair, or a deeper shortfall on one that already failed.  An audit that
+    cannot run drops every plan: nothing unverified is written.
     """
     import tempfile
 
@@ -2594,7 +2696,10 @@ def prune_board(
     rejected: list[NetPlan] = []
     drc_verified, note = False, "DRC verification skipped (--no-drc)"
 
-    if verify_drc and plans:
+    pour_plans: list[NetPlan] = []
+    pour_all: list[NetPlan] = []
+    wants_pour = verify_drc and _has_pour_candidates(pcb, nets)
+    if verify_drc and (plans or wants_pour):
         with tempfile.TemporaryDirectory(prefix="kct_prune_") as tmp:
             trial_path = Path(tmp) / "trial.kicad_pcb"
             # DRC must run with the project's rules (clearances, netclasses).
@@ -2620,32 +2725,114 @@ def prune_board(
                         "default rules only, custom clearances were NOT evaluated)"
                     )
 
-                def _trial_ok(group: list[NetPlan]) -> bool:
+                def _trial_sig(group: list[NetPlan]) -> Counter | None:
                     trial = PCB.load(pcb_path)
                     apply_plans(trial, group)
                     trial.save(trial_path)
-                    after = _drc_signature(trial_path)
-                    return after is not None and not _worse(after, baseline)
+                    return _drc_signature(trial_path)
 
-                # One DRC for everything; fall back to per-net only if it fails.
-                if _trial_ok(plans):
-                    accepted, rejected = list(plans), []
-                else:
-                    accepted, rejected = [], []
-                    for plan in plans:
-                        if _trial_ok([*accepted, plan]):
-                            accepted.append(plan)
+                def _trial_ok(group: list[NetPlan], base: Counter = baseline) -> bool:
+                    after = _trial_sig(group)
+                    return after is not None and not _worse(after, base)
+
+                def _verify_ordinary(group: list[NetPlan]) -> tuple[list[NetPlan], list[NetPlan]]:
+                    if not group or _trial_ok(group):
+                        return list(group), []
+                    kept: list[NetPlan] = []
+                    dropped: list[NetPlan] = []
+                    for plan in group:
+                        if _trial_ok([*kept, plan]):
+                            kept.append(plan)
                         else:
-                            rejected.append(plan)
+                            dropped.append(plan)
+                    return kept, dropped
+
+                # An ordinary edit outside the box already excludes that whole net.
+                # A refill may prove another edit on a net whose ordinary edits fit.
+                # If that edit crosses the box, keep the net's original copper in
+                # every subsequent DRC and connectivity trial.
+                excluded = {plan.net_name for plan in region_skipped}
+                while True:
+                    accepted, rejected = _verify_ordinary(plans)
+                    if not wants_pour:
+                        break
+                    selected_nets = nets
+                    if excluded:
+                        names = (n.name for n in pcb.nets.values()) if nets is None else nets
+                        selected_nets = set(names) - excluded
+                        if not selected_nets:
+                            pour_all = []
+                            break
+                    pour_all = _plan_pour_stubs(
+                        Path(pcb_path),
+                        accepted,
+                        rule_files=list(rules),
+                        nets=selected_nets,
+                    )
+                    if region is None or not pour_all:
+                        break
+                    skipped = _pour_plans_outside_region(pcb, region, plans, pour_all)
+                    if not skipped:
+                        break
+                    region_skipped.extend(skipped)
+                    excluded.update(p.net_name for p in skipped)
+                    plans = [p for p in plans if p.net_name not in excluded]
+
+                if pour_all:
+                    # Compare against the board the ordinary edits leave behind.
+                    pour_base = _trial_sig(accepted) if accepted else baseline
+                    if pour_base is not None:
+                        for plan in pour_all:
+                            if _trial_ok([*accepted, *pour_plans, plan], pour_base):
+                                pour_plans.append(plan)
+                            else:
+                                plan.reject_reason = "pour-stub removal added new DRC findings"
+                                rejected.append(plan)
     elif verify_drc:
         note = "nothing to verify"
 
     # Issue #8687: never trade a resolved declared-current net for an ambiguous one.
     gate_specs = _gate_specs(Path(pcb_path), current_paths)
+    ordinary_accepted = len(accepted)
     if gate_specs and accepted:
         accepted, audit_rejected = _audit_gate(Path(pcb_path), accepted, gate_specs)
         rejected = [*rejected, *audit_rejected]
 
+    creepage_rejected: list[NetPlan] = []
+    creepage_report: dict[str, Any] | None = None
+    if creepage_audit is not None:
+        accepted, creepage_rejected, creepage_report = _creepage_gate(
+            Path(pcb_path),
+            accepted,
+            creepage_audit,
+            creepage_baseline_text,
+            creepage_required_pairs,
+        )
+
+    if pour_plans:
+        if len(accepted) != ordinary_accepted:
+            # A gate dropped an ordinary edit, so the pour proof's board is gone.
+            for plan in pour_plans:
+                plan.reject_reason = "pour proof no longer matches the edits kept by the gates"
+            rejected = [*rejected, *pour_plans]
+            pour_plans = []
+        else:
+            if gate_specs:
+                pour_plans, audit_rejected = _audit_gate(Path(pcb_path), pour_plans, gate_specs)
+                rejected = [*rejected, *audit_rejected]
+            if creepage_audit is not None and pour_plans:
+                accepted, more, creepage_report = _creepage_gate(
+                    Path(pcb_path),
+                    [*accepted, *pour_plans],
+                    creepage_audit,
+                    creepage_baseline_text,
+                    creepage_required_pairs,
+                )
+                creepage_rejected = [*creepage_rejected, *more]
+            else:
+                accepted = [*accepted, *pour_plans]
+
+    plans = [*plans, *pour_all]
     stats = {"segments_removed": 0, "ends_snapped": 0}
     if apply and accepted:
         stats = apply_plans(pcb, accepted)
@@ -2662,10 +2849,91 @@ def prune_board(
         result = pcb if apply else PCB.load(pcb_path)
         if not apply and accepted:
             apply_plans(result, accepted)
-        uncut.extend(audit_loops_left(result, current_paths, uncut))
+        retained = {
+            p.net_name: p.reject_reason or "the proposed edit failed native DRC" for p in rejected
+        }
+        retained.update({p.net_name: p.reject_reason for p in creepage_rejected})
+        retained.update(
+            {p.net_name: "the edits extend outside the selected region" for p in region_skipped}
+        )
+        uncut.extend(audit_loops_left(result, current_paths, uncut, retained=retained))
     return pcb, PruneResult(
-        plans, accepted, rejected, drc_verified, note, stats, uncut, region_skipped
+        plans,
+        accepted,
+        rejected,
+        drc_verified,
+        note,
+        stats,
+        uncut,
+        region_skipped,
+        creepage_rejected,
+        creepage_report,
     )
+
+
+def _plans_board_text(pcb_path: Path, group: list[NetPlan]) -> str:
+    """The board text of ``pcb_path`` with ``group``'s plans applied (scratch copy)."""
+    import tempfile
+
+    trial = PCB.load(pcb_path)
+    apply_plans(trial, group)
+    with tempfile.TemporaryDirectory(prefix="kct_prune_creep_") as tmp:
+        out = Path(tmp) / "trial.kicad_pcb"
+        trial.save(out)
+        return out.read_text()
+
+
+def _creepage_gate(
+    pcb_path: Path,
+    accepted: list[NetPlan],
+    audit: CreepageAudit,
+    baseline_text: str | None,
+    required_pairs: Mapping[Any, Any] | None,
+) -> tuple[list[NetPlan], list[NetPlan], dict[str, Any]]:
+    """Split ``accepted`` into (kept, rejected) by the creepage audit (Issue #9640).
+
+    Plans are judged per net (a net's snaps, merges and removals stand or fall
+    together), like the DRC trial above: first all together, then -- only when
+    that regresses -- one at a time on top of the plans already kept.
+    """
+    from kicad_tools.creepage.output_audit import audit_summary
+
+    base_text = baseline_text if baseline_text is not None else Path(pcb_path).read_text()
+    report: dict[str, Any] = {"creepage_gate": "active", "creepage_audit": "unchanged"}
+    if not accepted:
+        return accepted, [], report
+    base = audit(base_text)
+    if base is None:
+        for plan in accepted:
+            plan.reject_reason = "creepage audit could not run; edit not verified"
+        report["creepage_audit"] = "unavailable"
+        return [], list(accepted), report
+    report["creepage_audit"] = "ran"
+
+    def worse(group: list[NetPlan]) -> dict[str, int] | None:
+        cur = audit(_plans_board_text(pcb_path, group))
+        if cur is None:
+            return {"unverifiable": 1}
+        excess = {k: n for k, n in cur.items() if n > base.get(k, 0)}
+        return excess or None
+
+    kept: list[NetPlan] = []
+    rejected: list[NetPlan] = []
+    if worse(accepted) is None:
+        kept = list(accepted)
+    else:
+        for plan in accepted:
+            excess = worse([*kept, plan])
+            if excess is None:
+                kept.append(plan)
+            else:
+                pairs = ", ".join(sorted(k.rsplit("|", 1)[0] for k in excess))
+                plan.reject_reason = f"creepage: leaves pair(s) further under requirement: {pairs}"
+                rejected.append(plan)
+    report.update(
+        audit_summary(audit, base_text, _plans_board_text(pcb_path, kept), required_pairs)
+    )
+    return kept, rejected, report
 
 
 def _gate_specs(
@@ -2771,10 +3039,45 @@ def cleanup_copper(routed: Path | str, max_passes: int = 10) -> dict[str, int]:
     raise RuntimeError(f"Copper cleanup did not converge in {max_passes} passes: {totals}")
 
 
+def _witness_cut_reason(model: _NetModel | None, witness: dict[str, object]) -> str:
+    """Explain the proposed whole-item cut on the board the audit actually read."""
+    if witness.get("kind") == "via":
+        return "the loop closes through a via barrel; prune can remove only an orphaned via"
+    if model is not None:
+        for index, node in enumerate(model.nodes):
+            if node.kind != "seg" or node.ref.layer != witness.get("layer"):
+                continue
+            if [list(node.ref.start), list(node.ref.end)] != [
+                witness.get("start"),
+                witness.get("end"),
+            ]:
+                continue
+            if node.ref.locked:
+                return "the track is locked"
+            cut = {index}
+            obstacle = _cut_obstacle(model, cut, set(), model.partition(set()))
+            if obstacle:
+                return obstacle
+            if _via_effects(model, cut, set()) is None:
+                return "removing it would strand a via on one layer"
+            if not model.end_ok(index, cut):
+                return "the full track has an endpoint without another anchor"
+            if protection := model.protection_reason(index):
+                return protection
+            if not _group_for(model, index, set()):
+                return "the cut would orphan a protected neighbouring track"
+            if not model.has_cycle():
+                return "the prune model cannot trace an alternate connection through endpoint joins"
+            return "this whole-track cut needs a verified net-level edit before it can be applied"
+    return "the witness locates a copper interval without a matching whole-track cut"
+
+
 def audit_loops_left(
     pcb: PCB,
     specs: Sequence[CurrentPathSpec],
     reported: Sequence[dict[str, Any]] = (),
+    *,
+    retained: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Loops the current-path audit still sees on the pruned board (#8368).
 
@@ -2795,25 +3098,26 @@ def audit_loops_left(
         witness_text,
     )
 
+    models: dict[int, _NetModel] | None = None
     seen = {str(u.get("net")) for u in reported}
     out: list[dict[str, Any]] = []
     for spec in specs:
         if spec.net_name in seen:
             continue
         res = resolve_current_path(pcb, spec)
-        if res.status != STATUS_AMBIGUOUS or not res.witness:
+        if res.status != STATUS_AMBIGUOUS or res.witness.get("kind") not in {"segment", "via"}:
             continue
         seen.add(spec.net_name)
         w = res.witness
+        if models is None:
+            models = _build_net_models(pcb)
+        model = models.get(res.source.net_number) if res.source else None
         out.append(
             {
                 "net": spec.net_name,
                 "segments": [witness_text(w)],
                 "min_width": round(float(cast("float", w.get("width", 0.0))), 6),
-                "reason": (
-                    "the current-path audit still sees a loop/parallel path that "
-                    "prune has no safe cut for"
-                ),
+                "reason": (retained or {}).get(spec.net_name) or _witness_cut_reason(model, w),
                 "witness": w,
             }
         )

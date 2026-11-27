@@ -61,13 +61,21 @@ def test_sibling_schematic_and_symbols_are_collected_with_project_root(tmp_path)
         "symbols/custom.kicad_sym",
     }
     assert report["project_root"] == ".."
+    assert any(
+        c["name"] == "native_refilled_drc" and c["status"] == cmd.PASSED for c in report["checks"]
+    )
+    receipt = json.loads((pcb / "output/readiness/fill-consistency.json").read_text())
+    for entry in ("saved_pcb", "refilled_pcb"):
+        snapshot = (pcb / receipt[entry]).parent
+        assert (snapshot / "sym-lib-table").read_text() == TABLE
+        assert (snapshot / "../../symbols/custom.kicad_sym").read_text() == LIB
     with zipfile.ZipFile(pcb / "output/manufacturing/kicad_project.zip") as zf:
         names = set(zf.namelist())
     assert {
         "pcb/output/board.kicad_pcb",
         "pcb/output/sym-lib-table",
         "symbols/custom.kicad_sym",
-        "schematics/board.kicad_sch",
+        "pcb/output/board.kicad_sch",
     } <= names
     # Sources outside the generated package are untouched.
     for name, data in sources.items():

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import subprocess
 from pathlib import Path
 
@@ -58,6 +59,8 @@ from kicad_tools.validate.rules.factory_clearance import check_silk_pad_clearanc
 from kicad_tools.validate.rules.silkscreen import (
     SILK_EDGE_CLEARANCE_MM,
     SILK_GEOMETRY_UNMODELED_RULE_ID,
+    _iter_pad_apertures,
+    _iter_via_apertures,
     _stroke_geometry,
     check_all_silkscreen,
     check_silk_coverage,
@@ -130,7 +133,7 @@ def _smd_pad(
         shape="rect",
         position=position,
         size=size,
-        layers=["F.Cu"],
+        layers=["F.Cu", "F.Mask"],
     )
 
 
@@ -146,7 +149,7 @@ def _thru_hole_pad(
         shape="circle",
         position=position,
         size=size,
-        layers=["*.Cu"],
+        layers=["*.Cu", "*.Mask"],
         drill=0.8,
     )
 
@@ -171,7 +174,9 @@ class TestSilkOverCopper:
         assert len(results) == 1
         v = results.violations[0]
         assert v.rule_id == "silk_over_copper"
-        assert v.severity == "warning"
+        # Error under the jlcpcb profiles (operator ruling on #9795, #9798);
+        # a profile without the knob keeps the warning.
+        assert v.severity == "error"
         assert v.items[0].startswith("U1")
         assert "pad 1" in v.items[1]
 
@@ -276,6 +281,27 @@ class TestSilkOverCopper:
 
         results = check_silk_over_copper(pcb, _rules())
         assert len(results) == 0
+
+    @pytest.mark.parametrize("layers", [["F.Cu"], ["F.Mask"], ["F.Cu", "B.Mask"]])
+    def test_pad_without_exposed_front_copper_clears(self, layers):
+        pad = _smd_pad(position=(0.0, 0.0))
+        pad.layers = layers
+        pcb = _empty_pcb()
+        pcb._footprints.append(_make_footprint(pads=[pad], texts=[_ref_text(position=(0, 0))]))
+        assert not check_silk_over_copper(pcb, _rules()).violations
+
+    @pytest.mark.parametrize(
+        ("margin", "x", "hits"), [(-0.2, 0.25, 1), (-0.2, 0.4, 0), (-0.7, 0, 0)]
+    )
+    def test_mask_defined_rect_pad(self, margin, x, hits):
+        pad = _smd_pad(position=(0, 0), size=(1, 1))
+        pad.solder_mask_margin = margin
+        stroke = FootprintGraphic(
+            graphic_type="line", layer="F.SilkS", stroke_width=0.05, start=(x, -0.1), end=(x, 0.1)
+        )
+        pcb = _empty_pcb()
+        pcb._footprints.append(_make_footprint(pads=[pad], graphics=[stroke]))
+        assert len(check_silk_over_copper(pcb, _rules())) == hits
 
     def test_hidden_text_skipped(self):
         """Hidden silk text never produces a silk_over_copper violation."""
@@ -430,23 +456,32 @@ def _via_probe_pcb(
     setup_tenting: tuple[str, str] | None,
     via_tenting: tuple[str, str] | None,
     silk_layers: tuple[str, ...] = ("F.SilkS",),
+    mask_clearance: float | None = 0.0,
+    via_size: float = 0.6,
+    silk: tuple[tuple[float, float], tuple[float, float], float] | None = None,
 ) -> PCB:
     """Build a PCB with one GND via at (10, 10) and silk segment(s) across it.
 
     ``setup_tenting`` / ``via_tenting`` are ``(front, back)`` token pairs
     (``"yes"`` / ``"no"`` / ``"none"``) or ``None`` to omit the node entirely,
     exercising the real ``(tenting ...)`` parse path in both places.
+
+    ``mask_clearance`` is the board's ``pad_to_mask_clearance`` (``None`` omits
+    the token).  ``silk`` overrides the default segment as ``(start, end,
+    stroke width)``; it is drawn on every ``silk_layers`` entry.
     """
     setup_block = ""
     if setup_tenting is not None:
         setup_block = f"(tenting (front {setup_tenting[0]}) (back {setup_tenting[1]}))"
+    clearance_node = "" if mask_clearance is None else f"(pad_to_mask_clearance {mask_clearance})"
     via_block = ""
     if via_tenting is not None:
         via_block = f"(tenting (front {via_tenting[0]}) (back {via_tenting[1]}))"
+    start, end, width = silk or ((8, 10), (12, 10), 0.2)
     silk_lines = "".join(
         f"""
-    (gr_line (start 8 10) (end 12 10)
-        (stroke (width 0.2) (type solid))
+    (gr_line (start {start[0]} {start[1]}) (end {end[0]} {end[1]})
+        (stroke (width {width}) (type solid))
         (layer "{layer}") (uuid "2222-{i}"))"""
         for i, layer in enumerate(silk_layers)
     )
@@ -454,12 +489,12 @@ def _via_probe_pcb(
     (version 20260206)
     (generator "pcbnew")
     (setup
-        (pad_to_mask_clearance 0)
+        {clearance_node}
         {setup_block}
     )
     (net 0 "")
     (net 1 "GND")
-    (via (at 10 10) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")
+    (via (at 10 10) (size {via_size}) (drill {via_size / 2}) (layers "F.Cu" "B.Cu")
         {via_block}
         (net 1) (uuid "1111"))
     {silk_lines}
@@ -546,6 +581,223 @@ class TestSilkOverUntentedVia:
         pcb.graphics[0].start = (30.0, 30.0)
         pcb.graphics[0].end = (34.0, 30.0)
         assert len(check_silk_over_copper(pcb, _rules())) == 0
+
+
+def _diagonal_stroke(
+    offset: float, length: float = 0.6
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Endpoints of a segment perpendicular to the 45 degree radius of the via
+    at (10, 10), centred ``offset`` mm from the via centre."""
+    ux = uy = math.sqrt(0.5)
+    half = length / 2.0
+    cx, cy = 10.0 + offset * ux, 10.0 + offset * uy
+    return (cx + half * ux, cy - half * uy), (cx - half * ux, cy + half * uy)
+
+
+def _via_opening_probe_pcb(*, stroke_offset: float) -> PCB:
+    """Build the Issue #10390 board: a 2.4 mm via at (10, 10), untented on the
+    front and tented on the back, under one 0.6 x 0.2 mm F.SilkS stroke.
+
+    The stroke runs perpendicular to the 45 degree radius, centred
+    ``stroke_offset`` mm from the via centre, so its nearest edge sits
+    ``stroke_offset - 0.1`` mm out.
+    """
+    start, end = _diagonal_stroke(stroke_offset)
+    text = f"""(kicad_pcb
+    (version 20260206)
+    (generator "pcbnew")
+    (setup
+        (pad_to_mask_clearance 0)
+        (tenting (front no) (back yes))
+    )
+    (net 0 "")
+    (net 1 "GND")
+    (via (at 10 10) (size 2.4) (drill 1.2) (layers "F.Cu" "B.Cu")
+        (net 1) (uuid "1111"))
+    (gr_line (start {start[0]} {start[1]}) (end {end[0]} {end[1]})
+        (stroke (width 0.2) (type solid))
+        (layer "F.SilkS") (uuid "2222-0"))
+)"""
+    from kicad_tools.sexp import parse_string
+
+    return PCB(parse_string(text))
+
+
+def _zero_mask_margin_rules():
+    """The jlcpcb rules with the profile mask margin set to zero."""
+    return dataclasses.replace(_rules(), min_solder_mask_clearance_mm=0.0)
+
+
+class TestUntentedViaOpeningIsRound:
+    """Issue #10390: the opening is the plotted disk, not the square around it."""
+
+    _VIA_LABEL = "via [GND] at (10.000, 10.000)"
+
+    def test_diagonal_stroke_outside_round_opening_is_clean(self):
+        """A stroke 1.4 mm out on the diagonal clears the 1.2 mm round opening.
+
+        Its nearest edge is 1.3 mm from the centre: outside the circle, inside
+        a corner of the 1.2 mm half-side square the checker used to model.
+        """
+        pcb = _via_opening_probe_pcb(stroke_offset=1.4)
+        assert len(check_silk_over_copper(pcb, _zero_mask_margin_rules())) == 0
+
+    def test_centred_stroke_still_flags_naming_the_via(self):
+        """The control: a stroke over the via centre is still reported."""
+        pcb = _via_opening_probe_pcb(stroke_offset=0.0)
+        violations = check_silk_over_copper(pcb, _zero_mask_margin_rules()).violations
+        assert len(violations) == 1
+        assert violations[0].items[1] == self._VIA_LABEL
+        assert violations[0].layer == "F.SilkS"
+        assert violations[0].severity == "info"
+
+    @pytest.mark.parametrize("include_via_obstacles", [True, False])
+    def test_reference_placement_receives_the_round_opening(self, include_via_obstacles):
+        """``collect_apertures`` yields the disk on the untented side only."""
+        from shapely.geometry import LineString, Point
+
+        from kicad_tools.silkscreen.place_refs import collect_apertures
+
+        pcb = _via_opening_probe_pcb(stroke_offset=1.4)
+        apertures = collect_apertures(pcb, 0.0, include_via_obstacles=include_via_obstacles)
+        openings = {
+            side: [geom for geom, label in apertures[side] if label == self._VIA_LABEL]
+            for side in ("F", "B")
+        }
+        assert len(openings["F"]) == int(include_via_obstacles)
+        assert openings["B"] == []
+        for opening in openings["F"]:
+            start, end = _diagonal_stroke(1.4)
+            assert not opening.intersects(LineString([start, end]).buffer(0.1))
+            assert opening.contains(Point(10.0, 10.0))
+        drills = [label for _geom, label in apertures["B"] if label.startswith("drill via")]
+        assert len(drills) == int(include_via_obstacles)
+
+
+# ---------------------------------------------------------------------------
+# silk_over_copper: an untented via's opening follows the board clearance
+# (#10384)
+# ---------------------------------------------------------------------------
+#
+# Measured on the pinned KiCad 10.0.6 image from kicad-cli mask plots of
+# boards whose vias are untented on both sides
+# (``scripts/research/probe_via_mask_clearance.py``).  Flashed opening
+# diameters, identical on F.Mask and B.Mask:
+#
+#   pad_to_mask_clearance   via d0.6   via d1.0   via d1.6   pad d1.0
+#   0                       0.600      1.000      1.600      1.000
+#   0.4                     1.400      1.800      2.400      1.800
+#   (token absent)          0.600      1.000      1.600      1.000
+#
+# i.e. KiCad expands an untented via's opening by the board's clearance
+# exactly as it expands a pad's, and the parser rejects a
+# ``(solder_mask_margin ...)`` node inside a via, so a via has no local
+# override to resolve.  The same probe shows kicad-cli's own
+# ``silk_over_copper`` reaching only to bare copper for pads and vias alike;
+# placement uses the full opening, even where it extends beyond copper.
+
+
+def _via_and_round_pad_pcb(mask_clearance: float | None) -> PCB:
+    """A board-untented d1.0 via at (10, 10) and a d1.0 round SMD pad at (20, 10)."""
+    clearance_node = "" if mask_clearance is None else f"(pad_to_mask_clearance {mask_clearance})"
+    text = f"""(kicad_pcb
+    (version 20260206)
+    (generator "pcbnew")
+    (setup
+        {clearance_node}
+        (tenting (front no) (back no))
+    )
+    (net 0 "")
+    (net 1 "GND")
+    (net 2 "SIG")
+    (via (at 10 10) (size 1.0) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "1111"))
+    (footprint "Probe:Pad" (layer "F.Cu") (at 20 10) (uuid "2111")
+        (attr smd)
+        (fp_text reference "PROBE1" (at 0 1.5) (layer "F.Fab") (uuid "2111t"))
+        (pad "1" smd circle (at 0 0) (size 1 1)
+            (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "SIG") (uuid "2111p"))
+    )
+)"""
+    return PCB(parse_string(text))
+
+
+def _opening_size(geometry) -> tuple[float, float]:
+    minx, miny, maxx, maxy = geometry.bounds
+    return maxx - minx, maxy - miny
+
+
+class TestUntentedViaMaskMargin:
+    """An untented via's opening is its copper expanded by the board's clearance."""
+
+    @pytest.mark.parametrize(
+        ("mask_clearance", "fallback", "expected_width"),
+        [
+            (-0.1, 0.05, 0.4),  # shrunk opening still flashes on both sides
+            (0.0, 0.05, 0.6),  # flashed C,0.600000
+            (0.4, 0.05, 1.4),  # flashed C,1.400000
+            # Nothing declared: KiCad flashes C,0.600000; kct keeps its fallback.
+            (None, 0.05, 0.7),
+            # A declared value is used whatever fallback the caller supplies.
+            (0.4, 0.0, 1.4),
+        ],
+    )
+    def test_via_opening_width_follows_the_board_clearance(
+        self, mask_clearance, fallback, expected_width
+    ):
+        pcb = _via_probe_pcb(
+            setup_tenting=("no", "no"), via_tenting=None, mask_clearance=mask_clearance
+        )
+        apertures = list(_iter_via_apertures(pcb, fallback))
+        assert [side for side, _geom, _label in apertures] == ["F", "B"]
+        for _side, geom, _label in apertures:
+            assert _opening_size(geom) == pytest.approx((expected_width, expected_width))
+
+    @pytest.mark.parametrize("mask_clearance", [-0.3, -0.8])
+    def test_closed_via_has_no_mask_aperture(self, mask_clearance):
+        pcb = _via_probe_pcb(
+            setup_tenting=("no", "no"),
+            via_tenting=None,
+            mask_clearance=mask_clearance,
+            silk=((10.46, 9.8), (10.46, 10.2), 0.2),
+        )
+        assert list(_iter_via_apertures(pcb, 0.05)) == []
+        assert check_silk_over_copper(pcb, _rules()).violations == []
+
+    @pytest.mark.parametrize(
+        ("mask_clearance", "expected_width"),
+        [(0.0, 1.0), (0.4, 1.8), (None, 1.1)],
+    )
+    def test_via_opening_equals_a_same_size_round_pad_opening(self, mask_clearance, expected_width):
+        """Measured: one opening size for a via and a same-diameter round pad."""
+        pcb = _via_and_round_pad_pcb(mask_clearance)
+        (_, via_geom, _), *_ = _iter_via_apertures(pcb, 0.05)
+        (_, pad_geom, _), *_ = _iter_pad_apertures(pcb, 0.05)
+        assert _opening_size(via_geom) == pytest.approx(_opening_size(pad_geom), abs=1e-3)
+        assert _opening_size(via_geom) == pytest.approx((expected_width, expected_width))
+
+    def test_silk_only_inside_the_expanded_opening_clears(self):
+        pcb = _via_probe_pcb(
+            setup_tenting=("no", "no"),
+            via_tenting=None,
+            mask_clearance=0.4,
+            silk=((10.5, 9.8), (10.5, 10.2), 0.2),
+        )
+        assert not check_silk_over_copper(pcb, _rules()).violations
+        other_profile = dataclasses.replace(_rules(), silk_exposed_copper_is_error=False)
+        [warning] = check_silk_over_copper(pcb, other_profile).violations
+        assert warning.severity == "warning"
+
+    @pytest.mark.parametrize("mask_clearance", [0.0, None])
+    def test_profile_margin_never_extends_exposed_copper(self, mask_clearance):
+        rules = dataclasses.replace(_rules(), min_solder_mask_clearance_mm=0.15)
+        pcb = _via_probe_pcb(
+            setup_tenting=("no", "no"),
+            via_tenting=None,
+            mask_clearance=mask_clearance,
+            via_size=1.6,
+            silk=((10.91, 9.0), (10.91, 11.0), 0.2),
+        )
+        assert not check_silk_over_copper(pcb, rules).violations
 
 
 # ---------------------------------------------------------------------------
@@ -1304,8 +1556,8 @@ class TestSilkEdgeClearance:
 
 
 class TestSilkSeverity:
-    def test_all_violations_are_warnings(self):
-        """Every emitted silk violation is warning severity (non-blocking)."""
+    def test_pad_overlap_errors_edge_stays_warning(self):
+        """Silk on exposed copper errors under jlcpcb (#9798); edge stays warning."""
         pcb = _empty_pcb()
         _square_outline(pcb)
         fp = _make_footprint(
@@ -1317,9 +1569,8 @@ class TestSilkSeverity:
 
         over = check_silk_over_copper(pcb, _rules())
         edge = check_silk_edge_clearance(pcb, _rules())
-        for v in (*over.violations, *edge.violations):
-            assert v.severity == "warning"
-        assert over.violations or edge.violations  # at least one fired
+        assert over.violations and all(v.severity == "error" for v in over.violations)
+        assert all(v.severity == "warning" for v in edge.violations)
 
 
 # Historical defect witnesses are frozen under regression-fixture/.
@@ -1358,7 +1609,11 @@ def test_real_board_regression(rel_path, rule_id):
         "silk_edge_clearance": edge.violations,
     }
     assert len(by_rule[rule_id]) >= 1
-    for v in (*over.violations, *edge.violations):
+    # #9798: silk on exposed copper grades as an error under jlcpcb (silk
+    # over a via aperture as info); edge clearance keeps its warning.
+    for v in over.violations:
+        assert v.severity in ("error", "info")
+    for v in edge.violations:
         assert v.severity == "warning"
 
 
@@ -1642,11 +1897,12 @@ class TestSilkPolygonGeometry:
         assert _stroke_geometry(graphic, None) is not None
 
     @pytest.mark.parametrize("fill", ["no", "none", ""])
-    def test_unfilled_fill_tokens_with_zero_stroke_print_nothing(self, fill):
-        """Unfilled AND unstroked prints no ink at all, so there is no geometry."""
+    def test_zero_width_polygon_prints_solid_or_with_default_pen(self, fill):
+        # KiCad 10.0.6 front-silk Gerber areas for this 6 mm square.
         graphic = _silk_poly(points=_RING_AROUND_ORIGIN, stroke_width=0.0, fill=fill)
-        assert graphic.is_filled is False
-        assert _stroke_geometry(graphic, None) is None
+        assert _stroke_geometry(graphic, None).area == pytest.approx(
+            36.0 if not fill else 2.39785, abs=1e-5
+        )
 
     @pytest.mark.parametrize("points", [[], [(0.0, 0.0)], [(0.0, 0.0), (1.0, 0.0)]])
     def test_degenerate_poly_is_skipped(self, points):
@@ -1869,11 +2125,13 @@ def _silk_arc(*, uuid: str = "", layer: str = "F.SilkS") -> FootprintGraphic:
     return graphic
 
 
-def _silk_unknown(*, uuid: str = "", layer: str = "F.SilkS") -> FootprintGraphic:
+def _silk_unknown(
+    *, uuid: str = "", layer: str = "F.SilkS", stroke_width: float = 0.12
+) -> FootprintGraphic:
     return FootprintGraphic(
-        graphic_type="curve",
+        graphic_type="future_shape",
         layer=layer,
-        stroke_width=0.12,
+        stroke_width=stroke_width,
         start=(0.0, 0.0),
         end=(1.0, 0.0),
         uuid=uuid,
@@ -1904,6 +2162,68 @@ class TestSilkCircleArcGeometry:
         g.end = (1.0, 0.0)  # ring r=1.0 passes through the 1x1 pad's aperture edge
         pcb = self._pcb_with(g, pad_at=(1.0, 0.0))
         assert len(check_silk_over_copper(pcb, _rules())) == 1
+
+    @pytest.mark.parametrize(
+        ("radius", "mask_margin", "overlaps"),
+        [(1.76, 0.05, False), (1.44, 0.05, True), (1.76, 0.40, False)],
+    )
+    def test_ring_at_round_wire_pad(self, radius, mask_margin, overlaps):
+        ring = _silk_circle()
+        ring.fill = "no"
+        ring.end = (radius, 0.0)
+        ring.stroke_width = 0.15
+        pad = _thru_hole_pad(position=(0.0, 0.0), size=(2.8, 2.8))
+        pad.solder_mask_margin = mask_margin
+        pcb = _empty_pcb()
+        pcb._footprints.append(_make_footprint(pads=[pad], graphics=[ring]))
+        assert len(check_silk_over_copper(pcb, _rules())) == int(overlaps)
+
+    @pytest.mark.parametrize(
+        ("version", "board_margin", "fp_margin", "pad_margin", "overlaps"),
+        [
+            (20240108, 0, 0.40, None, True),
+            (20240108, 0.40, None, None, True),
+            (20240108, 0.40, 0.05, None, False),
+            (20240108, 0, 0.40, 0.05, False),
+            (20240108, 0, 0.05, 0.40, True),
+            (20240108, 0, 0.40, 0, True),
+            (20240108, 0.40, 0, None, True),
+            (20260206, 0, 0.40, 0, False),
+            (20260206, 0.40, 0, None, False),
+        ],
+    )
+    def test_round_pad_margin_in_reference_placement(
+        self, tmp_path, version, board_margin, fp_margin, pad_margin, overlaps
+    ):
+        from shapely.geometry import Point
+
+        from kicad_tools.silkscreen.place_refs import collect_apertures
+
+        board = tmp_path / "ring.kicad_pcb"
+        fp_setting = "" if fp_margin is None else f"(solder_mask_margin {fp_margin})"
+        pad_setting = "" if pad_margin is None else f"(solder_mask_margin {pad_margin})"
+        board.write_text(
+            f"""(kicad_pcb (version {version}) (generator "pcbnew")
+              (general (thickness 1.6)) (paper "A4")
+              (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user)
+                      (38 "B.Mask" user) (39 "F.Mask" user))
+              (setup (pad_to_mask_clearance {board_margin}))
+              (footprint "Test:Round" (layer "F.Cu") (at 10 10) {fp_setting}
+                (property "Reference" "J1" (at 0 -4) (layer "F.SilkS")
+                  (effects (font (size 1 1) (thickness 0.15))))
+                (fp_circle (center 0 0) (end 1.76 0) (stroke (width 0.15) (type solid))
+                  (fill none) (layer "F.SilkS"))
+                (pad "1" thru_hole circle (at 0 0) (size 2.8 2.8) (drill 1.7)
+                  (layers "*.Cu" "*.Mask") {pad_setting})))"""
+        )
+        pcb = PCB.load(board)
+
+        [(opening, _label)] = [
+            entry for entry in collect_apertures(pcb, 0.05)["F"] if entry[1] == "J1 pad 1"
+        ]
+        # The ring's inner edge sits 1.76 - 0.075 mm from the pad centre.
+        assert opening.covers(Point(10 + 1.76 - 0.075, 10)) == overlaps
+        assert not check_silk_over_copper(pcb, _rules()).violations
 
     def test_unfilled_ring_enclosing_pad_does_not_flag(self):
         g = _silk_circle()
@@ -2032,14 +2352,14 @@ class TestSilkGeometryCoverage:
         violation = coverage.violations[0]
         assert violation.rule_id == SILK_GEOMETRY_UNMODELED_RULE_ID
         assert violation.severity == "info"
-        assert violation.items == ("U1 (fp_curve) {u}",)
+        assert violation.items == ("U1 (fp_future_shape) {u}",)
         assert violation.layer == "F.SilkS"
 
     def test_coverage_item_omits_uuid_suffix_when_unset(self):
         pcb = _empty_pcb()
         pcb._footprints.append(_make_footprint(graphics=[_silk_unknown()]))
 
-        assert check_silk_coverage(pcb, _rules()).violations[0].items == ("U1 (fp_curve)",)
+        assert check_silk_coverage(pcb, _rules()).violations[0].items == ("U1 (fp_future_shape)",)
 
     @pytest.mark.parametrize("layer", ["F.Fab", "F.CrtYd", "F.Cu"])
     def test_non_silk_layer_shapes_are_not_reported(self, layer):
@@ -2076,23 +2396,28 @@ class TestSilkGeometryCoverage:
         pcb = _empty_pcb()
         pcb._graphics.append(
             BoardGraphic(
-                graphic_type="curve",
+                graphic_type="future_shape",
                 layer="F.SilkS",
                 stroke_width=0.12,
                 start=(5.0, 5.0),
                 end=(5.5, 5.0),
-                uuid="gr-curve-uuid",
+                uuid="unmodeled-uuid",
             )
         )
 
         coverage = check_silk_coverage(pcb, _rules())
         assert len(coverage) == 1
-        assert coverage.violations[0].items == ("gr_curve {gr-curve-uuid}",)
+        assert coverage.violations[0].items == ("gr_future_shape {unmodeled-uuid}",)
 
     def test_coverage_reachable_through_check_all_silkscreen(self):
         """``kct check --only silkscreen`` surfaces the coverage advisory."""
         pcb = _empty_pcb()
-        pcb._footprints.append(_make_footprint(graphics=[_silk_unknown(uuid="u")]))
+        # A compliant stroke width (>= the 0.15 floor) so the only finding
+        # is the coverage advisory itself (#9798 regraded sub-minimum widths
+        # to errors under jlcpcb).
+        pcb._footprints.append(
+            _make_footprint(graphics=[_silk_unknown(uuid="u", stroke_width=0.2)])
+        )
 
         results = check_all_silkscreen(pcb, _rules())
         unmodeled = [v for v in results.violations if v.rule_id == SILK_GEOMETRY_UNMODELED_RULE_ID]

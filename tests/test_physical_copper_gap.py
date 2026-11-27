@@ -7,13 +7,13 @@ from kicad_tools.sexp import parse_string
 from kicad_tools.validate.rules.physical_gap import check_physical_copper_gap
 
 
-def board(*items):
+def board(*items, net_names=("GND", "VCC")):
     return PCB(
         parse_string(
-            """(kicad_pcb (version 20240108) (generator pcbnew)
+            f"""(kicad_pcb (version 20240108) (generator pcbnew)
       (general (thickness 1.6))
       (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
-      (net 0 "") (net 1 "GND") (net 2 "VCC")
+      (net 0 "") (net 1 "{net_names[0]}") (net 2 "{net_names[1]}")
     """
             + "\n".join(items)
             + ")"
@@ -21,9 +21,9 @@ def board(*items):
     )
 
 
-def track(a, b, identity, net=1, width=0.2):
+def track(a, b, identity, net=1, width=0.2, layer="F.Cu"):
     return f'''(segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]})
-        (width {width}) (layer "F.Cu") (net {net}) (uuid "{identity}"))'''
+        (width {width}) (layer "{layer}") (net {net}) (uuid "{identity}"))'''
 
 
 def gaps(pcb, minimum=0.25):
@@ -835,6 +835,106 @@ def _via(x, y, uuid, net=1):
         f'(via (at {x} {y}) (size .6) (drill .3) (layers "F.Cu" "B.Cu") '
         f'(net {net}) (uuid "{uuid}"))'
     )
+
+
+@pytest.mark.parametrize(
+    "xtal_vertices",
+    [
+        [(131.3, 86.7), (132.9, 86.7), (133.3, 86.3), (139.3, 86.3)],
+        [(131.3, 86.7), (131.7, 86.3), (139.3, 86.3)],
+    ],
+)
+def test_remote_xtal_edit_preserves_joy_x_gap(xtal_vertices, tmp_path, capsys):
+    """Reduced board 03: changing a distant XTAL1 bend reorders the JOY_X union edges."""
+    import json
+    from itertools import pairwise
+
+    from kicad_tools.cli import main
+    from kicad_tools.sexp import serialize_sexp
+
+    joy = [
+        ((133.3, 88.7), (138.1, 88.7)),
+        ((135.3, 89.1), (135.7, 88.7)),
+        ((135.7, 88.7), (138.1, 88.7)),
+    ]
+    # These disjoint tracks affect the union order while leaving the measured copper alone.
+    other = [
+        ((135, 103), (136, 104)),
+        ((125, 92), (126, 93)),
+        ((131, 96), (132, 96)),
+        ((136, 72), (136, 74)),
+        ((133, 82), (133, 84)),
+    ]
+    other.extend(pairwise(xtal_vertices))
+    pcb = board(
+        *(track(a, b, f"joy-{i}", layer="B.Cu") for i, (a, b) in enumerate(joy)),
+        _via(135.3, 89.1, "via"),
+        *(track(a, b, f"xtal-{i}", net=2, layer="B.Cu") for i, (a, b) in enumerate(other)),
+        net_names=("JOY_X", "XTAL1"),
+    )
+    path = tmp_path / "joystick.kicad_pcb"
+    path.write_text(serialize_sexp(pcb._sexp))
+    main(
+        ["check", str(path), "--mfr", "jlcpcb", "--only", "physical_copper_gap", "--format", "json"]
+    )
+    findings = json.loads(capsys.readouterr().out)["violations"]
+    owners = ["Trace@B.Cu:w0.2:133.3/88.7~138.1/88.7", "Via@135.3/89.1:F.Cu-B.Cu:d0.3/s0.6"]
+    [gap] = [v for v in findings if v["items"] == owners]
+    assert (gap["nets"], gap["layer"], gap["severity"]) == (["JOY_X"], "B.Cu", "error")
+    assert gap["actual_value"] == pytest.approx(0.0408276598)
+
+
+@pytest.mark.parametrize("with_elbow", [False, True])
+def test_parallel_pad_gap_survives_remote_dogleg(with_elbow, tmp_path, capsys):
+    """Both ends of the parallel gap on board 07 can have different copper owners."""
+    import json
+
+    from kicad_tools.cli import main
+    from kicad_tools.sexp import serialize_sexp
+
+    pad_id = "15436e44-f95d-4298-80f0-37ffa7519ad7"
+    local = [
+        "(gr_rect (start 93.5 40) (end 166.5 120) (stroke (width 0.05) (type default)) "
+        '(fill none) (layer "Edge.Cuts"))',
+        '(footprint "Test:U3" (layer "F.Cu") (at 0 0) '
+        '(property "Reference" "U3" (at 0 0) (layer "F.SilkS")) '
+        '(pad "4" smd rect (at 125.5 95.4) (size 0.7 0.3) (layers "F.Cu") '
+        f'(net 1 "MIPI_DAT0_N") (uuid "{pad_id}")))',
+        track((108.5, 95.511), (125.443, 95.511), "negative", width=0.225),
+        track((110.076, 95.003), (125.443, 95.003), "positive", net=2, width=0.225),
+    ]
+    horizontal_id = "Trace@F.Cu:w0.225:110.076/95.003~125.443/95.003"
+    expected = {(pad_id, horizontal_id)}
+    if with_elbow:
+        local.append(track((125.443, 95.003), (125.443, 94.622), "elbow", net=2, width=0.225))
+        expected.add((pad_id, horizontal_id, "Trace@F.Cu:w0.225:125.443/94.622~125.443/95.003"))
+    dogleg = [
+        track((108.5, 95.5), (104.5, 95.5), "remote-horizontal"),
+        track((104.5, 95.5), (104.5, 91.5), "remote-vertical"),
+    ]
+    for remote in ([], dogleg):
+        pcb = board(*local, *remote, net_names=("MIPI_DAT0_N", "MIPI_DAT0_P"))
+        path = tmp_path / "mipi.kicad_pcb"
+        path.write_text(serialize_sexp(pcb._sexp))
+        main(
+            [
+                "check",
+                str(path),
+                "--mfr",
+                "jlcpcb",
+                "--only",
+                "physical_copper_gap",
+                "--format",
+                "json",
+            ]
+        )
+        report = json.loads(capsys.readouterr().out)
+        gaps = [v for v in report["violations"] if v["rule_id"] == "physical_copper_gap"]
+        assert {tuple(v["items"]) for v in gaps} == expected
+        for gap in gaps:
+            assert gap["severity"] == "error" and gap["layer"] == "F.Cu"
+            assert gap["nets"] == ["MIPI_DAT0_N", "MIPI_DAT0_P"]
+            assert gap["actual_value"] == pytest.approx(0.1345)
 
 
 def _zone(uuid, net=1):

@@ -32,7 +32,9 @@ from ..core.board_outline import (
     legacy_arc_points,
     outline_node_points,
     outline_polygon_points,
+    outline_rect_points,
 )
+from ..core.layers import COPPER_LAYER_ORDER, is_declared_copper_layer, pad_copper_layers
 from ..core.outline_tessellation import DegenerateArcError, tessellate_arc, tessellate_cubic
 from ..core.schematic_uuids import UuidMinter
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
@@ -387,16 +389,21 @@ _FootprintFrame = tuple[float, float, float, bool]
 _ZONE_PTS_PARENTS = frozenset({"polygon", "filled_polygon", "fill_segments"})
 
 
-def _flip_side_layer(name: str) -> str:
+def _flip_side_layer(name: str, copper_layers: int = 2) -> str:
     """Swap a KiCad layer name to the other board side (``F.* <-> B.*``).
 
-    Side-neutral names (``*.Cu``, ``F&B.Cu``, ``In1.Cu``, ``Edge.Cuts``) are
-    returned unchanged -- what KiCad's footprint flip does to them as well.
+    With the board's *copper_layers* count, inner copper mirrors through the
+    stack (``In1.Cu <-> In2.Cu`` on four layers), as KiCad's footprint flip
+    does. Side-neutral names (``*.Cu``, ``F&B.Cu``, ``Edge.Cuts``) are
+    returned unchanged.
     """
     if name.startswith("F."):
         return "B." + name[2:]
     if name.startswith("B."):
         return "F." + name[2:]
+    inner = re.fullmatch(r"In(\d+)\.Cu", name)
+    if inner and 1 <= int(inner.group(1)) <= copper_layers - 2:
+        return f"In{copper_layers - 1 - int(inner.group(1))}.Cu"
     return name
 
 
@@ -463,8 +470,11 @@ def _transform_zone_sexp(
     zone_node: SExp,
     mapper,
     flip_layers: bool,
+    copper_layers: int,
 ) -> None:
     """Re-place one footprint ``(zone ...)`` node in the S-expression tree."""
+    if flip_layers:
+        _flip_layer_children(zone_node, copper_layers)
     for child in zone_node.iter_children():
         if child.tag in _ZONE_PTS_PARENTS:
             pts = child.find_child("pts")
@@ -487,24 +497,15 @@ def _transform_zone_sexp(
                         node.children[0] = _mm_atom(nx)
                         node.children[1] = _mm_atom(ny)
             if flip_layers and child.tag == "filled_polygon":
-                _flip_layer_node(child.find_child("layer"))
-        elif flip_layers and child.tag == "layer":
-            _flip_layer_node(child)
-        elif flip_layers and child.tag == "layers":
-            child.children = [
-                SExp.quoted_atom(_flip_side_layer(atom.value))
-                if atom.is_atom and isinstance(atom.value, str)
-                else atom
-                for atom in child.children
-            ]
+                _flip_layer_node(child.find_child("layer"), copper_layers)
 
 
-def _flip_layer_node(node: SExp | None) -> None:
+def _flip_layer_node(node: SExp | None, copper_layers: int = 2) -> None:
     if node is None:
         return
     name = node.get_string(0)
     if name:
-        node.children[0] = SExp.quoted_atom(_flip_side_layer(name))
+        node.children[0] = SExp.quoted_atom(_flip_side_layer(name, copper_layers))
 
 
 # Nodes holding a footprint-local ``y`` that a back-side placement mirrors.
@@ -711,7 +712,9 @@ def mirror_pad_primitives(pad_node: SExp, custom_clearance: SExp | None = None) 
     _exchange_front_back_primitives(pad_node, custom_clearance)
 
 
-def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0) -> None:
+def flip_footprint_children_to_back(
+    footprint_node: SExp, rotation: float = 0.0, copper_layers: int = 2
+) -> None:
     """Re-express a front-authored raw ``(footprint ...)`` for a back placement.
 
     A library footprint is authored for the front.  KiCad stores a footprint
@@ -720,12 +723,13 @@ def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0)
     footprint's own *rotation* is added on top by the caller), and texts
     mirrored (``(justify mirror)``) with angle ``180 + rotation - local``.
     Verified black-box against ``pcbnew`` 10.0.6 ``Flip`` output (Issue #8581).
-    Side-neutral layers (``*.Cu``, ``In1.Cu``, ``Edge.Cuts``) are unchanged.
+    Inner copper mirrors through the board's *copper_layers* stack (Issue
+    #8958); side-neutral layers (``*.Cu``, ``Edge.Cuts``) are unchanged.
     """
     for child in footprint_node.iter_children():
         tag = child.tag
         if tag == "pad":
-            _flip_layer_children(child)
+            _flip_layer_children(child, copper_layers)
             at_node = child.find_child("at")
             if at_node is not None:
                 _negate_node_y(at_node)
@@ -735,7 +739,7 @@ def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0)
             # Walks nested padstack blocks and exchanges front/back (Issue #9752).
             mirror_pad_primitives(child)
         elif tag in _FP_TEXT_TAGS:
-            _flip_layer_children(child)
+            _flip_layer_children(child, copper_layers)
             at_node = child.find_child("at")
             if at_node is not None:
                 _negate_node_y(at_node)
@@ -743,26 +747,26 @@ def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0)
                 _set_text_at_angle(at_node, _normalize_text_angle(180.0 + rotation - local), None)
             _mirror_text_effects(child)
         elif tag is not None and tag.startswith(_FP_GRAPHIC_TAG_PREFIXES):
-            _flip_layer_children(child)
+            _flip_layer_children(child, copper_layers)
             if tag == "fp_text_box":
                 _mirror_text_effects(child)
             _mirror_local_y(child)
         elif tag == "zone":
-            _flip_layer_children(child)
+            _flip_layer_children(child, copper_layers)
             _mirror_local_y(child)
             for poly in child.iter_children():
                 if poly.tag == "filled_polygon":
-                    _flip_layer_node(poly.find_child("layer"))
+                    _flip_layer_node(poly.find_child("layer"), copper_layers)
 
 
-def _flip_layer_children(node: SExp) -> None:
+def _flip_layer_children(node: SExp, copper_layers: int = 2) -> None:
     """Swap the sides of a node's direct ``(layer ...)``/``(layers ...)`` children."""
     for child in node.iter_children():
         if child.tag == "layer":
-            _flip_layer_node(child)
+            _flip_layer_node(child, copper_layers)
         elif child.tag == "layers":
             child.children = [
-                SExp.quoted_atom(_flip_side_layer(atom.value))
+                SExp.quoted_atom(_flip_side_layer(atom.value, copper_layers))
                 if atom.is_atom and isinstance(atom.value, str)
                 else atom
                 for atom in child.children
@@ -786,6 +790,7 @@ def transform_footprint_zone_nodes(
     footprint_node: SExp,
     old_frame: _FootprintFrame,
     new_frame: _FootprintFrame,
+    copper_layers: int = 2,
 ) -> int:
     """Re-place the ``(zone ...)`` children of a raw ``(footprint ...)`` node.
 
@@ -794,7 +799,8 @@ def transform_footprint_zone_nodes(
     ``position``/``rotation``/``layer`` setters already do this).  Both
     frames are **sheet-absolute** ``(x, y, rotation_deg, is_back)`` -- the
     values in the footprint's ``(at ...)``/``(layer ...)`` before and after
-    the edit.  Returns the number of zones rewritten (Issue #6119).
+    the edit. Pass the board's copper layer count when changing sides so
+    inner copper mirrors through the stack. Returns the number of zones rewritten.
     """
     if new_frame == old_frame:
         return 0
@@ -804,7 +810,7 @@ def transform_footprint_zone_nodes(
     mapper = _footprint_frame_mapper(old_frame, new_frame)
     flip_layers = old_frame[3] != new_frame[3]
     for zone_node in zone_nodes:
-        _transform_zone_sexp(zone_node, mapper, flip_layers)
+        _transform_zone_sexp(zone_node, mapper, flip_layers, copper_layers)
     return len(zone_nodes)
 
 
@@ -991,14 +997,17 @@ def keep_footprint_texts_upright(footprint_node: SExp) -> int:
     )
 
 
-def _transform_zone_object(zone: Zone, mapper, flip_layers: bool) -> None:
+def _transform_zone_object(zone: Zone, mapper, flip_layers: bool, copper_layers: int) -> None:
     """Re-place one parsed footprint :class:`Zone` (board-relative coords)."""
     zone.polygon = [mapper(x, y) for x, y in zone.polygon]
+    zone.rule_area_contours = [[mapper(x, y) for x, y in ring] for ring in zone.rule_area_contours]
     zone.filled_polygons = [[mapper(x, y) for x, y in poly] for poly in zone.filled_polygons]
     if flip_layers:
-        zone.layer = _flip_side_layer(zone.layer)
-        zone.layers = [_flip_side_layer(name) for name in zone.layers]
-        zone.filled_polygon_layers = [_flip_side_layer(name) for name in zone.filled_polygon_layers]
+        zone.layer = _flip_side_layer(zone.layer, copper_layers)
+        zone.layers = [_flip_side_layer(name, copper_layers) for name in zone.layers]
+        zone.filled_polygon_layers = [
+            _flip_side_layer(name, copper_layers) for name in zone.filled_polygon_layers
+        ]
 
 
 # Pad fields whose assignment is mirrored into the backing ``(pad ...)`` node
@@ -1546,23 +1555,49 @@ def _resolves_filled_cutout(graphic_type: str, fill: str, stroke_width: float) -
     return not stroke_width
 
 
+class _GraphicPointGeometry:
+    points: list[tuple[float, float]]
+    arc_boundary: list[tuple[float, float]] | None
+
+    @property
+    def boundary_points(self) -> list[tuple[float, float]]:
+        """Polygon vertices with embedded arcs tessellated for geometric operations."""
+        return self.points if self.arc_boundary is None else self.arc_boundary
+
+
+def _read_graphic_points(graphic: BoardGraphic | FootprintGraphic, node: SExp) -> None:
+    """Read authored points and the physical boundary of an arc-bearing polygon."""
+    kind = graphic.graphic_type
+    if kind == "rect" and node.find_child("radius") is not None:
+        graphic.points = outline_rect_points(node, graphic.start, graphic.end)
+    elif kind in ("poly", "curve") and (pts := node.find_child("pts")) is not None:
+        graphic.points = [
+            (xy.get_float(0) or 0.0, xy.get_float(1) or 0.0) for xy in pts.find_all("xy")
+        ]
+        if kind == "poly" and pts.find_child("arc") is not None:
+            graphic.arc_boundary = _polygon_arc_chain(node)
+            # The board outline API has exposed the tessellated Edge.Cuts ring
+            # since #9847. On other layers, points are the literal xy vertices.
+            if node.name == "gr_poly" and graphic.layer == "Edge.Cuts":
+                graphic.points = graphic.arc_boundary
+
+
 @dataclass
-class FootprintGraphic:
-    """Graphic element within a footprint (fp_line, fp_rect, fp_circle, fp_arc, fp_poly).
+class FootprintGraphic(_GraphicPointGeometry):
+    """Graphic element within a footprint (line, rectangle, circle, arc, polygon or curve).
 
     Used for silkscreen outlines, courtyard outlines, and markings on
-    footprints.  ``fp_poly`` graphics store their vertices in ``points``;
-    all other types leave ``points`` empty.
+    footprints. ``points`` carries the authored polygon vertices, a rounded
+    rectangle boundary, or the four control points of a cubic curve. Use
+    :attr:`boundary_points` for the full boundary of a polygon containing arcs.
 
     ``fill`` carries the raw ``(fill ...)`` token verbatim (``"yes"`` /
     ``"no"`` on KiCad 7+, ``"solid"`` / ``"none"`` on older files, ``""``
-    when the node is absent).  Consumers should read :pyattr:`is_filled`
-    rather than comparing the token themselves -- a filled shape renders
-    its whole interior, which is what silk clearance geometry must model
-    (Issue #5811).
+    when the node is absent). :pyattr:`is_filled` decodes an explicit fill.
+    The default for an absent token depends on the layer and graphic type.
     """
 
-    graphic_type: str  # line, rect, circle, arc, poly
+    graphic_type: str  # line, rect, circle, arc, poly, curve
     layer: str
     stroke_width: float  # in mm
     start: tuple[float, float] = (0.0, 0.0)
@@ -1573,10 +1608,12 @@ class FootprintGraphic:
     uuid: str = ""
     mid: tuple[float, float] | None = None  # Appended for positional compatibility
     fill: str = ""  # raw (fill ...) token: yes/no (KiCad 7+), solid/none (legacy)
+    legacy_width: float | None = None  # top-level (width N), as on BoardGraphic
+    arc_boundary: list[tuple[float, float]] | None = field(default=None, repr=False)
 
     @property
     def is_filled(self) -> bool:
-        """True when the shape's interior is printed, not just its outline."""
+        """Whether the authored fill token requests a solid interior."""
         return _fill_token_is_filled(self.fill)
 
     @classmethod
@@ -1596,6 +1633,8 @@ class FootprintGraphic:
         if stroke := sexp.find("stroke"):
             if width := stroke.find("width"):
                 graphic.stroke_width = width.get_float(0) or 0.0
+        elif width := sexp.find("width"):
+            graphic.legacy_width = width.get_float(0)
 
         # Start/end points (for line, rect)
         if start := sexp.find("start"):
@@ -1618,11 +1657,9 @@ class FootprintGraphic:
                     graphic.end[1] - graphic.center[1],
                 )
 
-        # Polygon vertices (for fp_poly): (pts (xy X Y) ...).
-        if graphic_type == "poly":
-            if pts := sexp.find("pts"):
-                for xy in pts.find_all("xy"):
-                    graphic.points.append((xy.get_float(0) or 0.0, xy.get_float(1) or 0.0))
+        _read_graphic_points(graphic, sexp)
+        if graphic_type == "curve" and graphic.points:
+            graphic.start, graphic.end = graphic.points[0], graphic.points[-1]
 
         # Fill state: (fill yes|no) on KiCad 7+, (fill solid|none) on older
         # files.  A filled shape prints its whole interior, so silk clearance
@@ -1703,7 +1740,7 @@ class GraphicText:
         return self.font_size[1]
 
 
-def _board_polygon_arc_chain(node: SExp) -> list[tuple[float, float]]:
+def _polygon_arc_chain(node: SExp) -> list[tuple[float, float]]:
     """Read an arc polygon without making a malformed drawing prevent PCB loading."""
     try:
         return outline_polygon_points(node)
@@ -1712,20 +1749,22 @@ def _board_polygon_arc_chain(node: SExp) -> list[tuple[float, float]]:
 
 
 @dataclass
-class BoardGraphic:
-    """Board-level graphic element (gr_line, gr_rect, gr_circle, gr_arc, gr_poly).
+class BoardGraphic(_GraphicPointGeometry):
+    """Board-level graphic element (line, rectangle, circle, arc, polygon or curve).
 
     Used for board outlines, silkscreen graphics, and other board-level drawings.
 
-    Mirrors :class:`FootprintGraphic`: ``gr_poly`` vertices land in
-    ``points`` and the ``(fill ...)`` token in ``fill`` (read it through
+    Mirrors :class:`FootprintGraphic`. Polygon ``points`` holds the literal
+    vertices except on Edge.Cuts, where it includes embedded arcs.
+    :attr:`boundary_points` follows the complete outline on every layer. The
+    ``(fill ...)`` token is stored in ``fill`` (read it through
     :pyattr:`is_filled`).  Before Issue #5811 ``gr_poly`` was not parsed at
     all, so a board-level polygon silk marker was invisible to every
     consumer of :pyattr:`PCB.graphics` -- including the silkscreen
     clearance geometry.
     """
 
-    graphic_type: str  # line, rect, circle, arc, poly
+    graphic_type: str  # line, rect, circle, arc, poly, curve
     layer: str
     stroke_width: float  # in mm
     start: tuple[float, float] = (0.0, 0.0)
@@ -1740,10 +1779,11 @@ class BoardGraphic:
     # convention ties the *default* fill of a circle/rect to a zero stroke
     # width (Issue #9690), so the Edge.Cuts fill resolution needs it.
     legacy_width: float | None = None
+    arc_boundary: list[tuple[float, float]] | None = field(default=None, repr=False)
 
     @property
     def is_filled(self) -> bool:
-        """True when the shape's interior is printed, not just its outline."""
+        """Whether the authored fill token requests a solid interior."""
         return _fill_token_is_filled(self.fill)
 
     @property
@@ -1761,10 +1801,9 @@ class BoardGraphic:
           or a legacy ``(width 0)``);
         * with no fill token, a ``gr_poly`` is never filled.
 
-        Only the Edge.Cuts consumers may read this: the silkscreen default
-        for an absent token stays "not filled" (:pyattr:`is_filled`,
-        Issue #5811).  The resolution itself is shared with the
-        footprint-local closed shapes (Issue #9692) through
+        Edge.Cuts and silkscreen have different defaults for omitted fill.
+        The Edge.Cuts resolution is shared with footprint-local closed
+        shapes (Issue #9692) through
         :func:`_resolves_filled_cutout`.
         """
         return _resolves_filled_cutout(
@@ -1789,9 +1828,7 @@ class BoardGraphic:
             if width := stroke.find("width"):
                 graphic.stroke_width = width.get_float(0) or 0.0
         elif width := sexp.find("width"):
-            # Pre-KiCad-6 legacy stroke width; feeds the Edge.Cuts fill
-            # default above (Issue #9690).  Kept out of ``stroke_width`` so
-            # silk consumers keep seeing today's 0.0 for legacy files.
+            # Preserve legacy width separately from the modern stroke token.
             graphic.legacy_width = width.get_float(0)
 
         # Start/end points
@@ -1807,22 +1844,11 @@ class BoardGraphic:
         if center := sexp.find("center"):
             graphic.center = (center.get_float(0) or 0.0, center.get_float(1) or 0.0)
 
-        # Polygon vertices (for gr_poly): (pts (xy X Y) ...).
-        if graphic_type == "poly":
-            if pts := sexp.find("pts"):
-                if graphic.layer == "Edge.Cuts" and has_board_polygon_arcs(sexp):
-                    graphic.points = _board_polygon_arc_chain(sexp)
-                else:
-                    for xy in pts.find_all("xy"):
-                        graphic.points.append((xy.get_float(0) or 0.0, xy.get_float(1) or 0.0))
-            # A ``gr_poly`` has no ``(start ...)`` node, and several consumers
-            # report ``graphic.start`` as the element's location (e.g.
-            # ``check_silkscreen_line_width``, ``_iter_silk_geometries``).
-            # Seed it from the first vertex so a board-level polygon does not
-            # report itself at the origin.  This is new behaviour only in the
-            # sense that ``gr_poly`` was not parsed at all before #5811.
-            if graphic.points:
-                graphic.start = graphic.points[0]
+        _read_graphic_points(graphic, sexp)
+        if graphic_type in ("poly", "curve") and graphic.points:
+            graphic.start = graphic.points[0]
+            if graphic_type == "curve":
+                graphic.end = graphic.points[-1]
 
         # Fill state -- see FootprintGraphic.from_sexp (Issue #5811).
         if fill := sexp.find("fill"):
@@ -1875,6 +1901,11 @@ class Footprint:
     # (#9796).
     zone_connect: int | None = None
     properties: dict[str, str] = field(default_factory=dict)
+    # Schematic symbol-instance link ``(path "/<sheet-uuid>/<symbol-uuid>")``
+    # (KiCad 8+ quoted form; KiCad 7 wrote the legacy bare hex form).  What
+    # lets KiCad's editors cross-probe this footprint back to its symbol and
+    # update it from the schematic (issues #10109, #10428).
+    path: str = ""
     _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
     _board_origin: tuple[float, float] = field(
         default=(0.0, 0.0),
@@ -1898,6 +1929,7 @@ class Footprint:
         repr=False,
         compare=False,
     )
+    _copper_layer_count: int = field(default=2, init=False, repr=False, compare=False)
 
     # Set of attr-block tokens the parser models explicitly. Anything
     # else that appears as an atom child of ``(attr ...)`` is captured
@@ -1961,6 +1993,16 @@ class Footprint:
                 at_node.set_value(0, x + origin[0])
                 at_node.set_value(1, y + origin[1])
 
+        elif name == "path":
+            path_node = sexp_node.find_child("path")
+            if path_node is not None:
+                if value:
+                    path_node.set_value(0, str(value))
+                else:
+                    sexp_node.remove(path_node)
+            elif value:
+                sexp_node.append(SExp.list("path", str(value)))
+
         elif name == "rotation":
             at_node = sexp_node.find_child("at")
             if at_node is not None:
@@ -2017,7 +2059,7 @@ class Footprint:
             board_map = _footprint_frame_mapper(old_frame, new_frame)
             flip_layers = old_frame[3] != new_frame[3]
             for zone in zones:
-                _transform_zone_object(zone, board_map, flip_layers)
+                _transform_zone_object(zone, board_map, flip_layers, self._copper_layer_count)
 
         # The tree is sheet-absolute: shift both frames by the board origin.
         ox, oy = self.__dict__.get("_board_origin", (0.0, 0.0))
@@ -2025,6 +2067,7 @@ class Footprint:
             sexp_node,
             (old_frame[0] + ox, old_frame[1] + oy, old_frame[2], old_frame[3]),
             (new_frame[0] + ox, new_frame[1] + oy, new_frame[2], new_frame[3]),
+            self._copper_layer_count,
         )
 
     def _turn_texts(self, sexp_node: SExp, old_frame: _FootprintFrame) -> None:
@@ -2211,6 +2254,14 @@ class Footprint:
         if uuid := sexp.find_child("uuid"):
             fp.uuid = uuid.get_string(0) or ""
 
+        # Schematic symbol-instance link (Issue #10109).  Direct children
+        # only: nothing below the footprint legitimately carries a
+        # ``(path ...)`` token today, but staying consistent with the
+        # direct-child rule above keeps a future descendant token from
+        # being misread as the footprint's own.
+        if path_node := sexp.find_child("path"):
+            fp.path = path_node.get_string(0) or ""
+
         # Description and tags
         if descr := sexp.find_child("descr"):
             fp.description = descr.get_string(0) or ""
@@ -2311,13 +2362,20 @@ class Footprint:
             if pad:
                 fp.pads.append(pad)
 
-        # Graphics (fp_line, fp_rect, fp_circle, fp_arc, fp_poly)
-        for graphic_type in ("line", "rect", "circle", "arc", "poly"):
+        # Footprint drawing primitives
+        for graphic_type in ("line", "rect", "circle", "arc", "poly", "curve"):
             for graphic_sexp in sexp.find_all(f"fp_{graphic_type}"):
                 graphic = FootprintGraphic.from_sexp(graphic_sexp, graphic_type)
                 fp.graphics.append(graphic)
 
         return fp
+
+
+def _copper_item_locked(sexp: SExp) -> bool:
+    """Read a KiCad lock child or the legacy bare lock token."""
+    if (locked := sexp.find("locked")) is not None:
+        return (locked.get_string(0) or "yes") != "no"
+    return any(child.is_atom and child.value == "locked" for child in sexp.children)
 
 
 @dataclass
@@ -2379,10 +2437,7 @@ class Segment:
                 seg.net_name_only = True
         if uuid := sexp.find("uuid"):
             seg.uuid = uuid.get_string(0) or ""
-        if (locked := sexp.find("locked")) is not None:
-            seg.locked = (locked.get_string(0) or "yes") != "no"
-        elif any(c.is_atom and c.value == "locked" for c in sexp.children):
-            seg.locked = True
+        seg.locked = _copper_item_locked(sexp)
 
         return seg
 
@@ -2555,6 +2610,22 @@ class Via:
     # actually reads.  Only the PCB loader consumes it (one warning per
     # board); the source S-expression is not rewritten.
     layers_read_as_through: bool = field(default=False, compare=False, repr=False)
+    locked: bool = field(default=False, compare=False)
+    # Issue #10364: read-only evidence for verifying wire ends. Per-layer copper
+    # diameters from a ``(padstack (layer "B.Cu" (size D)) ...)`` block (keyed
+    # by copper layer or the shared ``Inner`` group; empty when the via has no padstack
+    # block) and whether the bore is closed by per-via ``(filling yes)``,
+    # ``(capping yes)`` or ``(plugging (front|back yes))``. Not re-serialized.
+    padstack_sizes: dict[str, float] = field(default_factory=dict, compare=False, repr=False)
+    hole_closed: bool = field(default=False, compare=False, repr=False)
+
+    def copper_diameter(self, layer: str) -> float | None:
+        """Copper diameter on ``layer``; ``None`` if a padstack hides that layer."""
+        if not self.padstack_sizes:
+            return self.size
+        if layer in COPPER_LAYER_ORDER[1:-1]:
+            return self.padstack_sizes.get(layer, self.padstack_sizes.get("Inner"))
+        return self.padstack_sizes.get(layer)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Via:
@@ -2565,6 +2636,7 @@ class Via:
             drill=0.0,
             layers=[],
             net_number=0,
+            locked=_copper_item_locked(sexp),
         )
 
         # Issue #3124: detect the optional leading via-type token.  KiCad
@@ -2607,6 +2679,35 @@ class Via:
                 via.tenting_front = front.get_string(0)
             if back := tenting.find("back"):
                 via.tenting_back = back.get_string(0)
+        # Issue #10364: per-layer padstack diameters and closed-bore flags.
+        if padstack := sexp.find("padstack"):
+            aliases = {"Top": "F.Cu", "Bottom": "B.Cu"}
+            mode = padstack.find("mode")
+            mode_name = mode.get_string(0) if mode else None
+            if mode_name in ("front_inner_back", "custom"):
+                # KiCad writes the front diameter in the via's top-level size.
+                via.padstack_sizes["F.Cu"] = via.size
+            for layer in padstack.find_all("layer"):
+                name = layer.get_string(0) or ""
+                name = aliases.get(name, name)
+                lsize = layer.find("size")
+                if (
+                    (name in COPPER_LAYER_ORDER or name == "Inner")
+                    and lsize
+                    and (d := lsize.get_float(0)) is not None
+                ):
+                    via.padstack_sizes[name] = d
+            if mode_name == "normal" and not via.padstack_sizes:
+                pass  # uniform diameter: the top-level size applies everywhere
+            elif not via.padstack_sizes:
+                via.padstack_sizes = {"?": 0.0}  # unreadable: nothing verifiable
+        for token in ("filling", "capping"):
+            if node := sexp.find(token):
+                via.hole_closed |= node.get_string(0) == "yes"
+        if plug := sexp.find("plugging"):
+            for side in ("front", "back"):
+                if (n := plug.find(side)) and n.get_string(0) == "yes":
+                    via.hole_closed = True
         # Net — handles both (net N "name") and (net "name") formats.
         # KiCad 10 may emit (net "name") without a numeric net number.
         if net := sexp.find("net"):
@@ -2654,6 +2755,8 @@ class Via:
         via_sexp = SExp.list("via")
         if self.via_type:
             via_sexp.append(SExp.atom(self.via_type))
+        if self.locked:
+            via_sexp.append(SExp.list("locked", "yes"))
         via_sexp.append(SExp.list("at", self.position[0] + ox, self.position[1] + oy))
         via_sexp.append(SExp.list("size", self.size))
         via_sexp.append(SExp.list("drill", self.drill))
@@ -2744,7 +2847,7 @@ class Zone:
     layers: list[str] = field(default_factory=list)
     # Keepout flags when this zone is a rule area; None for pour zones.
     keepout: ZoneKeepout | None = None
-    # Boundary polygon points (x, y) in mm
+    # Literal xy vertices of the first boundary polygon, in mm.
     polygon: list[tuple[float, float]] = field(default_factory=list)
     # Filled polygon regions after DRC (may differ from boundary due to clearances)
     filled_polygons: list[list[tuple[float, float]]] = field(default_factory=list)
@@ -2787,6 +2890,9 @@ class Zone:
     # (Issue #6087).
     parent_reference: str = ""
     parent_uuid: str = ""
+    # Authored exterior and interior rings for curved zones or zones with cutouts.
+    # The historical field name also covers copper pours. Simple zones use polygon.
+    rule_area_contours: list[list[tuple[float, float]]] = field(default_factory=list)
 
     def is_stroked_fill(self) -> bool:
         """Whether ``filled_polygons`` are centre-lines rather than final copper.
@@ -2922,10 +3028,12 @@ class Zone:
                 zone.net_name = net.get_string(0) or ""
         if net_name := index.get("net_name"):
             zone.net_name = net_name.get_string(0) or ""
-        if layer := index.get("layer"):
+        # A filled polygon has its own layer, which may differ from the
+        # first declared zone layer on a multilayer pour.
+        if layer := sexp.find_child("layer"):
             zone.layer = layer.get_string(0) or ""
         # Multi-layer form (rule areas): (layers "F.Cu" "B.Cu") / (layers "*.Cu")
-        if layers := index.get("layers"):
+        if layers := sexp.find_child("layers"):
             zone.layers = [
                 layer_name
                 for i in range(len(layers.values))
@@ -2975,7 +3083,8 @@ class Zone:
 
             # Extract clearance if present
             if clearance := connect_pads.find("clearance"):
-                zone.clearance = clearance.get_float(0) or 0.2
+                if (value := clearance.get_float(0)) is not None:
+                    zone.clearance = value
 
         # Fill settings - (fill yes/no (thermal_gap X) (thermal_bridge_width X))
         if fill := index.get("fill"):
@@ -2994,6 +3103,9 @@ class Zone:
         # Parse boundary polygon - (polygon (pts (xy X Y) ...))
         if polygon := index.get("polygon"):
             zone.polygon = cls._parse_polygon_pts(polygon)
+            contours = sexp.find_children("polygon")
+            if len(contours) > 1 or polygon.find("arc") is not None:
+                zone.rule_area_contours = [_polygon_arc_chain(contour) for contour in contours]
 
         # Parse filled polygons - (filled_polygon (layer X) (pts (xy X Y) ...))
         for filled_poly in sexp.find_all("filled_polygon"):
@@ -3006,6 +3118,19 @@ class Zone:
                 zone.filled_polygon_layers.append(fp_layer or zone.layer)
 
         return zone
+
+    def _subtract_board_origin(self, ox: float, oy: float) -> None:
+        """Convert sheet coordinates to the board-relative coordinates exposed by PCB."""
+        if self.polygon:
+            self.polygon = [(x - ox, y - oy) for x, y in self.polygon]
+        if self.rule_area_contours:
+            self.rule_area_contours = [
+                [(x - ox, y - oy) for x, y in ring] for ring in self.rule_area_contours
+            ]
+        if self.filled_polygons:
+            self.filled_polygons = [
+                [(x - ox, y - oy) for x, y in poly] for poly in self.filled_polygons
+            ]
 
     def filled_polygon_layer(self, index: int) -> str:
         """Return the copper layer of ``filled_polygons[index]``.
@@ -3740,19 +3865,7 @@ class PCB:
                 # same parser handles both (issue #4873).
                 fp = Footprint.from_sexp(child)
                 self._footprints.append(fp)
-                for fp_child in child.iter_children():
-                    if fp_child.tag != "zone":
-                        continue
-                    # Footprint zones are stored sheet-absolute in a board
-                    # file, exactly like top-level zones (Issue #6087).
-                    fp_zone = Zone.from_sexp(fp_child)
-                    fp_zone.file_version = self._file_version()
-                    fp_zone.parent_reference = fp.reference
-                    fp_zone.parent_uuid = fp.uuid
-                    self._footprint_zones.append(fp_zone)
-                    # Back-reference so moving the footprint moves the zone
-                    # with it (Issue #6119).
-                    fp._zones.append(fp_zone)
+                self._parse_footprint_zones(fp, child)
             elif tag == "segment":
                 seg = Segment.from_sexp(child)
                 self._segments.append(seg)
@@ -3792,7 +3905,7 @@ class PCB:
             elif tag == "gr_text":
                 text = GraphicText.from_sexp(child)
                 self._texts.append(text)
-            elif tag in ("gr_rect", "gr_circle", "gr_poly"):
+            elif tag in ("gr_rect", "gr_circle", "gr_poly", "gr_curve"):
                 # ``gr_poly`` joined this dispatch in Issue #5811: a
                 # board-level polygon silk marker was previously parsed
                 # nowhere, so the silkscreen clearance geometry could not
@@ -3895,6 +4008,24 @@ class PCB:
         except ValueError:
             return 0
 
+    def _parse_footprint_zones(
+        self, fp: Footprint, node: SExp, board_origin: tuple[float, float] = (0.0, 0.0)
+    ) -> None:
+        """Share embedded zones between the footprint and the board's rule-area index.
+
+        Loading normalizes the whole board after parsing. Insertion already
+        knows the origin and can normalize these zones immediately.
+        """
+        for zone_node in node.find_children("zone"):
+            zone = Zone.from_sexp(zone_node)
+            zone.file_version = self._file_version()
+            zone.parent_reference = fp.reference
+            zone.parent_uuid = fp.uuid
+            if board_origin != (0.0, 0.0):
+                zone._subtract_board_origin(*board_origin)
+            self._footprint_zones.append(zone)
+            fp._zones.append(zone)
+
     def _parse_layers(self, sexp: SExp):
         """Parse layer definitions."""
         for child in sexp.iter_children():
@@ -3964,8 +4095,7 @@ class PCB:
 
         # KiCad 10 --save-board: no header table survived. Synthesize one from
         # the inline name-only references so the recovery loop below has a map.
-        if not self._nets:
-            self._synthesize_net_table()
+        self._synthesize_net_table()
 
         # Build bidirectional lookups from the header declarations
         name_to_number: dict[str, int] = {}
@@ -4043,7 +4173,12 @@ class PCB:
         No-op if a header table already exists or if there are no named
         inline references to recover from.
         """
-        if self._nets:
+        # A lone (net 0 "") declares only the no-net sentinel. Name-only
+        # copper on such a board still needs the same in-memory net table.
+        lone_sentinel = (
+            self._nets.keys() == {0} and not self._nets[0].name and self._net_name_only_dialect
+        )
+        if self._nets and not lone_sentinel:
             return
 
         # Iterate elements in a stable order and collect (name, surviving_num).
@@ -4321,14 +4456,9 @@ class PCB:
                 vx, vy = via.position
                 via.position = (vx - ox, vy - oy)
 
-            # Zones: convert boundary polygon AND every filled polygon.
+            # Zones: convert authored vertices, rule-area contours and copper fills.
             for zone in (*self._zones, *self._footprint_zones):
-                if zone.polygon:
-                    zone.polygon = [(x - ox, y - oy) for x, y in zone.polygon]
-                if zone.filled_polygons:
-                    zone.filled_polygons = [
-                        [(x - ox, y - oy) for x, y in poly] for poly in zone.filled_polygons
-                    ]
+                zone._subtract_board_origin(ox, oy)
 
     def _link_footprint_sexp_nodes(self) -> None:
         """Attach S-expression back-references to parsed Footprint objects.
@@ -4343,7 +4473,9 @@ class PCB:
         * ``_board_origin`` -- the board origin offset so that the setter
           can convert board-relative positions back to sheet-absolute
           when writing to the S-expression.
+        * ``_copper_layer_count`` -- the board stack size for embedded zone flips.
         """
+        copper_layers = self._footprint_copper_layer_count()
         # Build a UUID -> index lookup for fast matching.
         fp_by_uuid: dict[str, int] = {}
         for idx, fp in enumerate(self._footprints):
@@ -4375,6 +4507,7 @@ class PCB:
                 # Use object.__setattr__ to avoid triggering sync before
                 # both _sexp_node and _board_origin are in place.
                 object.__setattr__(fp, "_board_origin", self._board_origin)
+                object.__setattr__(fp, "_copper_layer_count", copper_layers)
                 object.__setattr__(fp, "_sexp_node", child)
 
                 # Issue #4518: link each Pad to its own ``(pad ...)`` node so
@@ -4497,7 +4630,7 @@ class PCB:
         chains: list[list[tuple[float, float]]] = []
         for child in self._sexp.find_children("gr_poly"):
             if _on_edge_cuts(child) and has_board_polygon_arcs(child) == curved:
-                chain = _board_polygon_arc_chain(child) if curved else _chain_from(child)
+                chain = _polygon_arc_chain(child) if curved else _chain_from(child)
                 if chain:
                     chains.append(chain)
         if not curved:
@@ -4739,6 +4872,12 @@ class PCB:
     def layers(self) -> dict[int, Layer]:
         """Layer definitions."""
         return self._layers
+
+    def _footprint_copper_layer_count(self) -> int:
+        """Physical stack size for mirroring, including mixed and jumper copper."""
+        return sum(
+            is_declared_copper_layer(layer.name, layer.type) for layer in self.layers.values()
+        )
 
     @property
     def copper_layers(self) -> list[Layer]:
@@ -6214,7 +6353,7 @@ class PCB:
                 elif tag == "gr_arc":
                     self._graphic_arcs.append(GraphicArc.from_sexp(child))
                     self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
-                elif tag in ("gr_rect", "gr_circle", "gr_poly"):
+                elif tag in ("gr_rect", "gr_circle", "gr_poly", "gr_curve"):
                     graphic_type = tag[3:]
                     self._graphics.append(BoardGraphic.from_sexp(child, graphic_type))
 
@@ -6279,7 +6418,7 @@ class PCB:
             elif tag == "gr_arc":
                 self._graphic_arcs.append(GraphicArc.from_sexp(child))
                 self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
-            elif tag in ("gr_rect", "gr_circle", "gr_poly"):
+            elif tag in ("gr_rect", "gr_circle", "gr_poly", "gr_curve"):
                 graphic_type = tag[3:]
                 self._graphics.append(BoardGraphic.from_sexp(child, graphic_type))
 
@@ -6625,6 +6764,32 @@ class PCB:
             return True
 
         return False
+
+    def set_footprint_property(self, reference: str, name: str, value: str) -> bool:
+        """Set a custom footprint field, retaining its existing display settings."""
+        fp = self.get_footprint(reference)
+        if fp is None or fp._sexp_node is None:
+            return False
+        for prop in fp._sexp_node.find_children("property"):
+            if prop.get_string(0) == name:
+                prop.children[1] = SExp.quoted_atom(value)
+                break
+        else:
+            prop = SExp.list(
+                "property",
+                SExp.quoted_atom(name),
+                SExp.quoted_atom(value),
+                SExp.list("at", 0, 0),
+                SExp.list("layer", fp.layer.replace(".Cu", ".Fab")),
+                SExp.list("hide", "yes"),
+                SExp.list("uuid", self.mint_uuid("property", fp.uuid, name)),
+                SExp.list("effects", SExp.list("font", SExp.list("size", 1, 1))),
+            )
+            if fp.layer == "B.Cu":
+                _mirror_text_effects(prop)
+            fp._sexp_node.append(prop)
+        fp.properties[name] = value
+        return True
 
     # Silkscreen management methods
 
@@ -7311,8 +7476,15 @@ class PCB:
         # back (layers, mirrored local geometry/text), not just its (layer)
         # node (Issue #8581). Front placements are untouched.
         is_back = _is_back_layer(layer)
+        copper_layers = self._footprint_copper_layer_count()
         if is_back:
-            flip_footprint_children_to_back(fp_sexp, rotation)
+            flip_footprint_children_to_back(fp_sexp, rotation, copper_layers)
+
+        # Footprint zones are stored board-absolute, unlike pads and graphics,
+        # so carry the library outline to the placement frame (Issue #8958).
+        transform_footprint_zone_nodes(
+            fp_sexp, (0.0, 0.0, 0.0, is_back), (abs_x, abs_y, rotation, is_back)
+        )
 
         # Rewrite each pad's angle to ABSOLUTE (board-frame) rotation.
         #
@@ -7413,7 +7585,9 @@ class PCB:
         # Link the S-expression node so that future mutations to position,
         # rotation, or layer are automatically persisted.
         object.__setattr__(footprint, "_board_origin", self._board_origin)
+        object.__setattr__(footprint, "_copper_layer_count", copper_layers)
         object.__setattr__(footprint, "_sexp_node", fp_sexp)
+        self._parse_footprint_zones(footprint, fp_sexp, self._board_origin)
         # New footprints need the same pad write-through links as loaded
         # footprints (#5049). Use parser order, not pad numbers: shield and
         # NPTH pads may share a number or have no number at all.
@@ -7715,6 +7889,8 @@ class PCB:
         net: str | int | None = None,
         waypoints: list[tuple[float, float]] | None = None,
         dedupe: bool = True,
+        *,
+        require_pad_layer: bool = False,
     ) -> list[Segment]:
         """
         Add a trace (one or more segments) between two points or pads.
@@ -7737,6 +7913,10 @@ class PCB:
                 accumulating exact-duplicate copper.  Set False only if you
                 deliberately need identical-geometry duplicates.
 
+            require_pad_layer: Require named endpoints to declare copper on the
+                requested layer. Use coordinates for intentional transitions
+                through vias. This check leaves coordinate endpoints alone.
+
         Returns:
             List of Segment objects that were created (skipped duplicates are
             excluded, so this may be shorter than the number of point-pairs).
@@ -7752,6 +7932,27 @@ class PCB:
             >>> pcb.add_trace((50, 30), (60, 30), waypoints=[(55, 35)])
             >>> pcb.save("board.kicad_pcb")
         """
+        if require_pad_layer:
+            copper = [
+                v.name for v in self.layers.values() if is_declared_copper_layer(v.name, v.type)
+            ]
+            for endpoint in (start, end):
+                if not isinstance(endpoint[0], str):
+                    continue
+                ref, number = endpoint
+                fp = self.get_footprint(ref)
+                endpoint_pad = (
+                    next((p for p in fp.pads if p.number == number), None) if fp else None
+                )
+                if endpoint_pad is None:
+                    raise ValueError(f"Cannot find pad {number} on footprint {ref}")
+                available = pad_copper_layers(endpoint_pad.layers, copper)
+                if layer not in available:
+                    raise ValueError(
+                        f"Pad {ref}.{number} has no declared copper on {layer}; "
+                        f"available copper: {', '.join(sorted(available)) or 'none'}"
+                    )
+
         # Resolve start position
         if isinstance(start[0], str):
             ref, pad = start[0], start[1]
@@ -8157,10 +8358,24 @@ class PCB:
             >>> pcb.save()
         """
         ox, oy = self._board_origin
+        node = self.via_source_node(via)
+        at_node = node.find("at") if node is not None else None
+        if at_node is not None:
+            at_node.set_value(0, new_position[0] + ox)
+            at_node.set_value(1, new_position[1] + oy)
+
+        # Update the in-memory object regardless so reads reflect the move.
+        via.position = (new_position[0], new_position[1])
+        # Position changed -> the cached via dedup key set is stale.
+        self._invalidate_dedup_keys()
+        return at_node is not None
+
+    def via_source_node(self, via: Via) -> SExp | None:
+        """Locate a via's backing node by UUID or its current sheet position."""
+        ox, oy = self._board_origin
         old_x, old_y = via.position
         target_uuid = via.uuid
 
-        updated = False
         for child in self._sexp.children:
             if child.is_atom or child.name != "via":
                 continue
@@ -8180,16 +8395,8 @@ class PCB:
                 if abs(ax - (old_x + ox)) > 1e-6 or abs(ay - (old_y + oy)) > 1e-6:
                     continue
 
-            at_node.set_value(0, new_position[0] + ox)
-            at_node.set_value(1, new_position[1] + oy)
-            updated = True
-            break
-
-        # Update the in-memory object regardless so reads reflect the move.
-        via.position = (new_position[0], new_position[1])
-        # Position changed -> the cached via dedup key set is stale.
-        self._invalidate_dedup_keys()
-        return updated
+            return child
+        return None
 
     def reinforce_net(
         self,

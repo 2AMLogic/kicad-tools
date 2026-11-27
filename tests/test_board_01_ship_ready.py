@@ -76,9 +76,16 @@ def test_board_01_bom_excludes_synthesized_power_symbol() -> None:
     designators = [r.get("Designator", "") for r in rows]
     flat = ",".join(designators)
     assert "#PWR" not in flat, f"Power symbol leaked into BOM CSV: designators={designators}"
-    # Must have exactly the four real components (R1+R2 grouped).
-    refs = sorted(d.strip() for r in designators for d in r.split(","))
-    assert refs == ["J1", "J2", "R1", "R2"], f"Unexpected BOM designators: {refs}"
+    # The approved BOM groups the two 10 kΩ resistors and the two headers.
+    groups = sorted((row["LCSC Part #"], sorted(row["Designator"].split(","))) for row in rows)
+    assert groups == [("C17414", ["R1", "R2"]), ("C7501260", ["J1", "J2"])]
+
+
+def test_board_01_placement_includes_both_through_hole_headers() -> None:
+    """The assembly decision in #7239 puts the two headers in JLCPCB's CPL."""
+    cpl = BOM_CSV.with_name("cpl_jlcpcb.csv")
+    with cpl.open(newline="", encoding="utf-8") as fh:
+        assert sorted(row["Designator"] for row in csv.DictReader(fh)) == ["J1", "J2", "R1", "R2"]
 
 
 def test_board_01_bom_formatter_skips_virtual_items() -> None:

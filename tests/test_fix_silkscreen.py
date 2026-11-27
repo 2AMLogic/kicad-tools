@@ -1,9 +1,11 @@
 """Tests for the fix-silkscreen command and SilkscreenRepairer."""
 
+import json
 from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli import main as kct_main
 from kicad_tools.cli.fix_silkscreen_cmd import _get_min_height, _get_min_width, main
 from kicad_tools.drc.repair_silkscreen import SilkscreenRepairer
 from kicad_tools.sexp.parser import parse_file
@@ -1067,6 +1069,61 @@ def clip_pcb(tmp_path: Path):
 
 
 class TestClipToPads:
+    @pytest.mark.parametrize(
+        ("version", "board_margin", "fp_margin", "pad_margin", "too_close"),
+        [
+            (20240202, 0, 0.22, None, True),
+            (20240202, 0, 0.22, 0.05, False),
+            (20240202, 0.22, None, None, True),
+            (20240202, 0.22, 0, None, False),
+            (20240108, 0.22, 0, None, True),
+            (20240108, 0, 0.22, 0, True),
+        ],
+    )
+    def test_repair_uses_checked_mask_margin(
+        self, tmp_path, version, board_margin, fp_margin, pad_margin, too_close
+    ):
+        # The stroke is 0.285 mm from copper and 0.065 mm from a +0.22 mm opening.
+        path = tmp_path / "margin.kicad_pcb"
+        local_fp = f"(solder_mask_margin {fp_margin})" if fp_margin is not None else ""
+        local_pad = f"(solder_mask_margin {pad_margin})" if pad_margin is not None else ""
+        path.write_text(f"""(kicad_pcb (version {version})
+          (setup (pad_to_mask_clearance {board_margin}))
+          (footprint "X:Y" (layer "F.Cu") (at 10 10) {local_fp}
+            (property "Reference" "R1")
+            (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") {local_pad})
+            (fp_line (start 0.86 -2) (end 0.86 2)
+              (stroke (width 0.15) (type solid)) (layer "F.SilkS"))))""")
+        before = _silk_pad_findings(path, 0.12)
+        assert [v.severity for v in before] == (["error"] if too_close else [])
+        repairer = SilkscreenRepairer(path)
+        result = repairer.repair_pad_clearance(0.12)
+        assert [f.action for f in result.fixes] == (["trimmed"] if too_close else [])
+        repairer.save()
+        assert not _silk_pad_findings(path, 0.12)
+
+    def test_legalize_moves_joined_marker_clear_of_inherited_legacy_margin(self, tmp_path):
+        from kicad_tools.drc.repair_silkscreen import legalize_silk
+        from kicad_tools.manufacturers import get_profile
+
+        path = tmp_path / "marker.kicad_pcb"
+        path.write_text("""(kicad_pcb (version 20240108)
+          (setup (pad_to_mask_clearance 0.22))
+          (footprint "X:Y" (layer "F.Cu") (at 10 10) (solder_mask_margin 0)
+            (property "Reference" "U1")
+            (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask"))
+            (pad "2" smd rect (at 5 0) (size 1 1) (layers "F.Cu" "F.Mask"))
+            (pad "3" smd rect (at 10 0) (size 1 1) (layers "F.Cu" "F.Mask"))
+            (fp_line (start -0.86 -0.3) (end -0.86 0.3)
+              (stroke (width 0.15) (type solid)) (layer "F.SilkS"))
+            (fp_line (start -0.86 0.3) (end -1.2 0.3)
+              (stroke (width 0.15) (type solid)) (layer "F.SilkS"))))""")
+        rules = get_profile("jlcpcb").get_design_rules(layers=2)
+        assert _silk_pad_findings(path, 0.12)
+        report = legalize_silk(path, rules)
+        assert [e.action for e in report.footprint_line_edits] == ["moved_marker"] * 2
+        assert not _silk_pad_findings(path, rules.silk_to_pad_warning_mm)
+
     def test_trims_line_crossing_limit(self, clip_pcb):
         # Runs along the top, 0.12 above pad copper at its ends -> must be shortened.
         path = clip_pcb(_line(-1.5, 0.45, 1.5, 0.45))
@@ -1156,3 +1213,39 @@ class TestClipToPads:
         repairer.repair_pad_clearance(0.15)
         repairer.save()
         assert not _silk_pad_findings(path)
+
+
+@pytest.mark.parametrize("profile", ["osh", "oshpark"])
+def test_individual_width_and_height_use_osh_rules(pcb_undersized_both, profile, capsys):
+    args = ["fix-silkscreen", str(pcb_undersized_both), "--mfr", profile, "--dry-run"]
+    assert kct_main([*args, "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["min_width_mm"] == pytest.approx(0.127)
+    assert report["min_height_mm"] == pytest.approx(0.762)
+
+
+def test_individual_pad_clearance_uses_order_profile(clip_pcb, capsys):
+    path = clip_pcb(_line(-1.5, 0.45, 1.5, 0.45))
+    args = ["fix-silkscreen", str(path), "--clip-to-pads", "--dry-run", "--format", "json"]
+    assert (
+        kct_main([*args, "--mfr", "jlcpcb-capabilityplus", "--layers", "4", "--copper", "2"]) == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["min_pad_clearance_mm"] == pytest.approx(0.15)
+    assert report["total_pad_clearance_fixed"] == 1
+
+
+def test_individual_pad_clearance_missing_for_osh(pcb_undersized_both, capsys):
+    args = [
+        "fix-silkscreen",
+        str(pcb_undersized_both),
+        "--mfr",
+        "osh",
+        "--clip-to-pads",
+        "--dry-run",
+    ]
+    assert kct_main(args) == 1
+    assert (
+        "--clip-to-pads needs a silk-to-pad clearance, but 'osh' defines none"
+        in capsys.readouterr().err
+    )

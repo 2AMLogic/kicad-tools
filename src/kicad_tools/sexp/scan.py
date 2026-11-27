@@ -24,6 +24,18 @@ from functools import lru_cache
 # A quoted string, escapes honoured; unterminated runs to the end of text.
 _STRING = r'"[^"\\]*(?:\\[\s\S][^"\\]*)*(?:"|\Z)'
 
+# Consume whole atoms so a quote or comment character inside a bare atom
+# follows the parser's rules. Only the parentheses group is yielded.
+_STRUCTURE = re.compile(rf'{_STRING}|[#;][^\n]*|(?P<paren>[()])|[^ \t\n\r()"#;][^ \t\n\r()]*')
+
+
+def iter_parentheses(text: str) -> Iterator[tuple[int, str]]:
+    """Yield the offsets and values of structural parentheses in source order."""
+    for match in _STRUCTURE.finditer(text):
+        paren = match.group("paren")
+        if paren is not None:
+            yield match.start(), paren
+
 
 @lru_cache(maxsize=64)
 def _scanner(pattern: str) -> re.Pattern[str]:

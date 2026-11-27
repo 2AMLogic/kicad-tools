@@ -13,11 +13,22 @@ from #9326; the ``mask_to_copper`` own-pad classes are #9334):
   when the profile declares a via-in-pad process, snapped to the pad centre
   so the copper fully merges;
 * **track tangent to its own via** -- the via is snapped onto the track's
-  centreline (the canonical track-via join), so the copper fully merges.
+  centreline (the canonical track-via join), so the copper fully merges;
+* **same-net trace shelf at a routed branch** (#10367) -- a track-track slit
+  between a trunk segment and a short staircase of same-net segments that
+  leaves the trunk at one of its ends.  The branch chain (the segments
+  joined end to end through plain two-segment nodes) is replaced by a
+  straight or 45-degree-plus-H/V shortcut that keeps the trunk-attach node,
+  the branch's far end and the chain's first and last widths.  The rewrite
+  is applied only when the replacement copper clears every neighbour under
+  the rule's own copper model and the slit it replaces is gone (see
+  :meth:`CopperGapRepairer._repair_shelf`); any pad, via, layer change,
+  tap or reinforcement endpoint on an interior node protects the chain.
 
 Everything else is left untouched and listed as unrepaired with a reason:
 different-net gaps (never moved by this repairer), zone-fill sides, pad-pad
-and track-track pairs, arcs, footprint polygons and via-via pairs.  A move
+pairs, track pairs that are not a branch shelf, arcs, footprint polygons and
+via-via pairs.  A move
 that would crowd foreign copper or drill too close to another hole is
 declined (``would_violate_clearance``, re-using the shared clearance gate
 inherited from :class:`DrillClearanceRepairer` -- and the same gate covers
@@ -36,20 +47,25 @@ from __future__ import annotations
 
 import math
 import re
+import uuid as uuid_lib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, NamedTuple
 
 from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
-from ..sexp import SExp
+from ..core.pcb_item_locks import BoardItemLocks
+from ..sexp import SExp, parse_string
 from .net_compat import resolve_net_atom
 from .repair_drill_clearance import DrillClearanceRepairer
 from .violation import DRCViolation, ViolationType
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers.base import DesignRules
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.physical_gap import FabGapPolicy
 
 # Item descriptors (``validate/copper_refs.py``) are quantised to 1 um, so a
 # match tolerance of 2 um absorbs the origin add/subtract round trip.
@@ -60,6 +76,60 @@ _TOLERANCE_MM = 0.01
 _VIA_REF = re.compile(r"^Via@(-?[\d.]+)/(-?[\d.]+):([^:]+):d([\d.]+)/s([\d.]+)$")
 # ``Trace@<layer>:w<width>:<x1>/<y1>~<x2>/<y2>`` (copper_refs.segment_ref)
 _TRACE_REF = re.compile(r"^Trace@([^:]+):w([\d.]+):(-?[\d.]+)/(-?[\d.]+)~(-?[\d.]+)/(-?[\d.]+)$")
+
+# A shelf rewrite replaces one branch chain, never a general re-route: longer
+# chains are declined (``chain_too_long``).
+_SHELF_MAX_CHAIN = 8
+# Reinforcement sidecar anchors are recorded to 0.1 mm; match them as loosely
+# as ``pcb.reinforcement_sidecar`` does (its ``_near`` tolerance).
+_REINFORCEMENT_TOL_MM = 0.05
+_SHELF_ACTION = "rewrite_shelf"
+
+Point2 = tuple[float, float]
+
+
+def _in(track: _Trk, tracks: list[_Trk]) -> bool:
+    """Identity membership: two segments with equal fields are still two segments."""
+    return any(track is t for t in tracks)
+
+
+class _Trk(NamedTuple):
+    """A same-net, same-layer segment: its node, ends and width."""
+
+    node: SExp
+    a: Point2
+    b: Point2
+    width: float
+
+
+@dataclass
+class ShelfRewrite:
+    """A branch-chain shelf rewrite: what was removed, what replaced it (#10367).
+
+    ``removed`` holds the original segment nodes as source text, in chain
+    order, so :meth:`CopperGapRepairer.undo_move` can put them back even in a
+    freshly loaded document; ``added`` identifies the replacement segments
+    (uuid, start, end, width) so undo can find them again.
+    """
+
+    layer: str
+    trunk_node: Point2  # where the chain leaves the trunk (preserved)
+    far_node: Point2  # the chain's far end (preserved)
+    shelf: tuple[Point2, Point2]  # the finding's shelf segment
+    removed: list[str]
+    added: list[tuple[str, Point2, Point2, float]]
+
+    def to_dict(self) -> dict:
+        return {
+            "layer": self.layer,
+            "trunk_node": list(self.trunk_node),
+            "far_node": list(self.far_node),
+            "shelf": [list(self.shelf[0]), list(self.shelf[1])],
+            "removed_segments": len(self.removed),
+            "added_segments": [
+                {"uuid": u, "from": list(a), "to": list(b), "width": w} for u, a, b, w in self.added
+            ],
+        }
 
 
 @dataclass
@@ -89,8 +159,14 @@ class CopperGapAction:
     # each end exactly -- an end may sit microns off the via centre, and the
     # via's own centre is the wrong restore value for it.
     joined: list[tuple[str, str, float, float]] = field(default_factory=list)
+    shelf: ShelfRewrite | None = None
 
     def __str__(self) -> str:
+        if self.shelf is not None:
+            return (
+                f"{self.action}: [{self.net_name}] ({self.via_x:.4f}, {self.via_y:.4f}) -> "
+                f"({self.new_x:.4f}, {self.new_y:.4f}) - {self.detail}"
+            )
         return (
             f"{self.action}: via [{self.net_name}] ({self.via_x:.4f}, {self.via_y:.4f}) -> "
             f"({self.new_x:.4f}, {self.new_y:.4f}) - {self.detail}"
@@ -121,6 +197,7 @@ class CopperGapResult:
     snapped_to_pad: int = 0
     snapped_to_track: int = 0
     opened: int = 0
+    rewritten_shelves: int = 0
     actions: list[CopperGapAction] = field(default_factory=list)
     unrepaired: list[CopperGapUnrepaired] = field(default_factory=list)
 
@@ -145,6 +222,8 @@ class CopperGapResult:
             lines.append(f"  Snapped vias onto their own track: {self.snapped_to_track}")
         if self.opened:
             lines.append(f"  Moved vias clear of their own pad: {self.opened}")
+        if self.rewritten_shelves:
+            lines.append(f"  Rewrote same-net trace shelves at branches: {self.rewritten_shelves}")
         reasons: dict[str, int] = {}
         for item in self.unrepaired:
             reasons[item.reason] = reasons.get(item.reason, 0) + 1
@@ -206,6 +285,23 @@ class CopperGapRepairer(DrillClearanceRepairer):
     move against the shared clearance engine before it is applied.
     """
 
+    def __init__(
+        self,
+        pcb_path: str | Path,
+        project_pcb_path: str | Path | None = None,
+        *,
+        fab_gap_policy: FabGapPolicy | None = None,
+    ):
+        self._fab_gap_policy = fab_gap_policy
+        super().__init__(pcb_path)
+        self._locks = BoardItemLocks(self.doc)
+        # The reinforcement sidecar sits next to the *input* board; a repair
+        # pass that loads a copy (``--output``) still honours it (#10367).
+        self._sidecar_board = Path(project_pcb_path) if project_pcb_path else self.path
+        # The physical-gap copper model of the current document, built lazily
+        # and dropped whenever the document is edited.
+        self._gap_model_cache: tuple[PCB, list, bool] | None = None
+
     def repair_gaps(
         self,
         violations: list[DRCViolation],
@@ -214,7 +310,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
         dry_run: bool = False,
         design_rules: DesignRules | None = None,
     ) -> CopperGapResult:
-        """Repair the same-net via/own-pad and track/own-via subset.
+        """Repair the same-net via/own-pad, track/own-via and track-track shelf subset.
 
         Args:
             violations: Any violations; only error-severity same-net
@@ -237,11 +333,20 @@ class CopperGapRepairer(DrillClearanceRepairer):
 
         pads: dict[str, tuple[BaseGeometry, tuple[float, float], list[str], str, str]] | None = None
         moved: set[int] = set()
+        claimed_chains: set[int] = set()
 
         for violation in findings:
             pair = self._classify_items(violation.items)
             if pair is None:
-                result.skip("unsupported_pair", violation)
+                tracks = self._track_pair(violation.items)
+                if tracks is None:
+                    result.skip("unsupported_pair", violation)
+                    continue
+                shelf_reason, shelf_uuid = self._repair_shelf(
+                    violation, tracks, result, dry_run, design_rules, claimed_chains
+                )
+                if shelf_reason is not None:
+                    result.skip(shelf_reason, violation, shelf_uuid)
                 continue
             via_desc, other_desc = pair
 
@@ -306,14 +411,22 @@ class CopperGapRepairer(DrillClearanceRepairer):
         """Split a finding's two item descriptors into ``(via, other)``.
 
         Returns ``None`` unless exactly one side is a via descriptor -- the
-        pad-pad, track-track, via-via, zone, arc and fp_poly classes are out
-        of scope.
+        pad-pad, track-track (handled by :meth:`_track_pair`), via-via, zone,
+        arc and fp_poly classes are not via moves.
         """
         vias = [str(i) for i in items if _VIA_REF.match(str(i))]
         others = [str(i) for i in items if not _VIA_REF.match(str(i))]
         if len(vias) != 1 or len(others) != 1:
             return None
         return vias[0], others[0]
+
+    @staticmethod
+    def _track_pair(items: list[str]) -> tuple[str, str] | None:
+        """The two ``Trace@`` descriptors of a track-track finding, else ``None``."""
+        traces = [str(i) for i in items if _TRACE_REF.match(str(i))]
+        if len(traces) != 2 or len(items) != 2:
+            return None
+        return traces[0], traces[1]
 
     def _find_via(self, desc: str) -> tuple[SExp, float, float, float, str] | None:
         """Resolve a ``Via@`` descriptor to ``(node, x, y, size, net)``."""
@@ -356,6 +469,16 @@ class CopperGapRepairer(DrillClearanceRepairer):
         self, desc: str
     ) -> tuple[tuple[float, float], tuple[float, float], float, str] | None:
         """Resolve a ``Trace@`` descriptor to ``(start, end, width, net)``."""
+        seg_node = self._find_segment_node(desc)
+        if seg_node is None:
+            return None
+        start, end = _xy(seg_node.find("start")), _xy(seg_node.find("end"))
+        if start is None or end is None:  # pragma: no cover - guarded by the finder
+            return None
+        return start, end, _num(seg_node.find("width")), self._net_name(seg_node)
+
+    def _find_segment_node(self, desc: str) -> SExp | None:
+        """Resolve a ``Trace@`` descriptor to its ``segment`` node."""
         from kicad_tools.validate.copper_refs import _clean
 
         match = _TRACE_REF.match(desc)
@@ -388,7 +511,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
             pair = sorted((start, end))
             if not (_pair_within_tol(pair, ends) or _pair_within_tol(pair, (ends[1], ends[0]))):
                 continue
-            return start, end, _num(w_node), self._net_name(seg_node)
+            return seg_node
         return None
 
     def _net_name(self, node: SExp) -> str:
@@ -474,7 +597,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
         start, end, width, seg_net = track
         if not vnet or vnet != seg_net:
             return "not_same_net"
-        if via_node.find("locked") is not None:
+        if self._locks.is_locked(via_node):
             return "locked_via"
 
         ux, uy = end[0] - start[0], end[1] - start[1]
@@ -525,7 +648,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
         poly, centre, _pad_layers, pad_net, _pad_ref = pad
         if not vnet or vnet != pad_net:
             return "not_same_net"
-        if via_node.find("locked") is not None:
+        if self._locks.is_locked(via_node):
             return "locked_via"
         # ``already_merged`` requires actual copper contact (distance 0);
         # a small positive gap is a real slit the repair must clear, not a
@@ -607,6 +730,704 @@ class CopperGapRepairer(DrillClearanceRepairer):
         return None
 
     # ------------------------------------------------------------------
+    # Same-net trace shelf at a routed branch (#10367)
+    # ------------------------------------------------------------------
+
+    def _repair_shelf(
+        self,
+        violation: DRCViolation,
+        tracks: tuple[str, str],
+        result: CopperGapResult,
+        dry_run: bool,
+        design_rules: DesignRules | None,
+        claimed: set[int],
+    ) -> tuple[str | None, str]:
+        """Rewrite the branch chain behind a track-track slit.
+
+        The finding's two segments are a *trunk* segment and a *shelf*
+        segment that belongs to a chain of same-net, same-layer segments
+        (joined end to end through plain two-segment nodes) leaving one of
+        the trunk's ends.  The chain is replaced by a straight or
+        45-degree-plus-H/V shortcut between the same two end nodes: the first
+        leg keeps the chain's first width and the second its last, so a
+        single width step survives.
+
+        Before anything is written the replacement is proven against the
+        physical-gap rule's own copper model (``physical_gap._collect`` --
+        pads, vias, tracks, arcs, filled zones): every neighbouring foreign
+        source must keep the profile's clearance, and no slit below the
+        finding's ``required_value`` may be introduced or exposed (which also
+        proves the original slit is gone).  Continuity holds by
+        construction: both end nodes keep their exact coordinates and every
+        replacement leg shares a node with the next.  Returns
+        ``(skip reason | None, uuid)``.
+        """
+        a_node, b_node = (self._find_segment_node(d) for d in tracks)
+        if a_node is None or b_node is None or a_node is b_node:
+            return "unsupported_pair", ""
+        layer = self._segment_layer(a_node)
+        if layer != self._segment_layer(b_node):
+            return "unsupported_pair", ""
+        net = self._net_name(a_node)
+        if not net or net != self._net_name(b_node):
+            return "not_same_net", ""
+        required = violation.required_value_mm
+        if required is None:
+            return "no_required_value", ""
+
+        track_list = self._layer_tracks(layer, net)
+        found, failure = self._shelf_chain(a_node, b_node, track_list)
+        if found is None:
+            return (failure or "unsupported_pair"), ""
+        chain, pts, shelf = found
+        first_uuid = self._segment_uuid(chain[0].node)
+        if any(id(t.node) in claimed for t in chain):
+            return "shelf_already_rewritten", first_uuid
+        if len(chain) < 2:
+            return "no_simplification", first_uuid
+        if any(self._locks.is_locked(t.node) for t in chain):
+            return "locked_segment", first_uuid
+        if any(self._locks.is_generator_owned(t.node) for t in chain):
+            return "generator_owned", first_uuid
+        if any(self._locks.is_group_member(t.node) for t in chain):
+            return "group_member", first_uuid
+        protected = self._protected_node_reason(pts, chain, layer, net, track_list)
+        if protected is not None:
+            return protected, first_uuid
+
+        profile = self._width_profile([t.width for t in chain])
+        if profile is None:
+            return "width_profile_unsupported", first_uuid
+        step = pts[profile[2]] if profile[2] is not None else None
+        candidates = self._shelf_candidates(pts, profile[0], profile[1], step)
+        if not candidates:
+            return "no_simplification", first_uuid
+
+        reason = "would_violate_clearance"
+        chosen: list[tuple[Point2, Point2, float]] | None = None
+        for legs in candidates:
+            if self._legs_duplicate_copper(legs, track_list, chain):
+                continue
+            reason_i = self._shelf_candidate_reason(legs, chain, layer, net, required, design_rules)
+            if reason_i is None:
+                chosen = legs
+                break
+            reason = reason_i
+        if chosen is None:
+            return reason, first_uuid
+
+        rewrite = ShelfRewrite(
+            layer=layer,
+            trunk_node=pts[0],
+            far_node=pts[-1],
+            shelf=(shelf.a, shelf.b),
+            removed=[t.node.to_string() for t in chain],
+            added=[],
+        )
+        new_nodes: list[SExp] = []
+        for index, (leg_a, leg_b, width) in enumerate(chosen):
+            node = parse_string(chain[0].node.to_string())
+            for tag, point in (("start", leg_a), ("end", leg_b)):
+                point_node = node.find(tag)
+                if point_node is not None:
+                    point_node.set_value(0, point[0])
+                    point_node.set_value(1, point[1])
+            width_node = node.find("width")
+            if width_node is not None:
+                width_node.set_value(0, width)
+            seed = f"kct-shelf:{layer}:{net}:{pts[0]}:{pts[-1]}:{index}:{leg_a}:{leg_b}"
+            new_id = str(uuid_lib.uuid5(uuid_lib.NAMESPACE_URL, seed))
+            for id_tag in ("uuid", "tstamp"):
+                id_node = node.find(id_tag)
+                if id_node is not None:
+                    id_node.set_value(0, new_id)
+                    break
+            else:
+                new_id = ""
+            rewrite.added.append((new_id, leg_a, leg_b, width))
+            new_nodes.append(node)
+
+        detail = (
+            f"replaced a {len(chain)}-segment branch with {len(chosen)} segment(s): shelf "
+            f"({shelf.a[0]:.4f}, {shelf.a[1]:.4f}) -> ({shelf.b[0]:.4f}, {shelf.b[1]:.4f}), "
+            f"trunk node ({pts[0][0]:.4f}, {pts[0][1]:.4f}), "
+            f"far end ({pts[-1][0]:.4f}, {pts[-1][1]:.4f})"
+        )
+        if not dry_run:
+            children = self.doc.children
+            positions = [self._child_index(t.node) for t in chain]
+            if any(p is None for p in positions):
+                return "chain_not_editable", first_uuid
+            insert_at = min(p for p in positions if p is not None)
+            for pos in sorted((p for p in positions if p is not None), reverse=True):
+                del children[pos]
+            for offset, node in enumerate(new_nodes):
+                children.insert(insert_at + offset, node)
+            self._gap_model_cache = None
+            self.modified = True
+        claimed.update(id(t.node) for t in chain)
+
+        result.actions.append(
+            CopperGapAction(
+                action=_SHELF_ACTION,
+                uuid=first_uuid,
+                via_x=pts[0][0],
+                via_y=pts[0][1],
+                new_x=pts[-1][0],
+                new_y=pts[-1][1],
+                net_name=net,
+                detail=detail,
+                shelf=rewrite,
+            )
+        )
+        result.repaired += 1
+        result.rewritten_shelves += 1
+        return None, first_uuid
+
+    @staticmethod
+    def _legs_duplicate_copper(
+        legs: list[tuple[Point2, Point2, float]], tracks: list[_Trk], chain: list[_Trk]
+    ) -> bool:
+        """Does any replacement leg lie wholly on same-net copper that stays?
+
+        Such a leg (typically an H/V leg collinear with the trunk) adds
+        nothing but a covered duplicate -- ``redundant_copper_covered`` -- so
+        the candidate is skipped in favour of the next one.
+        """
+        from shapely.geometry import LineString
+
+        for a, b, width in legs:
+            for track in tracks:
+                if _in(track, chain) or track.width < width - 1e-6:
+                    continue
+                line = LineString([track.a, track.b])
+                if Point(a).distance(line) <= 0.001 and Point(b).distance(line) <= 0.001:
+                    return True
+        return False
+
+    def _child_index(self, node: SExp) -> int | None:
+        """Index of ``node`` among the document's top-level children (by identity)."""
+        for index, child in enumerate(self.doc.children):
+            if child is node:
+                return index
+        return None
+
+    @staticmethod
+    def _segment_layer(seg_node: SExp) -> str:
+        layer_node = seg_node.find("layer")
+        return _bare(layer_node.get_first_atom()) if layer_node is not None else ""
+
+    def _layer_tracks(self, layer: str, net: str) -> list[_Trk]:
+        """Every same-net segment on ``layer`` with readable geometry."""
+        tracks: list[_Trk] = []
+        for seg_node in self.doc.find_all("segment"):
+            if self._segment_layer(seg_node) != layer or self._net_name(seg_node) != net:
+                continue
+            start, end = _xy(seg_node.find("start")), _xy(seg_node.find("end"))
+            if start is None or end is None:
+                continue
+            tracks.append(_Trk(seg_node, start, end, _num(seg_node.find("width"))))
+        return tracks
+
+    @staticmethod
+    def _touches(track: _Trk, point: Point2) -> bool:
+        return (
+            math.dist(track.a, point) <= _TOLERANCE_MM or math.dist(track.b, point) <= _TOLERANCE_MM
+        )
+
+    def _shelf_chain(
+        self, a_node: SExp, b_node: SExp, tracks: list[_Trk]
+    ) -> tuple[tuple[list[_Trk], list[Point2], _Trk] | None, str | None]:
+        """Find the branch chain that holds the shelf and leaves the trunk.
+
+        The shelf is the shorter of the finding's two segments and the trunk
+        the longer (a tie is no reading: neither can be told from a branch
+        step).  The chain leaves one of the trunk's ends.  Returns
+        ``((chain, node points, shelf segment) | None, failure reason)``; the
+        reason is ``chain_too_long`` (more than ``_SHELF_MAX_CHAIN``
+        segments), ``protected_tap`` (the shelf lies beyond a T-junction on the
+        way out of the trunk) or ``None`` (no chain at all).
+        """
+        by_node = {id(t.node): t for t in tracks}
+        a, b = by_node.get(id(a_node)), by_node.get(id(b_node))
+        if a is None or b is None:
+            return None, None
+        len_a, len_b = math.dist(a.a, a.b), math.dist(b.a, b.b)
+        if abs(len_a - len_b) <= _TOLERANCE_MM:
+            return None, None
+        shelf, trunk = (a, b) if len_a < len_b else (b, a)
+        best: tuple[float, list[_Trk], list[Point2]] | None = None
+        failure: str | None = None
+        for trunk_node in (trunk.a, trunk.b):
+            for first in tracks:
+                if first is trunk or not self._touches(first, trunk_node):
+                    continue
+                walked = self._walk_chain(first, trunk_node, trunk, tracks)
+                if walked is None:
+                    continue
+                chain, pts, overlong = walked
+                if not _in(shelf, chain):
+                    if self._shelf_beyond_fork(chain, pts, shelf, trunk, tracks):
+                        failure = failure or "protected_tap"
+                    continue
+                if overlong:
+                    failure = "chain_too_long"
+                    continue
+                length = sum(math.dist(t.a, t.b) for t in chain)
+                if best is None or length < best[0]:
+                    best = (length, chain, pts)
+        if best is None:
+            return None, failure
+        return (best[1], best[2], shelf), None
+
+    def _shelf_beyond_fork(
+        self, chain: list[_Trk], pts: list[Point2], shelf: _Trk, trunk: _Trk, tracks: list[_Trk]
+    ) -> bool:
+        """Does the walk stop at a T-junction whose other branches hold ``shelf``?"""
+        fork = pts[-1]
+        if self._touches(trunk, fork):
+            return False
+        others = [
+            t for t in tracks if t is not trunk and self._touches(t, fork) and not _in(t, chain)
+        ]
+        if len(others) < 2:
+            return False
+        for other in others:
+            walked = self._walk_chain(other, fork, trunk, tracks)
+            if walked is not None and _in(shelf, walked[0]):
+                return True
+        return False
+
+    def _walk_chain(
+        self, first: _Trk, start: Point2, trunk: _Trk, tracks: list[_Trk]
+    ) -> tuple[list[_Trk], list[Point2], bool] | None:
+        """Follow ``first`` away from ``start`` through plain two-segment nodes.
+
+        Stops at a free end, a fork (two or more other segments), or the trunk
+        (a loop back).  ``True`` in the result flags a chain longer than
+        ``_SHELF_MAX_CHAIN``.
+        """
+        chain = [first]
+        pts: list[Point2] = [start]
+        current, at = first, start
+        while True:
+            if math.dist(current.a, current.b) <= _TOLERANCE_MM:
+                return None
+            if math.dist(current.a, at) <= _TOLERANCE_MM:
+                nxt = current.b
+            elif math.dist(current.b, at) <= _TOLERANCE_MM:
+                nxt = current.a
+            else:
+                return None
+            pts.append(nxt)
+            others = [
+                t
+                for t in tracks
+                if t is not trunk and all(t is not c for c in chain) and self._touches(t, nxt)
+            ]
+            if self._touches(trunk, nxt) or len(others) != 1:
+                return chain, pts, False
+            if len(chain) >= _SHELF_MAX_CHAIN:
+                return chain, pts, True
+            current, at = others[0], nxt
+            chain.append(current)
+
+    @staticmethod
+    def _width_profile(widths: list[float]) -> tuple[float, float, int | None] | None:
+        """``(first width, last width, index of the step node)`` for one width step.
+
+        ``None`` when the widths change more than once (a taper the two-leg
+        replacement cannot reproduce).  The step index is the chain node where
+        the width changes, ``None`` for a constant width.
+        """
+        changes = [i for i in range(1, len(widths)) if abs(widths[i] - widths[i - 1]) > 1e-6]
+        if len(changes) > 1:
+            return None
+        return widths[0], widths[-1], (changes[0] if changes else None)
+
+    @staticmethod
+    def _shelf_candidates(
+        pts: list[Point2], w_first: float, w_last: float, step: Point2 | None
+    ) -> list[list[tuple[Point2, Point2, float]]]:
+        """Shortcut polylines between the chain's end nodes, preferred first.
+
+        A straight leg when the ends are axis-aligned or on a 45-degree line,
+        else a 45-degree leg followed by an H/V leg, else the H/V leg first.
+        Each is a list of ``(start, end, width)`` legs; the first leg takes the
+        chain's first width and the last leg its last width.
+        """
+        f, g = pts[0], pts[-1]
+        dx, dy = g[0] - f[0], g[1] - f[1]
+        ax, ay = abs(dx), abs(dy)
+        tol = 1e-4
+        if ax < tol and ay < tol:
+            return []
+        paths: list[list[Point2]] = []
+        if ax < tol or ay < tol or abs(ax - ay) < tol:
+            if abs(w_first - w_last) <= 1e-6 or step is None:
+                paths.append([f, g])
+            else:
+                # Keep the width step: split the straight run where the
+                # original step node projects onto it.
+                t = ((step[0] - f[0]) * dx + (step[1] - f[1]) * dy) / (dx * dx + dy * dy)
+                t = min(0.95, max(0.05, t))
+                paths.append([f, (round(f[0] + t * dx, 4), round(f[1] + t * dy, 4)), g])
+        else:
+            m = min(ax, ay)
+            sx, sy = math.copysign(1.0, dx), math.copysign(1.0, dy)
+            paths.append([f, (round(f[0] + sx * m, 4), round(f[1] + sy * m, 4)), g])
+            paths.append([f, (round(g[0] - sx * m, 4), round(g[1] - sy * m, 4)), g])
+
+        candidates: list[list[tuple[Point2, Point2, float]]] = []
+        for path in paths:
+            if len(path) == len(pts) and all(
+                math.dist(p, q) <= 1e-6 for p, q in zip(path, pts, strict=True)
+            ):
+                continue  # already the shortcut: nothing to simplify
+            if any(math.dist(p, q) <= 1e-6 for p, q in zip(path, path[1:], strict=False)):
+                continue
+            widths = [w_first] if len(path) == 2 else [w_first, w_last]
+            candidates.append([(path[i], path[i + 1], widths[i]) for i in range(len(path) - 1)])
+        return candidates
+
+    def _protected_node_reason(
+        self,
+        pts: list[Point2],
+        chain: list[_Trk],
+        layer: str,
+        net: str,
+        tracks: list[_Trk],
+    ) -> str | None:
+        """Why an interior chain node must not be rewritten, else ``None``.
+
+        An interior node is protected when it is a pad (any net), a via, a
+        layer transition (a same-net segment or arc on another layer ends
+        there), a tap (other same-net copper on this layer meets or crosses
+        it) or a recorded reinforcement endpoint.
+        """
+        interior = pts[1:-1]
+        if not interior:
+            return None
+        from shapely.geometry import LineString
+
+        chain_ids = {id(t.node) for t in chain}
+        pads = list(self._pads().values())
+        vias = [
+            (at, _num(via_node.find("size")))
+            for via_node in self.doc.find_all("via")
+            if (at := _xy(via_node.find("at"))) is not None
+        ]
+        other_layer_ends = self._other_layer_ends(layer, net)
+        arcs_here = self._arc_ends(layer, net)
+        wires = self._reinforcement_points(layer, net)
+
+        for index, node in enumerate(interior, start=1):
+            half = max(chain[index - 1].width, chain[index].width) / 2
+            point = Point(node)
+            for poly, _centre, pad_layers, _pad_net, _ref in pads:
+                on_layer = (
+                    layer in pad_layers
+                    or "*.Cu" in pad_layers
+                    or ("F&B.Cu" in pad_layers and layer in ("F.Cu", "B.Cu"))
+                )
+                if on_layer and point.distance(poly) <= half + _TOLERANCE_MM:
+                    return "protected_pad"
+            if any(math.dist(at, node) <= size / 2 + _TOLERANCE_MM for at, size in vias):
+                return "protected_via"
+            if any(math.dist(end, node) <= _TOLERANCE_MM for end in other_layer_ends):
+                return "protected_layer_change"
+            if any(math.dist(end, node) <= _TOLERANCE_MM for end in arcs_here):
+                return "protected_tap"
+            for other in tracks:
+                if id(other.node) in chain_ids:
+                    continue
+                if point.distance(LineString([other.a, other.b])) <= _TOLERANCE_MM:
+                    return "protected_tap"
+            if any(math.dist(p, node) <= _REINFORCEMENT_TOL_MM for p in wires):
+                return "protected_reinforcement"
+        return None
+
+    def _other_layer_ends(self, layer: str, net: str) -> list[Point2]:
+        """Ends of same-net segments and arcs routed on a different copper layer."""
+        ends: list[Point2] = []
+        for kind in ("segment", "arc"):
+            for node in self.doc.find_all(kind):
+                if self._segment_layer(node) == layer or self._net_name(node) != net:
+                    continue
+                for tag in ("start", "end"):
+                    xy = _xy(node.find(tag))
+                    if xy is not None:
+                        ends.append(xy)
+        return ends
+
+    def _arc_ends(self, layer: str, net: str) -> list[Point2]:
+        """Ends of same-net arcs on ``layer`` (copper a segment chain can meet)."""
+        ends: list[Point2] = []
+        for node in self.doc.find_all("arc"):
+            if self._segment_layer(node) != layer or self._net_name(node) != net:
+                continue
+            for tag in ("start", "end"):
+                xy = _xy(node.find(tag))
+                if xy is not None:
+                    ends.append(xy)
+        return ends
+
+    def _reinforcement_points(self, layer: str, net: str) -> list[Point2]:
+        """Recorded reinforcement wire anchors and leg ends on this net and layer."""
+        from kicad_tools.pcb.reinforcement_sidecar import load_wires_if_present
+
+        points: list[Point2] = []
+        for wire in load_wires_if_present(self._sidecar_board):
+            if wire.get("net") != net or layer not in (wire.get("layer"), wire.get("copy_layer")):
+                continue
+            for key in ("leg_start", "leg_end"):
+                p = wire.get(key)
+                if isinstance(p, dict) and "x" in p and "y" in p:
+                    points.append((float(p["x"]), float(p["y"])))
+            for p in wire.get("anchors", []):
+                if isinstance(p, dict) and "x" in p and "y" in p:
+                    points.append((float(p["x"]), float(p["y"])))
+        return points
+
+    def _gap_model(self) -> tuple[PCB, list] | None:
+        """``(board, copper sources)`` of the current document, or ``None``.
+
+        The sources are the physical-gap rule's own (``physical_gap._collect``).
+        Geometry the rule cannot model exactly makes the answer ``None`` (no
+        rewrite is then provably legal), except an unfilled zone: it has no
+        copper to be near.
+        """
+        if self._gap_model_cache is None:
+            from kicad_tools.schema.pcb import PCB
+            from kicad_tools.validate.rules.physical_gap import _collect
+
+            pcb = PCB(self.doc, self._sidecar_board)
+            sources, unsupported = _collect(pcb)
+            incomplete = any(not str(u).startswith("unfilled zone") for u in unsupported)
+            self._gap_model_cache = (pcb, sources, incomplete)
+        pcb, sources, incomplete = self._gap_model_cache
+        return None if incomplete else (pcb, sources)
+
+    def _shelf_obstacle_reason(
+        self,
+        pcb: PCB,
+        candidate: BaseGeometry,
+        layer: str,
+        net_number: int,
+        rules: DesignRules | None,
+    ) -> str | None:
+        """Check the swept track against rule areas and drills in board coordinates."""
+        from shapely.geometry import Polygon
+
+        from kicad_tools.cli.relocate_in_pad_vias import _pad_drill_focus, _resolve_hole_clearance
+        from kicad_tools.router.rule_area_resolve import all_rule_area_zones
+
+        for zone in all_rule_area_zones(pcb):
+            if zone.keepout is None or zone.keepout.tracks_allowed:
+                continue
+            layers = zone.layers or [zone.layer]
+            wildcard = "F&B.Cu" if layer in ("F.Cu", "B.Cu") else "*.In.Cu"
+            if not {layer, "*.Cu", wildcard}.intersection(layers):
+                continue
+            if len(zone.polygon) < 3:
+                return "gap_model_incomplete"
+            polygon = Polygon(zone.polygon)
+            if not polygon.is_valid:
+                return "gap_model_incomplete"
+            if candidate.intersects(polygon):
+                return "track_keepout"
+
+        try:
+            hole_floor = _resolve_hole_clearance(pcb)
+        except (OSError, ValueError):
+            return "gap_model_incomplete"
+        plated_floor = hole_floor
+        if rules is not None:
+            plated_floor = max(plated_floor, rules.min_pth_hole_to_track_mm or 0)
+            if layer not in ("F.Cu", "B.Cu"):
+                plated_floor = max(plated_floor, rules.min_inner_pth_hole_to_copper_mm or 0)
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                if pad.type not in ("thru_hole", "np_thru_hole"):
+                    continue
+                plated = pad.type == "thru_hole"
+                if plated and pad.net_number == net_number and net_number:
+                    continue
+                drill = _pad_drill_focus(pad, fp)
+                if drill is None:
+                    return "gap_model_incomplete"
+                focus, radius = drill
+                if candidate.distance(focus) < radius + (plated_floor if plated else hole_floor):
+                    return "hole_clearance"
+        layers_in_order = [item.name for item in pcb.copper_layers]
+        for via in pcb.vias:
+            if via.net_number == net_number and net_number:
+                continue
+            first, last = sorted(layers_in_order.index(name) for name in via.layers)
+            if (
+                layer in layers_in_order[first : last + 1]
+                and candidate.distance(Point(via.position)) < via.drill / 2 + hole_floor
+            ):
+                return "hole_clearance"
+        return None
+
+    def _shelf_candidate_reason(
+        self,
+        legs: list[tuple[Point2, Point2, float]],
+        chain: list[_Trk],
+        layer: str,
+        net: str,
+        required: float,
+        design_rules: DesignRules | None,
+    ) -> str | None:
+        """Why this replacement must not be applied, else ``None``.
+
+        Compare the layer's local slits before and after replacing the chain.
+        Check clearance and continued contact with neighbouring copper.
+        """
+        from shapely import union_all  # type: ignore[import-untyped]
+        from shapely.geometry import LineString
+
+        from kicad_tools.core.project_clearance import ProjectClearanceError
+        from kicad_tools.schema.pcb import Segment
+        from kicad_tools.validate.copper_refs import board_origin, segment_ref
+        from kicad_tools.validate.rules.netclass_clearance_copper import netclass_pair_requirement
+        from kicad_tools.validate.rules.physical_gap import CopperSource, iter_source_gaps
+
+        model = self._gap_model()
+        if model is None:
+            return "gap_model_incomplete"
+        pcb, sources = model
+        origin = board_origin(pcb)
+        ox, oy = origin
+
+        def rel(p: Point2) -> Point2:
+            return (p[0] - ox, p[1] - oy)
+
+        removed = {
+            segment_ref(
+                Segment(start=rel(t.a), end=rel(t.b), width=t.width, layer=layer, net_number=0),
+                origin,
+            )
+            for t in chain
+        }
+        candidate_sources = [
+            CopperSource(
+                LineString([rel(a), rel(b)]).buffer(width / 2, quad_segs=64),
+                layer,
+                net,
+                f"shelf-candidate-{index}",
+            )
+            for index, (a, b, width) in enumerate(legs)
+        ]
+        candidate_geom = union_all([c.geometry for c in candidate_sources])
+        foreign_required = design_rules.min_clearance_mm if design_rules is not None else required
+        numbers = {n.name: n.number for n in pcb.nets.values()}
+        net_number = numbers.get(net, 0)
+        try:
+            pair_requirement = netclass_pair_requirement(self._sidecar_board, pcb, foreign_required)
+        except ProjectClearanceError:
+            return "gap_model_incomplete"
+        obstacle = self._shelf_obstacle_reason(pcb, candidate_geom, layer, net_number, design_rules)
+        if obstacle:
+            return obstacle
+        policy = self._fab_gap_policy
+        scan = policy.detection_edge_mm if policy else required
+        removed_sources = [s for s in sources if s.layer == layer and s.identity in removed]
+        if len(removed_sources) != len(chain):
+            return "gap_model_incomplete"
+        original_geom = union_all([s.geometry for s in removed_sources])
+        minx, miny, maxx, maxy = original_geom.union(candidate_geom).bounds
+
+        neighbours: list[CopperSource] = []
+        for source in sources:
+            if source.layer != layer or source.geometry.is_empty or source.identity in removed:
+                continue
+            clearance = pair_requirement(net_number, numbers.get(source.net, 0))
+            reach = max(scan, clearance) + _TOLERANCE_MM
+            sx0, sy0, sx1, sy1 = source.geometry.bounds
+            if sx1 < minx - reach or sx0 > maxx + reach or sy1 < miny - reach or sy0 > maxy + reach:
+                continue
+            neighbours.append(source)
+            if (
+                source.net == net
+                and original_geom.intersects(source.geometry)
+                and not candidate_geom.intersects(source.geometry)
+            ):
+                if source.kind == "pad":
+                    return "protected_pad"
+                if source.identity.startswith("Via@"):
+                    return "protected_via"
+                return "protected_tap"
+            if source.net == net:
+                continue
+            if (
+                candidate_geom.intersects(source.geometry)
+                or candidate_geom.distance(source.geometry) < clearance - 1e-6
+            ):
+                return "would_violate_clearance"
+
+        # A previously covered slit can have two surviving owners. Compare
+        # witnesses as well as owners so an old slit elsewhere cannot mask it.
+        def witnesses(local: list[CopperSource]) -> set[tuple]:
+            return {
+                (gap.ids, tuple(sorted((round(p.x, 9), round(p.y, 9)) for p in (gap.a, gap.b))))
+                for gap in iter_source_gaps(local, scan)
+                if policy is None
+                or (
+                    "zone" not in gap.kinds
+                    and (policy.pad if "pad" in gap.kinds else policy.trace).severity_for(
+                        gap.distance
+                    )
+                    is not None
+                )
+            }
+
+        after = witnesses(neighbours + candidate_sources)
+        if after and after - witnesses(neighbours + removed_sources):
+            return "gap_not_cleared"
+
+        return None
+
+    def _undo_shelf(self, action: CopperGapAction) -> bool:
+        """Put a rewritten shelf's original segments back.
+
+        Finds the replacement segments (by uuid, else by geometry), removes
+        them and re-inserts the recorded originals at the same place.
+        ``False`` when a replacement segment is gone or was edited.
+        """
+        shelf = action.shelf
+        if shelf is None:
+            return False
+        positions: list[int] = []
+        for new_id, a, b, width in shelf.added:
+            matches = [
+                seg
+                for seg in self.doc.find_children("segment")
+                if self._segment_uuid(seg) == new_id
+                and self._net_name(seg) == action.net_name
+                and self._segment_layer(seg) == shelf.layer
+                and abs(_num(seg.find("width")) - width) < 1e-9
+                and {_xy(seg.find("start")), _xy(seg.find("end"))} == {a, b}
+            ]
+            if len(matches) != 1:
+                return False
+            index = self._child_index(matches[0])
+            if index is None or index in positions:
+                return False
+            positions.append(index)
+        children = self.doc.children
+        insert_at = min(positions)
+        restored = [parse_string(text) for text in shelf.removed]
+        for index in sorted(positions, reverse=True):
+            del children[index]
+        for offset, node in enumerate(restored):
+            children.insert(insert_at + offset, node)
+        self._gap_model_cache = None
+        self.modified = True
+        return True
+
+    # ------------------------------------------------------------------
     # Apply / undo / save
     # ------------------------------------------------------------------
 
@@ -674,6 +1495,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
                 at_node.set_value(1, new_y)
             for _uuid, seg_node, _tag, _orig in joined:
                 self._update_segment_endpoint(seg_node, vx, vy, new_x, new_y)
+            self._gap_model_cache = None
             self.modified = True
 
         result.repaired += 1
@@ -700,7 +1522,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
         for seg_node in self.doc.find_all("segment"):
             if not net_name or self._net_name(seg_node) != net_name:
                 continue
-            if seg_node.find("locked") is not None and self._end_at(seg_node, vx, vy) is not None:
+            if self._locks.is_locked(seg_node) and self._end_at(seg_node, vx, vy) is not None:
                 return None
             for tag in ("start", "end"):
                 xy = _xy(seg_node.find(tag))
@@ -718,7 +1540,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
 
     @staticmethod
     def _segment_uuid(seg_node: SExp) -> str:
-        uuid_node = seg_node.find("uuid")
+        uuid_node = seg_node.find_child("uuid") or seg_node.find_child("tstamp")
         atom = uuid_node.get_first_atom() if uuid_node else None
         return _bare(atom) if atom is not None else ""
 
@@ -864,8 +1686,11 @@ class CopperGapRepairer(DrillClearanceRepairer):
         """Put the moved via (and any segment ends that moved with it) back.
 
         Returns ``False`` when the via is gone or no end sits at the
-        post-move position (callers fall back to a snapshot restore).
+        post-move position (callers fall back to a snapshot restore).  A
+        ``rewrite_shelf`` action puts the replaced branch chain back instead.
         """
+        if action.shelf is not None:
+            return self._undo_shelf(action)
         target = None
         for via_node in self.doc.find_all("via"):
             if self._via_uuid(via_node) == action.uuid:

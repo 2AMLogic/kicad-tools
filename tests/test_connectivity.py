@@ -285,6 +285,16 @@ def _fake_kicad_cli_drc(payload: dict):
     return _run
 
 
+def _native_endpoint(description: str, x: float, y: float) -> dict:
+    from uuid import NAMESPACE_URL, uuid5
+
+    return {
+        "uuid": str(uuid5(NAMESPACE_URL, f"{description}/{x}/{y}")),
+        "description": description,
+        "pos": {"x": x, "y": y},
+    }
+
+
 def _unconnected_payload(count: int) -> dict:
     """A KiCad-shaped JSON report with ``count`` connectivity relationships."""
     return {
@@ -296,8 +306,8 @@ def _unconnected_payload(count: int) -> dict:
                 "severity": "error",
                 "description": "Missing connection between items",
                 "items": [
-                    {"description": "Zone [GND] on F.Cu", "pos": {"x": float(i), "y": 1.0}},
-                    {"description": f"Pad {i} [GND] of U1 on B.Cu", "pos": {"x": 2.0, "y": 2.0}},
+                    _native_endpoint("Zone [GND] on F.Cu", float(i), 1.0),
+                    _native_endpoint(f"Pad {i} [GND] of U1 on B.Cu", 2.0, 2.0),
                 ],
             }
             for i in range(count)
@@ -436,8 +446,8 @@ def _relationship_payload(item_pairs: list[tuple[str, str]]) -> dict:
                 "severity": "error",
                 "description": "Missing connection between items",
                 "items": [
-                    {"description": left, "pos": {"x": 1.0, "y": 1.0}},
-                    {"description": right, "pos": {"x": 2.0, "y": 2.0}},
+                    _native_endpoint(left, 1.0, 1.0),
+                    _native_endpoint(right, 2.0, 2.0),
                 ],
             }
             for left, right in item_pairs
@@ -526,6 +536,241 @@ def test_reconcile_warns_on_unexpected_kicad_cli_exit(tmp_path, monkeypatch) -> 
     # Internal classification substituted unchanged.
     assert len(result.issues) == 2
     assert {issue.issue_type for issue in result.issues} == {"partial"}
+
+
+#: Usage text whose ``--help`` probe answer is a definitive "no refill flag".
+_KICAD9_USAGE = (
+    "Usage: drc [--help] [--output OUTPUT_FILE] [--format FORMAT] "
+    "[--all-track-errors] [--schematic-parity] [--units UNITS] INPUT_FILE\n"
+)
+
+_EMPTY_RELATIONSHIP_REPORT = '{"violations": [], "unconnected_items": []}'
+
+
+def _native_launch_cli(monkeypatch, tmp_path, *, report_text: str | None, exit_code: int):
+    """Fake kicad-cli driving the native path through one DRC launch.
+
+    The ``--help`` probe answers definitively "no --refill-zones", so the
+    single launch carries no refill flag.  It writes ``report_text`` to the
+    ``-o`` path (``None`` writes nothing) and exits ``exit_code``.
+    """
+    import subprocess
+
+    import kicad_tools.cli.runner as runner_mod
+
+    cli = tmp_path / "kicad-cli"
+    monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda *a, **k: cli)
+
+    def _run(cmd, *args, **kwargs):
+        argv = [str(c) for c in cmd]
+        if "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=_KICAD9_USAGE, stderr="")
+        for flag in ("-o", "--output"):
+            if flag in argv:
+                if report_text is not None:
+                    Path(argv[argv.index(flag) + 1]).write_text(report_text)
+                break
+        return subprocess.CompletedProcess(argv, exit_code, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    return cli
+
+
+def _native_write_then_reject_cli(monkeypatch, tmp_path, *, retry_writes, retry_exit: int):
+    """Fake kicad-cli whose refill launch writes a complete report and then rejects the flag.
+
+    The probe fails (inconclusive), so the first launch carries
+    ``--refill-zones``: it writes a complete zero-relationship report and
+    exits 1 with ``Unknown argument: --refill-zones``.  The flag-less retry
+    writes ``retry_writes`` (``None`` writes nothing) and exits
+    ``retry_exit`` (Issue #9959's write-then-reject shape).
+    """
+    import subprocess
+
+    import kicad_tools.cli.runner as runner_mod
+
+    cli = tmp_path / "kicad-cli"
+    monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda *a, **k: cli)
+
+    def _run(cmd, *args, **kwargs):
+        argv = [str(c) for c in cmd]
+        if "--help" in argv:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="probe failed")
+        out = Path(argv[argv.index("-o") + 1])
+        if "--refill-zones" in argv:
+            out.write_text(_EMPTY_RELATIONSHIP_REPORT)
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="Unknown argument: --refill-zones\n", stderr=""
+            )
+        if retry_writes is not None:
+            out.write_text(retry_writes)
+        return subprocess.CompletedProcess(argv, retry_exit, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    return cli
+
+
+class TestNativeReportMustBeFreshAndComplete:
+    """Issue #9959: native reconciliation accepts only a complete report
+    written by the final launch.  Anything else warns and keeps the internal
+    findings instead of substituting an empty native result."""
+
+    @pytest.mark.parametrize(
+        "report_text",
+        [
+            None,
+            "",
+            "not json {",
+            '{"violations": 3}',
+            '{"violations": []}',
+            '{"violations": [], "unconnected_items": null}',
+            '{"violations": [], "unconnected_items": {}}',
+            '{"violations": [], "unconnected_items": [{}, null]}',
+            '{"violations": [null], "unconnected_items": []}',
+            '{"violations": [], "unconnected_items": [], "schematic_parity": [null]}',
+            '{"violations": [], "unconnected_items": [], "schematic_parity": {}}',
+            '{"violations": [], "unconnected_items": [{"items": [null]}]}',
+            '{"violations": [], "unconnected_items": [{"items": {}}]}',
+            '{"violations": [], "unconnected_items": [{"items": [{"description": null}]}]}',
+            '{"violations": [], "unconnected_items": [{"items": [{"net": ["NET1"]}]}]}',
+        ],
+    )
+    @pytest.mark.parametrize("exit_code", [0, 5])
+    def test_unusable_report_warns_and_keeps_internal_findings(
+        self, tmp_path, monkeypatch, report_text, exit_code
+    ):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_text(PARTIALLY_CONNECTED_PCB)
+        internal = ConnectivityValidator(board).validate().issues
+        _native_launch_cli(monkeypatch, tmp_path, report_text=report_text, exit_code=exit_code)
+
+        with pytest.warns(
+            RuntimeWarning,
+            match=r"unusable report .*substituting the internal analysis \(2 issue\(s\)\)",
+        ):
+            result = ConnectivityValidator(board).validate(reconcile_native=True)
+
+        assert len(internal) == 2 and result.issues == internal
+        assert {issue.issue_type for issue in result.issues} == {"partial"}
+
+    @pytest.mark.parametrize(
+        ("section", "owner", "member"),
+        [
+            ("violations", "finding", "items"),
+            ("violations", "finding", "type"),
+            ("schematic_parity", "finding", "description"),
+            ("unconnected_items", "finding", "severity"),
+            ("unconnected_items", "finding", "items"),
+            ("unconnected_items", "endpoint", "description"),
+            ("unconnected_items", "endpoint", "uuid"),
+            ("unconnected_items", "endpoint", "pos"),
+            ("unconnected_items", "position", "x"),
+            ("unconnected_items", "position", "y"),
+        ],
+    )
+    @pytest.mark.parametrize("exit_code", [0, 5])
+    def test_missing_finding_member_keeps_internal_classifications(
+        self, tmp_path, monkeypatch, section, owner, member, exit_code
+    ):
+        import json
+
+        fixture = Path(__file__).parent / "fixtures/conformance/sample-kicad-cli-drc.json"
+        finding = json.loads(fixture.read_text())["violations"][0]
+        if section == "unconnected_items":
+            finding["type"] = "unconnected_items"
+            finding["description"] = "Missing connection between items"
+        endpoint = finding["items"][0]
+        owners = {"finding": finding, "endpoint": endpoint, "position": endpoint["pos"]}
+        del owners[owner][member]
+        report = {"violations": [], "unconnected_items": [], "schematic_parity": []}
+        report[section] = [finding]
+        board = tmp_path / "board.kicad_pcb"
+        board.write_text(PARTIALLY_CONNECTED_PCB)
+        validator = ConnectivityValidator(board)
+        internal = validator.validate().issues
+        _native_launch_cli(
+            monkeypatch, tmp_path, report_text=json.dumps(report), exit_code=exit_code
+        )
+
+        with pytest.warns(RuntimeWarning, match="unusable report"):
+            result = validator.validate(reconcile_native=True)
+
+        assert result.issues == internal
+        assert {issue.net_name for issue in internal} == {"NET1", "GND"}
+
+    @pytest.mark.parametrize(
+        ("scope", "member", "value"),
+        [
+            ("finding", "items", []),
+            ("finding", "pos", {"x": True, "y": 0}),
+            ("endpoint", "net", ["NET1"]),
+            ("endpoint", "description", " "),
+            ("position", "x", "1.0"),
+            ("position", "y", float("nan")),
+        ],
+    )
+    def test_malformed_relationship_is_rejected(self, tmp_path, scope, member, value):
+        import json
+
+        from kicad_tools.drc.report import load_native_connectivity_report
+
+        report = _unconnected_payload(1)
+        finding = report["unconnected_items"][0]
+        endpoint = finding["items"][0]
+        owners = {"finding": finding, "endpoint": endpoint, "position": endpoint["pos"]}
+        owners[scope][member] = value
+        path = tmp_path / "drc.json"
+        path.write_text(json.dumps(report))
+
+        with pytest.raises(ValueError):
+            load_native_connectivity_report(path)
+
+    @pytest.mark.parametrize("exit_code", [0, 5])
+    def test_complete_zero_relationship_report_yields_zero_native_issues(
+        self, tmp_path, monkeypatch, recwarn, exit_code
+    ):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_text(PARTIALLY_CONNECTED_PCB)
+        _native_launch_cli(
+            monkeypatch, tmp_path, report_text=_EMPTY_RELATIONSHIP_REPORT, exit_code=exit_code
+        )
+
+        result = ConnectivityValidator(board).validate(reconcile_native=True)
+
+        assert result.issues == []
+        assert [w for w in recwarn.list if issubclass(w.category, RuntimeWarning)] == []
+
+    @pytest.mark.parametrize("retry_exit", [0, 5])
+    @pytest.mark.parametrize("retry_writes", [None, ""], ids=["reportless", "empty-retry"])
+    def test_reportless_retry_does_not_read_the_rejected_attempts_report(
+        self, tmp_path, monkeypatch, retry_exit, retry_writes
+    ):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_text(PARTIALLY_CONNECTED_PCB)
+        _native_write_then_reject_cli(
+            monkeypatch, tmp_path, retry_writes=retry_writes, retry_exit=retry_exit
+        )
+
+        with pytest.warns(RuntimeWarning, match=r"unusable report"):
+            result = ConnectivityValidator(board).validate(reconcile_native=True)
+
+        assert len(result.issues) == 2
+        assert {issue.issue_type for issue in result.issues} == {"partial"}
+
+    @pytest.mark.parametrize("retry_exit", [0, 5])
+    def test_fresh_zero_relationship_retry_report_is_accepted(
+        self, tmp_path, monkeypatch, recwarn, retry_exit
+    ):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_text(PARTIALLY_CONNECTED_PCB)
+        _native_write_then_reject_cli(
+            monkeypatch, tmp_path, retry_writes=_EMPTY_RELATIONSHIP_REPORT, retry_exit=retry_exit
+        )
+
+        result = ConnectivityValidator(board).validate(reconcile_native=True)
+
+        assert result.issues == []
+        assert [w for w in recwarn.list if issubclass(w.category, RuntimeWarning)] == []
 
 
 def test_reconcile_expected_degradations_stay_silent(tmp_path, monkeypatch, recwarn) -> None:

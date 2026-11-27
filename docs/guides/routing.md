@@ -1269,7 +1269,19 @@ so it does, then re-run the tile.
 > the board, plants the cross-region boundary stubs, and routes the tiles in
 > sequence automatically, making this recipe a single command.
 
-### `--preserve-existing` leaves an already-connected net alone
+### Routing a board that already has tracks or vias
+
+Plain `kct route` keeps existing copper when the input board has at least one
+top-level `segment` or `via`, including a standalone stitch via. Pads, zones,
+filled polygons and footprint graphics alone do not select this mode. The
+router treats existing tracks and vias the same whether they were drawn by
+hand or produced by an earlier routing pass.
+
+Use `--no-preserve-existing` to reroute the whole board from scratch. The
+generic `kct build` route step sets this option when regenerating its staged
+board. A loaded `--resume` checkpoint and the scoped `--complete`, `--nets`
+and `--region` modes keep their existing preservation behavior, including
+when combined with the full-reroute option.
 
 A bare `--preserve-existing` pass routes **only the nets that still have open
 connections**. A net whose pads are already all on one piece of copper — what

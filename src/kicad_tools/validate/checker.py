@@ -28,7 +28,7 @@ from .rules.match_group_length_skew import MatchGroupLengthSkewRule
 from .rules.path_ampacity import PathAmpacityRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.plane_split import PlaneSplitRule
-from .rules.pour_slot import PourSlotRule
+from .rules.pour_slot import PourSlotClearances, PourSlotRule
 from .rules.redundant_copper import RedundantCopperRule
 from .rules.reinforcement_courtyard import ReinforcementCourtyardRule
 from .rules.reinforcement_incomplete import ReinforcementIncompleteRule
@@ -41,10 +41,10 @@ if TYPE_CHECKING:
     from .rules.physical_gap import FabGapPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Sequence
     from pathlib import Path
 
-    from kicad_tools.router.current_paths import CurrentPathSpec
+    from kicad_tools.router.current_paths import CurrentPathSpec, OperatingCase
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.filters import ViolationFilter
@@ -155,6 +155,8 @@ class DRCChecker:
         routing_policy_defer_pair_vias: bool = True,
         strict_copper: bool = True,
         declared_reference_height_mm: float | None = None,
+        prove_pour_stubs: bool = False,
+        current_path_cases: Sequence[OperatingCase] | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -220,16 +222,16 @@ class DRCChecker:
                 into the legacy tolerance model.  Strict mode requires
                 shapely (a core dependency since #3824) and fails loud if it
                 is missing.
-            copper_oz_outer: Optional override for the *ampacity* gate's
-                outer-layer (F.Cu / B.Cu) copper weight in oz (Issue #4326).
+            copper_oz_outer: Optional outer-layer (F.Cu / B.Cu) copper weight
+                in oz for ampacity and stackup-specific trace-width advisories.
                 When provided, replaces ``design_rules.outer_copper_oz``
                 after the manufacturer preset is loaded, letting the CLI
                 honor the board's declared ``(setup (stackup ...))`` copper
                 weight (or an explicit keyed ``--copper outer=..``) without
                 repointing the preset's min-trace-width / clearance rules.
-                ``None`` leaves the preset default in place.
-            copper_oz_inner: Optional override for the *ampacity* gate's
-                inner-layer (In*.Cu) copper weight in oz (Issue #4326).
+                With ``None``, ampacity retains the preset default and the
+                advisory uses the board's declared weight when available.
+            copper_oz_inner: Optional inner-layer (In*.Cu) copper weight in oz.
                 Same semantics as ``copper_oz_outer`` for
                 ``design_rules.inner_copper_oz``.
             current_path_specs: Optional declared branch-specific
@@ -259,6 +261,9 @@ class DRCChecker:
                 ``routing_policy`` leaves the via cap of engaged diff-pair
                 nets to ``diffpair_uncoupled_length`` so it is not reported
                 twice.  Pass False when that category does not run.
+            prove_pour_stubs: Opt in to the native-refill proof behind
+                ``redundant_copper_pour_stub`` (Issue #10137); costs one
+                kicad-cli refill per candidate branch.
             strict_copper: When True (default), a heavier-than-1oz outer
                 weight with no profile entry raises
                 ``UnsupportedCopperWeightError`` instead of silently using
@@ -283,6 +288,12 @@ class DRCChecker:
         # check_all(); set to a (possibly empty) dict of
         # WidthConsistencyRule options to include it.
         self.width_consistency_options: dict[str, object] | None = None
+        # ``bypass_distance`` needs the board's schematic.  ``kct check`` passes
+        # the resolved path to :meth:`check_bypass_distance` explicitly; these
+        # defaults serve ``check_all`` callers (no schematic -> the rule does
+        # not run).
+        self.schematic_path: Path | None = None
+        self.bypass_max_distance_mm: float = 3.0
         self.pcb = pcb
         self.manufacturer = manufacturer
         self.layers = layers
@@ -319,6 +330,12 @@ class DRCChecker:
         self.current_path_specs: list[CurrentPathSpec] = (
             list(current_path_specs) if current_path_specs else []
         )
+        # Issue #10361: named operating cases of the same sidecar (paths
+        # that run simultaneously, with signed currents). Empty keeps every
+        # path judged independently.
+        self.current_path_cases: list[OperatingCase] = (
+            list(current_path_cases) if current_path_cases else []
+        )
         # Issue #8746: wire records (gauge source) and nets whose ampacity
         # waiver cites reinforcement, for ``reinforcement_incomplete``.
         self.reinforcement_wires: list[dict] = list(reinforcement_wires or [])
@@ -348,6 +365,7 @@ class DRCChecker:
         self.fab_view = fab_view
         self.fab_view_copper_oz = fab_view_copper_oz
         self.fab_view_gap_policy = fab_view_gap_policy
+        self.prove_pour_stubs = prove_pour_stubs
         self.emit_measurements = emit_measurements
         # The skew / continuity rules surface their measured info findings
         # when either the user asked for --verbose OR a caller wants the
@@ -367,7 +385,27 @@ class DRCChecker:
             layers, copper_oz, strict=strict_copper
         )
 
-        # Issue #4326: override the ampacity copper weights ONLY.
+        if self.design_rules.trace_width_warning_mm is not None:
+            # A preset can carry a measured advisory even when the actual board
+            # has a different layer count or inner copper weight.
+            from kicad_tools.physics.stackup import stackup_copper_oz
+
+            declared_outer = declared_inner = None
+            if copper_oz_outer is None or copper_oz_inner is None:
+                declared_outer, declared_inner = stackup_copper_oz(pcb)
+            outer = copper_oz_outer if copper_oz_outer is not None else declared_outer
+            inner = copper_oz_inner if copper_oz_inner is not None else declared_inner
+            board_layers = len(getattr(pcb, "copper_layers", ())) or layers
+            if board_layers <= 2:
+                inner = 0.0
+            entry = profile.get_dfm_entry(
+                board_layers,
+                copper_oz if outer is None else outer,
+                self.design_rules.inner_copper_oz if inner is None else inner,
+            )
+            self.design_rules = self.design_rules.with_trace_width_advisory(entry)
+
+        # Issue #4326: set the ampacity copper weights on a copy of the preset.
         #
         # ``copper_oz_outer`` / ``copper_oz_inner`` let the CLI repoint the
         # IPC-2221 ampacity gate at the board's declared ``(setup (stackup
@@ -451,6 +489,7 @@ class DRCChecker:
         "check_sharp_trace_corner",
         "check_missing_plated_hole",
         "check_board_id",
+        "check_bypass_distance",
         "check_single_pad_nets",
         "check_pad_grid_alignment",
         "check_thermal_asymmetry",
@@ -551,6 +590,12 @@ class DRCChecker:
         # fab-blocking defect.  Explicit entry REQUIRED -- the ``via``
         # prefix fallback would file it under Manufacturing.
         "via_under_body": CATEGORY_ADVISORY,
+        # Bypass-cap distance to the schematic-designated supply pin: a
+        # placement-quality advisory.  The unassociated/unmeasurable info
+        # companion needs its own entry -- unknown ids default to the
+        # fab-blocking Manufacturing bucket.
+        "bypass_distance": CATEGORY_ADVISORY,
+        "bypass_distance_unassociated": CATEGORY_ADVISORY,
         # JLCDFM mask warnings (Issue #8847): fab-DFM advisories.
         "mask_negative_expansion": CATEGORY_ADVISORY,
         "mask_multi_segment": CATEGORY_ADVISORY,
@@ -593,6 +638,7 @@ class DRCChecker:
         "redundant_copper_detour": CATEGORY_ADVISORY,
         "redundant_copper_staircase": CATEGORY_ADVISORY,
         "redundant_copper_via_offcentre": CATEGORY_ADVISORY,
+        "redundant_copper_pour_stub": CATEGORY_ADVISORY,
         # Isolated copper (Issue #4680, second slice): orphaned zone-fill
         # islands.  Warning-severity quality advisory mirroring KiCad's
         # default severity (project_generator.py pins it to "warning") --
@@ -690,6 +736,11 @@ class DRCChecker:
         "netclass_via_diameter": CATEGORY_MANUFACTURING,
         "netclass_via_drill": CATEGORY_MANUFACTURING,
         "netclass_annular_ring": CATEGORY_MANUFACTURING,
+        # Issue #10139: sidecar / project / copper net-class agreement.
+        # Warning-severity consistency audit, never fab-blocking.  Explicit
+        # entries are REQUIRED: unknown ids default to Manufacturing.
+        "netclass_sidecar_mismatch": CATEGORY_ADVISORY,
+        "netclass_track_width_mismatch": CATEGORY_ADVISORY,
         # Issue #7292: project.kct requirements vs the routed board.
         "spec_conformance_dimensions": CATEGORY_MANUFACTURING,
         "spec_conformance_layers": CATEGORY_MANUFACTURING,
@@ -918,14 +969,35 @@ class DRCChecker:
         Before Issue #8914 this method called the rule with no arguments at
         all, which pinned the old ``include_vias=False`` default on every
         ``kct check`` run and made the via arm unreachable.
+
+        Issue #10172: when the resolved manufacturer profile supplies
+        ``tht_smd_danger_mm`` / ``tht_smd_warning_mm``, those bands are passed
+        through instead of relying solely on the rule module's defaults.
         """
         if not self.fab_view:
             return DRCResults()
-        from .rules.tht_smd_spacing import ANCHOR_DRILL_MM, check_tht_smd_spacing
+        from .rules.tht_smd_spacing import (
+            ANCHOR_DRILL_MM,
+            DANGER_MM,
+            WARNING_MM,
+            check_tht_smd_spacing,
+        )
 
+        danger_mm = (
+            self.design_rules.tht_smd_danger_mm
+            if self.design_rules.tht_smd_danger_mm is not None
+            else DANGER_MM
+        )
+        warning_mm = (
+            self.design_rules.tht_smd_warning_mm
+            if self.design_rules.tht_smd_warning_mm is not None
+            else WARNING_MM
+        )
         return self._absolutize(
             check_tht_smd_spacing(
                 self.pcb,
+                danger_mm=danger_mm,
+                warning_mm=warning_mm,
                 via_drill_mm=ANCHOR_DRILL_MM if via_drill_mm is None else via_drill_mm,
             )
         )
@@ -1078,11 +1150,11 @@ class DRCChecker:
         rule = DanglingCopperRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
-    def check_pour_slot(self, netclass_clearances: Mapping[str, float] | None = None) -> DRCResults:
+    def check_pour_slot(self, netclass_clearances: PourSlotClearances | None = None) -> DRCResults:
         """Report parallel tracks too close for the zone fill (Issue #8435).
 
         Own CLI category (``pour_slot``) so ``--skip pour_slot`` works.
-        ``netclass_clearances`` maps net name to authored netclass clearance.
+        Accepts board clearance rules or a mapping of per-net clearances.
         """
         rule = PourSlotRule(netclass_clearances)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
@@ -1105,7 +1177,9 @@ class DRCChecker:
         Staircase shortcuts must keep new copper out of pad mask-opening
         zones grown by the active ``mask_to_copper`` policy's strictest
         clearance -- the explicit request, else the ``--mfr`` default
-        (Issue #9817).
+        (Issue #9817) -- and, when a physical-gap policy is active, must
+        open no ``physical_copper_gap`` slit against the copper that
+        remains (Issue #9862).
         """
         from .mask_copper import default_request_for_manufacturer
 
@@ -1116,7 +1190,15 @@ class DRCChecker:
             if policy is not None
             else 0.0
         )
-        rule = RedundantCopperRule(mask_clearance_mm=mask_clearance)
+        rule = RedundantCopperRule(
+            mask_clearance_mm=mask_clearance,
+            # Issue #9862: the staircase gate mirrors check_physical_copper_gap
+            # -- the explicit threshold wins, the fab bands apply only in fab
+            # view; with neither active there is no slit floor to match.
+            physical_copper_gap_mm=self.physical_copper_gap_mm,
+            fab_view_gap_policy=self.fab_view_gap_policy if self.fab_view else None,
+            prove_pour_stubs=self.prove_pour_stubs,
+        )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_diffpair_clearance_intra(self) -> DRCResults:
@@ -1470,6 +1552,7 @@ class DRCChecker:
         """
         rule = PathAmpacityRule(
             specs=self.current_path_specs,
+            cases=self.current_path_cases,
             # Issue #9648: a leg reinforcement_incomplete judges fully wired
             # credits its buttress wire's cross-section here -- the same
             # board-derived verdict (and sidecar gauge) that rule reports,
@@ -2053,6 +2136,40 @@ class DRCChecker:
         from .rules.via_type_capability import ViaTypeCapabilityRule
 
         rule = ViaTypeCapabilityRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_bypass_distance(
+        self,
+        schematic_path: str | Path | None = None,
+        max_distance_mm: float | None = None,
+    ) -> DRCResults:
+        """Check each bypass cap's distance to the supply pin its schematic designates.
+
+        Measures from the cap's supply pad to the pad of the pin chosen by
+        :func:`kicad_tools.placement.decoupling.schematic_cap_associations`
+        -- never the nearest pin on the rail, so two ICs sharing a rail with
+        swapped caps are reported.  Over-distance caps are ``bypass_distance``
+        warnings; caps with no defensible target (or not on the board) are
+        ``bypass_distance_unassociated`` info findings.  Advisory category.
+
+        Args:
+            schematic_path: The board's schematic; defaults to
+                :attr:`schematic_path`.  With neither, nothing runs (``kct
+                check`` reports the category as ``unknown``, not passed).
+            max_distance_mm: Maximum allowed distance in mm; defaults to
+                :attr:`bypass_max_distance_mm` (3.0).
+
+        Returns:
+            DRCResults containing ``bypass_distance`` findings.
+        """
+        from .rules.bypass_distance import BypassDistanceRule
+
+        rule = BypassDistanceRule(
+            schematic_path if schematic_path is not None else self.schematic_path,
+            max_distance_mm=(
+                max_distance_mm if max_distance_mm is not None else self.bypass_max_distance_mm
+            ),
+        )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_via_under_body(self) -> DRCResults:

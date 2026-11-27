@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+from kicad_tools.schema.pcb import Layer
 from kicad_tools.validate.rules.pour_slot import PourSlotRule
 
 
@@ -19,6 +21,9 @@ class _Seg:
 
 @dataclass
 class _Zone:
+    rule_area_contours: list = field(default_factory=list)
+    polygon = ((-50, -50), (100, -50), (100, 100), (-50, 100))
+    net_name: str = "GND"
     layer: str = "F.Cu"
     layers: list = field(default_factory=list)
     keepout: object = None
@@ -30,6 +35,8 @@ class _Zone:
 class _PCB:
     segments: list = field(default_factory=list)
     zones: list = field(default_factory=list)
+    footprint_rule_areas: list = field(default_factory=list)
+    layers = {0: Layer(0, "F.Cu", "signal"), 2: Layer(2, "B.Cu", "signal")}
 
 
 def _pair(gap, **kw):
@@ -46,17 +53,39 @@ def _run(segs, zones=(None,), rule=None):
     return (rule or PourSlotRule()).check(_PCB(segs, zs), None)
 
 
-# Threshold with defaults: 2 * 0.3 + 0.25 = 0.85 mm.
+# Threshold with defaults: 2 * 0.3 + 0.25 = 0.85 mm.  A pour slot exists only
+# for a gap with a fillable strip the fill then drops: 2 * clearance < gap <
+# 2 * clearance + min_thickness, i.e. (0.6, 0.85) mm here (Issue #10121).
 
 
 def test_flagged_pair():
-    res = _run(_pair(0.5))
+    res = _run(_pair(0.7))
     assert [v.rule_id for v in res.violations] == ["pour_slot"]
     v = res.violations[0]
     assert v.severity == "warning"
     assert "10.00 mm" in v.message
-    assert abs(v.actual_value - 0.5) < 1e-6
+    assert abs(v.actual_value - 0.7) < 1e-6
     assert abs(v.required_value - 0.85) < 1e-6
+
+
+def test_packed_pair_not_reported():
+    """A pair at or below 2 x clearance leaves no fillable strip to drop.
+
+    The copper-free channel between packed tracks is the unavoidable
+    clearance void of two different-net conductors at that spacing -- the
+    same void a fine-pitch pad row produces with no tracks at all -- so it
+    is not a pour slot (Issue #10121, native-refill controls).
+    """
+    for gap in (0.05, 0.25, 0.5, 0.599, 0.6):
+        assert _run(_pair(gap)).violations == [], gap
+
+
+def test_packed_boundary_is_the_strips_lower_edge():
+    # Just past the packed tolerance a fillable strip exists again and is
+    # dropped: 0.6 + 1.5 x tolerance leaves a 0.0015 mm strip (< min_thickness).
+    res = _run(_pair(0.6015))
+    assert len(res.violations) == 1
+    assert abs(res.violations[0].actual_value - 0.6015) < 1e-6
 
 
 def test_pair_at_or_above_fill_width_is_clean():
@@ -80,17 +109,49 @@ def test_touching_or_overlapping_left_to_drc():
     assert _run(_pair(-0.1)).violations == []
 
 
-def test_netclass_clearance_raises_threshold():
-    # gap 1.0 is clean with zone clearance 0.3 (threshold 0.85) ...
-    assert _run(_pair(1.0)).violations == []
-    # ... but a 0.5 mm netclass clearance gives 2*0.5+0.25 = 1.25.
-    res = _run(_pair(1.0), rule=PourSlotRule({"B": 0.5}))
-    assert len(res.violations) == 1
-    assert abs(res.violations[0].required_value - 1.25) < 1e-6
+def test_unequal_netclass_clearances_bound_each_side_of_the_strip():
+    thick = _Zone(clearance=0.2, min_thickness=0.3)
+    thin = _Zone(clearance=0.2, min_thickness=0.025)
+    for wider in ("A", "B"):
+        rule = PourSlotRule({wider: 0.4})
+        assert not _run(_pair(0.6), [thick], rule).violations
+        (slot,) = _run(_pair(0.65), [thick], rule).violations
+        assert abs(slot.required_value - 0.9) < 1e-6
+        assert abs(slot.location[1] - (0.525 if wider == "A" else 0.325)) < 1e-6
+        assert not _run(_pair(0.65), [thin], rule).violations
+        assert not _run(_pair(0.9), [thick], rule).violations
+        assert not _run(_pair(0.95), [thick], rule).violations
+
+
+def test_custom_rule_matches_one_track_to_zone_on_its_layer(tmp_path):
+    board = tmp_path / "board.kicad_pcb"
+    board.with_suffix(".kicad_dru").write_text(
+        """(version 1)
+        (rule "Wide A to GND" (layer "F.Cu")
+          (condition "A.NetName == 'GND' && B.NetName == 'A'")
+          (constraint clearance (min 0.4mm)))"""
+    )
+    rule = PourSlotRule(BoardClearanceRules.from_board(board))
+    zone = _Zone(clearance=0.1, min_thickness=0.2)
+    tracks = _pair(0.7)
+    (pair,) = rule.iter_pairs(_PCB(tracks, [zone]))
+    assert (pair.first_clearance, pair.second_clearance) == (0.4, 0.2)
+    zone.layer = "B.Cu"
+    for track in tracks:
+        track.layer = zone.layer
+    assert not _run(tracks, [zone], rule).violations
+
+
+def test_zone_netclass_sets_a_floor_on_both_facing_clearances():
+    zone = _Zone(clearance=0.2, min_thickness=0.3)
+    rule = PourSlotRule({"GND": 0.4})
+    assert not _run(_pair(0.65), [zone], rule).violations
+    (slot,) = _run(_pair(0.95), [zone], rule).violations
+    assert abs(slot.required_value - 1.1) < 1e-6
 
 
 def test_zone_clearance_wins_over_smaller_netclass():
-    res = _run(_pair(0.5), rule=PourSlotRule({"B": 0.1}))
+    res = _run(_pair(0.7), rule=PourSlotRule({"B": 0.1}))
     assert abs(res.violations[0].required_value - 0.85) < 1e-6
 
 
@@ -105,7 +166,7 @@ def test_side_by_side_but_no_overlap_not_reported():
 
 
 def test_diagonal_pair_flagged_and_perpendicular_ignored():
-    d = 0.5 / 2**0.5 + 0.2 / 2**0.5  # perpendicular pitch 0.7 along the diagonal normal
+    d = 0.7 / 2**0.5 + 0.2 / 2**0.5  # perpendicular pitch 0.9 along the diagonal normal
     segs = [
         _Seg((0, 0), (10, 10)),
         _Seg((-d, d), (10 - d, 10 + d), net_number=2, net_name="B"),
@@ -121,20 +182,22 @@ def test_keepout_zone_is_not_a_pour():
 
 def test_multi_zone_layer_uses_widest_requirement():
     zones = [_Zone(), _Zone(clearance=0.5, min_thickness=0.25)]
-    res = _run(_pair(1.0), zones=zones)
+    # Widest requirement: band (1.0, 1.25) mm, so 1.1 mm is flagged.
+    res = _run(_pair(1.1), zones=zones)
     assert len(res.violations) == 1
+    assert abs(res.violations[0].required_value - 1.25) < 1e-6
 
 
 def test_each_pair_reported_once():
-    segs = _pair(0.5) + [_Seg((0, 1.4), (10, 1.4), net_number=3, net_name="C")]
-    # A-B gap 0.5 and B-C gap 0.7 (both flagged); A-C gap 1.2 clean.
+    segs = _pair(0.7) + [_Seg((0, 1.8), (10, 1.8), net_number=3, net_name="C")]
+    # A-B gap 0.7 and B-C gap 0.7 (both flagged); A-C gap 1.6 clean.
     assert len(_run(segs).violations) == 2
 
 
 def test_duplicated_segment_reports_slot_once():
     # Issue #8503: two identical copies of a track (already reported by
     # redundant_copper_duplicate) next to a neighbour are one slot, not two.
-    segs = _pair(0.5)
+    segs = _pair(0.7)
     segs.append(_Seg((0, 0), (10, 0)))
     assert len(_run(segs).violations) == 1
     # Reversed endpoint order is the same copper too.
@@ -143,20 +206,48 @@ def test_duplicated_segment_reports_slot_once():
 
 
 def test_duplicate_of_both_tracks_reports_slot_once():
-    segs = _pair(0.5) + _pair(0.5)
+    segs = _pair(0.7) + _pair(0.7)
     assert len(_run(segs).violations) == 1
 
 
 def test_parallel_copy_with_different_width_is_distinct():
-    # Not an exact duplicate (different width): it is distinct geometry.
-    segs = _pair(0.5)
+    # Not an exact duplicate (different width): it is distinct geometry
+    # (A-C gap 0.675 mm is also inside the dropped-island band).
+    segs = _pair(0.7)
     segs.append(_Seg((0, 0), (10, 0), width=0.25))
     assert len(_run(segs).violations) == 2
 
 
 def test_two_zones_on_one_layer_report_each_pair_once():
     # Issue #8503: several pours sharing a layer must not multiply findings.
-    res = _run(_pair(0.5), zones=[_Zone(), _Zone(clearance=0.2)])
+    res = _run(_pair(0.7), zones=[_Zone(), _Zone(clearance=0.2)])
     assert len(res.violations) == 1
     # The widest requirement of the layer's pours applies.
     assert abs(res.violations[0].required_value - 0.85) < 1e-6
+
+
+def test_angled_gap_uses_only_the_shared_run_in_the_zone():
+    zone = _Zone(clearance=0.2, min_thickness=0.3)
+    zone.polygon = ((5, 5), (25, 5), (25, 35), (5, 35))
+    a = _Seg((11, 15), (19, 15), width=0.4)
+    for end_x in (19, 40):
+        end_y = 15.995 - (end_x - 11) * 0.395 / 29
+        b = _Seg((11, 15.995), (end_x, end_y), width=0.4, net_number=2, net_name="B")
+        for tracks in ([a, b], [b, a]):
+            (warning,) = _run(tracks, [zone]).violations
+            assert abs(warning.actual_value - (0.595 - 4 * 0.395 / 29)) < 1e-6
+
+    # Both tracks continue, but only the first 14 mm are in the zone.
+    a.end = (40, 15)
+    (warning,) = _run([a, b], [zone]).violations
+    assert abs(warning.actual_value - (0.595 - 7 * 0.395 / 29)) < 1e-6
+
+
+def test_angled_pair_reports_only_the_part_in_the_slot_band():
+    a = _Seg((0, 0), (30, 0), width=0.4)
+    b = _Seg((0, 0.7), (30, 1.3), width=0.4, net_number=2, net_name="B")
+    zone = _Zone(clearance=0.2, min_thickness=0.3)
+    (pair,) = PourSlotRule().iter_pairs(_PCB([a, b], [zone]))
+    # Edge gap increases from 0.3 to 0.9 mm, crossing both cutoffs.
+    assert abs(pair.gap - 0.5505) < 1e-5
+    assert abs(pair.overlap - 14.95) < 0.001

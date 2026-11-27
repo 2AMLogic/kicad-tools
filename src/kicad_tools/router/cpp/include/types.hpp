@@ -405,7 +405,11 @@ namespace router {
 // fab-view checker grades as ``physical_copper_gap``.  The pad copper's
 // corner radius rides on ``PadInfo::copper_corner_radius`` (``add_pad``'s
 // ``copper_corner_radius``; a ``rect`` pad's square corner is real copper).
-constexpr int ROUTER_CPP_BUILD_VERSION = 76;
+// v77 (Issue #9273): single-ended trace searches check their closest approach
+// to an already stored same-net via against the trace-population slit band.
+// v78 (Issue #9273): grade each facing leg, including shallow joins to stored vias.
+// v79 (Issue #9851): grade and emit pad stubs on the serialized coordinate grid.
+constexpr int ROUTER_CPP_BUILD_VERSION = 79;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -947,6 +951,14 @@ inline void same_net_pad_aabb_half_extents(const PadInfo& pad, float& half_w,
     half_h = (pad.width * abs_sin + pad.height * abs_cos) / 2.0f;
 }
 
+// Overlap with a straight copper face needed to keep its facing via arc
+// within the fab checker's shoulder exemption (see same_net_pad_union_depth_mm).
+inline double annulus_facing_overlap_depth(double radius, double edge_mm) {
+    constexpr double kSin60 = 0.86602540378443864676;  // sqrt(1 - FACING_COS_SECOND^2)
+    const double lens = std::max(0.0, radius * kSin60 - std::max(edge_mm, 0.0));
+    return radius - std::sqrt(std::max(0.0, radius * radius - lens * lens));
+}
+
 // Issue #8994: the same-net pad slit-band verdict, the faithful C++ mirror of
 // Python ``via_clearance.same_net_pad_gap_acceptable`` for a via ANNULUS of
 // radius ``annulus_half_mm`` at world ``(wx, wy)`` against one same-net SMD
@@ -988,11 +1000,8 @@ inline bool same_net_pad_gap_in_band(double wx, double wy, double annulus_half_m
     // either face line -- an annulus that swallows a square corner crosses
     // the two faces, whose depth is what the derivation measures.
     const double r = std::max(annulus_half_mm, 0.0);
-    constexpr double kSin60 = 0.86602540378443864676;  // sqrt(1 - 0.5^2)
     constexpr double kUnionDepthSlackMm = 1e-3;
-    const double lens = std::max(0.0, r * kSin60 - std::max(edge_mm, 0.0));
-    const double depth =
-        (lens < r ? r - std::sqrt(std::max(0.0, r * r - lens * lens)) : r) + kUnionDepthSlackMm;
+    const double depth = annulus_facing_overlap_depth(r, edge_mm) + kUnionDepthSlackMm;
     const double full = std::max(
         0.0, std::min(static_cast<double>(half_w), static_cast<double>(half_h)));
     const double corner = pad.copper_corner_radius < 0.0f
@@ -1025,6 +1034,19 @@ struct StoredSegment {
     float authored_floor = 0.0f;
 };
 
+template <typename TraceSegment>
+inline double annulus_segment_gap(double wx, double wy, double annulus_half_mm,
+                                  const TraceSegment& seg) {
+    const double ax = seg.x1, ay = seg.y1;
+    const double dx = static_cast<double>(seg.x2) - ax;
+    const double dy = static_cast<double>(seg.y2) - ay;
+    const double len_sq = dx * dx + dy * dy;
+    double t = 0.0;
+    if (len_sq > 0.0) t = std::clamp(((wx - ax) * dx + (wy - ay) * dy) / len_sq, 0.0, 1.0);
+    return std::hypot(wx - (ax + t * dx), wy - (ay + t * dy))
+        - annulus_half_mm - static_cast<double>(seg.width) / 2.0;
+}
+
 // Issue #9208: the trace-population sibling of ``same_net_pad_gap_in_band`` --
 // true when a via ANNULUS (radius ``annulus_half_mm`` at world ``(wx, wy)``)
 // leaves a copper gap to the OWN-net stored segment ``seg`` strictly inside
@@ -1035,16 +1057,10 @@ struct StoredSegment {
 // annulus is the ``gap == 0`` case) and ``gap >= edge`` are both ACCEPTED, with
 // the same 1e-9 float-noise slack.  The caller owns the own-net / layer
 // filter.  A zero-length segment degenerates to point-vs-point distance.
+template <typename TraceSegment>
 inline bool same_net_segment_gap_in_band(double wx, double wy, double annulus_half_mm,
-                                         const StoredSegment& seg, double edge_mm) {
-    const double ax = seg.x1, ay = seg.y1;
-    const double dx = static_cast<double>(seg.x2) - ax;
-    const double dy = static_cast<double>(seg.y2) - ay;
-    const double len_sq = dx * dx + dy * dy;
-    double t = 0.0;
-    if (len_sq > 0.0) t = std::clamp(((wx - ax) * dx + (wy - ay) * dy) / len_sq, 0.0, 1.0);
-    const double dist = std::hypot(wx - (ax + t * dx), wy - (ay + t * dy));
-    const double gap = dist - annulus_half_mm - static_cast<double>(seg.width) / 2.0;
+                                         const TraceSegment& seg, double edge_mm) {
+    const double gap = annulus_segment_gap(wx, wy, annulus_half_mm, seg);
     return 1e-9 < gap && gap < edge_mm - 1e-9;
 }
 

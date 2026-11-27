@@ -37,6 +37,7 @@ import argparse
 import json
 import sys
 from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 
 from kicad_tools.drc.repair_silkscreen import (
@@ -47,116 +48,42 @@ from kicad_tools.drc.repair_silkscreen import (
     SilkscreenRepairResult,
     TextHeightRepairResult,
 )
-from kicad_tools.manufacturers import get_all_manufacturer_names
-from kicad_tools.manufacturers.base import DesignRules, load_design_rules_from_yaml
-
-
-def _get_min_width(
-    mfr: str | None,
-    layers: int,
-    copper: float,
-    explicit_width: float | None,
-) -> float:
-    """Resolve the target minimum silkscreen width.
-
-    If *explicit_width* is given it takes precedence.  Otherwise the value is
-    loaded from the manufacturer YAML profile.
-    """
-    if explicit_width is not None:
-        return explicit_width
-
-    if mfr:
-        try:
-            rules_dict = load_design_rules_from_yaml(mfr)
-            key = f"{layers}layer_{int(copper)}oz"
-            if key in rules_dict:
-                return rules_dict[key].min_silkscreen_width_mm
-            # Try without copper weight
-            key = f"{layers}layer_1oz"
-            if key in rules_dict:
-                return rules_dict[key].min_silkscreen_width_mm
-            # Fall back to first available
-            first = next(iter(rules_dict.values()))
-            return first.min_silkscreen_width_mm
-        except FileNotFoundError:
-            print(
-                f"Warning: No configuration found for manufacturer '{mfr}'",
-                file=sys.stderr,
-            )
-
-    # Sensible default matching JLCPCB minimum
-    return 0.15
-
-
-def _get_min_height(
-    mfr: str | None,
-    layers: int,
-    copper: float,
-    explicit_height: float | None,
-) -> float:
-    """Resolve the target minimum silkscreen text height.
-
-    If *explicit_height* is given it takes precedence.  Otherwise the value is
-    loaded from the manufacturer YAML profile.
-    """
-    if explicit_height is not None:
-        return explicit_height
-
-    if mfr:
-        try:
-            rules_dict = load_design_rules_from_yaml(mfr)
-            key = f"{layers}layer_{int(copper)}oz"
-            if key in rules_dict:
-                return rules_dict[key].min_silkscreen_height_mm
-            # Try without copper weight
-            key = f"{layers}layer_1oz"
-            if key in rules_dict:
-                return rules_dict[key].min_silkscreen_height_mm
-            # Fall back to first available
-            first = next(iter(rules_dict.values()))
-            return first.min_silkscreen_height_mm
-        except FileNotFoundError:
-            print(
-                f"Warning: No configuration found for manufacturer '{mfr}'",
-                file=sys.stderr,
-            )
-
-    # Sensible default matching JLCPCB minimum
-    return 1.0
-
-
-def _get_min_pad_clearance(mfr: str | None, layers: int, copper: float) -> float | None:
-    """Resolve the manufacturer's minimum silk-to-pad clearance (mm), if defined."""
-    if not mfr:
-        return None
-    try:
-        rules_dict = load_design_rules_from_yaml(mfr)
-    except FileNotFoundError:
-        print(f"Warning: No configuration found for manufacturer '{mfr}'", file=sys.stderr)
-        return None
-    for key in (f"{layers}layer_{int(copper)}oz", f"{layers}layer_1oz"):
-        if key in rules_dict:
-            return rules_dict[key].min_silk_to_pad_clearance_mm
-    return next(iter(rules_dict.values())).min_silk_to_pad_clearance_mm
+from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
+from kicad_tools.manufacturers.base import DesignRules
 
 
 def _resolve_design_rules(mfr: str | None, layers: int, copper: float) -> DesignRules | None:
-    """Resolve the whole manufacturer ruleset for the shared legalisation pass.
-
-    Issue #9797: ``legalize_silk`` reads every silk value (width, height,
-    pad and hole clearance, solder-mask margin) from one :class:`DesignRules`
-    instead of the per-value lookups above.
-    """
     if not mfr:
         return None
     try:
-        rules_dict = load_design_rules_from_yaml(mfr)
-    except FileNotFoundError:
+        profile = get_profile(mfr)
+    except ValueError:
+        print(f"Warning: No configuration found for manufacturer '{mfr}'", file=sys.stderr)
         return None
-    for key in (f"{layers}layer_{int(copper)}oz", f"{layers}layer_1oz"):
-        if key in rules_dict:
-            return rules_dict[key]
-    return next(iter(rules_dict.values()))
+    return profile.get_design_rules(layers=layers, copper_oz=copper)
+
+
+def _get_min_width(
+    mfr: str | None, layers: int, copper: float, explicit_width: float | None
+) -> float:
+    if explicit_width is not None:
+        return explicit_width
+    rules = _resolve_design_rules(mfr, layers, copper)
+    return rules.min_silkscreen_width_mm if rules else 0.15
+
+
+def _get_min_height(
+    mfr: str | None, layers: int, copper: float, explicit_height: float | None
+) -> float:
+    if explicit_height is not None:
+        return explicit_height
+    rules = _resolve_design_rules(mfr, layers, copper)
+    return rules.min_silkscreen_height_mm if rules else 1.0
+
+
+def _get_min_pad_clearance(mfr: str | None, layers: int, copper: float) -> float | None:
+    rules = _resolve_design_rules(mfr, layers, copper)
+    return rules.min_silk_to_pad_clearance_mm if rules else None
 
 
 def _print_results(
@@ -464,8 +391,26 @@ def _legalize_json(report: SilkLegalizeReport, mfr: str | None) -> dict:
             for f in report.strokes.fixes
         ],
     }
+    data["footprint_line_edits"] = [asdict(edit) for edit in report.footprint_line_edits]
     data.update(_clip_dicts(report.pads))
     data.update(_hole_dicts(report.holes))
+    data["total_keepout_clip_fixed"] = report.keepouts.total_fixed
+    data["keepout_clip_fixes"] = [
+        {
+            "owner": f.owner,
+            "element_type": f.element_type,
+            "layer": f.layer,
+            "action": f.action,
+            "areas": f.areas,
+            "old_area_mm2": round(f.old_area, 6),
+            "new_area_mm2": round(f.new_area, 6),
+            "pieces": f.pieces,
+        }
+        for f in report.keepouts.fixes
+    ]
+    data["keepout_residual"] = report.keepout_residual
+    data["text_in_keepout"] = report.text_in_keepout
+    data["keepout_measurement_errors"] = report.keepouts.measurement_errors
     data["reference_placements"] = (
         [p.to_dict() for p in report.refs.placements] if report.refs is not None else []
     )
@@ -488,6 +433,13 @@ def _print_legalize_text(report: SilkLegalizeReport, mfr: str | None) -> None:
         )
     if report.strokes.total_fixed:
         print(f"  thickened {report.strokes.total_fixed} text stroke(s) to {report.min_width_mm}mm")
+    for edit in report.footprint_line_edits:
+        action = (
+            "shifted joined marker" if edit.action == "moved_marker" else "trimmed free end at edge"
+        )
+        print(
+            f"  {edit.footprint_ref}: {action} on {edit.layer} from {edit.old_start} to {edit.old_end}"
+        )
     if report.pads.total_fixed:
         print(
             f"  clipped {report.pads.total_fixed} line(s) to {report.min_pad_clearance_mm}mm pad clearance"
@@ -497,6 +449,8 @@ def _print_legalize_text(report: SilkLegalizeReport, mfr: str | None) -> None:
             f"  clipped {report.holes.total_fixed} graphic(s) off drilled holes"
             f" (vias untouched, {report.min_hole_clearance_mm}mm clearance)"
         )
+    if report.keepouts.total_fixed:
+        print(f"  clipped {report.keepouts.total_fixed} graphic(s) out of silk keepouts")
     if report.unresolved:
         print("Unresolved (left illegal; no waiver created, kct check still reports them):")
         for u in report.unresolved:
@@ -568,6 +522,16 @@ def _run_legalize(args, pcb_path: Path) -> int:
         # save): fail loud rather than ship silk the fab will remove.
         print(
             f"Error: {len(report.hole_residual)} silk graphic(s) still overlap a drilled hole",
+            file=sys.stderr,
+        )
+        return 1
+    if report.keepouts.measurement_errors:
+        for message in report.keepouts.measurement_errors:
+            print(f"Error: {message}", file=sys.stderr)
+        return 1
+    if report.keepout_residual:
+        print(
+            f"Error: {len(report.keepout_residual)} silk graphic(s) still lie in a silk keepout",
             file=sys.stderr,
         )
         return 1

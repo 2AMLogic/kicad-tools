@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from . import decoupling_defaults as defaults
 from .base import CircuitBlock
 
 if TYPE_CHECKING:
@@ -34,7 +35,7 @@ class OscillatorBlock(CircuitBlock):
         ref: str = "Y1",
         value: str = "24.576MHz",
         osc_symbol: str = "Oscillator:ASE-xxxMHz",
-        decoupling_cap: str = "100nF",
+        decoupling_cap: str = defaults.DefaultValue(defaults.BYPASS),
         cap_ref: str = "C1",
         en_tied_to_vcc: bool = True,
     ):
@@ -59,7 +60,9 @@ class OscillatorBlock(CircuitBlock):
 
         # Place decoupling cap to the left
         cap_offset = -15
-        self.cap = sch.add_symbol("Device:C", x + cap_offset, y + 15, cap_ref, decoupling_cap)
+        self.cap = self._add_decoupling_cap(
+            "Device:C", x + cap_offset, y + 15, cap_ref, decoupling_cap, owner=ref
+        )
 
         self.components = {
             "OSC": self.osc,
@@ -324,7 +327,6 @@ def create_mclk_oscillator(
         y,
         ref=ref,
         value=frequency,
-        decoupling_cap="100nF",
         cap_ref=cap_ref,
     )
 

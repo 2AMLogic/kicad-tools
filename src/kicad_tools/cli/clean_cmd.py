@@ -14,6 +14,13 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.core.atomic_write import (
+    recovery_copies,
+    recovery_link_target,
+    remove_retained_copy,
+    retained_copy_board,
+)
+
 __all__ = ["main", "CleanResult", "find_cleanable_files"]
 
 
@@ -173,6 +180,19 @@ def get_project_schematic_name(project_path: Path) -> str | None:
     return project_path.stem + ".kicad_sch"
 
 
+def _recovery_size(directory: Path) -> int:
+    """Count file bytes whose last directory entry would be removed by cleanup."""
+    links: dict[tuple[int, int], int] = {}
+    size = 0
+    for entry in directory.iterdir():
+        stat = entry.lstat()
+        key = (stat.st_dev, stat.st_ino)
+        links[key] = links.get(key, 0) + 1
+        if links[key] == stat.st_nlink:
+            size += stat.st_size
+    return size
+
+
 def find_cleanable_files(
     project_path: Path,
     deep: bool = False,
@@ -219,10 +239,46 @@ def find_cleanable_files(
     # Protect the project file itself
     result.to_keep.append(ProtectedFile(project_path, "project file"))
 
-    # Scan directory for cleanable files
-    protected_names = {p.path.name for p in result.to_keep}
+    entries = list(project_dir.iterdir())
+    records = recovery_copies(project_dir / main_pcb) if main_pcb else []
+    linked_sources = set()
+    if main_pcb and (main_board := project_dir / main_pcb).is_symlink() and main_board.is_file():
+        linked_sources.add(main_board.resolve())
+    for record in records:
+        recovery = retained_copy_board(record)
+        if recovery is None:
+            continue
+        source = recovery_link_target(record)
+        if source is not None and source.is_file():
+            linked_sources.add(source.resolve())
+        try:
+            size = _recovery_size(record)
+        except OSError:
+            size = 0
+        result.to_delete.append(
+            CleanableFile(
+                record, "recovery_copy", f"retained PCB recovery for {recovery.name}", size
+            )
+        )
+    # Another board's recovery still needs its live board for discovery.
+    selected_records = set(records)
+    other_records = {
+        entry: board
+        for entry in entries
+        if entry not in selected_records and (board := retained_copy_board(entry)) is not None
+    }
+    for board in sorted(set(other_records.values())):
+        result.to_keep.append(ProtectedFile(board, "board with separate recovery copies"))
+    # Report (never delete) each record this project cannot clean, so the
+    # preview does not claim a clean project while leaving it behind.
+    for record, board in sorted(other_records.items()):
+        result.to_keep.append(
+            ProtectedFile(record, f"recovery copy of {board.name} - clean that board's project")
+        )
 
-    for file_path in project_dir.iterdir():
+    # Apply the general cleanup rules after protecting the linked sources.
+    protected_names = {p.path.name for p in result.to_keep}
+    for file_path in entries:
         if not file_path.is_file():
             continue
 
@@ -230,6 +286,9 @@ def find_cleanable_files(
 
         # Skip protected files
         if filename in protected_names:
+            continue
+        if linked_sources and file_path.resolve() in linked_sources:
+            result.to_keep.append(ProtectedFile(file_path, "source of linked PCB"))
             continue
 
         # Check for old PCB versions
@@ -419,6 +478,13 @@ def format_output_text(result: CleanResult, verbose: bool = False) -> str:
             lines.append(f"  ✗ {f.path.name} ({f.size_str})")
         lines.append("")
 
+    recovery_copies = result.by_category("recovery_copy")
+    if recovery_copies:
+        lines.append(f"Would delete ({len(recovery_copies)} retained recovery copies):")
+        for f in recovery_copies:
+            lines.append(f"  ✗ {f.path.name}/ ({f.size_str})")
+        lines.append("")
+
     if result.to_keep:
         lines.append("Would keep:")
         for f in result.to_keep:
@@ -464,7 +530,7 @@ def format_output_json(result: CleanResult) -> str:
 
 def delete_files(result: CleanResult, verbose: bool = False) -> tuple[int, int]:
     """
-    Delete the files marked for cleanup.
+    Delete the files (and recovery-copy directories) marked for cleanup.
 
     Args:
         result: CleanResult with files to delete
@@ -475,10 +541,22 @@ def delete_files(result: CleanResult, verbose: bool = False) -> tuple[int, int]:
     """
     deleted = 0
     freed = 0
+    selected = result.project_dir / (result.project_name + ".kicad_pcb")
 
     for f in result.to_delete:
         try:
-            f.path.unlink()
+            if f.category == "recovery_copy":
+                # A linked board can change between preview and deletion.
+                if not remove_retained_copy(f.path, selected_board=selected):
+                    continue
+            else:
+                if (
+                    f.category == "pcb_version"
+                    and selected.is_symlink()
+                    and f.path.resolve() == selected.resolve()
+                ):
+                    continue
+                f.path.unlink()
             deleted += 1
             freed += f.size_bytes
             if verbose:

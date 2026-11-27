@@ -196,6 +196,7 @@ class TestCategoryListMatchesDispatcher:
             "sch_fields",
             "doc_drift",
             "netclass_floor",
+            "netclass_agreement",
             "netclass_clearance_copper",
             "spec_conformance",
         }

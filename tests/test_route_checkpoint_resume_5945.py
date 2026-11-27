@@ -307,13 +307,30 @@ def _auto_args(**kw) -> argparse.Namespace:
 
 
 class TestRouteAutoPasses:
+    @staticmethod
+    def _published_board(source: Path, tmp_path: Path) -> bytes:
+        """Independently apply the final silk pass to the expected route candidate."""
+        from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+
+        expected = _copy_board(source, tmp_path / "expected.kicad_pcb")
+        report = run_default_silk_pass(expected, mfr="jlcpcb", quiet=True)
+        assert report and report["total_fixed"] > 0
+        return expected.read_bytes()
+
     def test_regressing_pass_is_rolled_back_and_checkpoint_keeps_best(self, tmp_path, monkeypatch):
         from kicad_tools.cli.commands import routing
 
         board = _copy_board(VD_UNROUTED, tmp_path / "vd.kicad_pcb")
         out = tmp_path / "out.kicad_pcb"
         ck = tmp_path / "ck.kicad_pcb"
-        routed_text = VD_ROUTED.read_text()
+        # Pass 1 has three connected nets and a silk stroke that publication must widen.
+        routed = _copy_board(VD_ROUTED, tmp_path / "pass1.kicad_pcb")
+        thin_silk = (
+            "\t(gr_line (start 144 78) (end 145 78) (stroke (width 0.08) (type default)) "
+            '(layer "F.SilkS") (uuid "84fc9cb1-8ca5-4480-a717-fa5668db60ef"))\n'
+        )
+        routed_text = routed.read_text().rstrip().removesuffix(")") + thin_silk + ")\n"
+        routed.write_text(routed_text)
         unrouted_text = VD_UNROUTED.read_text()
         sources: list[str] = []
 
@@ -331,11 +348,11 @@ class TestRouteAutoPasses:
 
         # The regressing pass was undone: the output still holds pass 1.
         assert rc == 1
-        assert out.read_text() == routed_text
+        assert out.read_bytes() == self._published_board(routed, tmp_path)
         assert len(fully_connected_nets(out)) == 3
         meta = read_checkpoint_meta(ck)
         assert meta is not None and meta["pass"] == 1
-        assert ck.read_text() == routed_text
+        assert ck.read_bytes() == out.read_bytes()
 
     def test_rolled_back_net_reports_not_successful_in_json(self, tmp_path, monkeypatch, capsys):
         from kicad_tools.cli.commands import routing
@@ -388,7 +405,7 @@ class TestRouteAutoPasses:
             )
         )
         assert rc == 0
-        assert out.read_text() == unrouted_text
+        assert out.read_bytes() == self._published_board(VD_UNROUTED, tmp_path)
         assert all(d["success"] and "rolled_back" not in d for d in docs)
         # Scoring still runs: the checkpoint keeps the best pass.
         assert ck.read_text() == routed_text

@@ -1,4 +1,272 @@
 {
+  "meta": {
+    "kct_attach_zone_excluded_nets": [
+      "unconnected-(U1-ADC6-Pad19)",
+      "unconnected-(U1-ADC7-Pad22)",
+      "unconnected-(U1-PC4-Pad27)",
+      "unconnected-(U1-PD1-Pad31)",
+      "unconnected-(U1-XTAL1{slash}PB6-Pad7)",
+      "unconnected-(U1-XTAL2{slash}PB7-Pad8)",
+      "unconnected-(U2-NC-Pad21)",
+      "unconnected-(U3-DNC-Pad2)",
+      "unconnected-(U3-NC-Pad6)"
+    ],
+    "kct_pad_zone_clearances": {
+      "F.Cu": {
+        "GND": {
+          "U3": [
+            "1",
+            "3",
+            "5",
+            "7",
+            "8"
+          ]
+        }
+      }
+    },
+    "manufacturer": "jlcpcb",
+    "kct_router_netclasses": {
+      "classes": [
+        "Audio",
+        "Clock",
+        "Debug",
+        "Differential",
+        "Digital",
+        "Ground plane",
+        "Motor power",
+        "Power"
+      ],
+      "assignments": [
+        "+5V",
+        "AREF",
+        "CPH",
+        "CPL",
+        "DRIVER_SLEEP",
+        "EN_A",
+        "EN_B",
+        "EN_C",
+        "FUSED",
+        "GND",
+        "GND_SENSE",
+        "HALL_A",
+        "HALL_B",
+        "HALL_C",
+        "IREF",
+        "LED_A",
+        "MISO",
+        "MOSI",
+        "PG_DELAY",
+        "PHASE_A",
+        "PHASE_B",
+        "PHASE_C",
+        "PWM_A",
+        "PWM_B",
+        "PWM_C",
+        "RESET",
+        "RUN",
+        "SCK",
+        "SENSE_IN",
+        "SPEED",
+        "STATUS_LED",
+        "V3P3",
+        "VCP",
+        "VIN",
+        "VM",
+        "nFAULT",
+        "nTRIP"
+      ]
+    },
+    "kct_netclass_patterns": {
+      "+5V": {
+        "netclass": "Power",
+        "pattern": "^\\x2B5V\\z$"
+      },
+      "AREF": {
+        "netclass": "Digital",
+        "pattern": "AREF"
+      },
+      "CPH": {
+        "netclass": "Digital",
+        "pattern": "CPH"
+      },
+      "CPL": {
+        "netclass": "Digital",
+        "pattern": "CPL"
+      },
+      "DRIVER_SLEEP": {
+        "netclass": "Differential",
+        "pattern": "DRIVER_SLEEP"
+      },
+      "EN_A": {
+        "netclass": "Digital",
+        "pattern": "EN_A"
+      },
+      "EN_B": {
+        "netclass": "Digital",
+        "pattern": "EN_B"
+      },
+      "EN_C": {
+        "netclass": "Digital",
+        "pattern": "EN_C"
+      },
+      "FUSED": {
+        "netclass": "Motor power",
+        "pattern": "FUSED"
+      },
+      "GND": {
+        "netclass": "Ground plane",
+        "pattern": "GND"
+      },
+      "GND_SENSE": {
+        "netclass": "Motor power",
+        "pattern": "GND_SENSE"
+      },
+      "HALL_A": {
+        "netclass": "Digital",
+        "pattern": "HALL_A"
+      },
+      "HALL_B": {
+        "netclass": "Digital",
+        "pattern": "HALL_B"
+      },
+      "HALL_C": {
+        "netclass": "Digital",
+        "pattern": "HALL_C"
+      },
+      "IREF": {
+        "netclass": "Digital",
+        "pattern": "IREF"
+      },
+      "LED_A": {
+        "netclass": "Digital",
+        "pattern": "LED_A"
+      },
+      "MISO": {
+        "netclass": "Digital",
+        "pattern": "MISO"
+      },
+      "MOSI": {
+        "netclass": "Digital",
+        "pattern": "MOSI"
+      },
+      "PG_DELAY": {
+        "netclass": "Digital",
+        "pattern": "PG_DELAY"
+      },
+      "PHASE_A": {
+        "netclass": "Motor power",
+        "pattern": "PHASE_A"
+      },
+      "PHASE_B": {
+        "netclass": "Motor power",
+        "pattern": "PHASE_B"
+      },
+      "PHASE_C": {
+        "netclass": "Motor power",
+        "pattern": "PHASE_C"
+      },
+      "PWM_A": {
+        "netclass": "Digital",
+        "pattern": "PWM_A"
+      },
+      "PWM_B": {
+        "netclass": "Digital",
+        "pattern": "PWM_B"
+      },
+      "PWM_C": {
+        "netclass": "Digital",
+        "pattern": "PWM_C"
+      },
+      "RESET": {
+        "netclass": "Debug",
+        "pattern": "RESET"
+      },
+      "RUN": {
+        "netclass": "Differential",
+        "pattern": "RUN"
+      },
+      "SCK": {
+        "netclass": "Clock",
+        "pattern": "SCK"
+      },
+      "SENSE_IN": {
+        "netclass": "Audio",
+        "pattern": "SENSE_IN"
+      },
+      "SPEED": {
+        "netclass": "Digital",
+        "pattern": "SPEED"
+      },
+      "STATUS_LED": {
+        "netclass": "Digital",
+        "pattern": "STATUS_LED"
+      },
+      "V3P3": {
+        "netclass": "Power",
+        "pattern": "V3P3"
+      },
+      "VCP": {
+        "netclass": "Differential",
+        "pattern": "VCP"
+      },
+      "VIN": {
+        "netclass": "Motor power",
+        "pattern": "VIN"
+      },
+      "VM": {
+        "netclass": "Motor power",
+        "pattern": "VM"
+      },
+      "nFAULT": {
+        "netclass": "Digital",
+        "pattern": "nFAULT"
+      },
+      "nTRIP": {
+        "netclass": "Differential",
+        "pattern": "nTRIP"
+      }
+    },
+    "kct_netclass_assignments": {
+      "+5V": "Power",
+      "AREF": "Digital",
+      "CPH": "Digital",
+      "CPL": "Digital",
+      "DRIVER_SLEEP": "Differential",
+      "EN_A": "Digital",
+      "EN_B": "Digital",
+      "EN_C": "Digital",
+      "FUSED": "Motor power",
+      "GND": "Ground plane",
+      "GND_SENSE": "Motor power",
+      "HALL_A": "Digital",
+      "HALL_B": "Digital",
+      "HALL_C": "Digital",
+      "IREF": "Digital",
+      "LED_A": "Digital",
+      "MISO": "Digital",
+      "MOSI": "Digital",
+      "PG_DELAY": "Digital",
+      "PHASE_A": "Motor power",
+      "PHASE_B": "Motor power",
+      "PHASE_C": "Motor power",
+      "PWM_A": "Digital",
+      "PWM_B": "Digital",
+      "PWM_C": "Digital",
+      "RESET": "Debug",
+      "RUN": "Differential",
+      "SCK": "Clock",
+      "SENSE_IN": "Audio",
+      "SPEED": "Digital",
+      "STATUS_LED": "Digital",
+      "V3P3": "Power",
+      "VCP": "Differential",
+      "VIN": "Motor power",
+      "VM": "Motor power",
+      "nFAULT": "Digital",
+      "nTRIP": "Differential"
+    },
+    "kct_sidecar_sha256": "d365938d8d3c2b92f158c517cf598bd6a2c71d5694d4412836fe660037e23037"
+  },
   "board": {
     "design_settings": {
       "rules": {
@@ -61,7 +329,7 @@
       {
         "name": "Differential",
         "clearance": 0.15,
-        "track_width": 0.2,
+        "track_width": 0.15,
         "via_diameter": 0.6,
         "via_drill": 0.3
       },
@@ -73,18 +341,175 @@
         "via_drill": 0.3
       },
       {
-        "name": "HighCurrentSignal",
+        "name": "Ground plane",
         "clearance": 0.2,
-        "track_width": 0.2,
+        "track_width": 0.5,
         "via_diameter": 0.6,
+        "via_drill": 0.3
+      },
+      {
+        "name": "Motor power",
+        "clearance": 0.2,
+        "track_width": 0.5,
+        "via_diameter": 0.65,
         "via_drill": 0.3
       },
       {
         "name": "Power",
         "clearance": 0.2,
-        "track_width": 0.2,
-        "via_diameter": 0.6,
+        "track_width": 0.5,
+        "via_diameter": 0.8,
         "via_drill": 0.3
+      }
+    ],
+    "netclass_patterns": [
+      {
+        "netclass": "Power",
+        "pattern": "^\\x2B5V\\z$"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "AREF"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "CPH"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "CPL"
+      },
+      {
+        "netclass": "Differential",
+        "pattern": "DRIVER_SLEEP"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "EN_A"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "EN_B"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "EN_C"
+      },
+      {
+        "netclass": "Motor power",
+        "pattern": "FUSED"
+      },
+      {
+        "netclass": "Ground plane",
+        "pattern": "GND"
+      },
+      {
+        "netclass": "Motor power",
+        "pattern": "GND_SENSE"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "HALL_A"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "HALL_B"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "HALL_C"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "IREF"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "LED_A"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "MISO"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "MOSI"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "PG_DELAY"
+      },
+      {
+        "netclass": "Motor power",
+        "pattern": "PHASE_A"
+      },
+      {
+        "netclass": "Motor power",
+        "pattern": "PHASE_B"
+      },
+      {
+        "netclass": "Motor power",
+        "pattern": "PHASE_C"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "PWM_A"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "PWM_B"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "PWM_C"
+      },
+      {
+        "netclass": "Debug",
+        "pattern": "RESET"
+      },
+      {
+        "netclass": "Differential",
+        "pattern": "RUN"
+      },
+      {
+        "netclass": "Clock",
+        "pattern": "SCK"
+      },
+      {
+        "netclass": "Audio",
+        "pattern": "SENSE_IN"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "SPEED"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "STATUS_LED"
+      },
+      {
+        "netclass": "Power",
+        "pattern": "V3P3"
+      },
+      {
+        "netclass": "Differential",
+        "pattern": "VCP"
+      },
+      {
+        "netclass": "Motor power",
+        "pattern": "VIN"
+      },
+      {
+        "netclass": "Motor power",
+        "pattern": "VM"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "nFAULT"
+      },
+      {
+        "netclass": "Differential",
+        "pattern": "nTRIP"
       }
     ],
     "netclass_assignments": {
@@ -113,13 +538,13 @@
         "Digital"
       ],
       "FUSED": [
-        "Digital"
+        "Motor power"
       ],
       "GND": [
-        "Power"
+        "Ground plane"
       ],
       "GND_SENSE": [
-        "Audio"
+        "Motor power"
       ],
       "HALL_A": [
         "Digital"
@@ -146,13 +571,13 @@
         "Digital"
       ],
       "PHASE_A": [
-        "HighCurrentSignal"
+        "Motor power"
       ],
       "PHASE_B": [
-        "HighCurrentSignal"
+        "Motor power"
       ],
       "PHASE_C": [
-        "HighCurrentSignal"
+        "Motor power"
       ],
       "PWM_A": [
         "Digital"
@@ -188,10 +613,10 @@
         "Differential"
       ],
       "VIN": [
-        "Power"
+        "Motor power"
       ],
       "VM": [
-        "Digital"
+        "Motor power"
       ],
       "nFAULT": [
         "Digital"
@@ -200,59 +625,5 @@
         "Differential"
       ]
     }
-  },
-  "meta": {
-    "manufacturer": "jlcpcb",
-    "kct_router_netclasses": {
-      "classes": [
-        "Audio",
-        "Clock",
-        "Debug",
-        "Differential",
-        "Digital",
-        "HighCurrentSignal",
-        "Power"
-      ],
-      "assignments": [
-        "+5V",
-        "AREF",
-        "CPH",
-        "CPL",
-        "DRIVER_SLEEP",
-        "EN_A",
-        "EN_B",
-        "EN_C",
-        "FUSED",
-        "GND",
-        "GND_SENSE",
-        "HALL_A",
-        "HALL_B",
-        "HALL_C",
-        "IREF",
-        "LED_A",
-        "MISO",
-        "MOSI",
-        "PG_DELAY",
-        "PHASE_A",
-        "PHASE_B",
-        "PHASE_C",
-        "PWM_A",
-        "PWM_B",
-        "PWM_C",
-        "RESET",
-        "RUN",
-        "SCK",
-        "SENSE_IN",
-        "SPEED",
-        "STATUS_LED",
-        "V3P3",
-        "VCP",
-        "VIN",
-        "VM",
-        "nFAULT",
-        "nTRIP"
-      ]
-    },
-    "kct_sidecar_sha256": "65dfbac3f4161241f2430a0068f5841dbbf986b37d58a2640f0716eebbdd0b12"
   }
 }

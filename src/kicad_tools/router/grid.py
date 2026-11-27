@@ -84,6 +84,8 @@ _SegEnvelope = tuple[float, float, float, float]
 CarveoutMode = Literal["none", "skip", "clamp"]
 
 if TYPE_CHECKING:
+    from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
+
     from kicad_tools.performance import PerformanceConfig
     from kicad_tools.schema.pcb import Zone
 
@@ -1448,6 +1450,9 @@ class RoutingGrid:
         from .fixed_copper import FixedFillObstacles
 
         self.fixed_fills = FixedFillObstacles()
+        self.authored_arc_copper: dict[str, list[tuple[int, BaseGeometry | None]]] = {}
+        # Issue #10164: footprint copper polygons (``fp_poly``) by layer name, in sheet frame.
+        self.authored_footprint_poly_copper: dict[str, list[BaseGeometry | None]] = {}
 
         # PR #4078 Path B: (layer, y, x) keys reserved with mirror_to_cpp=False
         # (the single-ended #2983 inner-corner / #4053 bundle-river byte-lane

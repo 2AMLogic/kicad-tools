@@ -14,11 +14,16 @@ def run_parts_command(args) -> int:
     if not args.parts_command:
         print("Usage: kicad-tools parts <command> [options]")
         print(
-            "Commands: lookup, search, availability, import, cache, suggest, sync-catalog, alternatives"
+            "Commands: lookup, search, availability, import, cache, suggest, sync-catalog, alternatives, stock"
         )
         return 1
 
     from ..parts_cmd import main as parts_main
+
+    if args.parts_command == "stock":
+        from ..parts_cmd import run_stock
+
+        return run_stock(args)
 
     if args.parts_command == "lookup":
         sub_argv = ["lookup", args.part]
@@ -34,6 +39,8 @@ def run_parts_command(args) -> int:
             sub_argv.extend(["--format", args.format])
         if args.limit != 20:
             sub_argv.extend(["--limit", str(args.limit)])
+        if args.package is not None:
+            sub_argv.extend(["--package", args.package])
         if args.in_stock:
             sub_argv.append("--in-stock")
         if args.basic:

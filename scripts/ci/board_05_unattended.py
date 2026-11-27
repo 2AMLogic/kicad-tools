@@ -14,9 +14,9 @@ that proof. It leaves the shipping path alone:
    (:data:`PROTOCOL_FLAGS`) at each ``--seed``. Since #7831 it chains the
    ``--complete`` lattice pass itself; ``--reserve-pour-only-passives`` has
    been on by default since #7835, so it is not passed.
-3. The graded board gets the #8532 preparation the shipping recipe applies
-   after its copper (``pcb add-fiducials`` + ``pcb add-board-info``), then is
-   graded with the pinned toolchain
+3. The routed board gets the shipping recipe's fiducials and board ID (#8532).
+   ``place-silk-refs --over-holes`` moves references that cross drills in this
+   routing result (#9424). The prepared board is graded with the pinned toolchain
    (:func:`kicad_tools.cli.kicad_toolchain.evidence_toolchain`, so
    ``KCT_KICAD_DOCKER=1`` works on a host):
 
@@ -169,6 +169,15 @@ def gate_failures(row: dict) -> list[str]:
     count("kicad_drc_warnings", "kicad-cli DRC warnings")
     count("kct_check_warnings", f"kct check --mfr {MANUFACTURER} warnings")
 
+    # Issue #9424: a ``kct check`` whose mask pass ran but degraded (the
+    # ``mask_to_copper_incomplete`` info marker of #8914) measured nothing;
+    # like every other gate that did not run, it fails the row.
+    if row.get("kct_check_mask_incomplete"):
+        failures.append(
+            "kct check mask_to_copper coverage incomplete "
+            "(unqualified kicad-cli? run under KCT_KICAD_DOCKER=1)"
+        )
+
     for key, label in (("lvs_copper_clean", "copper LVS"), ("lvs_label_clean", "label LVS")):
         value = row.get(key)
         if value is None:
@@ -220,26 +229,18 @@ def route_flags(seed: int) -> list[str]:
 
 
 def prepare_for_grading(routed: Path) -> dict[str, list[str]]:
-    """Add the #8532 global fiducials + board-ID silk the shipping recipe adds.
-
-    ``redesign/build.py`` runs ``pcb add-fiducials`` and ``pcb add-board-info``
-    after applying the reviewed copper, so the release board passes the
-    ``fiducials_missing`` / ``board_id_missing`` DFM warnings.  The unattended
-    path routes from scratch and wrote neither, so without this step its board
-    alone fails the recipe's own 0-warning bar (issue #9424).  Fixed geometry
-    on the board, never a waiver.
-    """
+    """Add assembly markings and move reference text clear of the routed drill pattern."""
     from kicad_tools.cli.pcb_add_board_info import run_add_board_info
     from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+    from kicad_tools.cli.place_silk_refs_cmd import main as place_silk_refs
 
-    prep: list[str] = []
     if run_add_fiducials(routed, sides="populated") != 0:
         raise RuntimeError("pcb add-fiducials failed")
-    prep.append("fiducials")
     if run_add_board_info(routed, auto=True) != 0:
         raise RuntimeError("pcb add-board-info failed")
-    prep.append("board_info")
-    return {"prep": prep}
+    if place_silk_refs([str(routed), "--mfr", MANUFACTURER, "--layers", "4", "--over-holes"]) != 0:
+        raise RuntimeError("place-silk-refs --over-holes failed")
+    return {"prep": ["fiducials", "board_info", "silk_refs_over_holes"]}
 
 
 def run_kicad_drc(routed: Path, evidence: Path) -> dict:
@@ -334,12 +335,20 @@ def run_kct_check(routed: Path, evidence: Path) -> dict:
         if v.get("severity") == "error":
             rule = v.get("rule_id") or v.get("rule") or "?"
             by_rule[rule] = by_rule.get(rule, 0) + 1
-    return {
+    row = {
         "kct_check_errors": summary.get("errors"),
         "kct_check_warnings": summary.get("warnings"),
         "kct_check_by_rule": dict(sorted(by_rule.items())),
         "kct_check_report": str(report_path),
     }
+    # Issue #9424 (the #8914 trap): when the mask pass runs but cannot
+    # complete -- an unqualified host kicad-cli cannot attribute native mask
+    # regions -- it degrades to zero findings plus one info
+    # ``mask_to_copper_incomplete`` marker, which reads as a clean board to
+    # the error/warning counters.  "Not checked" is not "clean" here either.
+    if any(v.get("rule_id") == "mask_to_copper_incomplete" for v in report.get("violations", [])):
+        row["kct_check_mask_incomplete"] = True
+    return row
 
 
 def run_lvs(sch: Path, routed: Path, evidence: Path) -> dict:

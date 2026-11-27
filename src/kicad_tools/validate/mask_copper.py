@@ -138,6 +138,25 @@ spoke width and nothing else, so the pour body lies beyond the band
 (relief gaps 0.2 and 0.3 mm, 0 mm expansion). A solid connection, an
 unconnected same-net pour, a pour body inside the band, pour exposed by a
 positive expansion and different-net pour keep their measured verdict.
+
+A pad solid-connected to its own pour (issue #9436)
+===================================================
+
+A same-net ``zone`` that is the pour a plain pad is *solid*-connected to is
+``own_pour_solid`` at info. JLCDFM on the consumer board that exposed this
+(13 pads solid in their own-net pour, 0 mm expansion) reported 0 danger and 0
+warning, so the "solid is untested" reason that kept it an error no longer
+holds. Every condition is required (``_own_pour_solid``): the pad is a plain
+shape with a non-negative mask margin; its *effective* zone connection (pad
+override, else footprint, else zone, as ``_declared_thermal`` resolves it) is
+solid, a "thermal for through-hole" setting on an SMD pad counting as solid;
+the fill overlaps the pad beyond ``u``, nothing of it is exposed beyond the
+pad, every piece of it within the examined band touches the pad (no same-zone
+island), and its connections at the pad rim are not solely narrow passages
+that widen into the pour beyond a relief gap. A
+declared-solid pad whose fill shows spokes or no join, an island, an
+unconnected same-net pour, a positive expansion with pour in the ring and a
+different-net pour keep their measured verdict.
 """
 
 from __future__ import annotations
@@ -146,6 +165,8 @@ import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from .mask_copper_exposure import construction_uncertainty_mm, nominal_exposure, opening_inventory
 
 if TYPE_CHECKING:
     from .violations import DRCResults
@@ -297,6 +318,7 @@ class MaskCopperMeasurement:
             "within_own_pad",
             "within_reinforce_run",
             "own_pour_thermal",
+            "own_pour_solid",
             "within_own_footprint",
         ) or self.relation not in ("overlap", "touching", "disjoint"):
             raise ValueError("Invalid mask measurement disposition/relation")
@@ -370,6 +392,7 @@ class MaskCopperAssessment:
     intent_audit: list[dict[str, Any]] = field(default_factory=list)
     geometry_provenance: dict[str, Any] = field(default_factory=dict)
     evaluated_pairs: int = 0
+    aperture_inventory: dict[str, list[dict[str, Any]]] | None = None
 
     def __post_init__(self):
         if self.coverage not in ("complete", "incomplete", "not_run"):
@@ -388,6 +411,14 @@ class MaskCopperAssessment:
         """
         if self.coverage == "complete":
             return None
+        if any(
+            "[Errno 28]" in reason or "no space left on device" in reason.lower()
+            for reason in self.reasons
+        ):
+            return (
+                "free space on the temporary filesystem or set TMPDIR to a writable "
+                "directory with enough space, then re-run the mask assessment"
+            )
         return (
             "run the mask assessment on a qualified KiCad build "
             "(native interpreter): set KCT_KICAD_DOCKER=1 to use the pinned "
@@ -408,7 +439,16 @@ class MaskCopperAssessment:
     def from_dict(cls, data):
         if data.get("schema") != "kct.mask-copper-assessment.v1":
             raise ValueError("Unknown mask assessment schema")
+        summary = data.get("nominal_exposure", {})
+        inventory = {
+            side: face["openings"]
+            for side, face in summary.get("faces", {}).items()
+            if face["openings"] is not None
+        }
         return cls(
+            aperture_inventory=None
+            if summary.get("status", "inventory_unavailable") == "inventory_unavailable"
+            else inventory,
             coverage=data["coverage"],
             reasons=list(data["reasons"]),
             policy=MaskCopperPolicy(**data["policy"]) if data["policy"] else None,
@@ -441,6 +481,7 @@ class MaskCopperAssessment:
             "intent_audit": self.intent_audit,
             "geometry_provenance": committed_geometry_provenance(self.geometry_provenance),
             "evaluated_pairs": self.evaluated_pairs,
+            "nominal_exposure": nominal_exposure(self),
         }
 
 
@@ -664,6 +705,83 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
     return True, excess, None
 
 
+def clean_own_pad_entry(
+    opening,
+    copper,
+    owner_copper,
+    owner_kind: str,
+    width_mm: float,
+    endpoints,
+    *,
+    clearance_mm: float,
+    uncertainty_mm: float,
+    margin_mm: float = 0.0,
+) -> bool:
+    """Whether a straight track is one clean entry into its own pad.
+
+    The within-own-pad class asked about copper that is not on a board yet
+    (issue #9939): a repairer judging a leg it may draw.  ``opening`` is the
+    pad's modelled mask opening, ``owner_copper`` the pad's copper and
+    ``owner_kind`` its kind (``pad:roundrect`` ...); ``endpoints`` are the
+    track's authored ends.  The caller supplies the policy clearance, the pad's
+    mask margin and the uncertainty it modelled the opening to.
+    """
+    item = {"kind": "segment", "width_mm": width_mm, "endpoints_mm": tuple(endpoints)}
+    return bool(
+        _within_own_pad(
+            opening,
+            copper,
+            owner_copper,
+            {"kind": owner_kind},
+            item,
+            margin_mm,
+            clearance_mm,
+            uncertainty_mm,
+        )[0]
+    )
+
+
+def _separate_mask_land(owner, side, opening, candidates, conductors):
+    """Resolve a technical mask pad to the single numbered land beneath it."""
+    parent = owner.get("parent_uuid")
+    layers = owner["layers_geometry"]
+    # The worker only emits outer-layer copper polygons. Inner copper and
+    # wildcard copper memberships are recorded in the authored layer list.
+    authored_layers = owner.get("layers")
+    if (
+        not parent
+        or not owner["kind"].startswith("pad:")
+        or owner.get("net")
+        or owner.get("pad_ref")
+        or not authored_layers
+        or any(layer.endswith(".Cu") for layer in authored_layers)
+        or any(layer.endswith(".Cu") for layer in layers)
+        or opening.is_empty
+    ):
+        return None
+
+    shape = layers[side]
+    land = None
+    for position in candidates:
+        _, item, copper = conductors[position]
+        if not item["kind"].startswith("pad:") or item.get("parent_uuid") != parent:
+            continue
+        if not copper.intersects(shape) and not copper.intersects(opening):
+            continue
+        # A second touching pad, an overhang, or an unidentified land makes
+        # the assembly's intended electrical owner ambiguous.
+        if (
+            land is not None
+            or not item.get("pad_ref")
+            or not item.get("net")
+            or not copper.covers(shape)
+            or not copper.covers(opening)
+        ):
+            return None
+        land = item
+    return land
+
+
 def _same_footprint_pads(owner_items, item) -> bool:
     """True when the conductor and every opening owner are pads of one footprint.
 
@@ -688,7 +806,7 @@ def _same_footprint_pads(owner_items, item) -> bool:
 
 
 @dataclass
-class _ReinforceRun:
+class ReinforceRun:
     """One ``<board>.reinforcement.json`` record resolved for attribution (#9315).
 
     Sidecar coordinates are sheet-absolute and the native object inventory
@@ -701,6 +819,11 @@ class _ReinforceRun:
     with those confirmed anchors -- never through the net alone, so an
     unrelated ``gr_line`` opening over the same net elsewhere on the board
     attributes to nothing (#9315).
+
+    :func:`reinforcement_run_records` builds the runs unconfirmed; the mask
+    assessment confirms them against the native object inventory
+    (:func:`_reinforce_runs`) and the Gerber-archive measurement against the
+    plotted X2 copper (``export.reinforcement_clearance``, #10422).
     """
 
     label: str
@@ -734,24 +857,18 @@ def _reinforce_run_label(record: dict[str, Any]) -> str:
     return net
 
 
-def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
-    """Resolve wire records against the native inventory; empty when unusable.
+def reinforcement_run_records(wires: Any) -> list[ReinforceRun]:
+    """Sidecar wire records as runs, not yet confirmed against any copper (#10422).
 
     A record needs a net, at least one anchor and an outer copper layer (an
     inner layer has no strip to attribute). Malformed records are skipped,
     never fail the assessment (#8886 resolves the same records for
     ``reinforcement_incomplete``; this is the mask side of that split).
     """
-    if not wires:
-        return []
-    from shapely.geometry import Point
-
     from kicad_tools.pcb.reinforce import MASK_LAYER_FOR_COPPER
 
-    from .rules.reinforcement_incomplete import MASK_TOLERANCE_MM
-
-    runs: list[_ReinforceRun] = []
-    for record in wires:
+    runs: list[ReinforceRun] = []
+    for record in wires or ():
         if not isinstance(record, dict):
             continue
         net = record.get("net")
@@ -767,33 +884,48 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
         mask_side = MASK_LAYER_FOR_COPPER.get(layer)
         if mask_side is None or not anchors:
             continue
-        net_copper: list[Any] = []
-        for item in objects.values():
-            if item.get("net") != net:
-                continue
-            copper = item.get("layers_geometry", {}).get(layer)
-            if copper is None or copper.is_empty:
-                continue
-            net_copper.append(copper)
-        confirmed: tuple[tuple[float, float], ...] = ()
-        if net_copper:
-            from shapely.ops import unary_union  # type: ignore[import-untyped]
-
-            union = unary_union(net_copper)
-            confirmed = tuple(
-                anchor for anchor in anchors if union.distance(Point(anchor)) <= MASK_TOLERANCE_MM
-            )
         runs.append(
-            _ReinforceRun(
+            ReinforceRun(
                 label=_reinforce_run_label(record),
                 net=net,
                 layer=layer,
                 mask_side=mask_side,
                 anchors=tuple(anchors),
-                confirmed_anchors=confirmed,
+                confirmed_anchors=(),
                 wire_gauge_awg=_record_awg(record),
             )
         )
+    return runs
+
+
+def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[ReinforceRun]:
+    """Resolve wire records against the native inventory; empty when unusable.
+
+    Each run's confirmed anchors are its recorded anchors that same-net copper
+    really stands on, within the strip tolerance (Issue #9315).
+    """
+    from shapely.geometry import Point
+    from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+    from .rules.reinforcement_incomplete import MASK_TOLERANCE_MM
+
+    runs = reinforcement_run_records(wires)
+    for run in runs:
+        net_copper: list[Any] = []
+        for item in objects.values():
+            if item.get("net") != run.net:
+                continue
+            copper = item.get("layers_geometry", {}).get(run.layer)
+            if copper is None or copper.is_empty:
+                continue
+            net_copper.append(copper)
+        if net_copper:
+            union = unary_union(net_copper)
+            run.confirmed_anchors = tuple(
+                anchor
+                for anchor in run.anchors
+                if union.distance(Point(anchor)) <= MASK_TOLERANCE_MM
+            )
     return runs
 
 
@@ -828,6 +960,46 @@ def _mid_run_circle_limit_mm(awg):
         return anchor_drill_for_awg(awg) + 2 * _MID_RUN_CIRCLE_FLASH_MM
     except ValueError:
         return None
+
+
+def grow_reinforce_chain(
+    pieces: list[tuple[Any, Any, Any]], seeds: Any, tolerance: float
+) -> list[tuple[Any, Any, Any]]:
+    """Grow a strip chain to a fixpoint from ``seeds``; the admitted pieces in order.
+
+    A strip (#8743) is one continuous cutout from anchor to anchor, so a piece
+    joins the chain when its ``probe`` lies within ``tolerance`` of a confirmed
+    anchor point or of a piece already in the chain, and reaches further
+    pieces itself. ``pieces`` are ``(key, material, probe)``: ``material`` is
+    what later pieces may attach to, ``probe`` the geometry tested against the
+    seeds and the admitted materials -- the convex hull for the native object
+    inventory (:func:`_attribute_reinforce_openings`) and the end points of a
+    plotted stroke for the Gerber archive (``export.reinforcement_clearance``,
+    #10422). An opening merely over the same net's copper elsewhere on the
+    board is continuous with nothing and stays out (#9315).
+    """
+    from shapely.geometry import Point
+
+    anchors = [Point(a) for a in seeds]
+    admitted: list[tuple[Any, Any, Any]] = []
+    pending = list(pieces)
+    while pending:
+        remaining = []
+        progressed = False
+        for piece in pending:
+            probe = piece[2]
+            near = any(probe.distance(anchor) <= tolerance for anchor in anchors) or any(
+                probe.distance(other[1]) <= tolerance for other in admitted
+            )
+            if near:
+                admitted.append(piece)
+                progressed = True
+            else:
+                remaining.append(piece)
+        pending = remaining
+        if not progressed:
+            break
+    return admitted
 
 
 def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs=()):
@@ -874,7 +1046,7 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
 
     tolerance = MASK_TOLERANCE_MM + uncertainty
     claimants = [(run, False) for run in runs] + [(run, True) for run in far_runs]
-    candidates: dict[str, list[tuple[_ReinforceRun, float]]] = {}
+    candidates: dict[str, list[tuple[ReinforceRun, float]]] = {}
     strip_materials: dict[str, Any] = {}
     # Mid-run candidates (#9444): same-net vias and board-graphic circles whose
     # claim rests on continuity with the run's strip, not on an anchor.
@@ -916,37 +1088,30 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
     for run, far in claimants:
         if not run.confirmed_anchors:
             continue
-        anchor_points = [Point(a) for a in run.confirmed_anchors]
         if far:
-            pending = [
-                (uuid, item["layers_geometry"][run.mask_side])
+            # The far run's strip lives on the opposite mask layer, so its
+            # chain is grown from the source ``gr_line`` objects there.
+            chain_pieces = [
+                (
+                    uuid,
+                    item["layers_geometry"][run.mask_side],
+                    item["layers_geometry"][run.mask_side].convex_hull,
+                )
                 for uuid, item in objects.items()
                 if item.get("kind") == "gr_line"
                 and run.mask_side in item.get("layers_geometry", {})
                 and not item["layers_geometry"][run.mask_side].is_empty
             ]
         else:
-            pending = list(strip_materials.items())
-        admitted_hulls: list[Any] = []
-        while pending:
-            remaining = []
-            progressed = False
-            for uuid, material in pending:
-                hull = material.convex_hull
-                near = any(hull.distance(point) <= tolerance for point in anchor_points) or any(
-                    hull.distance(other) <= tolerance for other in admitted_hulls
-                )
-                if not near:
-                    remaining.append((uuid, material))
-                    continue
-                if not far and not any(r is run for r, _ in candidates.get(uuid, ())):
+            chain_pieces = [
+                (uuid, material, material.convex_hull) for uuid, material in strip_materials.items()
+            ]
+        admitted = grow_reinforce_chain(chain_pieces, run.confirmed_anchors, tolerance)
+        if not far:
+            for uuid, _material, _probe in admitted:
+                if not any(r is run for r, _ in candidates.get(uuid, ())):
                     candidates.setdefault(uuid, []).append((run, float("inf")))
-                admitted_hulls.append(hull)
-                progressed = True
-            pending = remaining
-            if not progressed:
-                break
-        chain_hulls[id(run)] = admitted_hulls
+        chain_hulls[id(run)] = [material for _uuid, material, _probe in admitted]
 
     # Mid-run holes (#9444): a same-net layer-change via, or an anchor-size
     # board circle, standing on the run's strip is soldered with the rest of
@@ -974,7 +1139,7 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
             if distance <= _CENTRE_EPS_MM:
                 candidates.setdefault(uuid, []).append((run, distance))
 
-    run_by_uuid: dict[str, _ReinforceRun] = {}
+    run_by_uuid: dict[str, ReinforceRun] = {}
     pieces: dict[int, list[Any]] = {}
     for uuid, pairs in candidates.items():
         best = None
@@ -1066,21 +1231,19 @@ def _conductor_on_reinforce_run(
 #: pcbnew ZONE_CONNECTION codes (black-box read on the pinned image, #9284).
 _ZONE_CONNECTION_INHERITED = -1
 _ZONE_CONNECTION_THERMAL = 1
+_ZONE_CONNECTION_SOLID = 2
 _ZONE_CONNECTION_THT_THERMAL = 3
 
 #: pcbnew draws at most four thermal spokes per pad.
 _MAX_THERMAL_SPOKES = 4
 
 
-def _declared_thermal(owner, zone):
-    """``(relief_gap_mm, spoke_width_mm)`` when the pad declares thermal relief to *zone*.
+def _effective_connection(owner, zone):
+    """``(code, pad, pour)`` for the pad's effective zone connection to *zone*, or None.
 
     Precedence as pcbnew stores it: the pad's own zone-connection override,
-    else its footprint's, else the zone's. Thermal relief only (or
-    "thermal for through-hole pads" on a plated through-hole pad); a solid,
-    none, or unknown connection returns None. Gap and spoke width are the
-    pad's overrides when set, else the zone's. Custom ``zone_connection``
-    DRC rules never get here: they make the native run incomplete.
+    else its footprint's, else the zone's. None when either side carries no
+    connection data (older worker output): callers fail closed.
     """
     pad = owner.get("zone_connection")
     pour = zone.get("zone_connection")
@@ -1093,6 +1256,22 @@ def _declared_thermal(owner, zone):
         effective = pad["footprint"]
     if effective == _ZONE_CONNECTION_INHERITED:
         effective = pour["pad_connection"]
+    return effective, pad, pour
+
+
+def _declared_thermal(owner, zone):
+    """``(relief_gap_mm, spoke_width_mm)`` when the pad declares thermal relief to *zone*.
+
+    Thermal relief only (or "thermal for through-hole pads" on a plated
+    through-hole pad); a solid, none, or unknown connection returns None. Gap
+    and spoke width are the pad's overrides when set, else the zone's. Custom
+    ``zone_connection`` DRC rules never get here: they make the native run
+    incomplete.
+    """
+    resolved = _effective_connection(owner, zone)
+    if resolved is None:
+        return None
+    effective, pad, pour = resolved
     thermal = effective == _ZONE_CONNECTION_THERMAL or (
         effective == _ZONE_CONNECTION_THT_THERMAL and pad["plated_through"]
     )
@@ -1107,6 +1286,21 @@ def _declared_thermal(owner, zone):
     if not gap or not spoke or gap <= 0 or spoke <= 0:
         return None
     return gap, spoke
+
+
+def _declared_solid(owner, zone):
+    """True when the pad's effective connection to *zone* is solid.
+
+    pcbnew's solid code, or "thermal for through-hole pads" on a pad that is
+    not plated through-hole (an SMD pad), which pcbnew joins solid.
+    """
+    resolved = _effective_connection(owner, zone)
+    if resolved is None:
+        return False
+    effective, pad, _pour = resolved
+    return effective == _ZONE_CONNECTION_SOLID or (
+        effective == _ZONE_CONNECTION_THT_THERMAL and not pad["plated_through"]
+    )
 
 
 def _own_pour_thermal(opening, copper, owner_copper, owner, item, margin, band, uncertainty):
@@ -1189,6 +1383,126 @@ def _own_pour_thermal(opening, copper, owner_copper, owner, item, margin, band, 
     return qualifies, spokes, excess, gap, spoke
 
 
+def _spoke_shoulders(contact, centre, copper, walls, reach, tolerance):
+    """Does this pad-rim contact run between parallel walls into a wider pour?
+
+    Return None for a broad contact, False for a straight strip and True when
+    the strip opens into more copper on both sides before its centreline ends.
+    """
+    from shapely.geometry import LineString, Point
+
+    if contact.is_ring or contact.convex_hull.distance(centre) <= tolerance:
+        return None
+    ends = [Point(contact.coords[0]), Point(contact.coords[-1])]
+    middle = Point((ends[0].x + ends[1].x) / 2, (ends[0].y + ends[1].y) / 2)
+    # Read the tangent of the copper boundary on either side of each rim
+    # crossing. A spoke can cross a flat or curved pad at any angle.
+    outward = (middle.x - centre.x, middle.y - centre.y)
+    directions = []
+    sample = 4 * tolerance
+    for end in ends:
+        wall = min(walls, key=end.distance)
+        where = wall.project(end)
+        before = wall.interpolate((where - sample) % wall.length)
+        after = wall.interpolate((where + sample) % wall.length)
+        dx, dy = after.x - before.x, after.y - before.y
+        length = math.hypot(dx, dy)
+        if length < 2 * sample - tolerance:
+            return None
+        if dx * outward[0] + dy * outward[1] < 0:
+            length = -length
+        directions.append((dx / length, dy / length))
+    (dx, dy), (other_x, other_y) = directions
+    if math.hypot(dx - other_x, dy - other_y) * sample > 2 * tolerance:
+        return None
+
+    def outward_ray(point):
+        return LineString([(point.x, point.y), (point.x + dx * reach, point.y + dy * reach)])
+
+    # A zone edge clipping the pad can leave a strip too. On a relief spoke,
+    # a ray just outside each wall crosses the gap then meets the pour body.
+    # The strip's centreline must stay in copper up to those shoulders.
+    width = (ends[0].x - ends[1].x) * -dy + (ends[0].y - ends[1].y) * dx
+    if abs(width) <= 4 * tolerance:
+        return None
+    outside = outward_ray(middle).difference(copper)
+    limit = middle.distance(outside) if not outside.is_empty else reach
+    offset = math.copysign(4 * tolerance, width)
+    for end, side in zip(ends, (offset, -offset), strict=True):
+        flank = Point(end.x - dy * side, end.y + dx * side)
+        body = outward_ray(flank).intersection(copper)
+        along = (end.x - middle.x) * dx + (end.y - middle.y) * dy
+        if (
+            body.is_empty
+            or not 2 * tolerance < flank.distance(body) < limit - along + 2 * tolerance
+        ):
+            return False
+    return True
+
+
+def _own_pour_solid(opening, copper, owner_copper, owner, item, margin, band, uncertainty):
+    """True when *item* is the pour a plain pad is solid-connected to (issue #9436).
+
+    Fab evidence (JLCDFM on the consumer board of #9436: 13 such pads, 0 mm
+    expansion, 0 danger / 0 warning) covers exactly this, and every condition
+    is required:
+
+    1. The owner is a plain pad shape with a non-negative mask margin.
+    2. The pad's effective zone connection is solid (``_declared_solid``).
+    3. Direct connection: the fill overlaps the pad beyond ``u``.
+    4. Nothing exposed beyond the pad: ``opening ∩ fill − pad.buffer(u)`` is
+       empty, so a positive expansion with pour in its ring fails.
+    5. No same-zone island: every connected piece of the fill within ``band``
+       of the opening touches the pad. A zone is one conductor, so an island
+       of it beside the opening would otherwise ride in on the joined pour.
+    6. The actual join is solid. A spoke-only join has parallel-sided copper
+       crossings at the pad rim and widens into the pour beyond the relief
+       gap. A solid zone may clip the pad or have neighbouring clearance
+       cutouts. Their voids alone are not evidence of a relief.
+    """
+    if (
+        owner["kind"] not in _WITHIN_OWN_PAD_OWNER_KINDS
+        or margin < 0
+        or not _declared_solid(owner, item)
+        or owner_copper.buffer(-uncertainty).intersection(copper.buffer(-uncertainty)).area <= 0
+        or opening.intersection(copper).difference(owner_copper.buffer(uncertainty)).area
+        > _AREA_EPSILON_MM2
+    ):
+        return False
+    tolerance = max(uncertainty, 1e-6)
+    pad_zone = owner_copper.buffer(tolerance)
+    region = opening.buffer(band + uncertainty)
+    near = copper.intersection(region)
+    for piece in getattr(near, "geoms", None) or [near]:
+        if (
+            piece.geom_type in ("Polygon", "MultiPolygon")
+            and piece.area > _AREA_EPSILON_MM2
+            and not piece.buffer(tolerance).intersects(pad_zone)
+        ):
+            return False
+    from shapely import line_merge  # type: ignore[import-untyped]
+
+    rim = line_merge(owner_copper.boundary.intersection(copper))
+    contacts = [
+        edge
+        for edge in getattr(rim, "geoms", [rim])
+        if edge.geom_type == "LineString" and edge.length > 2 * tolerance
+    ]
+    if not contacts:
+        return False
+    if rim.is_ring:
+        return True
+    boundary = near.boundary
+    walls = list(getattr(boundary, "geoms", [boundary]))
+    xmin, ymin, xmax, ymax = copper.bounds
+    reach = math.hypot(xmax - xmin, ymax - ymin) + owner_copper.length
+    shoulders = [
+        _spoke_shoulders(contact, owner_copper.centroid, copper, walls, reach, tolerance)
+        for contact in contacts
+    ]
+    return None in shoulders or not any(shoulders)
+
+
 def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=()):
     """Measure actual native mask against independently retained source copper.
 
@@ -1202,7 +1516,7 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
     """
     # The shapely.geometry stubs error is consumed at the first import site
     # (_conductor_endpoints above); a second ignore here would read as unused.
-    from shapely import STRtree  # type: ignore[import-untyped]
+    from shapely import STRtree
     from shapely.geometry import GeometryCollection, box
     from shapely.ops import nearest_points, unary_union
 
@@ -1229,7 +1543,9 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
     # contribution and the adjacent copper may be independently constructed,
     # so add both bounds, then 4nm for Gerber reconstruction/rounding.
     # This is uncertainty, never a process clearance allowance.
-    uncertainty = 2 * geometry.provenance.get("max_error_mm_per_construction", 0) + 0.000004
+    uncertainty = construction_uncertainty_mm(
+        geometry.provenance.get("max_error_mm_per_construction", 0)
+    )
     approved = {}
     for intent in intents:
         owner = geometry.objects.get(intent.owner_uuid)
@@ -1268,6 +1584,8 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
         )
         if reason is None:
             approved[(intent.owner_uuid, intent.conductor_uuid, intent.mask_side)] = intent
+    inventory: dict[str, list[dict[str, Any]]] = {}
+    result.aperture_inventory = inventory
     runs = _reinforce_runs(geometry.objects, reinforce_wires)
     for side in ("F.Mask", "B.Mask"):
         layer = side.replace(".Mask", ".Cu")
@@ -1366,7 +1684,10 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
         conductor_ids = {entry[0] for entry in conductors}
         index = STRtree([entry[2] for entry in conductors]) if conductors else None
         endpoint_cache: dict[str, Any] = {}
+        attributed_lands = {}
+        measurement_starts = []
         for owners, opening, kind, margin, provenance in openings:
+            measurement_starts.append(len(result.measurements))
             if index is None:
                 continue
             # Only a single-owner, non-merged opening excludes its own UUID.
@@ -1384,6 +1705,13 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                 candidates = sorted(
                     index.query(box(minx - reach, miny - reach, maxx + reach, maxy + reach))
                 )
+            source_items = [geometry.objects[o] for o in owners]
+            land = (
+                _separate_mask_land(source_items[0], side, opening, candidates, conductors)
+                if excluded is not None
+                else None
+            )
+            owner_items = [land] if land is not None else source_items
             for position in candidates:
                 identity, item, copper = conductors[position]
                 if identity == excluded:
@@ -1407,7 +1735,6 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                 # copper is exposed, and whether the exposure is the pad's
                 # own escape or an unrelated crossing. Never gates the
                 # measurement itself -- the comparison set stays all objects.
-                owner_items = [geometry.objects[o] for o in owners]
                 owner_nets = sorted({o["net"] for o in owner_items if o["net"]})
                 conductor_net = item["net"] or None
                 same_net = (
@@ -1431,12 +1758,14 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                     owner_items[0]["layers_geometry"].get(layer) if single_pad_owner else None
                 )
                 if area > 0 and owner_copper is not None and not owner_copper.is_empty:
+                    attributed_lands[owners[0]] = owner_items[0]
                     beyond_owner = intersection.difference(owner_copper).area
                 beside_excess = None
                 within_own_pad_failed_condition = None
                 if (
                     disposition in ("violation", "uncertain")
                     and same_net
+                    and (land is None or item is land or not item["kind"].startswith("pad:"))
                     and owner_copper is not None
                     and not owner_copper.is_empty
                 ):
@@ -1488,6 +1817,18 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                         disposition = "own_pour_thermal"
                         beside_excess = pour_excess
                         pour_spokes, pour_gap, pour_spoke = spokes, gap, spoke
+                    elif _own_pour_solid(
+                        opening,
+                        copper,
+                        owner_copper,
+                        owner_items[0],
+                        item,
+                        margin,
+                        outer_limit,
+                        uncertainty,
+                    ):
+                        # Issue #9436: a pad solid-connected to its own pour.
+                        disposition = "own_pour_solid"
                 intent = (
                     approved.get((owners[0], identity, side))
                     if len(owners) == 1 and kind != "merged_region"
@@ -1589,6 +1930,15 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                         pour_spoke_width_mm=pour_spoke,
                     )
                 )
+        measurement_starts.append(len(result.measurements))
+        inventory[side] = opening_inventory(
+            components,
+            openings,
+            geometry.objects,
+            attributed_lands,
+            layer if layer in geometry.exported.layers else None,
+            measurement_starts,
+        )
     return result
 
 
@@ -1723,6 +2073,8 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
         # copper beyond what its reinforce run puts there on purpose.
         # ``own_pour_thermal`` (issue #9284): the only copper under mask
         # beside the opening is the pad's own thermal spokes.
+        # ``own_pour_solid`` (issue #9436): the copper is the pour the pad is
+        # solid-connected to; the fab reports nothing for that shape.
         # ``within_own_footprint`` (issue #9420): the opening and the copper
         # are same-net pads of one footprint -- its same-footprint pad exposure.
         if measurement.disposition in (
@@ -1730,6 +2082,7 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
             "within_own_pad",
             "within_reinforce_run",
             "own_pour_thermal",
+            "own_pour_solid",
             "within_own_footprint",
         ):
             severity = "info"

@@ -133,7 +133,9 @@ KNOWN_FAILURE_CAPPED_FRACTION = 0.9
 #: Issue #8486: a memo keyed on the *coarse* copper key (foreign nets near a
 #: failed net with no sealed terminal) is re-probed at least once every this
 #: many iterations, so a key that is too coarse can never suppress a rescue
-#: for good.
+#: for good.  The same bound caps the per-net search back-off's staleness: a
+#: copper-keyed net whose budget was halved is re-searched at its full cap at
+#: least once every this many iterations (Nov 2026 re-scope).
 KNOWN_FAILURE_REPROBE_EVERY = 3
 
 #: Closing-copper kinds a rip-up can actually remove: route copper of a net the
@@ -142,6 +144,11 @@ KNOWN_FAILURE_REPROBE_EVERY = 3
 #: ``board_edge`` -- survives any rip-up, and ``kelvin_isolated`` is the failed
 #: net's own isolated branch.
 RIPPABLE_CLOSING_KINDS: frozenset[str] = frozenset({"route_segment", "route_via"})
+
+
+def _is_copper_key(signature: Any) -> bool:
+    """Identify the foreign-copper witness used when no terminal is sealed (#8486)."""
+    return isinstance(signature, tuple) and bool(signature) and signature[0] == "copper"
 
 
 def rippable_closing_nets(
@@ -652,13 +659,31 @@ class RipupCycleGuard:
     """``net -> overflow-silent rescues skipped as a repeat of a futile one``."""
 
     entry_signature: dict[int, Any] = field(default_factory=dict)
-    """``net -> seal signature`` of each unrouted net at the top of the current
-    iteration (:meth:`begin_iteration`); keys the per-net search back-off."""
+    """Nets unrouted or partially connected at iteration entry, with their
+    latest pre-search witness.  A rip-up between searches can change that
+    witness within the iteration."""
 
     capped_streak: dict[int, tuple[int, Any, int]] = field(default_factory=dict)
-    """``net -> (iteration, entry signature, streak)``: the net's latest
-    negotiated search ran to its cap with no path, ``streak`` consecutive
-    iterations in a row under that same entry signature."""
+    """``net -> (last failed iteration, witness at first failure, streak)``.
+    Copper that appears during a streak need not remain for the streak to hold.
+    A copper-keyed streak re-anchors on a witness change that earned a full
+    attempt but keeps its count (issue #8486): only progress -- a route, or a
+    partial result connecting new pad pairs -- restarts it from zero."""
+
+    full_search_iter: dict[int, int] = field(default_factory=dict)
+    """``net -> iteration`` of its last negotiated search that ran at the full
+    unshrunk per-net cap (issue #8486).  Anchors the copper-key re-probe: a
+    backed-off copper-keyed net is re-searched at the full cap at least once
+    every :data:`KNOWN_FAILURE_REPROBE_EVERY` iterations, even if all the
+    copper observed at the first failure remains."""
+
+    streak_dependency: dict[int, Any] = field(default_factory=dict)
+    """``net -> SearchDependency`` (issue #8486): the grid cells the failed
+    searches of its current streak read, unioned.  When present, a foreign
+    shape that was in the witness at the first failure and has since moved
+    away only restarts the streak if its clearance envelope touched those
+    cells; absent (Python fallback ran, stale extension), any such change
+    restarts it."""
 
     last_fail_s: dict[int, float] = field(default_factory=dict)
     """``net -> seconds`` its latest no-path negotiated search took; bounds the
@@ -681,48 +706,96 @@ class RipupCycleGuard:
     signature in an earlier iteration)."""
 
     def begin_iteration(self, iteration: int, failed: Mapping[int, Any]) -> None:
-        """Record the entry seal of each unrouted net; forget routed ones.
+        """Track the nets that enter this iteration without full pad
+        connectivity and forget fully routed ones.
 
-        ``failed`` maps every net that is unrouted at the top of ``iteration``
-        to its seal signature (``None`` when it has none).  A net absent from
-        it was routed since: its known-failure memos are cleared, so a later
-        failure starts from scratch.
+        The negotiated loop fills in each witness when the net is searched.
+        A net absent from ``failed`` was routed since its previous search.
+        Since the November 2026 #8486 scope the caller also admits partially
+        connected nets: their searches feed the same streak, judged on
+        connected-pad progress rather than on returning any copper.
         """
         self.entry_signature = {int(n): sig for n, sig in failed.items()}
         for memo in (
             self.capped_streak,
+            self.streak_dependency,
             self.futile_rescue,
             self.last_fail_s,
             self.setup_floor_s,
             self.futile_rescue_iter,
+            self.full_search_iter,
         ):
             for net in [n for n in memo if n not in self.entry_signature]:
                 memo.pop(net)
 
     def _known_capped(self, net: int, iteration: int) -> tuple[int, Any, int] | None:
-        """The capped-search record still valid for ``net`` at ``iteration``."""
+        """The capped-search record still valid for ``net`` at ``iteration``.
+
+        A seal must match exactly in consecutive iterations. For an unsealed
+        net, the first failed search already saw no path with its original
+        foreign copper and its clearance rules. Added copper can come and
+        go while that observation still holds. Removing or moving an original
+        shape, or changing the clearance it imposes, can open a corridor.
+        """
         sig = self.entry_signature.get(int(net))
         rec = self.capped_streak.get(int(net))
-        if sig is None or rec is None or rec[0] != int(iteration) - 1 or rec[1] != sig:
+        if sig is None or rec is None:
+            return None
+        if _is_copper_key(sig) and _is_copper_key(rec[1]):
+            if rec[0] > int(iteration):
+                return None
+            removed = frozenset(rec[1][1]) - frozenset(sig[1])
+            if not removed:
+                return rec
+            # A shape from the first failure is gone.  It can only have opened
+            # a detour if the failed searches read cells near it (#8486).
+            dependency = self.streak_dependency.get(int(net))
+            if dependency is not None and not any(dependency.touches(i) for i in removed):
+                return rec
+            return None
+        if rec[0] != int(iteration) - 1 or rec[1] != sig:
             return None
         return rec
 
     def search_cap(self, net: int, iteration: int, cap: float | None) -> float | None:
-        """Per-net search cap for ``net`` this iteration (issue #8486).
+        """Return the effective wall-clock cap for this search (#8486)."""
+        return self.search_budget(net, iteration, cap)[0]
 
-        Full ``cap`` unless the net returned no path in the last
-        :data:`KNOWN_FAILURE_BACKOFF_AFTER` (or more) consecutive iterations
-        under the same entry signature; then the cap halves per extra such
-        iteration, floored at :data:`KNOWN_FAILURE_BACKOFF_FLOOR_S`.  A net
+    def search_budget(
+        self, net: int, iteration: int, cap: float | None
+    ) -> tuple[float | None, bool]:
+        """Return the cap and whether the fallback needs a fresh attempt.
+
+        Full ``cap`` until :data:`KNOWN_FAILURE_BACKOFF_AFTER` failures under
+        a still-valid witness. The cap then halves per additional failing
+        iteration, floored at :data:`KNOWN_FAILURE_BACKOFF_FLOOR_S`. A net
         whose failures ended before its cap is also bounded by its own last
         failing search time (still floored, never above ``cap``).  ``None``
         (no wall-clock cap, the deterministic arm) is never touched.
+        A witness change that reaches the streak restores the full ``cap``
+        for the one search it earns; that search's failure re-anchors the
+        streak on the post-change witness with its count kept, so the next
+        change-free iteration is backed off again right away.
+
+        A copper-keyed net whose streak survives on the coarse key (see
+        :meth:`_known_capped`) is re-searched at the full ``cap`` at least
+        once every :data:`KNOWN_FAILURE_REPROBE_EVERY` iterations since its
+        last full-cap search, including when the observed copper stays in place.
         """
         if cap is None:
-            return None
+            return None, False
         rec = self._known_capped(net, iteration)
         if rec is None or rec[2] < KNOWN_FAILURE_BACKOFF_AFTER:
-            return cap
+            self.full_search_iter[int(net)] = int(iteration)
+            previous = self.capped_streak.get(net)
+            changed = previous is not None and previous[1] != self.entry_signature.get(net)
+            return cap, rec is None and changed
+        if _is_copper_key(rec[1]) and (
+            int(iteration) - self.full_search_iter.get(int(net), int(iteration))
+            >= KNOWN_FAILURE_REPROBE_EVERY
+        ):
+            self.full_search_iter[int(net)] = int(iteration)
+            return cap, True
         shrunk = cap * 0.5 ** (rec[2] - KNOWN_FAILURE_BACKOFF_AFTER + 1)
         last = self.last_fail_s.get(int(net))
         if last is not None:
@@ -731,7 +804,7 @@ class RipupCycleGuard:
         reduced = max(min(cap, floor), shrunk)
         if reduced < cap:
             self.backoffs.append((int(iteration), int(net), reduced))
-        return reduced
+        return reduced, False
 
     def note_search(
         self,
@@ -741,36 +814,92 @@ class RipupCycleGuard:
         elapsed: float,
         routed: bool,
         setup_stopped: bool = False,
+        dependency: Any = None,
     ) -> None:
         """Feed one negotiated search back (issue #8486).
+
+        ``dependency`` (a ``SearchDependency``) is the grid cells the search
+        read.  It accumulates over a streak; a failure without one clears it,
+        so the streak falls back to the witness-only rule.
 
         ``setup_stopped`` (issue #8644): the search ended in pre-search mask
         setup without expanding A*; the net's next floor then rises above the
         setup time it just spent (see :data:`KNOWN_FAILURE_MIN_SEARCH_SLICE_S`).
 
-        A search that routed, or ran with no entry signature, resets the net's
-        streak; a no-path search extends it whether or not it reached its cap
-        (a sub-cap failure additionally bounds the next cap, :meth:`search_cap`).
-        Seconds spent on a net already known to fail are added
-        to :attr:`known_fail_seconds`.
+        A search that made progress, or ran with no witness, resets the net's
+        streak; a no-progress search (no path, or -- for a net that entered
+        partially connected -- a result connecting no new pad pair) extends it
+        whether or not it reached its cap (a sub-cap failure additionally
+        bounds the next cap, :meth:`search_cap`).  A full-cap search that a
+        witness change earned extends the streak as well (re-anchored on the
+        post-change witness, copper keys only): like the periodic re-probe,
+        the change buys one full attempt, not a streak restart.
+        A *second* failing search in the same iteration (the negotiated loop
+        searches a failed net both in the zero-overflow recovery and in the
+        reroute pass) counts toward known-fail seconds only while the witness
+        still holds. A changed blocker starts a new streak even then.
         """
         net, iteration = int(net), int(iteration)
-        prev = self._known_capped(net, iteration)
-        if prev is not None:
-            self.add_known_fail_seconds(iteration, elapsed)
         sig = self.entry_signature.get(net)
+        prior = self.capped_streak.get(net)
+        prev = self._known_capped(net, iteration)
+        same_iter = (
+            prior is not None and prior[0] == iteration and (prev is not None or prior[1] == sig)
+        )
+        if prev is not None or same_iter:
+            self.add_known_fail_seconds(iteration, elapsed)
         if routed or cap is None or sig is None:
             self.capped_streak.pop(net, None)
+            self.streak_dependency.pop(net, None)
             self.last_fail_s.pop(net, None)
             self.setup_floor_s.pop(net, None)
+            self.full_search_iter.pop(net, None)
             return
         self.last_fail_s[net] = float(elapsed)
         if setup_stopped:
             self.setup_floor_s[net] = float(elapsed) + KNOWN_FAILURE_MIN_SEARCH_SLICE_S
         else:
             self.setup_floor_s.pop(net, None)
-        streak = prev[2] + 1 if prev is not None else 1
-        self.capped_streak[net] = (iteration, sig, streak)
+        self._note_dependency(net, dependency, restart=prev is None and not same_iter)
+        if same_iter:
+            return
+        # Anchor to the failure that started the streak. Adding then removing
+        # unrelated copper cannot undo that observation.
+        if prev is None:
+            # The streak was invalidated for this search by a witness change
+            # (a removal that touched the dependency set, or a coarse-key
+            # wobble), so the search just ran at the full cap the change
+            # earned.  That earned attempt counts like the periodic re-probe
+            # (#8486): the streak re-anchors on the post-change witness but
+            # KEEPS its count, so an unchanged iteration after it backs
+            # straight off instead of running a second unearned full search.
+            # Copper keys only: a seal change or a copper/seal regime switch
+            # is a structurally new failure mode and still restarts at one.
+            carried = (
+                prior[2]
+                if prior is not None and _is_copper_key(prior[1]) and _is_copper_key(sig)
+                else 0
+            )
+            self.capped_streak[net] = (iteration, sig, carried + 1)
+        else:
+            self.capped_streak[net] = (iteration, prev[1], prev[2] + 1)
+
+    def _note_dependency(self, net: int, dependency: Any, *, restart: bool) -> None:
+        """Fold one failed search's read cells into the streak's record.
+
+        A new streak starts from this search alone.  A continuing one unions
+        in each further search; a search that recorded nothing (or a streak
+        that already lost its record) leaves the streak without one.
+        """
+        if restart:
+            merged = dependency
+        else:
+            known = self.streak_dependency.get(net)
+            merged = None if known is None or dependency is None else known.union(dependency)
+        if merged is None:
+            self.streak_dependency.pop(net, None)
+        else:
+            self.streak_dependency[net] = merged
 
     def add_known_fail_seconds(self, iteration: int, seconds: float) -> None:
         key = int(iteration)
@@ -808,10 +937,12 @@ class RipupCycleGuard:
         for memo in (
             self.futile_rescue,
             self.capped_streak,
+            self.streak_dependency,
             self.no_path_seen,
             self.last_fail_s,
             self.setup_floor_s,
             self.futile_rescue_iter,
+            self.full_search_iter,
         ):
             memo.pop(int(net), None)
 

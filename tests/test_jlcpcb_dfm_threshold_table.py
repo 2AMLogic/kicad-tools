@@ -11,7 +11,7 @@ import pytest
 
 from kicad_tools.cli.check_cmd import _apply_dfm_table
 from kicad_tools.manufacturers import get_profile
-from kicad_tools.manufacturers.base import DFM_THRESHOLD_NAMES
+from kicad_tools.manufacturers.base import DFM_OPTIONAL_THRESHOLD_NAMES, DFM_THRESHOLD_NAMES
 
 
 @pytest.fixture(scope="module")
@@ -27,7 +27,9 @@ def test_table_has_version(table):
 
 def test_every_threshold_has_provenance(table):
     for entry in table.entries:
-        assert set(entry.thresholds) == set(DFM_THRESHOLD_NAMES)
+        names = set(entry.thresholds)
+        assert set(DFM_THRESHOLD_NAMES) <= names
+        assert names - set(DFM_THRESHOLD_NAMES) <= set(DFM_OPTIONAL_THRESHOLD_NAMES)
         for name, th in entry.thresholds.items():
             assert th.source_url.startswith("http"), (entry.key, name)
             assert len(th.retrieved) == 10 and th.retrieved[4] == "-", (entry.key, name)
@@ -60,17 +62,20 @@ def test_missing_stackup_has_no_fallback(stackup):
     assert get_profile("jlcpcb").get_dfm_entry(*stackup) is None
 
 
-def _checker(n_layers=4):
+def _checker(n_layers=4, copper_oz=2.0):
     return SimpleNamespace(
         pcb=SimpleNamespace(copper_layers=list(range(n_layers))),
-        design_rules=get_profile("jlcpcb").get_design_rules(n_layers, 2.0),
+        design_rules=get_profile("jlcpcb").get_design_rules(n_layers, copper_oz),
     )
 
 
 def test_apply_table_missing_stackup_is_incomplete(capsys):
     cw: dict = {}
-    assert _apply_dfm_table(_checker(), "jlcpcb", 4, 3.0, 0.5, 1.0, cw) is True
+    checker = _checker(copper_oz=1.0)
+    assert checker.design_rules.trace_width_warning_mm is not None
+    assert _apply_dfm_table(checker, "jlcpcb", 4, 3.0, 0.5, 1.0, cw) is True
     assert cw["dfm_table"]["entry"] is None
+    assert checker.design_rules.trace_width_warning_mm is None
     assert "INCOMPLETE" in capsys.readouterr().err
 
 
@@ -171,7 +176,7 @@ def test_observed_warning_basis_recorded():
 # Bump ``version`` in jlcpcb.yaml AND this digest together when any number,
 # ``source_url`` or ``retrieved`` date changes (the digest covers provenance,
 # not just the millimetre values).
-_PINNED = (2, "845623b78c5368b3")
+_PINNED = (4, "5688079a56c40cec")
 
 
 def _digest(table) -> str:
@@ -228,6 +233,7 @@ _FLOOR_FIELDS = {
     "annular_ring_via": "min_annular_ring_mm",
     "annular_ring_pth": "min_pth_annular_ring_mm",
     "mask_bridge": "min_solder_mask_dam_mm",
+    "tht_smd_spacing": "tht_smd_danger_mm",
 }
 
 
@@ -247,13 +253,110 @@ def test_effective_rules_meet_table_floors_and_match_check(stackup):
             entry.key,
             field_name,
         )
+    assert eff.tht_smd_warning_mm == pytest.approx(entry.thresholds["tht_smd_spacing"].warning_mm)
     # kct check applies the same floors: its result equals the profile's.
     c = SimpleNamespace(
         pcb=SimpleNamespace(copper_layers=list(range(layers))),
         design_rules=p._base_design_rules(layers, outer),
     )
     assert _apply_dfm_table(c, "jlcpcb", layers, outer, inner, outer, {}) is False
-    assert c.design_rules == eff
+    # ``get_design_rules(layers, outer)`` cannot express the inner weight, so for
+    # the 1 oz-inner stackup it resolves the 0.5 oz-inner entry; the optional
+    # #10173 ``trace_width`` warning is therefore compared against the entry the
+    # check path actually resolved, and everything else must be identical.
+    from dataclasses import replace
+
+    tw = entry.thresholds.get("trace_width")
+    assert c.design_rules.trace_width_warning_mm == (tw.warning_mm if tw else None)
+    assert replace(c.design_rules, trace_width_warning_mm=None) == replace(
+        eff, trace_width_warning_mm=None
+    )
+
+
+def test_tht_smd_spacing_thresholds_recorded_on_all_stackups(table):
+    """Issue #10172: JLCPCB profile carries calibrated THT-to-SMD bands with provenance."""
+    for entry in table.entries:
+        th = entry.thresholds["tht_smd_spacing"]
+        assert th.danger_mm == pytest.approx(2.032)
+        assert th.warning_mm == pytest.approx(3.05)
+        assert th.basis == "observed_jlcdfm"
+        assert th.source_url == "https://github.com/2AMLogic/kicad-tools/issues/9421"
+        assert th.retrieved == "2026-11-18"
+
+
+def test_checker_tht_smd_spacing_verdict_follows_loaded_profile_threshold(monkeypatch):
+    """Issue #10172: varying the loaded JLCPCB profile threshold shifts the checker verdict."""
+    from dataclasses import replace
+
+    from kicad_tools.manufacturers.base import DfmEntry, DfmThresholdTable
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
+    from kicad_tools.validate.checker import DRCChecker
+
+    # THT 1.6 mm round pad at x=0 (edge x=0.8); SMD 1 mm square at x = 0.8 + 2.2 + 0.5 = 3.5.
+    # Copper-edge gap is 2.20 mm: warning under the default 2.032 / 3.05 mm profile bands.
+    pcb = PCB(
+        parse_string(
+            """(kicad_pcb (version 20240108) (generator pcbnew)
+              (general (thickness 1.6))
+              (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+              (net 0 "") (net 1 "A") (net 2 "B")
+              (footprint "T" (layer "F.Cu") (at 0 0) (property "Reference" "J1")
+                (pad "1" thru_hole circle (at 0 0) (size 1.6 1.6) (drill 0.9)
+                  (layers "*.Cu" "*.Mask") (net 1 "A") (uuid "tht")))
+              (footprint "S" (layer "F.Cu") (at 3.5 0) (property "Reference" "R1")
+                (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 2 "B") (uuid "smd"))))"""
+        )
+    )
+    profile = get_profile("jlcpcb")
+    base_table = profile.dfm_thresholds
+    assert base_table is not None
+
+    def _with_tht_band(danger_mm: float, warning_mm: float) -> DfmThresholdTable:
+        entries = []
+        for e in base_table.entries:
+            new_th = replace(
+                e.thresholds["tht_smd_spacing"],
+                danger_mm=danger_mm,
+                warning_mm=warning_mm,
+            )
+            entries.append(
+                DfmEntry(
+                    key=e.key,
+                    layers=e.layers,
+                    outer_oz=e.outer_oz,
+                    inner_oz=e.inner_oz,
+                    thresholds={**e.thresholds, "tht_smd_spacing": new_th},
+                )
+            )
+        return DfmThresholdTable(version=base_table.version, entries=tuple(entries))
+
+    # Default profile: 2.20 mm sits between 2.032 and 3.05 -> warning.
+    default_found = (
+        DRCChecker(pcb, manufacturer="jlcpcb", layers=2, fab_view=True)
+        .check_tht_smd_spacing()
+        .violations
+    )
+    assert [v.severity for v in default_found] == ["warning"]
+
+    # Tighter profile (danger=2.50, warning=3.50): 2.20 mm becomes error.
+    monkeypatch.setattr(profile, "dfm_thresholds", _with_tht_band(2.50, 3.50))
+    tight_found = (
+        DRCChecker(pcb, manufacturer="jlcpcb", layers=2, fab_view=True)
+        .check_tht_smd_spacing()
+        .violations
+    )
+    assert [v.severity for v in tight_found] == ["error"]
+    assert tight_found[0].required_value == pytest.approx(2.50)
+
+    # Looser profile (danger=1.50, warning=2.10): 2.20 mm becomes clean.
+    monkeypatch.setattr(profile, "dfm_thresholds", _with_tht_band(1.50, 2.10))
+    loose_found = (
+        DRCChecker(pcb, manufacturer="jlcpcb", layers=2, fab_view=True)
+        .check_tht_smd_spacing()
+        .violations
+    )
+    assert not loose_found
 
 
 def test_4layer_2oz_mask_dam_is_table_floor_everywhere():
@@ -285,3 +388,23 @@ def test_3oz_main_is_incomplete_not_error(tmp_path):
     res = SimpleNamespace(violations=[], mask_copper_assessments=[], rules_checked=1)
     v = evaluate_check_verdict(tmp_path / "x.kicad_pcb", res, drc_only=True, dfm_incomplete=True)
     assert v.verdict == "incomplete"
+
+
+def test_trace_width_is_optional_and_recorded_only_for_4layer_1oz(table):
+    """#10173: the optional threshold exists only where JLCDFM evidence does."""
+    with_tw = [e.key for e in table.entries if "trace_width" in e.thresholds]
+    assert with_tw == ["4layer_1oz"]
+    tw = table.lookup(4, 1.0, 0.5).thresholds["trace_width"]
+    assert tw.warning_mm == pytest.approx(0.1524)
+    assert tw.danger_mm == pytest.approx(0.1016)
+    assert tw.warning_basis == "observed_jlcdfm"
+    assert tw.source_url.endswith("/issues/10173")
+
+
+def test_trace_width_warning_is_applied_without_moving_the_error_floor():
+    p = get_profile("jlcpcb")
+    rules = p.get_design_rules(4, 1.0)
+    assert rules.trace_width_warning_mm == pytest.approx(0.1524)
+    assert rules.min_trace_width_mm == pytest.approx(0.1016)  # error floor unchanged
+    assert p.get_design_rules(2, 1.0).trace_width_warning_mm is None
+    assert p.get_design_rules(6, 1.0).trace_width_warning_mm is None

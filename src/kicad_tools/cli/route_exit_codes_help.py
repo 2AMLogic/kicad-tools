@@ -8,14 +8,19 @@ without importing the huge ``route_cmd`` module (issue #6291).
 
 ROUTE_EXIT_CODES_EPILOG = """\
 exit codes:
-  0  all nets routed (or meets --min-completion), DRC clean
+  0  routing met the completion threshold and no gated check failed;
+     fully connected copper with post-route DRC errors exits 3 on
+     every path (issue #10057). For a DRC gate, run
+     'kct check <routed.kicad_pcb> --drc-only' on the saved board.
   1  fatal failure -- no nets routed
   2  partial routing -- below threshold or requested placement-blocked nets
   3  post-route validation or processing failed:
-     DRC violations remain, --auto-fix rolled back (issue #2852),
-     the --voltage-map HV pairwise audit failed (issue #4588),
-     selective zone filling failed, or staged repair could not
-     preserve fixed copper and net membership
+     DRC violations remain (JSON summary.failure_reason is
+     "post_route_drc" when they are the sole failure on fully
+     connected copper, issues #10049, #10057), --auto-fix rolled
+     back (issue #2852), the --voltage-map HV pairwise audit failed
+     (issue #4588), selective zone filling failed, or staged repair
+     could not preserve fixed copper and net membership
   4  partial routing AND segment-segment or HV pairwise
      clearance violations (issues #1666, #4588)
   5  interrupted by SIGINT with partial results saved

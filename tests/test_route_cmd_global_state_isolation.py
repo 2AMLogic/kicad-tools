@@ -188,6 +188,9 @@ def test_full_route_restores_sigint_handler_env_and_router_pin(
             str(_VOLTAGE_DIVIDER),
             "--strategy",
             "basic",
+            # The single attempt installs the handler with a live router pinned.
+            "--no-auto-layers",
+            "--no-chain-complete",
             "--seed",
             "42",
             "--skip-drc",

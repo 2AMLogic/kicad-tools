@@ -2040,6 +2040,45 @@ class TestTraceRoutingAPI:
         # Verify the segment is in the PCB
         assert len(pcb.segments) == 1
 
+    @pytest.mark.parametrize("pad_is_start", [True, False])
+    def test_require_pad_layer_rejects_before_changing_board(self, minimal_pcb, pad_is_start):
+        pcb = PCB.load(minimal_pcb)
+        endpoints = [("R1", "1"), (108.0, 108.0)]
+        if not pad_is_start:
+            endpoints.reverse()
+        before = len(pcb.segments)
+        with pytest.raises(ValueError, match=r"R1\.1.*B\.Cu.*F\.Cu"):
+            pcb.add_trace(*endpoints, layer="B.Cu", net="NEW_NET", require_pad_layer=True)
+        assert len(pcb.segments) == before
+        assert "NEW_NET" not in {net.name for net in pcb.nets.values()}
+        assert pcb.add_trace(*endpoints, layer="B.Cu")  # Legacy coordinate-anchor use.
+
+    @pytest.mark.parametrize(
+        "layers, target",
+        [
+            ('"F.Cu" "F.Paste" "F.Mask"', "F.Cu"),
+            ('"B.Cu" "B.Paste" "B.Mask"', "B.Cu"),
+            ('"*.Cu" "*.Mask"', "B.Cu"),
+            ('"F&B.Cu"', "F.Cu"),
+        ],
+    )
+    def test_require_pad_layer_accepts_concrete_and_wildcard_layers(
+        self, minimal_pcb, layers, target
+    ):
+        text = minimal_pcb.read_text()
+        if target == "B.Cu" and "*.Cu" not in layers:
+            text = text.replace('(layer "F.Cu")', '(layer "B.Cu")')
+        if "*.Cu" in layers:
+            text = text.replace("smd roundrect", "thru_hole oval").replace(
+                "(roundrect_rratio 0.25)", "(drill 0.3)"
+            )
+        minimal_pcb.write_text(text.replace('"F.Cu" "F.Paste" "F.Mask"', layers))
+        pcb = PCB.load(minimal_pcb)
+        assert pcb.add_trace(("R1", "1"), (108.0, 108.0), layer=target, require_pad_layer=True)
+        assert pcb.add_trace(
+            (104.0, 110.0), (108.0, 110.0), layer=target, net=1, require_pad_layer=True
+        )
+
     def test_add_trace_with_waypoints(self, tmp_path):
         """Test adding a trace with intermediate waypoints."""
         pcb = PCB.create(width=100, height=100)
@@ -5032,6 +5071,22 @@ class TestCopperDedup:
         }
         # The set of distinct segment geometries is unchanged: no net edge lost.
         assert before == after
+
+
+@pytest.mark.parametrize(
+    "token,locked", [("(locked yes)", True), ("locked", True), ("(locked no)", False), ("", False)]
+)
+def test_via_lock_survives_rebuilding_the_node(token, locked):
+    from kicad_tools.schema.pcb import Via
+    from kicad_tools.sexp import parse_string
+
+    via = Via.from_sexp(
+        parse_string(
+            f'(via {token} (at 6 5) (size 0.7) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))'
+        )
+    )
+    assert via.locked is locked
+    assert Via.from_sexp(via.to_sexp()).locked is locked
 
 
 class TestViaTentingRoundTrip:

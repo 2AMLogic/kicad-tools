@@ -102,6 +102,9 @@ def _base_argv(pcb_path: Path, out_path: Path) -> list[str]:
         "python",
         "--no-cache",
         "--skip-drc",
+        # This fixture tests layer reservation in the first route. Chained
+        # completion would launch an unrelated native DRC probe afterward.
+        "--no-chain-complete",
         "--quiet",
     ]
 
@@ -343,6 +346,8 @@ class TestEscalationPlaneAudit:
             "--skip-drc",
             "--quiet",
             "--no-optimize",
+            # Audit this run's copper without chaining an unbounded `kct check` subprocess.
+            "--no-chain-complete",
             "--max-layers",
             "4",
         ]

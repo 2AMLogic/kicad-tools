@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -112,6 +113,59 @@ def test_transaction_restores_bytes_sidecars_and_cleans_scratch(tmp_path, monkey
     )
     assert sidecar.read_bytes() == b"project bytes"
     assert visited and all(not p.exists() for p in visited)
+
+
+@pytest.mark.parametrize("existing_record", [True, False])
+@pytest.mark.parametrize("failure", ["stage-evidence", "publish-board", None])
+def test_board_and_drill_evidence_publish_together(tmp_path, monkeypatch, existing_record, failure):
+    path, _ = board(tmp_path)
+    original = path.read_bytes()
+    record = tmp_path / "readiness" / "drill-relocations.json"
+    if existing_record:
+        record.parent.mkdir()
+        record.write_bytes(b"[]\n")
+    relocations = [{"net": "GND", "from": [3, 4], "to": [4, 5]}]
+    evidence_at_board_publish = []
+
+    def qualify(candidate, schematic):
+        candidate.write_bytes(b"qualified copper")
+        return relocations
+
+    monkeypatch.setattr(finalizer, "_finalize_candidate", qualify)
+    if failure == "stage-evidence":
+        write_text = Path.write_text
+
+        def full_disk(target, *args, **kwargs):
+            if target.name == record.name:
+                raise OSError("drill evidence write failed")
+            return write_text(target, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", full_disk)
+    elif failure == "publish-board":
+        replace = os.replace
+
+        def fail_board_publish(source, destination):
+            if Path(destination) == path:
+                evidence_at_board_publish.append(json.loads(record.read_bytes()))
+                raise OSError("board publish failed")
+            return replace(source, destination)
+
+        monkeypatch.setattr(os, "replace", fail_board_publish)
+
+    assert finalizer.finalize_routing(path) is (failure is None)
+    if failure is None:
+        assert path.read_bytes() == b"qualified copper"
+        assert json.loads(record.read_bytes()) == relocations
+    else:
+        assert path.read_bytes() == original
+        assert (record.read_bytes() if record.exists() else None) == (
+            b"[]\n" if existing_record else None
+        )
+    if failure == "publish-board":
+        assert evidence_at_board_publish == [relocations]
+    assert not list(tmp_path.rglob("*.bak-*"))
+    assert not list(tmp_path.glob("board02-finalize-*"))
+    assert not list(tmp_path.rglob(".board02-evidence-*"))
 
 
 @pytest.mark.parametrize("gate", ["native", "lvs", "vacuous", "binding", "vip", "geometry"])

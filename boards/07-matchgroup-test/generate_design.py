@@ -54,6 +54,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
@@ -64,7 +65,7 @@ from kicad_tools.pcb.center_sheet import (
     edge_cuts_bbox,
     translate_pcb_text,
 )
-from kicad_tools.recipes.gate import evaluate_pipeline_gate
+from kicad_tools.recipes.gate import PipelineGateResult, evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
 from kicad_tools.router.rules import (
     NET_CLASS_POWER,
@@ -575,9 +576,8 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     on a shared copper layer.  A net is electrically continuous iff all
     of its pads land in ONE connected component.
 
-    Pad copper is approximated by the pad's *inscribed* circle, which is
-    conservative (an audit "connected" verdict implies real overlap; a
-    thermal-spoke connection always overlaps the inscribed circle).
+    The audit and repair use the same pad copper outlines as the connectivity
+    validator, including the ends of rectangular and rounded lands.
 
     Returns:
         ``{net_name: {"connected": bool, "pad_groups": [[(pad, is_th)]],
@@ -585,12 +585,12 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         ImportError if unavailable (a silent skip is how dead pours
         shipped on softstart in the first place -- see PR #3481).
     """
-    import math
     import re
 
     from shapely.geometry import LineString, Point, Polygon
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
+    from kicad_tools.geometry.copper import pad_copper_outline
 
     text = pcb_path.read_text()
     all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
@@ -657,24 +657,18 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     origin_x, origin_y = analyzer.pcb.board_origin
     pads: dict[str, list] = {n: [] for n in net_names}
     for fp in analyzer.pcb.footprints:
-        theta = math.radians(fp.rotation or 0.0)
+        sheet_position = (fp.position[0] + origin_x, fp.position[1] + origin_y)
         for pad in fp.pads:
             if pad.net_name not in pads:
                 continue
-            px, py = pad.position
-            rx = px * math.cos(theta) + py * math.sin(theta)
-            ry = -px * math.sin(theta) + py * math.cos(theta)
-            x = fp.position[0] + rx + origin_x
-            y = fp.position[1] + ry + origin_y
             is_th = any("*" in str(layer) for layer in pad.layers)
             layers = (
                 all_layers if is_th else frozenset({l for l in pad.layers if l.endswith(".Cu")})
             )
-            radius = min(pad.size) / 2.0
             pads[pad.net_name].append(
                 (
                     f"{fp.reference}.{pad.number}",
-                    Point(x, y).buffer(radius),
+                    pad_copper_outline(pad, sheet_position, fp.rotation),
                     layers,
                     is_th,
                 )
@@ -932,6 +926,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
     from kicad_tools.core.schematic_uuids import UuidMinter, uuids_in_text
+    from kicad_tools.geometry.copper import pad_board_center, pad_copper_outline
     from kicad_tools.router.clearance_kernel import (
         CLEARANCE_EPSILON_MM,
         KSegment,
@@ -939,6 +934,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         copper_gap,
     )
     from kicad_tools.router.via_clearance import (
+        SAME_NET_BAND_UNION_EPS_MM,
+        SAME_NET_BAND_WRITE_SLACK_MM,
         same_net_band_edges,
         same_net_band_seat_ok,
         same_net_trace_band_clear,
@@ -958,31 +955,22 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     analyzer = NetStatusAnalyzer(pcb_path)
     origin_x, origin_y = analyzer.pcb.board_origin
 
-    # Pads: (geom, net, layers, drill_r, center, name, is_th, inscribed,
+    # Pads: (geom, net, layers, drill_r, center, name, is_th, copper,
     #        kpad, bound_r) -- ``kpad`` / ``bound_r`` are Issue #6736's true
     #        pad copper and the radius of the circle (about ``center``) that
     #        encloses it.
     pad_index: list[tuple] = []
     for fp in analyzer.pcb.footprints:
-        theta = math.radians(fp.rotation or 0.0)
+        sheet_position = (fp.position[0] + origin_x, fp.position[1] + origin_y)
         for pad in fp.pads:
-            px, py = pad.position
-            rx = px * math.cos(theta) + py * math.sin(theta)
-            ry = -px * math.sin(theta) + py * math.cos(theta)
-            x = fp.position[0] + rx + origin_x
-            y = fp.position[1] + ry + origin_y
+            x, y = pad_board_center(pad, sheet_position, fp.rotation)
             is_th = any("*" in str(layer) for layer in pad.layers)
             layers = (
                 all_layers if is_th else frozenset({l for l in pad.layers if l.endswith(".Cu")})
             )
-            # Conservative obstacle: circumscribed half-diagonal so square
-            # pad corners are respected.  The CONNECTIVITY geometry uses
-            # the inscribed circle instead (matching ``_audit_pour_nets``)
-            # -- using the circumscribed circle for own-net union would
-            # make the repair believe pads are connected that the audit
-            # (correctly, conservatively) reports stranded.
+            # The via-in-pad exclusion uses the circumscribed half-diagonal.
+            # Own-net connectivity uses the same copper outline as the audit.
             half_diag = math.hypot(pad.size[0], pad.size[1]) / 2.0
-            inscribed_r = min(pad.size) / 2.0
             drill_r = float(getattr(pad, "drill", 0.0) or 0.0) / 2.0
             # Issue #6736: the pad's TRUE copper for clearance, from the
             # shared kernel adapter (board-relative, so shifted into the
@@ -1009,7 +997,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                     (x, y),
                     f"{fp.reference}.{pad.number}",
                     is_th,
-                    Point(x, y).buffer(inscribed_r),
+                    pad_copper_outline(pad, sheet_position, fp.rotation),
                     kpad,
                     bound_r,
                 )
@@ -1038,6 +1026,9 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     # resolves for this board's stackup, from the one shared resolver (never
     # literals; a missing profile entry disables the band, 0.0).
     SAME_NET_PAD_GAP_MM, SAME_NET_TRACE_GAP_MM = same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
+    pad_slit_limit = (
+        SAME_NET_PAD_GAP_MM + SAME_NET_BAND_WRITE_SLACK_MM if SAME_NET_PAD_GAP_MM else 0.0
+    )
 
     # Segments: (geom, net, layer)
     seg_index: list[tuple] = []
@@ -1217,10 +1208,18 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         path = centreline.buffer(width / 2.0)
         kseg = KSegment(x1=p0[0], y1=p0[1], x2=p1[0], y2=p1[1], width=width)
         for entry in pad_index:
-            geom, pnet, layers, _drill_r, (px, py) = entry[:5]
-            if pnet != net and layer in layers:
-                cheap = centreline.distance(Point(px, py)) - width / 2.0 - entry[9]
+            _geom, pnet, layers, drill_r, (px, py), _name, is_th = entry[:7]
+            if layer not in layers:
+                continue
+            cheap = centreline.distance(Point(px, py)) - width / 2.0 - entry[9]
+            if pnet != net:
                 if _pad_too_close(kseg, entry, _pair_clear(net, pnet), cheap):
+                    return False
+            elif not is_th and not drill_r and cheap < pad_slit_limit:
+                # A stub may enter its own SMD pad, or pass outside the fab's
+                # pad-spacing band. Measure the actual rounded/rotated land.
+                gap = copper_gap(kseg, entry[8])
+                if SAME_NET_BAND_UNION_EPS_MM < gap < pad_slit_limit:
                     return False
         for geom, snet, lay in seg_index:
             if snet != net and lay == layer and path.distance(geom) < _pair_clear(net, snet):
@@ -1333,11 +1332,9 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             if vnet == net:
                 own.append((pt.buffer(radius), all_layers, "via"))
         for entry in pad_index:
-            _obst, pnet, layers, _dr, center, name, is_th, inscribed = entry[:8]
+            _obst, pnet, layers, _dr, center, name, is_th, copper = entry[:8]
             if pnet == net:
-                # Inscribed-circle copper for own-net union (matches the
-                # audit's conservative connectivity model).
-                own.append((inscribed, layers, f"pad:{name}"))
+                own.append((copper, layers, f"pad:{name}"))
         pad_center = {entry[5]: entry[4] for entry in pad_index if entry[1] == net}
         # Through-hole pads of this net.  Their plated barrel already spans
         # the copper stack, so sub-stage D may terminate a bridge on one
@@ -1956,12 +1953,35 @@ def retune_pair_skew(routed_path: Path, sidecar_path: Path) -> list[str]:
     return [t.name for t in report.targets if t.achieved]
 
 
+def _route_completed(result: subprocess.CompletedProcess) -> bool:
+    """Accept full connectivity when DRC is the only check the recipe must repeat."""
+    if result.returncode not in (0, 3):
+        return False
+    try:
+        summary = json.loads(result.stdout)["summary"]
+        complete = (
+            summary["nets_requested"] > 0
+            and summary["nets_routed"] == summary["nets_requested"]
+            and summary["nets_partial"] == summary["nets_unrouted"] == 0
+            and summary["has_disconnected_islands"] is False
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return complete and (
+        (result.returncode == 0 and summary.get("verdict") == "success")
+        or (
+            result.returncode == 3
+            and summary.get("verdict") == "failed"
+            and summary.get("failure_reason") == "post_route_drc"
+        )
+    )
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB by invoking ``kct route`` with the proven flag recipe.
 
-    Returns True if ``kct route`` reports full success (return code 0);
-    False if it produced a partial routing (still acceptable -- the
-    output file is written either way and downstream DRC continues).
+    Returns whether the router connected every signal with no unresolved non-DRC
+    failure. The complete recipe checks DRC again on the finished, tuned copper.
 
     Issue #2991: Previously this function called ``router.route_all()``
     directly through the in-process API, configured with a custom
@@ -2442,6 +2462,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         str(output_path),
         "--manufacturer",
         "jlcpcb",
+        "--format",
+        "json",
         "--route-engine",
         ROUTE_ENGINE,
         "--strategy",
@@ -2595,27 +2617,24 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print(f"   Command: PYTHONHASHSEED={env['PYTHONHASHSEED']} {' '.join(cmd)}")
     print("\n3. Routing...")
 
-    result = subprocess.run(cmd, capture_output=False, text=True, env=env)
-
-    # ``kct route`` returns 0 on full success and a non-zero code on
-    # partial / failed routing.  Either way it writes a routed PCB to
-    # ``output_path`` (the partial-results file is at
-    # ``<stem>_partial.kicad_pcb``).  As long as the output file
-    # exists, downstream steps (zone generation + DRC) can run; report
-    # success/partial purely informationally.
-    success = result.returncode == 0
-
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, env=env)
     if not output_path.exists():
         print(f"\n   ERROR: ``kct route`` did not produce {output_path}", file=sys.stderr)
         return False
 
-    if success:
-        print("\n   SUCCESS: ``kct route`` reports all signal nets routed!")
+    success = _route_completed(result)
+    if success and result.returncode == 3:
+        print("   All signal nets connected. Post-route DRC will be checked after final tuning.")
+    elif success:
+        print("   All signal nets connected.")
     else:
-        print(
-            f"\n   PARTIAL: ``kct route`` exited with code {result.returncode} "
-            "(partial routing; downstream zone + DRC will continue)"
-        )
+        print(f"   Signal routing incomplete or unverified (router exit {result.returncode}).")
+
+    from ddr_pad_escapes import clear_fixture_pad_escapes
+
+    fixed = clear_fixture_pad_escapes(output_path)
+    if fixed:
+        print(f"   Adjusted {fixed} pad exits before generating zones.")
 
     # Phase 3H (#2723) integration point.  When --length-match-groups
     # lands, the CLI's own routing pipeline will apply
@@ -2875,6 +2894,14 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         + ("PASS" if native_stable else "FAIL (see above)")
     )
 
+    # The lattice can turn alongside its own DDR pad opening (#9960). Clear
+    # these escapes on the routed copper before measuring the final bus skew.
+    from ddr_pad_escapes import clear_ddr_pad_escapes
+
+    changed_escapes = clear_ddr_pad_escapes(output_path, generate_pcb.DDR_DATA_BYTE_0_SINGLES)
+    if changed_escapes:
+        print(f"   Cleared {changed_escapes} DDR pad escapes before skew tuning")
+
     # Issue #7612: lengthen the shorter half of the four pairs the router
     # leaves skewed.  Last on purpose: ``retune_pcb`` splices copper into the
     # finished board (it was written for one, and it measures the shipped
@@ -2882,7 +2909,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # repair or translation legs above.  The bumps are F.Cu copper beside pour
     # zones, so the recipe's fill and the pour audit run again afterwards.
     print("\n11. Tuning diff-pair skew (Issue #7612)...")
-    if retune_pair_skew(output_path, sidecar_path):
+    if retune_pair_skew(output_path, sidecar_path) or changed_escapes:
         refill = subprocess.run(fill_argv, capture_output=True, text=True)
         if refill.returncode != 0:
             print(f"   WARNING: re-fill after skew tuning failed (rc={refill.returncode})")
@@ -2892,7 +2919,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     return success
 
 
-def run_drc(pcb_path: Path) -> bool:
+def run_drc(pcb_path: Path, *, drc_only: bool = False) -> bool:
     """Run kct check --mfr jlcpcb on the routed PCB."""
     print("\n" + "=" * 60)
     print("Running DRC (kct check --mfr jlcpcb)...")
@@ -2909,6 +2936,8 @@ def run_drc(pcb_path: Path) -> bool:
         "jlcpcb",
         "--errors-only",
     ]
+    if drc_only:
+        cmd.append("--drc-only")
     if sidecar.exists():
         cmd.extend(["--net-class-map", str(sidecar)])
 
@@ -2923,6 +2952,28 @@ def run_drc(pcb_path: Path) -> bool:
     except Exception as e:
         print(f"\n   Error running DRC: {e}")
         return False
+
+
+def check_finished_board(
+    schematic: Path, routed: Path, route_complete: bool, *, bundle_written: bool
+) -> PipelineGateResult:
+    """Check the routed board under its own rules, including its archive after export."""
+    copper_clean, _ = write_lvs_report(
+        schematic, routed, routed.parent, require_clean=False, run_copper=True, run_label=True
+    )
+    checked = run_drc(routed, drc_only=not bundle_written)
+    return evaluate_pipeline_gate(
+        routed,
+        route_ok=route_complete,
+        lvs_ok=copper_clean,
+        export_ok=checked if bundle_written else None,
+        supplemental_drc_ok=checked,
+        supplemental_reason=(
+            "completed bundle failed the DRC, ERC, LVS or manifest check"
+            if bundle_written
+            else "kct check found errors on the final routed copper"
+        ),
+    )
 
 
 def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
@@ -2975,7 +3026,7 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
             print(f"\n   Error: {result.stderr}")
         return False
     manifest = mfg_dir / "manifest.json"
-    if manifest.exists():
+    if manifest.is_file():
         print(f"\n   Manifest: {manifest}")
         return True
     print("\n   WARNING: manifest.json not produced")
@@ -3132,89 +3183,24 @@ def main() -> int:
                 write_placement_delta_report(output_dir, delta_path, delta_report)
             routed_path = output_dir / "matchgroup_test_routed.kicad_pcb"
             route_success = route_pcb(pcb_path, routed_path)
-            drc_ok = run_drc(routed_path)
 
-            # LVS (#3779, wired schematic #4012).  The fixture schematic is
-            # fully wired (generate_schematic.py emits a wire stub + global
-            # label for all 244 pins, PIN_NETS mirroring generate_pcb.py
-            # pad-for-pad), so the copper comparator binds 244/244 pads and
-            # carries real evidence.  Since #7557 (U4's TMDS balls on its
-            # J2-facing column) every signal net routes on seed 42, so the
-            # honest verdict is ``clean=true``; before it, TMDS_D0_N was the
-            # one expected open.  ``require_clean=False`` keeps a dirty
-            # verdict advisory HERE so the recipe still reaches the
-            # manufacturing-bundle export and writes ``lvs.json`` for triage;
-            # the verdict gates through ``lvs_ok`` below and the
-            # board-07-end-to-end CI job (``check_copper_lvs.py`` with no
-            # known opens + ``check_board_00_e2e.py --lvs-only``).  This step
-            # only runs in ``--step all`` (the ``--step route`` CI branch has
-            # no schematic).
-            copper_clean, _label_clean = write_lvs_report(
-                sch_path,
-                routed_path,
-                output_dir,
-                require_clean=False,
-                run_copper=True,
-                run_label=True,
-            )
-            if not copper_clean:
-                print(
-                    "[lvs] copper-LVS is dirty -- a REGRESSION: every signal "
-                    "net routes on seed 42 since #7557.  lvs.json carries the "
-                    "clean=false verdict; see the summary above for the "
-                    "opens/shorts this run produced."
-                )
-
-            # Export manufacturing bundle (#3147) so ``kct fleet status``
-            # reports ``ship_ready=true`` (the bundle's manifest mtime must
-            # be newer than the freshly routed PCB).  Run unconditionally:
-            # routing is allowed to be PARTIAL on this board, and a current
-            # bundle still clears the ``"artifacts stale"`` blocker.
-            mfg_ok = export_manufacturing_bundle(routed_path, output_dir)
-
-            # Issue #3912: derive BOTH the SUMMARY and the exit code from ONE
-            # shared PipelineGateResult so they can never diverge.  The
-            # previous ``return 0 if route_success else 1`` gated ONLY on
-            # route completion while the SUMMARY printed an independent
-            # ``DRC:`` line -- exactly the exit-code-vs-SUMMARY drift this
-            # issue eliminates.
-            #
-            # The gate reflects the board's state HONESTLY rather than
-            # papering over it:
-            #   * ``route_ok=route_success`` -- ``kct route`` exits non-zero
-            #     unless the copper is DRC-clean: since #7557 all 31 signal
-            #     nets connect on seed 42, but the skew/impedance residuals
-            #     (#7550/#7349/#7619) make it exit 3 ("connected but DRC
-            #     dirty"), so the ``Routing:`` line reads PARTIAL.
-            #     ``route_allowance`` is left at 0 ON PURPOSE: inflating it
-            #     would flip the line to a FALSE "SUCCESS" (route_status()
-            #     reads SUCCESS whenever route_ok is True).
-            #   * ``lvs_ok=copper_clean`` -- since #7557 the copper-LVS verdict
-            #     is clean, so it is a gating leg: a new open or short fails it.
-            #   * ``supplemental_drc_ok=drc_ok`` -- ``run_drc``
-            #     (``kct check --mfr jlcpcb``) is the only engine that sees
-            #     the match-group / diffpair length-skew rule families
-            #     kicad-cli cannot express, so its verdict tightens the DRC
-            #     leg (the authoritative geometric ``kicad-cli --refill-zones``
-            #     leg runs inside the gate).
-            # Net effect: the board honestly ends FAIL (route exit 3 + real
-            # kct-check DRC residuals) and exits non-zero -- NOT a false exit 0
-            # for a board that is not DRC-clean.  The board-07-end-to-end CI
-            # job tolerates this non-zero recipe exit (`|| true`) and gates on
-            # the LVS-clean + allowlist asserters instead.
-            gate = evaluate_pipeline_gate(
-                routed_path,
-                route_ok=route_success,
-                route_allowance=0,
-                lvs_ok=copper_clean,
-                export_ok=mfg_ok,
-                supplemental_drc_ok=drc_ok,
-                supplemental_reason=(
-                    "kct check --mfr jlcpcb reported error-level DRC findings "
-                    "(match-group / diffpair skew + allowlisted residuals; see "
-                    "DRC output above)"
-                ),
-            )
+            gate = check_finished_board(sch_path, routed_path, route_success, bundle_written=False)
+            if gate.passed:
+                if export_manufacturing_bundle(routed_path, output_dir):
+                    # Export can change silk, zone fills or the project rules.
+                    # Verify the exact board and archive the exporter left on disk.
+                    gate = check_finished_board(
+                        sch_path, routed_path, route_success, bundle_written=True
+                    )
+                else:
+                    gate = replace(
+                        gate,
+                        export_ok=False,
+                        reasons=[
+                            *gate.reasons,
+                            "manufacturing export failed or did not produce its manifest",
+                        ],
+                    )
 
             print("\n" + "=" * 60)
             print("SUMMARY")

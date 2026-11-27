@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pytest
+
 from kicad_tools.validate import DRCChecker
 from kicad_tools.validate.rules.dangling_copper import DanglingCopperRule
 
@@ -142,6 +144,65 @@ _SQUARE_FILL = [(100.0, 100.0), (110.0, 100.0), (110.0, 110.0), (100.0, 110.0)]
 
 
 class TestTrackDangling:
+    @pytest.mark.parametrize("pitch", [0.25, 0.125])
+    def test_subdivided_pad_to_pad_run_needs_no_trunk_walk(self, pitch):
+        from unittest.mock import patch
+
+        from kicad_tools.validate.rules import dangling_copper
+
+        points = [(6 + i * pitch, 9.0) for i in range(41)]
+        tracks = [_FakeSegment(a, b) for a, b in zip(points, points[1:], strict=False)]
+        pads = [_FakePad(position=p, size=(0.2, 0.2)) for p in (points[0], points[-1])]
+        with patch.object(
+            dangling_copper, "_trunk_span", wraps=dangling_copper._trunk_span
+        ) as walk:
+            results = _run(segments=tracks, footprints=[_FakeFootprint(pads)])
+        assert not results.violations
+        assert walk.call_count == 0
+
+    def test_spur_beside_its_parent_needs_a_second_contact(self):
+        junction = (12.0, 9.0)
+        pads = [_FakePad(position=(6.0, 9.0)), _FakePad(position=(19.0, 9.0))]
+        trunk = [_FakeSegment((6.0, 9.0), junction), _FakeSegment(junction, (19.0, 9.0))]
+        for tip in ((11.8, 9.2), (11.8, 9.15)):
+            spur = _FakeSegment(tip, junction)
+            findings = _by_rule(
+                _run(segments=[*trunk, spur], footprints=[_FakeFootprint(pads)]), "track_dangling"
+            )
+            assert [v.location for v in findings] == [tip]
+            terminated = _FakeFootprint([*pads, _FakePad(position=tip)])
+            assert not _by_rule(
+                _run(segments=[*trunk, spur], footprints=[terminated]), "track_dangling"
+            )
+
+    def test_identical_spans_on_opposite_layers_have_independent_ends(self):
+        a, b = (6.0, 9.0), (12.0, 9.0)
+        tracks = [_FakeSegment(a, b), _FakeSegment(b, a, layer="B.Cu")]
+        fp = _FakeFootprint([_FakePad(position=a), _FakePad(position=b)])
+        findings = _by_rule(_run(segments=tracks, footprints=[fp]), "track_dangling")
+        assert [v.layer for v in findings] == ["B.Cu"]
+        assert "both ends dangling" in findings[0].message
+
+    def test_overlaid_branch_copies_leave_one_open_tip(self):
+        junction, tip = (12.0, 9.0), (13.0, 10.0)
+        pads = [_FakePad(position=(6.0, 9.0)), _FakePad(position=(19.0, 9.0))]
+        tracks = [
+            _FakeSegment((6.0, 9.0), junction),
+            _FakeSegment(junction, (19.0, 9.0)),
+            _FakeSegment(junction, tip),
+            _FakeSegment(tip, junction),
+            _FakeSegment(junction, tip),
+        ]
+        findings = _by_rule(
+            _run(segments=tracks, footprints=[_FakeFootprint(pads)]), "track_dangling"
+        )
+        assert [v.location for v in findings] == [tip]
+
+        pads.append(_FakePad(position=tip))
+        assert not _by_rule(
+            _run(segments=tracks, footprints=[_FakeFootprint(pads)]), "track_dangling"
+        )
+
     def test_isolated_segment_flagged_once(self):
         """A fully floating track emits ONE violation (kicad-cli parity:
         one finding per track, not per endpoint)."""
@@ -415,6 +476,88 @@ _ARC_BOARD = """(kicad_pcb (version 20240108) (generator "test")
 
 
 class TestEndToEndParsedBoard:
+    @pytest.mark.parametrize("split_trunk", [False, True])
+    @pytest.mark.parametrize("reverse_spur", [False, True])
+    @pytest.mark.parametrize("tip", [(11.9, 9.15), (12.0, 9.18)])
+    @pytest.mark.parametrize("contact", ["open", "pad", "cap"])
+    def test_short_spur_needs_independent_tip_contact(
+        self, tmp_path, split_trunk, reverse_spur, tip, contact
+    ):
+        from kicad_tools.schema.pcb import PCB
+
+        left, root, right = (6, 9), (12, 9), (19, 9)
+        segments = [(left, root), (root, right)] if split_trunk else [(left, right)]
+        segments.append((tip, root) if reverse_spur else (root, tip))
+        pads = [left, right]
+        if contact == "pad":
+            pads.append(tip)
+        elif contact == "cap":
+            # A separate track approaches within the two 0.1 mm cap radii.
+            far_end = (tip[0], 12)
+            segments.append(((tip[0], tip[1] + 0.18), far_end))
+            pads.append(far_end)
+
+        board = tmp_path / "spur.kicad_pcb"
+        parts = [
+            '(kicad_pcb (version 20240108) (generator "test")',
+            '(layers (0 "F.Cu" signal) (31 "B.Cu" signal)) (net 1 "SIG")',
+        ]
+        for (x1, y1), (x2, y2) in segments:
+            parts.append(
+                f'(segment (start {x1} {y1}) (end {x2} {y2}) (width 0.2) (layer "F.Cu") (net 1))'
+            )
+        for x, y in pads:
+            parts.append(
+                f'(footprint "Test:Pad" (layer "F.Cu") (at {x} {y}) '
+                '(pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "SIG")))'
+            )
+        board.write_text("\n".join([*parts, ")"]))
+        checker = DRCChecker(PCB.load(str(board)), manufacturer="jlcpcb", layers=2)
+        findings = _by_rule(checker.check_dangling_copper(), "track_dangling")
+        assert [v.location for v in findings] == ([tip] if contact == "open" else [])
+
+    @pytest.mark.parametrize("contact", ["open", "pad", "cap"])
+    @pytest.mark.parametrize("offset", [None, 0.05, 0.10, 0.12, 0.15, (0.15, 0.3)])
+    def test_subdividing_straight_trunk_keeps_spur_tip_warning(self, tmp_path, offset, contact):
+        """Added vertices on the trunk, at any distance from the root, are not a contact."""
+        from kicad_tools.schema.pcb import PCB
+
+        left, root, right, tip = (6, 9), (12, 9), (19, 9), (11.8, 9.15)
+        if offset is None:
+            segments = [(left, root)]
+        else:
+            cuts = offset if isinstance(offset, tuple) else (offset,)
+            xs = [root[0] - d for d in sorted(cuts, reverse=True)]
+            pts = [left, *((x, 9) for x in xs), root]
+            segments = list(zip(pts, pts[1:], strict=False))
+        segments += [(root, right), (tip, root)]
+        pads = [left, right]
+        if contact == "pad":
+            pads.append(tip)
+        elif contact == "cap":
+            far_end = (tip[0], 12)
+            segments.append(((tip[0], tip[1] + 0.18), far_end))
+            pads.append(far_end)
+
+        parts = [
+            '(kicad_pcb (version 20240108) (generator "test")',
+            '(layers (0 "F.Cu" signal) (31 "B.Cu" signal)) (net 1 "SIG")',
+        ]
+        for (x1, y1), (x2, y2) in segments:
+            parts.append(
+                f'(segment (start {x1} {y1}) (end {x2} {y2}) (width 0.2) (layer "F.Cu") (net 1))'
+            )
+        for x, y in pads:
+            parts.append(
+                f'(footprint "Test:Pad" (layer "F.Cu") (at {x} {y}) '
+                '(pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "SIG")))'
+            )
+        board = tmp_path / "trunk.kicad_pcb"
+        board.write_text("\n".join([*parts, ")"]))
+        checker = DRCChecker(PCB.load(str(board)), manufacturer="jlcpcb", layers=2)
+        findings = _by_rule(checker.check_dangling_copper(), "track_dangling")
+        assert [v.location for v in findings] == ([tip] if contact == "open" else [])
+
     def test_arc_terminates_track_ends_and_stubs_flagged(self, tmp_path):
         """On a parsed board: a segment-arc-segment chain closed through
         two vias is clean (the arc terminates both adjacent segment

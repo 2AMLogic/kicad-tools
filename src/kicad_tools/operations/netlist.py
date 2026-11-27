@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,6 +41,7 @@ class NetlistComponent:
     sheet_path: str = ""
     properties: dict[str, str] = field(default_factory=dict)
     pins: list[ComponentPin] = field(default_factory=list)
+    symbol_path: str = ""
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> NetlistComponent:
@@ -50,6 +51,7 @@ class NetlistComponent:
         footprint = ""
         lib_id = ""
         sheet_path = ""
+        symbol_path = ""
         properties: dict[str, str] = {}
 
         if ref_node := sexp.find("ref"):
@@ -67,15 +69,36 @@ class NetlistComponent:
             elif lib_node.get_string(1):
                 lib_id = lib_node.get_string(1) or ""
 
-        if (sheet_node := sexp.find("sheetpath")) and (names := sheet_node.find("names")):
-            sheet_path = names.get_string(0) or ""
+        if sheet_node := sexp.find_child("sheetpath"):
+            if names := sheet_node.find_child("names"):
+                sheet_path = names.get_string(0) or ""
+            # The native export has already selected this project's annotation.
+            # A multi-unit part can supply several symbol timestamps.
+            sheet_stamps = sheet_node.find_child("tstamps")
+            unit_stamps = sexp.find_child("tstamps")
+            if sheet_stamps is not None and unit_stamps is not None:
+                prefix = sheet_stamps.get_string(0) or ""
+                units = (unit_stamps.get_string(0) or "").split()
+                if prefix.startswith("/") and units:
+                    symbol_path = f"{prefix.rstrip('/')}/{units[0]}"
 
         # Parse properties
         for prop in sexp.find_all("property"):
-            prop_name = prop.get_string(0)
-            prop_value = prop.get_string(1)
-            if prop_name and prop_value:
+            if name := prop.find("name"):
+                prop_name = name.get_string(0)
+                value_node = prop.find("value")
+                prop_value = value_node.get_string(0) if value_node else None
+            else:
+                prop_name = prop.get_string(0)
+                prop_value = prop.get_string(1)
+            if prop_name and prop_value is not None:
                 properties[prop_name] = prop_value
+
+        # KiCad serializes custom symbol fields as (field (name "LCSC") "C123").
+        if fields := sexp.find("fields"):
+            for item in fields.find_all("field"):
+                if (name := item.find("name")) and (field_name := name.get_string(0)):
+                    properties[field_name] = item.get_string(1) or ""
 
         return cls(
             reference=ref,
@@ -84,6 +107,7 @@ class NetlistComponent:
             lib_id=lib_id,
             sheet_path=sheet_path,
             properties=properties,
+            symbol_path=symbol_path,
         )
 
 
@@ -180,6 +204,8 @@ class Netlist:
     sheets: list[SheetInfo] = field(default_factory=list)
     components: list[NetlistComponent] = field(default_factory=list)
     nets: list[NetlistNet] = field(default_factory=list)
+    # Qualified output name -> literal winning local/hierarchical label.
+    qualified_labels: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Netlist:
@@ -379,7 +405,8 @@ class Netlist:
 
         # Categorize nets
         power_names = {"GND", "PGND", "AGND", "VCC", "VDD", "VBUS"}
-        power_nets = [n for n in self.nets if n.name.startswith("+") or n.name in power_names]
+        labels = (self.qualified_labels.get(net.name, net.name) for net in self.nets)
+        power_count = sum(label.startswith("+") or label in power_names for label in labels)
 
         return {
             "source_file": self.source_file,
@@ -389,8 +416,8 @@ class Netlist:
             "component_count": len(self.components),
             "components_by_type": dict(by_prefix),
             "net_count": len(self.nets),
-            "power_net_count": len(power_nets),
-            "signal_net_count": len(self.nets) - len(power_nets),
+            "power_net_count": power_count,
+            "signal_net_count": len(self.nets) - power_count,
         }
 
 
@@ -529,7 +556,7 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
                         sheetname = sname
 
             # Extract (pin "name" direction (at x y angle) ...) children.
-            # Pin positions in sheet entries are relative to the sheet origin.
+            # A pin's (at x y) is already in absolute page coordinates, like its parent wire.
             for pin_node in child.find_all("pin"):
                 pin_name = pin_node.get_string(0)
                 if pin_name:
@@ -565,11 +592,127 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
     return entries
 
 
+@dataclass(frozen=True, order=True)
+class _NetIdentity:
+    """Rank and name select the display name. Scope distinguishes sheet-local aliases."""
+
+    priority: int
+    name: str
+    scope: str
+
+
+class _ParentNetAliases:
+    """Equivalences between parent nets joined through child-sheet wiring."""
+
+    def __init__(self) -> None:
+        self.parents: dict[_NetIdentity, _NetIdentity] = {}
+
+    def resolve(self, name: _NetIdentity) -> _NetIdentity:
+        while name in self.parents:
+            parent = self.parents[name]
+            self.parents[name] = self.parents.get(parent, parent)
+            name = self.parents[name]
+        return name
+
+    def join(self, first: _NetIdentity, second: _NetIdentity) -> None:
+        first, second = sorted((self.resolve(first), self.resolve(second)))
+        if first != second:
+            self.parents[second] = first
+
+
 def _collect_hierarchy_components(
     sch_path: Path,
     sheet_path: str,
     visited: set[Path] | None = None,
+    *,
+    include_symbol_pins: bool = False,
+    qualified_labels: dict[str, str] | None = None,
 ) -> tuple[list[NetlistComponent], dict[str, list]]:
+    """Resolve names after collecting bindings from every sheet in the hierarchy."""
+    aliases = _ParentNetAliases()
+    components, nets, multi_sheet = _collect_sheet_nets(
+        sch_path,
+        sheet_path,
+        visited,
+        include_symbol_pins=include_symbol_pins,
+        net_scope=sheet_path,
+        parent_nets_by_port={},
+        aliases=aliases,
+        annotated_packages={},
+    )
+    by_identity: dict[_NetIdentity, list] = defaultdict(list)
+    for identity, pins in nets.items():
+        by_identity[aliases.resolve(identity)].extend(pins)
+
+    # In a multi-sheet design a local or hierarchical label is always rendered
+    # with its owning sheet-instance path, so a net's exported name never
+    # depends on whether an unrelated sheet reuses the same text (#10334).
+    # Global and power names stay bare. A single-sheet schematic and the
+    # automatically generated names (priority 4) keep their short spelling
+    # unless they collide, in which case the local one is qualified.
+    counts = Counter(identity.name for identity in by_identity)
+
+    def keeps_bare_name(identity: _NetIdentity) -> bool:
+        if multi_sheet and identity.priority in (2, 3):
+            return False
+        return not identity.scope or counts[identity.name] == 1
+
+    names = {identity: identity.name for identity in by_identity if keeps_bare_name(identity)}
+    used = set(names.values())
+    for identity in by_identity:
+        if identity in names:
+            continue
+        qualified = f"{identity.scope}{identity.name}"
+        name = qualified
+        # A label can itself contain the generated path.
+        suffix = 2
+        while name in used:
+            name = f"{qualified}#{suffix}"
+            suffix += 1
+        names[identity] = name
+        used.add(name)
+        if qualified_labels is not None and identity.priority in (2, 3):
+            qualified_labels[name] = identity.name
+    return components, {names[identity]: pins for identity, pins in by_identity.items()}
+
+
+def _placed_symbol_identity(
+    source: SExp | None, sheet_uuids: tuple[str, ...]
+) -> tuple[str, str, int | None]:
+    """Read the reference, schematic link and optional unit for this sheet placement."""
+    if source is None or not all(sheet_uuids):
+        return "", "", None
+    uuid = source.find_child("uuid")
+    symbol_uuid = uuid.get_string(0) if uuid is not None else None
+    link = "/" + "/".join((*sheet_uuids[1:], symbol_uuid)) if symbol_uuid else ""
+    instances = source.find_child("instances")
+    if instances is not None:
+        # On duplicate placement paths the native exporter uses the last
+        # matching annotation, including on renamed projects and repeated sheets.
+        wanted = "/" + "/".join(sheet_uuids)
+        for project in reversed(instances.find_children("project")):
+            for path in reversed(project.find_children("path")):
+                if (path.get_string(0) or "").rstrip("/") == wanted:
+                    placed = path.find_child("reference")
+                    if placed is not None and (ref := placed.get_string(0)):
+                        unit = path.find_child("unit")
+                        return ref, link, unit.get_int() if unit is not None else None
+    return "", link, None
+
+
+def _collect_sheet_nets(
+    sch_path: Path,
+    sheet_path: str,
+    visited: set[Path] | None,
+    *,
+    include_symbol_pins: bool,
+    net_scope: str,
+    parent_nets_by_port: dict[str, _NetIdentity],
+    aliases: _ParentNetAliases,
+    annotated_packages: dict[tuple[str, str], tuple[int, NetlistComponent]],
+    sheet_uuids: tuple[str, ...] = (),
+    ancestors: frozenset[Path] = frozenset(),
+) -> tuple[list[NetlistComponent], dict[_NetIdentity, list], bool]:
     """Recursively collect components and nets from a schematic hierarchy.
 
     Loads the schematic at *sch_path*, collects its components and
@@ -587,34 +730,57 @@ def _collect_hierarchy_components(
         visited: Set of already-visited *resolved* paths used for
             circular-reference detection.  Callers should pass ``None``;
             the function creates the set internally.
+        include_symbol_pins: Retain library pin definitions and include the
+            pins of placed power symbols in the connectivity.
+        net_scope: Path of sheet instance names used to qualify local nets.
+        parent_nets_by_port: Parent net names at this sheet instance's ports.
+        aliases: Parent nets joined by ports anywhere in this traversal.
 
     Returns:
-        A ``(components, net_dict)`` tuple where *components* is a flat
+        A ``(components, net_dict, has_children)`` tuple where *components* is a flat
         list of :class:`NetlistComponent` from all sheets and *net_dict*
-        maps net names to lists of :class:`PinRef`-like objects (each
-        with ``symbol_ref`` and ``pin`` attributes).
+        maps net identities to lists of :class:`PinRef`-like objects (each
+        with ``symbol_ref`` and ``pin`` attributes). *has_children* indicates
+        whether this sheet declares any sub-sheets.
     """
     from kicad_tools.schematic.models import Schematic
+    from kicad_tools.schematic.models.netlist_mixin import _component_root
 
     if visited is None:
         visited = set()
 
     resolved = sch_path.resolve()
-    if resolved in visited:
+    if resolved in ancestors:
         logger.warning("Circular sheet reference detected, skipping: %s", sch_path)
-        return [], {}
-    visited.add(resolved)
+        return [], {}, False
 
     if not sch_path.exists():
         logger.warning("Sub-sheet file not found, skipping: %s", sch_path)
-        return [], {}
+        return [], {}, False
 
     # Load single sheet
     sch = Schematic.load(str(sch_path))
+    if not sheet_uuids:
+        sheet_uuids = (sch.sheet_uuid,)
+    identities_by_symbol = [
+        _placed_symbol_identity(getattr(sym, "_source_node", None), sheet_uuids)
+        for sym in sch.symbols
+    ]
+    # Old shared sheets with no annotations have only one set of references
+    # and net bindings. A second annotated placement has its own references.
+    if resolved in visited and sch.symbols and not any(ref for ref, _, _ in identities_by_symbol):
+        return [], {}, False
+    visited.add(resolved)
 
     # Collect components from this sheet
     components: list[NetlistComponent] = []
-    for sym in sch.symbols:
+    for sym, (ref, symbol_path, unit) in zip(sch.symbols, identities_by_symbol, strict=True):
+        # Apply this placement before selecting its pins. Two sheets may
+        # place different units of the same package from one shared file.
+        if ref:
+            sym.reference = ref
+        if unit is not None:
+            sym.unit = unit
         footprint = ""
         if hasattr(sym, "footprint") and sym.footprint:
             footprint = sym.footprint
@@ -625,80 +791,107 @@ def _collect_hierarchy_components(
         if sym.symbol_def and hasattr(sym.symbol_def, "lib_id"):
             lib_id = sym.symbol_def.lib_id
 
-        components.append(
-            NetlistComponent(
-                reference=sym.reference,
-                value=sym.value,
-                footprint=footprint,
-                lib_id=lib_id,
-                sheet_path=sheet_path,
-            )
+        component = NetlistComponent(
+            reference=sym.reference,
+            value=sym.value,
+            footprint=footprint,
+            lib_id=lib_id,
+            sheet_path=sheet_path,
+            symbol_path=symbol_path,
+            properties=dict(sym.properties),
+            pins=[ComponentPin(pin.number, pin.name, pin.pin_type) for pin in sym.symbol_def.pins]
+            if include_symbol_pins
+            else [],
         )
+        if sym.reference and not sym.reference.endswith("?"):
+            first_unit, package = annotated_packages.setdefault(
+                (sym.reference, lib_id), (sym.unit, component)
+            )
+            # A placed graphical unit can share the package without contributing pins.
+            # Keep duplicate single-unit references visible to the completeness check.
+            if package is not component and (
+                sym.unit != first_unit or sym.symbol_def.unit_count() > 1
+            ):
+                if not package.footprint:
+                    package.footprint = footprint
+                continue
+        components.append(component)
 
-    # Extract per-sheet connectivity
-    net_dict: dict[str, list] = {}
+    ranked_names: dict[tuple, list[tuple[int, str]]] = {}
+    connectivity, names_by_root, _ = sch._build_connectivity_graph(
+        ranked_names_by_root=ranked_names
+    )
+    identities = {}
+    for candidates in ranked_names.values():
+        priority, winner = candidates[0]
+        identity = _NetIdentity(priority, winner, "" if priority <= 1 else net_scope)
+        identities[winner] = identity
+        # Every global or power name is a connection across sheets, even if
+        # another label won the flat component's display name.
+        for rank, name in candidates:
+            if rank <= 1:
+                # Both power symbols and global labels share this namespace.
+                aliases.join(identity, _NetIdentity(1, name, ""))
+
+    def net_at(pos: tuple[float, float]) -> str | None:
+        root = _component_root(connectivity, (round(pos[0], 2), round(pos[1], 2)))
+        names = names_by_root.get(root)
+        return names[0] if names else None
+
+    # A local label can win the flat sheet's name even though the same wire
+    # reaches a differently named hierarchical port. Bind the physical
+    # component at the port, then carry its parent name through nested sheets.
+    parent_names: dict[str, _NetIdentity] = {}
+    for label in sch.hier_labels:
+        if label.text in parent_nets_by_port:
+            local_net = net_at((label.x, label.y))
+            if local_net:
+                parent_name = parent_nets_by_port[label.text]
+                first_parent = parent_names.setdefault(local_net, parent_name)
+                aliases.join(first_parent, parent_name)
+                identity = identities[local_net]
+                if identity.priority <= 1:
+                    aliases.join(identity, parent_name)
+
+    net_dict: dict[_NetIdentity, list] = {}
     try:
-        sheet_nets = sch.extract_netlist()
-        for net_name, pins in sheet_nets.items():
-            net_dict.setdefault(net_name, []).extend(pins)
+        for name, pins in sch.extract_netlist(include_power_symbols=include_symbol_pins).items():
+            identity = (
+                parent_names.get(name) or identities.get(name) or _NetIdentity(4, name, net_scope)
+            )
+            net_dict.setdefault(identity, []).extend(pins)
     except Exception:
         logger.warning("Failed to extract netlist from %s, skipping connectivity", sch_path)
 
-    # Build a map from sheet pin position -> net name in the parent sheet.
-    # This is used to resolve hierarchical label connections: the parent's
-    # connectivity graph tells us what net each sheet pin is on.
-    parent_connectivity, parent_net_names, _ = sch._build_connectivity_graph()
-
-    def _find_parent(p: tuple) -> tuple:
-        if p not in parent_connectivity:
-            parent_connectivity[p] = p
-        if parent_connectivity[p] != p:
-            parent_connectivity[p] = _find_parent(parent_connectivity[p])
-        return parent_connectivity[p]
-
-    def _net_name_at(pos: tuple) -> str | None:
-        """Find the net name for a position in the parent connectivity graph."""
-        root = _find_parent(pos)
-        # Check all points in the same connected component for net names
-        for point, names in parent_net_names.items():
-            if _find_parent(point) == root and names:
-                return names[0]
-        return None
-
-    # Recurse into sub-sheets with hierarchical label net merging
-    sheet_entries = _get_sheet_entries(sch_path)
-    parent_dir = sch_path.parent
-    for entry in sheet_entries:
-        sub_path = parent_dir / entry.filename
-        sub_sheet_path = f"{sheet_path}{entry.filename}/"
-        sub_components, sub_nets = _collect_hierarchy_components(sub_path, sub_sheet_path, visited)
-        components.extend(sub_components)
-
-        # Build a mapping from hierarchical label name -> parent net name
-        # using the sheet pin positions in the parent's connectivity graph.
-        hlabel_to_parent_net: dict[str, str] = {}
+    entries = _get_sheet_entries(sch_path)
+    for entry in entries:
+        child_bindings = {}
         for pin_name, pin_pos in zip(entry.pin_names, entry.pin_positions, strict=False):
-            parent_net = _net_name_at(pin_pos)
+            parent_net = net_at(pin_pos)
             if parent_net:
-                hlabel_to_parent_net[pin_name] = parent_net
+                child_bindings[pin_name] = parent_names.get(parent_net, identities[parent_net])
+        sub_components, sub_nets, _ = _collect_sheet_nets(
+            sch_path.parent / entry.filename,
+            f"{sheet_path}{entry.filename}/",
+            visited,
+            include_symbol_pins=include_symbol_pins,
+            net_scope=f"{net_scope}{entry.sheetname or Path(entry.filename).stem}/",
+            parent_nets_by_port=child_bindings,
+            aliases=aliases,
+            annotated_packages=annotated_packages,
+            sheet_uuids=(*sheet_uuids, entry.uuid),
+            ancestors=ancestors | {resolved},
+        )
+        components.extend(sub_components)
+        for identity, pins in sub_nets.items():
+            net_dict.setdefault(identity, []).extend(pins)
 
-        # Merge child nets into parent net_dict.  When a child net name
-        # matches a hierarchical label that has a different net name in
-        # the parent context, unify them under the parent's net name.
-        for net_name, pins in sub_nets.items():
-            target_name = hlabel_to_parent_net.get(net_name, net_name)
-            net_dict.setdefault(target_name, []).extend(pins)
-
-        # Also ensure any parent-side pins already in net_dict under the
-        # hierarchical label name are merged if we renamed the net.
-        for hlabel_name, parent_net in hlabel_to_parent_net.items():
-            if hlabel_name != parent_net and hlabel_name in net_dict:
-                net_dict.setdefault(parent_net, []).extend(net_dict.pop(hlabel_name))
-
-    return components, net_dict
+    return components, net_dict, bool(entries)
 
 
-def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
+def build_netlist_from_schematic(
+    sch_path: str | Path, *, include_symbol_pins: bool = False
+) -> Netlist:
     """
     Build a Netlist from a schematic using pure Python extraction.
 
@@ -713,6 +906,8 @@ def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
 
     Args:
         sch_path: Path to .kicad_sch file
+        include_symbol_pins: Populate each component’s library pin definitions
+            across all units and include power symbols and PWR_FLAGs in the nets.
 
     Returns:
         Parsed Netlist object
@@ -726,7 +921,10 @@ def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
         raise FileNotFoundError(f"Schematic not found: {sch_path}")
 
     # Recursively collect components and nets from all sheets
-    components, net_dict = _collect_hierarchy_components(sch_path, "/")
+    qualified_labels: dict[str, str] = {}
+    components, net_dict = _collect_hierarchy_components(
+        sch_path, "/", include_symbol_pins=include_symbol_pins, qualified_labels=qualified_labels
+    )
 
     # Build nets from merged connectivity data
     nets: list[NetlistNet] = []
@@ -745,6 +943,7 @@ def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
         tool="kicad-tools (Python fallback)",
         components=components,
         nets=nets,
+        qualified_labels=qualified_labels,
     )
 
 

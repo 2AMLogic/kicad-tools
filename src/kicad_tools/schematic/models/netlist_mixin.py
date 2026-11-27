@@ -8,12 +8,23 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from .wire_geometry import wire_segments_connect
 
 if TYPE_CHECKING:
-    pass
+    from .elements import PowerSymbol
+
+
+_Node = TypeVar("_Node")
+
+
+def _component_root(parent: dict[_Node, _Node], node: _Node) -> _Node:
+    """Return a union-find representative with path compression."""
+    while (next_node := parent.get(node, node)) != node:
+        parent[node] = parent.get(next_node, next_node)
+        node = parent[node]
+    return node
 
 
 @dataclass(frozen=True)
@@ -103,18 +114,40 @@ def _instance_owns_pin(sym, pin) -> bool:
 class SchematicNetlistMixin:
     """Mixin providing netlist extraction and query operations for Schematic class."""
 
-    def _build_connectivity_graph(self) -> tuple[dict, dict, dict]:
+    power_symbols: list[PowerSymbol]
+
+    def _build_connectivity_graph(
+        self, *, ranked_names_by_root: dict[tuple, list[tuple[int, str]]] | None = None
+    ) -> tuple[dict, dict, dict]:
         """Build a connectivity graph using Union-Find.
+
+        Equal labels join separate wire branches on this sheet, including
+        branches connected transitively through aliases, and each electrical
+        component carries exactly one name chosen by KiCad's priority
+        (global label, power symbol, local label, hierarchical label).  Every
+        netlist API (:meth:`extract_netlist`, :meth:`get_net_for_pin`,
+        :meth:`get_all_pin_nets`) therefore shares one net identity, including
+        for a rail that carries two names (issue #10240). Hierarchical callers
+        can supply ranked_names_by_root to retain every alias and its priority
+        when joining components across sheet boundaries.
 
         Returns:
             Tuple of (parent dict, point_to_net_names dict, point_to_pins dict)
             - parent: Union-Find parent mapping for connectivity
-            - point_to_net_names: Maps points to their net names (from labels/power symbols)
+            - point_to_net_names: Maps one representative point of each named
+              component to its single winning net name
             - point_to_pins: Maps points to PinRef objects at that location
         """
         parent = {}
         point_to_net_names: dict[tuple, list[str]] = {}
         point_to_pins: dict[tuple, list[PinRef]] = {}
+        name_priority: dict[str, int] = {}
+
+        def add_net_name(point: tuple[float, float], name: str, priority: int) -> None:
+            point_to_net_names.setdefault(point, []).append(name)
+            # KiCad selects global labels, power, local labels, then
+            # hierarchical labels. Equal-priority names sort lexically.
+            name_priority[name] = min(name_priority.get(name, priority), priority)
 
         def find(p):
             """Find root of point p in Union-Find structure."""
@@ -235,6 +268,11 @@ class SchematicNetlistMixin:
                 if pos_rounded not in point_to_pins:
                     point_to_pins[pos_rounded] = []
                 point_to_pins[pos_rounded].append(PinRef(symbol_ref=sym.reference, pin=pin.number))
+                # KiCad treats a hidden power-input pin as a global net named
+                # after the pin, as a power symbol is (legacy power symbols
+                # without the library ``(power)`` flag rely on this).
+                if pin.hidden and pin.pin_type == "power_in" and pin.name not in ("", "~"):
+                    add_net_name(pos_rounded, pin.name, 1)
 
                 # Connect to wires (KiCad: pins connect at wire endpoints
                 # or junctions only, never to a wire crossing mid-span)
@@ -246,7 +284,7 @@ class SchematicNetlistMixin:
             # Power symbol net name comes from lib_id (e.g., "power:+3.3V" -> "+3.3V")
             net_name = pwr.net_name
             if net_name is not None:
-                point_to_net_names.setdefault(pwr_pos, []).append(net_name)
+                add_net_name(pwr_pos, net_name, 1)
 
             # Power symbols connect through their pin — same endpoint-or-
             # junction rule as symbol pins.
@@ -256,9 +294,7 @@ class SchematicNetlistMixin:
         for label in self.labels:
             label_pos = (round(label.x, 2), round(label.y, 2))
 
-            if label_pos not in point_to_net_names:
-                point_to_net_names[label_pos] = []
-            point_to_net_names[label_pos].append(label.text)
+            add_net_name(label_pos, label.text, 2)
 
             connect_to_wire(label_pos)
 
@@ -266,9 +302,7 @@ class SchematicNetlistMixin:
         for gl in self.global_labels:
             gl_pos = (round(gl.x, 2), round(gl.y, 2))
 
-            if gl_pos not in point_to_net_names:
-                point_to_net_names[gl_pos] = []
-            point_to_net_names[gl_pos].append(gl.text)
+            add_net_name(gl_pos, gl.text, 0)
 
             connect_to_wire(gl_pos)
 
@@ -276,15 +310,28 @@ class SchematicNetlistMixin:
         for hl in self.hier_labels:
             hl_pos = (round(hl.x, 2), round(hl.y, 2))
 
-            if hl_pos not in point_to_net_names:
-                point_to_net_names[hl_pos] = []
-            point_to_net_names[hl_pos].append(hl.text)
+            add_net_name(hl_pos, hl.text, 3)
 
             connect_to_wire(hl_pos)
 
+        first_point: dict[str, tuple] = {}
+        for point, names in point_to_net_names.items():
+            for name in names:
+                union(point, first_point.setdefault(name, point))
+        # Both physical wires and shared names are now in the same graph.
+        # Keep one representative name per electrical component.
+        point_to_net_names = {}
+        for name in sorted(first_point, key=lambda name: (name_priority[name], name)):
+            root = find(first_point[name])
+            point_to_net_names.setdefault(root, [name])
+            if ranked_names_by_root is not None:
+                ranked_names_by_root.setdefault(root, []).append((name_priority[name], name))
+
         return parent, point_to_net_names, point_to_pins
 
-    def extract_netlist(self, hierarchical: bool = False) -> dict[str, list[PinRef]]:
+    def extract_netlist(
+        self, hierarchical: bool = False, *, include_power_symbols: bool = False
+    ) -> dict[str, list[PinRef]]:
         """Extract netlist from schematic.
 
         Analyzes schematic connectivity to build a mapping from net names
@@ -301,6 +348,9 @@ class SchematicNetlistMixin:
                 byte-identical to previous releases: only the root
                 sheet's wires, symbols, labels, and power symbols are
                 considered.
+            include_power_symbols: Include the pins of placed power symbols and
+                PWR_FLAGs when a caller needs to distinguish an exclusive
+                component connection from one attached to a supply.
 
         Returns:
             Dict mapping net names to list of connected pins.
@@ -341,10 +391,16 @@ class SchematicNetlistMixin:
                     "to walk sub-sheets."
                 )
 
-            _, net_dict = _collect_hierarchy_components(Path(saved_path), "/")
+            _, net_dict = _collect_hierarchy_components(
+                Path(saved_path), "/", include_symbol_pins=include_power_symbols
+            )
             return net_dict
 
         parent, point_to_net_names, point_to_pins = self._build_connectivity_graph()
+        if include_power_symbols:
+            for power in self.power_symbols:
+                pos = (round(power.x, 2), round(power.y, 2))
+                point_to_pins.setdefault(pos, []).append(PinRef(power.reference, "1"))
 
         def find(p):
             """Find root with path compression."""
@@ -464,19 +520,12 @@ class SchematicNetlistMixin:
             Same semantics as :meth:`get_net_for_pin`'s return value.
         """
 
-        def find(p):
-            if p not in parent:
-                parent[p] = p
-            if parent[p] != p:
-                parent[p] = find(parent[p])
-            return parent[p]
-
         # Find the root of this pin's position
-        pin_root = find(pin_pos)
+        pin_root = _component_root(parent, pin_pos)
 
         # Look for net names in the same connected component
         for point, net_names in point_to_net_names.items():
-            if find(point) == pin_root and net_names:
+            if _component_root(parent, point) == pin_root and net_names:
                 return net_names[0]
 
         # No named net — this component carries no label or power symbol.
@@ -496,7 +545,7 @@ class SchematicNetlistMixin:
         component_pins: list[PinRef] = []
         connected_elsewhere = False
         for point, pins in point_to_pins.items():
-            if find(point) != pin_root:
+            if _component_root(parent, point) != pin_root:
                 continue
             component_pins.extend(pins)
             if point != pin_pos:
@@ -583,8 +632,12 @@ class SchematicNetlistMixin:
             if floating), covering every ``(ref, number)`` pair reachable
             by iterating ``self.symbols`` and their ``symbol_def.pins``.
         """
-        parent, point_to_net_names, point_to_pins = self._build_connectivity_graph()
+        return self._pin_nets_from_graph(*self._build_connectivity_graph())
 
+    def _pin_nets_from_graph(
+        self, parent: dict, point_to_net_names: dict, point_to_pins: dict
+    ) -> dict[tuple[str, str], str | None]:
+        """Resolve symbol pins on a graph that may also contain sheet-pin connections."""
         result: dict[tuple[str, str], str | None] = {}
         for sym in self.symbols:  # type: ignore[attr-defined]
             ref = sym.reference

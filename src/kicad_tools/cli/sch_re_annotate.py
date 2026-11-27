@@ -22,10 +22,14 @@ Usage:
 
     # Restart numbering per sheet
     kicad-tools sch re-annotate board.kicad_sch --per-sheet
+
+    # Report parts whose reference order disagrees with position order
+    kicad-tools sch re-annotate board.kicad_sch --check
 """
 
 import re
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from kicad_tools.cli.modify_schematic import create_backup
@@ -42,6 +46,11 @@ _POWER_PREFIXES = {"#PWR", "#FLG"}
 
 # Whitespace token for regex: matches one or more tabs or spaces
 _WS = r"[ \t]+"
+
+_PARTNER_SCOPE = (
+    "Each partner pair connects two-pin parts of different prefixes on the same sheet. "
+    "Power and ground rails, shared nets and parts with multiple candidate connections are skipped."
+)
 
 
 def _format_reference(prefix: str, number: int, unit_suffix: str = "") -> str:
@@ -102,8 +111,8 @@ def _parse_reference(ref: str) -> tuple[str, int | None, str]:
 def _extract_symbols_from_text(text: str) -> list[dict]:
     """Extract symbol references and their positions from schematic text.
 
-    Returns list of dicts with keys: reference, prefix, number, unit_suffix,
-    position_y, position_x, lib_id, uuid, has_project_instance.
+    Each symbol records its reference, prefix, number, unit suffix, position,
+    library ID and UUID. Annotated symbols also record their KiCad unit number.
 
     Two passes are performed:
     1. Main pass: matches symbol blocks ending with an ``(instances)`` block
@@ -142,6 +151,7 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
         at_match = re.search(r"\(at ([\d.eE+-]+) ([\d.eE+-]+)", block)
         ref_match = ref_pattern.search(block)
         uuid_match = re.search(r'\(uuid "([^"]+)"\)', block)
+        unit_match = re.search(r"\(unit (\d+)\)", block)
 
         if not ref_match or not lib_match:
             continue
@@ -161,6 +171,7 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
                 "prefix": prefix,
                 "number": number,
                 "unit_suffix": unit_suffix,
+                "unit": int(unit_match.group(1)) if unit_match else 1,
                 "position_x": x,
                 "position_y": y,
                 "lib_id": lib_id,
@@ -235,6 +246,41 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
         )
 
     return symbols
+
+
+def _mark_package_units(
+    file_symbols: dict[Path, list[dict]], prefixes: list[str] | None, *, paired_board: bool
+) -> None:
+    """Recognize native units of the same footprint across the schematic hierarchy."""
+    by_reference: dict[str, list[dict]] = defaultdict(list)
+    for symbols in file_symbols.values():
+        for sym in symbols:
+            if (
+                sym["number"] is None
+                or sym["reference"].startswith("#")
+                or (prefixes is not None and sym["prefix"] not in prefixes)
+            ):
+                continue
+            if sym["unit_suffix"]:
+                # Paired mode looks up the exact footprint spelling, including leading zeros.
+                # Standalone mode already groups explicit suffixes numerically in _assign_numbers.
+                if paired_board:
+                    sym["package_ref"] = sym["reference"].removesuffix(sym["unit_suffix"])
+            else:
+                by_reference[sym["reference"]].append(sym)
+
+    for ref, units in by_reference.items():
+        if len(units) < 2:
+            continue
+        if len({s["lib_id"] for s in units}) != 1 or len({s["unit"] for s in units}) != len(units):
+            if paired_board:
+                raise ValueError(
+                    f"Ambiguous schematic reference '{ref}': expected distinct units of one symbol"
+                )
+            # Standalone reannotation keeps its handling of ordinary duplicate references.
+            continue
+        for unit in units:
+            unit["package_ref"] = ref
 
 
 def _apply_reference_rename(text: str, old_ref: str, new_ref: str) -> str:
@@ -488,6 +534,8 @@ def run_re_annotate(
     format: str = "text",
     unannotated_only: bool = False,
     include_power: bool = False,
+    check: bool = False,
+    pcb_path: Path | None = None,
 ) -> int:
     """Run the re-annotate operation.
 
@@ -503,6 +551,13 @@ def run_re_annotate(
             references, leaving already-assigned references unchanged.
         include_power: If True, also annotate ``#PWR?`` and ``#FLG?`` power
             symbols (excluded by default).
+        check: If True, report reference numbers out of schematic position
+            order and reversed reference ordering between electrical partners.
+            Either finding returns exit code 1.
+            Files are never modified under ``--check``.
+        pcb_path: If set, apply the reference mapping to this board's footprints.
+            A paired write prepares any requested backups, then saves the board
+            followed by the schematics. A failed write triggers rollback.
 
     Returns:
         0 on success, 1 on error.
@@ -510,6 +565,19 @@ def run_re_annotate(
     if not schematic_path.exists():
         print(f"Error: File not found: {schematic_path}", file=sys.stderr)
         return 1
+
+    pcb_board = None
+    if pcb_path is not None:
+        from kicad_tools.schema.pcb import PCB
+
+        if not pcb_path.exists():
+            print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
+            return 1
+        try:
+            pcb_board = PCB.load(pcb_path)
+        except Exception as e:
+            print(f"Error loading PCB {pcb_path}: {e}", file=sys.stderr)
+            return 1
 
     # Collect all schematic files in hierarchy order
     all_files = _collect_schematic_files(schematic_path)
@@ -538,8 +606,11 @@ def run_re_annotate(
     # The mapping is now keyed by UUID to handle unannotated refs (R?, C?)
     # that share the same reference string across multiple components.
 
-    if per_sheet:
-        uuid_mapping = _build_per_sheet_mapping(
+    try:
+        if not check and not unannotated_only:
+            _mark_package_units(file_symbols, prefixes, paired_board=pcb_path is not None)
+        build_mapping = _build_per_sheet_mapping if per_sheet else _build_continuous_mapping
+        uuid_mapping = build_mapping(
             all_files,
             file_symbols,
             prefixes,
@@ -547,15 +618,62 @@ def run_re_annotate(
             unannotated_only=unannotated_only,
             include_power=include_power,
         )
-    else:
-        uuid_mapping = _build_continuous_mapping(
-            all_files,
-            file_symbols,
-            prefixes,
-            start_from,
-            unannotated_only=unannotated_only,
-            include_power=include_power,
-        )
+    except ValueError as e:
+        print(f"Error: {e}. No files were modified.", file=sys.stderr)
+        return 1
+
+    if check:
+        import json
+
+        uuid_to_file: dict[str, Path] = {}
+        for sch_file, syms in file_symbols.items():
+            for sym in syms:
+                uid = sym.get("uuid")
+                if uid:
+                    uuid_to_file[uid] = sch_file
+        flagged = _out_of_order_parts(uuid_mapping, uuid_to_file, per_sheet)
+        partners = None
+        if not unannotated_only and (prefixes is None or len(set(prefixes)) >= 2):
+            try:
+                partners = _partner_inversions(schematic_path, prefixes, per_sheet)
+            except (OSError, ValueError) as exc:
+                message = f"Cannot check schematic connectivity: {exc}"
+                if format == "json":
+                    print(json.dumps({"check": True, "error": message}))
+                else:
+                    print(message, file=sys.stderr)
+                return 1
+        if format == "json":
+            report: dict = {"check": True, "out_of_order": flagged, "total": len(flagged)}
+            if partners is not None:
+                report.update(partner_inversions=partners, partner_scope=_PARTNER_SCOPE)
+                report["total"] += len(partners)
+            print(json.dumps(report, indent=2))
+        elif flagged:
+            print(
+                f"Reference order check: {len(flagged)} part(s) disagree "
+                "with schematic position order:"
+            )
+            print()
+            check_by_prefix: dict[str, list[tuple[str, str]]] = {}
+            for item in flagged:
+                check_by_prefix.setdefault(item["prefix"], []).append((item["old"], item["new"]))
+            for prefix in sorted(check_by_prefix):
+                print(f"  {prefix}:")
+                for old, new in check_by_prefix[prefix]:
+                    print(f"    {old} -> {new}")
+            print()
+        else:
+            print("All reference numbers agree with schematic position order.")
+        if format != "json" and partners is not None:
+            if partners:
+                print("Electrical partners with reversed reference order:")
+                for pair in partners:
+                    print(f"  {'/'.join(pair['parts'])} on {pair['net']}")
+            else:
+                print("Electrical partners agree in reference order.")
+            print(_PARTNER_SCOPE)
+        return 1 if flagged or partners else 0
 
     # Filter out identity mappings
     effective_mapping = {
@@ -568,18 +686,102 @@ def run_re_annotate(
             # even when there is nothing to do.
             import json
 
-            print(json.dumps({"mappings": [], "total": 0, "dry_run": dry_run}, indent=2))
+            output: dict = {"mappings": [], "total": 0, "dry_run": dry_run}
+            if pcb_path is not None:
+                output["pcb"] = {
+                    "path": str(pcb_path),
+                    "renamed": 0,
+                    "warnings": [],
+                }
+            print(json.dumps(output, indent=2))
         elif not uuid_mapping:
             print("No references to renumber.")
         else:
             print("All references are already sequential. No changes needed.")
         return 0
 
-    # Phase 3: Output mapping / apply changes
-    if format == "json":
+    # Phase 2b: prepare the board-side rename plan in memory. A failed
+    # plan leaves both inputs intact. Phase 5 writes the prepared board
+    # and schematics under the same rollback handling.
+    board_mapping: dict[str, str] = {}
+    pcb_warnings: list[str] = []
+
+    if pcb_board is not None:
+        from kicad_tools.cli.commands.pcb import (
+            _build_rename_plan,
+            _update_footprint_reference,
+        )
+
+        existing_refs = {fp.reference for fp in pcb_board.footprints}
+
+        # Board footprints carry base references (no unit suffix), so
+        # multi-unit schematic refs (U1A -> U2A) collapse to U1 -> U2.
+        targets_by_source: dict[str, str] = {}
+        for info in sorted(uuid_mapping.values(), key=lambda i: i["new"]):
+            if info["unannotated"]:
+                pcb_warnings.append(
+                    f"Skipping '{info['old']}' on the board: unannotated reference is ambiguous"
+                )
+                continue
+            # Preserve the exact footprint spelling, including leading zeros.
+            _, _, unit_suffix = _parse_reference(info["old"])
+            old_base = info["old"].removesuffix(unit_suffix)
+            new_base = info["new"].removesuffix(unit_suffix)
+            if old_base in targets_by_source and targets_by_source[old_base] != new_base:
+                print(
+                    f"Error: Units of '{old_base}' would receive different references "
+                    f"({targets_by_source[old_base]} and {new_base}). No files were modified.",
+                    file=sys.stderr,
+                )
+                return 1
+            targets_by_source[old_base] = new_base
+
+        board_mapping = {old: new for old, new in targets_by_source.items() if old != new}
+
+        # Two different footprints must never receive the same new reference
+        # (e.g. --per-sheet restarts numbering on every sheet).  Reject before
+        # any file is written.
+        by_target: dict[str, list[str]] = {}
+        for old_base, new_base in board_mapping.items():
+            by_target.setdefault(new_base, []).append(old_base)
+        dup_targets = {t: srcs for t, srcs in by_target.items() if len(srcs) > 1}
+        if dup_targets:
+            for target, srcs in sorted(dup_targets.items()):
+                print(
+                    f"Error: Footprints {', '.join(sorted(srcs))} would all be renamed "
+                    f"to '{target}' on the board; refusing to write duplicate "
+                    f"references (--per-sheet numbering cannot be paired with --pcb "
+                    f"when sheets reuse numbers). No files were modified.",
+                    file=sys.stderr,
+                )
+            return 1
+
+        # A mapped old ref absent from the board is a warning, not an error.
+        for old_base in [r for r in board_mapping if r not in existing_refs]:
+            pcb_warnings.append(f"Reference '{old_base}' not found in PCB")
+            del board_mapping[old_base]
+
+        if board_mapping:
+            rename_steps, plan_warnings, plan_errors = _build_rename_plan(
+                board_mapping, existing_refs
+            )
+            pcb_warnings.extend(plan_warnings)
+            if plan_errors:
+                for err in plan_errors:
+                    print(f"Error: {err}", file=sys.stderr)
+                return 1
+            for step_from, step_to, _via_temp in rename_steps:
+                if not _update_footprint_reference(pcb_board, step_from, step_to):
+                    print(
+                        f"Error: Failed to rename '{step_from}' -> '{step_to}' in PCB",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+    def _emit_json_result() -> None:
         import json
 
-        output = {
+        payload: dict = {
             "mappings": [
                 {"old": info["old"], "new": info["new"], "uuid": uid}
                 for uid, info in sorted(effective_mapping.items(), key=lambda x: x[1]["new"])
@@ -587,8 +789,16 @@ def run_re_annotate(
             "total": len(effective_mapping),
             "dry_run": dry_run,
         }
-        print(json.dumps(output, indent=2))
-    else:
+        if pcb_path is not None:
+            payload["pcb"] = {
+                "path": str(pcb_path),
+                "renamed": len(board_mapping),
+                "warnings": pcb_warnings,
+            }
+        print(json.dumps(payload, indent=2))
+
+    # Phase 3: Output mapping / apply changes
+    if format != "json":
         print(f"Re-annotation mapping ({len(effective_mapping)} changes):")
         print()
 
@@ -603,10 +813,20 @@ def run_re_annotate(
             print(f"  {prefix}:")
             for old, new in changes:
                 print(f"    {old} -> {new}")
+
+        if pcb_path is not None:
+            print()
+            print(f"  PCB {pcb_path} ({len(board_mapping)} footprint rename(s)):")
+            for old, new in sorted(board_mapping.items()):
+                print(f"    {old} -> {new}")
+            for w in pcb_warnings:
+                print(f"  Warning: {w}")
         print()
 
     if dry_run:
-        if format == "text":
+        if format == "json":
+            _emit_json_result()
+        elif format == "text":
             print("Dry run: no changes made.")
         return 0
 
@@ -674,26 +894,239 @@ def run_re_annotate(
 
         modified_files[sch_file] = current_text
 
-    # Phase 5: Write modified files
-    if modified_files:
-        for sch_file, new_text in modified_files.items():
-            if backup:
-                bak = create_backup(sch_file)
-                if format == "text":
-                    print(f"  Backup: {bak.name}")
-            try:
-                sch_file.write_text(new_text, encoding="utf-8")
-            except OSError as e:
-                print(f"Error writing {sch_file}: {e}", file=sys.stderr)
-                return 1
+    # Phase 5: Write the board first, then the schematics. A failed write
+    # triggers restoration from the original bytes. Report any file whose
+    # original contents could not be restored.
+    written: list[tuple[Path, bytes]] = []  # (path, original bytes)
 
-    if format == "text":
-        print(
+    def _matches_original(path: Path, original: bytes) -> bool:
+        try:
+            return path.read_bytes() == original
+        except OSError:
+            # An unreadable or missing file can still be restored.
+            return False
+
+    def _rollback() -> None:
+        failed = False
+        for path, original in reversed(written):
+            if _matches_original(path, original):
+                continue
+            try:
+                path.write_bytes(original)
+            except OSError as rb_err:
+                if _matches_original(path, original):
+                    continue
+                failed = True
+                print(
+                    f"Error: could not restore {path} after failed write: {rb_err}",
+                    file=sys.stderr,
+                )
+        if failed:
+            print(
+                "The source files may be out of sync. Check the files listed above.",
+                file=sys.stderr,
+            )
+        elif written:
+            print("All source files match their original contents.", file=sys.stderr)
+
+    write_pcb = pcb_path is not None and pcb_board is not None and bool(board_mapping)
+
+    # Create every requested backup before the first live write, so a backup
+    # that cannot be created (e.g. read-only parent directory) leaves the
+    # board and all schematics untouched.
+    if backup:
+        backup_targets: list[Path] = []
+        if write_pcb and pcb_path is not None:
+            backup_targets.append(pcb_path)
+        backup_targets.extend(modified_files)
+        for backup_target in backup_targets:
+            try:
+                bak = create_backup(backup_target)
+            except Exception as e:
+                print(f"Error creating backup of {backup_target}: {e}", file=sys.stderr)
+                print("No files were modified.", file=sys.stderr)
+                return 1
+            if format == "text":
+                print(f"  Backup: {bak.name}")
+
+    if write_pcb and pcb_path is not None and pcb_board is not None:
+        try:
+            original_pcb = pcb_path.read_bytes()
+            written.append((pcb_path, original_pcb))
+            pcb_board.save(pcb_path)
+        except Exception as e:
+            print(f"Error writing {pcb_path}: {e}", file=sys.stderr)
+            _rollback()
+            return 1
+
+    for sch_file, new_text in modified_files.items():
+        try:
+            written.append((sch_file, sch_file.read_bytes()))
+            sch_file.write_text(new_text, encoding="utf-8")
+        except OSError as e:
+            print(f"Error writing {sch_file}: {e}", file=sys.stderr)
+            _rollback()
+            return 1
+
+    if format == "json":
+        _emit_json_result()
+    elif format == "text":
+        message = (
             f"Re-annotated {len(effective_mapping)} reference(s) "
             f"across {len(modified_files)} file(s)."
         )
+        if pcb_path is not None and board_mapping:
+            message += f" Renamed {len(board_mapping)} footprint reference(s) in {pcb_path}."
+        print(message)
 
     return 0
+
+
+def _inversion_indices(numbers: list[int]) -> list[int]:
+    """Indices that have a greater number before them or a smaller number after."""
+    prefix_max = numbers.copy()
+    suffix_min = numbers.copy()
+    for i in range(1, len(numbers)):
+        prefix_max[i] = max(prefix_max[i - 1], numbers[i])
+    for i in range(len(numbers) - 2, -1, -1):
+        suffix_min[i] = min(suffix_min[i + 1], numbers[i])
+    return [i for i, n in enumerate(numbers) if prefix_max[i] > n or suffix_min[i] < n]
+
+
+def _partner_inversions(
+    schematic_path: Path, prefixes: list[str] | None, per_sheet: bool
+) -> list[dict] | None:
+    """Report each electrical pair whose two prefixes rank it in opposite order.
+
+    None preserves the original position-only report when there are no
+    eligible pairs. An empty list means eligible partners agreed in order.
+    """
+    from kicad_tools.operations.netlist import build_netlist_from_schematic
+    from kicad_tools.router.net_class import (
+        is_ground_rail_name,
+        is_power_rail_name,
+        is_power_rail_pin,
+    )
+
+    netlist = build_netlist_from_schematic(schematic_path, include_symbol_pins=True)
+    occurrences = Counter(comp.reference for comp in netlist.components)
+    sheets = {comp.reference: comp.sheet_path for comp in netlist.components}
+    # Count library pins even when a wire or an entire unit is unplaced.
+    # Duplicate references cannot identify an unambiguous partner.
+    refs = {
+        comp.reference: _parse_reference(comp.reference)
+        for comp in netlist.components
+        if occurrences[comp.reference] == 1
+        and not comp.reference.startswith("#")
+        and len({pin.number for pin in comp.pins}) == 2
+    }
+    supply_pins = {
+        (comp.reference, pin.number)
+        for comp in netlist.components
+        for pin in comp.pins
+        if is_power_rail_pin(pin.pin_type, pin.name)
+    }
+    candidates: list[tuple[str, str, str]] = []
+    candidate_counts: Counter[str] = Counter()
+    for net in netlist.nets:
+        if len(net.nodes) != 2 or is_ground_rail_name(net.name) or is_power_rail_name(net.name):
+            continue
+        if any((node.reference, node.pin) in supply_pins for node in net.nodes):
+            continue
+        left, right = (node.reference for node in net.nodes)
+        if left not in refs or right not in refs or refs[left][0] == refs[right][0]:
+            continue
+        if refs[left][0] > refs[right][0]:
+            left, right = right, left
+        candidates.append((left, right, net.name))
+        candidate_counts.update((left, right))
+
+    groups: dict[tuple[str, str, str], list[tuple[int, int, str, str, str]]] = defaultdict(list)
+    for left, right, net_name in candidates:
+        # Count every candidate before applying the user's prefix filter.
+        if candidate_counts[left] != 1 or candidate_counts[right] != 1:
+            continue
+        if sheets[left] != sheets[right]:
+            continue
+        left_prefix, left_number, left_unit = refs[left]
+        right_prefix, right_number, right_unit = refs[right]
+        if left_number is None or right_number is None or left_unit or right_unit:
+            continue
+        if prefixes is not None and (left_prefix not in prefixes or right_prefix not in prefixes):
+            continue
+        scope = sheets[left] if per_sheet else ""
+        groups[scope, left_prefix, right_prefix].append(
+            (left_number, right_number, left, right, net_name)
+        )
+
+    if not groups:
+        return None
+    result = []
+    for group in sorted(groups):
+        pairs = sorted(groups[group])
+        # Sort by both numbers so ties in either prefix do not create an inversion.
+        for index in _inversion_indices([pair[1] for pair in pairs]):
+            _, _, left, right, net_name = pairs[index]
+            result.append({"parts": [left, right], "net": net_name})
+    return result
+
+
+def _out_of_order_parts(
+    uuid_mapping: dict[str, dict],
+    uuid_to_file: dict[str, Path],
+    per_sheet: bool,
+) -> list[dict]:
+    """Return mapping entries whose number order disagrees with position order.
+
+    Walks the mapping in insertion order — the same order the mapping
+    builders enumerated the symbols (file order, then top-to-bottom,
+    left-to-right position), which is also the order the new numbers are
+    assigned in — and, per prefix, flags every part that participates in an
+    inversion: a part whose current number is strictly greater than a later
+    part's number, or strictly less than an earlier part's number.  Parts
+    with equal numbers (multi-unit components sharing a base) and
+    unannotated references (``R?``) are not ranked.
+
+    Under *per_sheet* the comparison is scoped per file, because per-sheet
+    numbering restarts and cross-sheet number comparisons are meaningless.
+
+    Returns:
+        List of ``{"prefix", "old", "new", "uuid"}`` dicts in mapping
+        (position) order, reusing the mapping builders' assignment — no
+        second ordering implementation.
+    """
+    entries: list[tuple[str, str, int]] = []  # (uuid, prefix, old_number)
+    for uid, info in uuid_mapping.items():
+        if not uid:
+            continue
+        prefix, number, _ = _parse_reference(info["old"])
+        if number is None:
+            continue
+        entries.append((uid, prefix, number))
+
+    if per_sheet:
+        scopes: list[list[tuple[str, str, int]]] = []
+        by_file: dict[Path, list[tuple[str, str, int]]] = {}
+        for uid, prefix, number in entries:
+            by_file.setdefault(uuid_to_file.get(uid, Path("")), []).append((uid, prefix, number))
+        scopes.extend(by_file.values())
+    else:
+        scopes = [entries]
+
+    flagged: set[str] = set()
+    for scope in scopes:
+        by_prefix: dict[str, list[tuple[str, int]]] = {}
+        for uid, prefix, number in scope:
+            by_prefix.setdefault(prefix, []).append((uid, number))
+        for seq in by_prefix.values():
+            flagged.update(seq[i][0] for i in _inversion_indices([n for _, n in seq]))
+
+    results = []
+    for uid, info in uuid_mapping.items():
+        if uid in flagged:
+            prefix, _, _ = _parse_reference(info["old"])
+            results.append({"prefix": prefix, "old": info["old"], "new": info["new"], "uuid": uid})
+    return results
 
 
 def _build_continuous_mapping(
@@ -740,6 +1173,7 @@ def _build_per_sheet_mapping(
 ) -> dict[str, dict]:
     """Build a per-sheet UUID-keyed mapping, restarting numbering per file."""
     mapping: dict[str, dict] = {}
+    package_targets: dict[str, str] = {}
 
     for sch_file in all_files:
         syms = file_symbols[sch_file]
@@ -751,6 +1185,18 @@ def _build_per_sheet_mapping(
             unannotated_only=unannotated_only,
             include_power=include_power,
         )
+        # One package can span sheets even when their counters restart independently.
+        for sym in syms:
+            package = sym.get("package_ref")
+            if package is None:
+                continue
+            target = sheet_mapping[sym.get("uuid") or sym["reference"]]["new"].removesuffix(
+                sym["unit_suffix"]
+            )
+            if package_targets.setdefault(package, target) != target:
+                raise ValueError(
+                    f"Units of '{package}' would receive different references with --per-sheet"
+                )
         mapping.update(sheet_mapping)
 
     return mapping
@@ -792,8 +1238,8 @@ def _assign_numbers(
 
     # Track next number per prefix
     counters: dict[str, int] = {}
-    # Track base number assignments for multi-unit: (prefix, old_number) -> new_number
-    multi_unit_assigned: dict[tuple[str, int | None], int] = {}
+    # A package's units share one number even when their symbols are far apart.
+    multi_unit_assigned: dict[str, int] = {}
 
     for sym in symbols:
         ref = sym["reference"]
@@ -814,19 +1260,17 @@ def _assign_numbers(
         unannotated = number is None
 
         # Handle multi-unit components
-        if unit_suffix:
-            key = (prefix, number)
-            if key in multi_unit_assigned:
-                new_number = multi_unit_assigned[key]
-            else:
-                new_number = counters.get(prefix, start_from)
-                counters[prefix] = new_number + 1
-                multi_unit_assigned[key] = new_number
-            new_ref = _format_reference(prefix, new_number, unit_suffix)
+        package_ref = sym.get("package_ref")
+        if package_ref is None and unit_suffix:
+            package_ref = f"{prefix}{number}"
+        if package_ref in multi_unit_assigned:
+            new_number = multi_unit_assigned[package_ref]
         else:
             new_number = counters.get(prefix, start_from)
             counters[prefix] = new_number + 1
-            new_ref = _format_reference(prefix, new_number)
+            if package_ref is not None:
+                multi_unit_assigned[package_ref] = new_number
+        new_ref = _format_reference(prefix, new_number, unit_suffix)
 
         mapping[sym_uuid] = {
             "old": ref,
@@ -973,6 +1417,18 @@ def main(argv: list[str] | None = None):
         help="Also annotate unannotated #PWR? and #FLG? power symbols",
     )
     parser.add_argument(
+        "--pcb",
+        type=Path,
+        metavar="BOARD",
+        help="Also apply the renumbering to footprint references in this .kicad_pcb",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check reference numbers in schematic position order and across electrical "
+        "partners. Exit 1 on either disagreement. Files are read-only.",
+    )
+    parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
@@ -995,6 +1451,8 @@ def main(argv: list[str] | None = None):
         format=args.format,
         unannotated_only=args.unannotated_only,
         include_power=args.include_power,
+        pcb_path=args.pcb,
+        check=args.check,
     )
 
 

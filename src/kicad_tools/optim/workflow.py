@@ -440,6 +440,7 @@ class OptimizationWorkflow:
         callback: Callable[[int, float], None] | None = None,
     ) -> OptimizationResult:
         """Run evolutionary (genetic algorithm) optimization."""
+        from kicad_tools.core.geometry import rotate_pad_offset
         from kicad_tools.optim import EvolutionaryPlacementOptimizer, add_keepout_zones
         from kicad_tools.optim.evolutionary import EvolutionaryConfig
 
@@ -478,6 +479,13 @@ class OptimizationWorkflow:
             callback=evo_callback,
         )
 
+        optimizer._apply_individual(best)
+        # from_pcb builds one component per footprint and one pin per pad in file order.
+        # Recompute the winner's pin centers with the rotation KiCad applies on save.
+        for component, footprint in zip(optimizer.components, self.pcb.footprints, strict=True):
+            for pin, pad in zip(component.pins, footprint.pads, strict=True):
+                dx, dy = rotate_pad_offset(*pad.position, component.rotation)
+                pin.x, pin.y = component.x + dx, component.y + dy
         self._optimizer = optimizer
 
         return OptimizationResult(
@@ -485,8 +493,7 @@ class OptimizationWorkflow:
             strategy="evolutionary",
             components=len(optimizer.components),
             iterations=self.config.generations,
-            wire_length_mm=optimizer.total_wire_length(),
-            energy=optimizer.compute_energy(),
+            wire_length_mm=optimizer._total_wire_length(),
             message=f"Best fitness: {best.fitness:.2f}",
         )
 

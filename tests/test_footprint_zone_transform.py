@@ -30,7 +30,7 @@ from kicad_tools.recovery import (
     StrategyApplicator,
     StrategyType,
 )
-from kicad_tools.schema.pcb import PCB, Footprint
+from kicad_tools.schema.pcb import PCB, Footprint, _flip_side_layer
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "fp_zone_transform"
 BASE = FIXTURES / "base.kicad_pcb"
@@ -221,6 +221,165 @@ def test_footprint_rule_areas_follow_the_move():
     xs = [x + ox for x, _ in area.polygon]
     ys = [y + oy for _, y in area.polygon]
     assert (min(xs), max(xs), min(ys), max(ys)) == pytest.approx((121, 127, 117, 123))
+
+
+_KEEPOUT_MOD = """(footprint "Keepout"
+  (layer "F.Cu")
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask"))
+  (zone (net 0) (net_name "") (layer "F.Cu") (hatch edge 0.5)
+    (keepout (tracks not_allowed) (vias not_allowed) (pads allowed)
+      (copperpour not_allowed) (footprints allowed))
+    (polygon (pts (xy -3 -1) (xy 3 -1) (xy 3 -4) (xy -3 -4)))
+  )
+)
+"""
+
+
+@pytest.mark.parametrize(
+    ("rotation", "layer", "expected"),
+    [
+        (0, "F.Cu", [(-3, -1), (3, -1), (3, -4), (-3, -4)]),
+        (90, "F.Cu", [(-1, 3), (-1, -3), (-4, -3), (-4, 3)]),
+        (90, "B.Cu", [(1, 3), (1, -3), (4, -3), (4, 3)]),
+    ],
+)
+def test_add_footprint_from_file_places_zones_with_the_footprint(
+    tmp_path, rotation, layer, expected
+):
+    """A library zone lands at the placed footprint, not at the sheet origin (Issue #8958)."""
+    mod = tmp_path / "Keepout.kicad_mod"
+    mod.write_text(_KEEPOUT_MOD, encoding="utf-8")
+    pcb = PCB.create(width=100, height=100)
+    fp = pcb.add_footprint_from_file(mod, "U1", 50, 50, rotation=rotation, layer=layer)
+    ax, ay = fp.sheet_position
+    [zone] = fp._sexp_node.find_children("zone")
+    xys = zone.find_child("polygon").find_child("pts")
+    pts = [(xy.get_float(0), xy.get_float(1)) for xy in xys]
+    _assert_points(pts, [(ax + x, ay + y) for x, y in expected], TOL)
+
+
+@pytest.mark.parametrize(
+    ("zone_layers", "side", "expected_layers"),
+    [
+        ('(layer "In1.Cu")', "F.Cu", ["In1.Cu"]),
+        ('(layer "In1.Cu")', "B.Cu", ["In2.Cu"]),
+        ('(layers "F.Cu" "In1.Cu")', "F.Cu", ["F.Cu", "In1.Cu"]),
+        ('(layers "F.Cu" "In1.Cu")', "B.Cu", ["B.Cu", "In2.Cu"]),
+    ],
+)
+def test_add_footprint_from_file_flips_inner_zone_layers(
+    tmp_path, zone_layers, side, expected_layers
+):
+    """On a back placement KiCad mirrors inner copper through the stack
+    (In1 <-> In2 on four layers), as its native placement does (Issue #8958)."""
+    mod = tmp_path / "Keepout.kicad_mod"
+    mod.write_text(_KEEPOUT_MOD.replace('(layer "F.Cu") (hatch', f"{zone_layers} (hatch"))
+    pcb = PCB.create(width=100, height=100, layers=4)
+    fp = pcb.add_footprint_from_file(mod, "U1", 50, 50, rotation=90, layer=side)
+    ax, ay = fp.sheet_position
+    [zone] = fp._sexp_node.find_children("zone")
+    node = zone.find_child("layers") or zone.find_child("layer")
+    assert [c.value for c in node.children] == expected_layers
+    xys = zone.find_child("polygon").find_child("pts")
+    pts = [(xy.get_float(0), xy.get_float(1)) for xy in xys]
+    local = (
+        [(1, 3), (1, -3), (4, -3), (4, 3)]
+        if side == "B.Cu"
+        else [(-1, 3), (-1, -3), (-4, -3), (-4, 3)]
+    )
+    _assert_points(pts, [(ax + x, ay + y) for x, y in local], TOL)
+
+
+_STACK_ZONE_MOD = """(footprint "StackZones"
+  (layer "F.Cu")
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask"))
+  (zone (layer "In1.Cu") (keepout (tracks not_allowed))
+    (polygon (pts (xy 0 0) (xy 3 0) (xy 0 2))))
+  (zone (layers "In1.Cu" "F.Cu")
+    (polygon (pts (xy 0 0) (xy 3 0) (xy 0 2)))
+    (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 2 0) (xy 0 1)))
+    (filled_polygon (layer "In1.Cu") (pts (xy 0 0) (xy 1 0) (xy 0 1))))
+  (zone (layers "F&B.Cu") (keepout (vias not_allowed))
+    (polygon (pts (xy 0 0) (xy 2 0) (xy 0 1)))))"""
+
+
+def _assert_stack_zone_layers(fp, inner, outer):
+    keepout, pour, neutral = fp._zones
+    assert (keepout.layer, keepout.layers) == (inner, [])
+    assert (pour.layer, pour.layers, pour.filled_polygon_layers) == (
+        inner,
+        [inner, outer],
+        [outer, inner],
+    )
+    assert (neutral.layer, neutral.layers) == ("F&B.Cu", ["F&B.Cu"])
+
+    raw_keepout, raw_pour, raw_neutral = fp._sexp_node.find_children("zone")
+    assert raw_keepout.find_child("layer").values == [inner]
+    assert raw_pour.find_child("layers").values == [inner, outer]
+    assert [
+        p.find_child("layer").get_string(0) for p in raw_pour.find_children("filled_polygon")
+    ] == [outer, inner]
+    assert raw_neutral.find_child("layers").values == ["F&B.Cu"]
+
+
+@pytest.mark.parametrize(("layers", "back_inner"), [(4, "In2.Cu"), (6, "In4.Cu")])
+@pytest.mark.parametrize("reload_first", [False, True], ids=["just-inserted", "loaded"])
+def test_placed_zones_flip_through_the_board_stack(tmp_path, layers, back_inner, reload_first):
+    path = tmp_path / "board.kicad_pcb"
+    if layers == 4:
+        pcb = PCB.create(layers=4)
+    else:
+        # PCB.create builds two or four layers; PCB.load also accepts six.
+        path.write_text("""(kicad_pcb (version 20260306) (generator pcbnew)
+          (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (4 "In1.Cu" power)
+            (6 "In2.Cu" mixed) (8 "In3.Cu" jumper) (10 "In4.Cu" signal)))""")
+        pcb = PCB.load(path)
+    mod = tmp_path / "StackZones.kicad_mod"
+    mod.write_text(_STACK_ZONE_MOD)
+    pcb.add_footprint_from_file(mod, "AE1", 20, 30, rotation=90)
+    pcb.add_footprint_from_file(mod, "AE2", 20, 30, rotation=90, layer="B.Cu")
+    if reload_first:
+        pcb.save(path)
+        pcb = PCB.load(path)
+
+    fp = _ae1(pcb)
+    fp.layer = "B.Cu"
+    _assert_stack_zone_layers(fp, back_inner, "B.Cu")
+    direct = pcb.get_footprint("AE2")
+    _assert_stack_zone_layers(direct, back_inner, "B.Cu")
+    assert next(z for z in pcb.footprint_rule_areas if z.parent_reference == "AE1") is fp._zones[0]
+    # The parsed keepout is board-relative, including on a centered board.
+    _assert_points(fp._zones[0].polygon, [(20, 30), (20, 27), (18, 30)], TOL)
+    _assert_points(fp._zones[0].polygon, direct._zones[0].polygon, TOL)
+
+    pcb.save(path)
+    pcb = PCB.load(path)
+    fp = _ae1(pcb)
+    _assert_stack_zone_layers(fp, back_inner, "B.Cu")
+    fp.position = (25, 35)
+    fp.rotation = 30
+    _assert_stack_zone_layers(fp, back_inner, "B.Cu")
+    _mirror(pcb)
+    _assert_stack_zone_layers(fp, "In1.Cu", "F.Cu")
+    pcb.save(path)
+    _assert_stack_zone_layers(_ae1(PCB.load(path)), "In1.Cu", "F.Cu")
+
+
+@pytest.mark.parametrize(
+    ("name", "copper_layers", "expected"),
+    [
+        ("F.Cu", 4, "B.Cu"),
+        ("In1.Cu", 2, "In1.Cu"),
+        ("In1.Cu", 4, "In2.Cu"),
+        ("In2.Cu", 4, "In1.Cu"),
+        ("In1.Cu", 6, "In4.Cu"),
+        ("In2.Cu", 6, "In3.Cu"),
+        ("*.Cu", 6, "*.Cu"),
+    ],
+)
+def test_flip_side_layer_mirrors_inner_copper(name, copper_layers, expected):
+    """Pinned against KiCad 10.0.8 DRC on 4- and 6-layer boards (Issue #8958)."""
+    assert _flip_side_layer(name, copper_layers) == expected
 
 
 def test_written_coordinates_keep_six_decimals(tmp_path):

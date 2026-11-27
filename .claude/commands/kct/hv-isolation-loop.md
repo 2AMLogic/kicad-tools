@@ -17,15 +17,13 @@ It **complements, not duplicates**, `{{skill:ee-review}}` (which writes the *dec
 
 ## Prerequisite
 
-The native router/DRC backend must be built in the active checkout before the routing/gate steps are meaningful (Epic #4054 convention #1). Run once per checkout / worktree:
+After `uv sync`, check the native router in the project environment.
 
 ```bash
-uv run kct build-native --check   # expect: "C++ backend: available"
-# if "not installed":
-uv run kct build-native
+uv run kct build-native --check
 ```
 
-`uv sync` does **not** build the native extension. A fresh checkout or git worktree needs this step explicitly.
+`C++ backend: available` and exit code 0 satisfy this prerequisite. If the router is missing, run `uv run kct build-native` and repeat the check. Placement and DRC are optional. When either reports `not built`, continue with its Python fallback. Building those two native extensions requires a kicad-tools source checkout.
 
 ## Model selection
 

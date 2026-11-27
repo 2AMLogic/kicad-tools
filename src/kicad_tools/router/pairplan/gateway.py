@@ -523,9 +523,12 @@ class WorkableCombo:
     # a neighbour in loses to any that does not, however short.
     sealed: int = 0
     # Issue #7650: how much of the body runs coupled at the pair pitch
-    # (:func:`coupled_length`).  It only breaks a matched-length tie: of two
-    # equally long combinations, the one with less uncoupled copper wins.
+    # (:func:`coupled_length`). It breaks a matched-length tie on unbudgeted
+    # pairs and contributes to the uncoupled-length cost on budgeted pairs.
     coupled: float = 0.0
+    # A per-terminal uncoupled budget makes a short, poorly coupled route
+    # compete on both costs. Unbudgeted pairs retain matched-length priority.
+    budgeted: bool = False
 
     @property
     def score(self) -> float:
@@ -545,9 +548,21 @@ class WorkableCombo:
         return self.score + abs(self.length_p - self.length_n)
 
     def key(self) -> tuple[int, float, float, int]:
-        """Deterministic sort key: sealed count, matched length (to 1 um),
-        longest coupled run (to 1 um, issue #7650), try order."""
-        return (self.sealed, round(self.matched, 3), -round(self.coupled, 3), self.order)
+        """Rank open escape sites, then route length and uncoupled copper."""
+        if self.budgeted:
+            longest = max(self.length_p, self.length_n)
+            uncoupled = longest - min(self.length_p, self.length_n, self.coupled)
+            return self.sealed, round(longest + uncoupled, 3), round(self.matched, 3), self.order
+        return self.sealed, round(self.matched, 3), -round(self.coupled, 3), self.order
+
+    def prunes(self, length_floor: float) -> bool:
+        """Whether a lower bound on the sum of both legs proves defeat.
+
+        For budgeted pairs the cost is at least the longer rail, hence at
+        least half the length sum. Equality can still win on a later field.
+        """
+        floor = length_floor / 2 if self.budgeted else length_floor
+        return self.sealed == 0 and round(floor, 3) > self.key()[1]
 
 
 def best_workable(combos: list[WorkableCombo]) -> WorkableCombo | None:

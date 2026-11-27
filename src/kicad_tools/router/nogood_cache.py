@@ -108,13 +108,14 @@ def search_failure_is_definitive(router: Any) -> bool:
     return getattr(router, "last_route_exhausted", False) is True
 
 
-def search_budget_context(router: Any, per_net_timeout: float | None) -> tuple:
+def search_budget_context(router: Any, per_net_timeout: float | None, net: int) -> tuple:
     """Budget settings that shape a search, for the cache key."""
     return (
         getattr(router, "_effective_search_iterations", None),
         getattr(router, "_per_net_iteration_cap_active", None),
         getattr(router, "_max_iterations_override", None),
-        getattr(router, "_relief_mode", None),
+        getattr(router, "_relief_mode", getattr(router, "relief_mode", None)),
+        getattr(router, "net_astar_weights", {}).get(net, 1.0),
         per_net_timeout is not None,
     )
 

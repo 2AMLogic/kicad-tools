@@ -23,9 +23,11 @@ this is not a claim that an unconstrained autorouter produces identical copper.
 The factory construction is JLC06161H-2116A, nominal 1.6 mm, with four signal
 layers and dedicated ground/3.3 V reference planes. See the
 [fabrication requirements](real_design/manufacturing-requirements.md).
-There are 40 SMT parts, including 25 capacitors on the back, and three manually
-assembled through-hole headers. Exact manufacturer part numbers and supplier
-references are in [the procurement list](real_design/procurement.json).
+The assembly BOM and placement file cover 40 SMT parts, including 25
+back-side capacitors, and three through-hole headers. Check J1, J2, J3 and
+U2 against the assembly drawings in JLCPCB’s placement preview. The
+procurement list gives the manufacturer part numbers and supplier
+references. [Procurement list](real_design/procurement.json)
 
 Supply regulated 5 V ±5% at J1 pin 1 and ground at pin 2. Use an external SWD
 probe at J2 and a 3.3 V UART adapter at J3. The initial bench envelope is
