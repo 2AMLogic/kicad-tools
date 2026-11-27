@@ -516,3 +516,58 @@ def test_absolute_capacitance_tolerance(catalog_db, capsys):
             desc = f"10pF 50V {tol} C0G {CAP_FAMILY}"
             _insert(db, code, str(code), "0402", tier, desc, attrs)
     assert _alternatives(capsys, "C800") == ["C801", "C803", "C804"]
+
+
+@pytest.mark.parametrize(
+    ("source", "kept"),
+    [
+        ("250 V AC", ["250 V AC", "400VAC", "400 V AC"]),
+        ("250VAC", ["250 V AC", "400VAC", "400 V AC"]),
+        ("250 V DC", ["250 V DC", "250V"]),
+    ],
+)
+def test_mlcc_ac_dc_ratings_stay_distinct(catalog_db, capsys, source, kept):
+    ratings = ["250 V DC", "250 V AC", "100 V AC", "400VAC", "250V", "400 V AC", "250 V DC"]
+    attrs = {k: v for k, v in _cap("1nF").items() if k != "Voltage Rating"}
+    attrs["Temperature Coefficient"] = "C0G"
+    with sqlite3.connect(catalog_db) as db:
+        _insert(db, 800, "SRC", "2220", "extended", f"1 nF {source} C0G {CAP_FAMILY}", attrs)
+        for code, rating in enumerate(ratings, 801):
+            desc = f"1 nF {rating} C0G {CAP_FAMILY}"
+            _insert(db, code, f"A{code}", "2220", "basic", desc, attrs)
+    expected = [f"C{c}" for c, r in enumerate(ratings, 801) if r in kept]
+    assert sorted(_alternatives(capsys, "C800")) == sorted(expected)
+
+
+def test_resistor_ac_working_voltage(catalog_db, capsys):
+    attrs = _attributes("10kΩ 1% 0603")[1]
+    with sqlite3.connect(catalog_db) as db:
+        for code, voltage in enumerate(("200VAC", "50VAC", "", "200VAC", "250 V AC"), 800):
+            tier = "extended" if code == 800 else "basic"
+            _insert(db, code, str(code), "0603", tier, f"{RES_FAMILY} {voltage}", attrs)
+    assert _alternatives(capsys, "C800") == ["C803", "C804"]
+
+
+@pytest.mark.parametrize(
+    ("description", "kept", "wrong"),
+    [
+        (
+            "Fixed Output -5V Linear Regulator",
+            "Fixed Output -5V Linear Regulator",
+            ["Fixed Output -12V Linear Regulator", "Fixed Output +5V Linear Regulator"],
+        ),
+        (
+            "Input 32V Output 3.3V",
+            "Output 3.3V Input 32V",
+            ["Input 32V Output 5V", "Input 3.3V Output 32V"],
+        ),
+    ],
+)
+def test_regulator_voltage_polarity_and_role(catalog_db, capsys, description, kept, wrong):
+    with sqlite3.connect(catalog_db) as db:
+        _insert(db, 800, "REG", "SOT23", "extended", description, {})
+        for code, text in enumerate(wrong, 801):
+            _insert(db, code, "REG", "SOT23", "basic", text, {})
+        _insert(db, 810, "REG", "SOT23", "basic", kept, {})
+        _insert(db, 811, "REG", "SOT23", "basic", description, {})
+    assert _alternatives(capsys, "C800") == ["C810", "C811"]

@@ -104,6 +104,14 @@ def _quantity(unit: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![\w./+-])(?:(?:±|\+/-)\s*)?({_NUMBER})\s*([mkµu]?){unit}(?!\w)")
 
 
+# Voltage keeps its sign and AC/DC qualifier ("250VAC", "-5V"): a 250 V AC
+# rating is not a 250 V DC one, and a -5 V output is not a +5 V output.
+# An unqualified voltage is treated as DC, as catalogs publish it.
+_VOLTAGE = re.compile(
+    rf"(?<![\w./+-])(?:(?:±|\+/-)\s*)?([+\-−])?({_NUMBER})\s*([mkµu]?)V"
+    r"(?:\s*((?i:AC|DC)))?(?![A-Za-z0-9_])"
+)
+
 _RATINGS = {
     "Voltage Rating": _quantity(r"V(?:\s*(?i:DC))?"),
     "Power(Watts)": _quantity("W"),
@@ -277,18 +285,63 @@ def _safety_compatible(source: Part, candidate: Part, same_device: bool) -> bool
     return same_device or not re.search(r"\bsafety\b", source.description, re.I)
 
 
-# Preserve input/output roles alongside the voltages in exact-device descriptions.
-_DEVICE_VOLTAGE = re.compile(_RATINGS["Voltage Rating"].pattern + r"|\b(?i:input|output)\b")
+_DEVICE_TOKEN = re.compile(_VOLTAGE.pattern + r"|\b(?i:input|output)\b")
 
 
-def _device_voltages(part: Part) -> list[str | Fraction]:
-    evidence: list[str | Fraction] = []
-    for match in _DEVICE_VOLTAGE.finditer(part.description):
-        if match[1]:
-            evidence.append(Fraction(match[1]) * _FACTORS[match[2]])
-        else:
-            evidence.append(match[0].casefold())
-    return evidence if any(isinstance(item, Fraction) for item in evidence) else []
+def _signed_voltage(match: re.Match[str]) -> tuple[Fraction, str]:
+    value = Fraction(match[2]) * _FACTORS[match[3]]
+    if match[1] in ("-", "−"):
+        value = -value
+    return value, (match[4] or "dc").casefold()
+
+
+def _device_voltages(part: Part) -> dict[str | None, tuple[tuple[Fraction, str], ...]]:
+    """Group each published voltage under the input/output role it is named with.
+
+    A role word binds to the adjacent voltage (before it, else after it), each
+    word to one voltage, so the result does not depend on description order.
+    """
+    tokens = list(_DEVICE_TOKEN.finditer(part.description))
+    claimed: set[int] = set()
+    found: dict[str | None, list[tuple[Fraction, str]]] = {}
+    for i, token in enumerate(tokens):
+        if token[2] is None:
+            continue
+        role = None
+        for j in (i - 1, i + 1):
+            if 0 <= j < len(tokens) and tokens[j][2] is None and j not in claimed:
+                claimed.add(j)
+                role = tokens[j][0].casefold()
+                break
+        found.setdefault(role, []).append(_signed_voltage(token))
+    return {role: tuple(sorted(values)) for role, values in found.items()}
+
+
+def _passive_voltages(part: Part) -> dict[str, set[Fraction]]:
+    """Return the published voltages of a passive, grouped as ac / dc."""
+    groups: dict[str, set[Fraction]] = {}
+    for match in _VOLTAGE.finditer(part.description):
+        value, kind = _signed_voltage(match)
+        groups.setdefault(kind, set()).add(value)
+    if "Voltage Rating" in part.specs:
+        structured = _VOLTAGE.fullmatch(part.specs["Voltage Rating"])
+        if not structured:
+            raise ValueError("Unrecognized catalog rating")
+        value, kind = _signed_voltage(structured)
+        groups.setdefault(kind, set()).add(value)
+    return groups
+
+
+def _voltage_covered(source: Part, candidate: Part, mandatory: tuple[str, ...]) -> bool:
+    required = _passive_voltages(source)
+    if not required:
+        return "Voltage Rating" not in mandatory
+    offered = _passive_voltages(candidate)
+    for kind, values in required.items():
+        have = offered.get(kind, set())
+        if len(values) != 1 or len(have) != 1 or next(iter(have)) < next(iter(values)):
+            return False
+    return True
 
 
 def _covers_ratings(
@@ -299,6 +352,10 @@ def _covers_ratings(
             if passive is None and key == "Voltage Rating":
                 left, right = _device_voltages(source), _device_voltages(candidate)
                 if left and right and left != right:
+                    return False
+                continue
+            if key == "Voltage Rating":
+                if not _voltage_covered(source, candidate, mandatory):
                     return False
                 continue
             cap_tolerance = passive == "cap" and key == "Tolerance"
