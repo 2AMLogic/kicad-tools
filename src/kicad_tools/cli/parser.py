@@ -6894,7 +6894,15 @@ def _add_validate_parser(subparsers) -> None:
     validate_parser.add_argument(
         "validate_files",
         nargs="*",
-        help="Path(s) to project/schematic/PCB files. Accepts: .kicad_pro, .kicad_sch, .kicad_pcb",
+        help="Project, schematic or PCB paths. --channel-intent also accepts an exported netlist.",
+    )
+    validate_parser.add_argument(
+        "--channel-intent",
+        metavar="DECLARATION.json",
+        help="Check declared channel instances against a .kicad_sch or KiCad S-expression netlist and a .kicad_pcb",
+    )
+    validate_parser.add_argument(
+        "--netlist", dest="validate_netlist", help="Exported netlist for --channel-intent"
     )
     validate_parser.add_argument(
         "--sync",
