@@ -103,9 +103,13 @@ def test_all_unresolvable_numbers_warn_not_ok(tmp_path):
     assert "C999" in r.details
 
 
-def test_unresolvable_alongside_checked_part_is_ok(tmp_path):
+@pytest.mark.parametrize(("strict", "expected"), [(False, "WARN"), (True, "FAIL")])
+def test_unresolvable_alongside_checked_part(tmp_path, strict, expected):
     items = [_item("R1", "C999"), _item("R2", "C1")]
-    assert _run(tmp_path, [_part("C1", 50, "live")], items).status == "OK"
+    result = _run(tmp_path, [_part("C1", 50, "live")], items, strict_report_source=strict)
+    assert result.status == expected
+    assert "C999" in result.details
+    assert "1 other part(s) have recorded stock" in result.message
 
 
 def test_existing_csv_merged_zero_stock_part_warns(tmp_path):

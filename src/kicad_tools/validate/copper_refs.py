@@ -124,6 +124,11 @@ def segment_ref(seg: Segment, origin: Origin = _NO_ORIGIN) -> str:
     return f"Trace@{layer}:w{width}:{_fmt_point(a)}~{_fmt_point(b)}"
 
 
+def segment_witness(seg: Segment, origin: Origin) -> str:
+    """Identify a track across edits, falling back to geometry for uuid-less tracks."""
+    return getattr(seg, "uuid", "") or segment_ref(seg, origin)
+
+
 def run_ref(
     layer: str,
     width: float,

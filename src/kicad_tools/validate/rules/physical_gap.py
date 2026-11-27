@@ -80,6 +80,8 @@ class CopperSource:
     # only; "" for tracks/vias/zones).  An index, not the reference or uuid, so
     # two footprints sharing a reference or a hand-duplicated uuid never alias.
     footprint: str = ""
+    # Stable across a repair even when the geometry-based public identity changes.
+    witness: str = ""
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,7 @@ class CopperGap:
     a: Any
     b: Any
     layer: str
+    witnesses: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -492,6 +495,7 @@ def _collect(pcb):
                 segment.layer,
                 net_name(segment.net_number),
                 segment_ref(segment, origin),
+                witness=getattr(segment, "uuid", ""),
             )
         )
     for fp_index, fp in enumerate(pcb.footprints):
@@ -567,6 +571,7 @@ def _collect(pcb):
                     layer,
                     net_name(via.net_number),
                     via_ref(via, origin),
+                    witness=getattr(via, "uuid", ""),
                 )
             )
     for index, zone in enumerate(pcb.zones):
@@ -807,6 +812,7 @@ def _scan_copper_gaps(pcb, minimum_mm: float, make_finding) -> DRCResults:
             distance=gap.distance,
             nets=gap.nets,
             ids=gap.ids,
+            witnesses=gap.witnesses,
             kinds=gap.kinds,
             a=gap.a,
             b=gap.b,
@@ -832,7 +838,10 @@ def iter_source_gaps(sources: list[CopperSource], minimum_mm: float) -> Iterator
             ids = tuple(sorted({identity for side in owners for identity, _ in side}))
             nets = tuple(sorted({net for side in owners for _, net in side}))
             kinds = {local[k].kind for side in owner_indices for k in side}
-            yield CopperGap(distance, nets, ids, kinds, a, b, layer)
+            witnesses = {
+                local[k].witness or local[k].identity for side in owner_indices for k in side
+            }
+            yield CopperGap(distance, nets, ids, kinds, a, b, layer, tuple(sorted(witnesses)))
 
 
 def check_physical_copper_gap(
@@ -855,7 +864,7 @@ def check_physical_copper_gap(
     not a guarantee about acute notches, etching chemistry or stale zone fills.
     """
 
-    def make_finding(*, distance, nets, ids, kinds, a, b, layer, ox, oy):
+    def make_finding(*, distance, nets, ids, witnesses, kinds, a, b, layer, ox, oy):
         tiered_warning = error_below_mm is not None and distance >= error_below_mm
         return DRCViolation(
             "physical_copper_gap",
@@ -868,6 +877,7 @@ def check_physical_copper_gap(
             actual_value=distance,
             required_value=minimum_mm,
             items=ids,
+            witnesses=witnesses,
             nets=nets,
             closest_locations=((a.x, a.y), (b.x, b.y)),
             same_net=len(nets) == 1,
@@ -895,7 +905,7 @@ def check_physical_copper_gap_fab_view(pcb, policy: FabGapPolicy) -> DRCResults:
     from guessed edges.
     """
 
-    def make_finding(*, distance, nets, ids, kinds, a, b, layer, ox, oy):
+    def make_finding(*, distance, nets, ids, witnesses, kinds, a, b, layer, ox, oy):
         if "zone" in kinds:
             return DRCViolation(
                 "physical_copper_gap",
@@ -907,6 +917,7 @@ def check_physical_copper_gap_fab_view(pcb, policy: FabGapPolicy) -> DRCResults:
                 layer=layer,
                 actual_value=distance,
                 items=ids,
+                witnesses=witnesses,
                 nets=nets,
                 closest_locations=((a.x, a.y), (b.x, b.y)),
                 same_net=len(nets) == 1,
@@ -928,6 +939,7 @@ def check_physical_copper_gap_fab_view(pcb, policy: FabGapPolicy) -> DRCResults:
             actual_value=distance,
             required_value=edge,
             items=ids,
+            witnesses=witnesses,
             nets=nets,
             closest_locations=((a.x, a.y), (b.x, b.y)),
             same_net=len(nets) == 1,
