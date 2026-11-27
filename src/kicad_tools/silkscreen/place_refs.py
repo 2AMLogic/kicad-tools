@@ -1065,8 +1065,9 @@ class SilkRefPlacer:
             clearance_mm: Required spacing between a reference's text box
                 and any pad aperture or other silk element.
             edge_clearance_mm: Required spacing to the board outline.
-            mask_clearance_mm: Solder-mask margin used to size pad/via
-                apertures (matches ``DesignRules.min_solder_mask_clearance_mm``).
+            mask_clearance_mm: Fallback mask margin for pad and untented-via
+                openings when the board declares no clearance. A local pad or
+                footprint margin takes precedence. Also sizes NPTH keepouts.
             max_offset_mm: How far from the component body to search.
             step_mm: Search ring spacing.
             allow_rotate: If True, also try each candidate with the text

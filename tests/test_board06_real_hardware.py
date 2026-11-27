@@ -1,10 +1,12 @@
-"""Datasheet and native-serialization regressions for the assembled LVDS demo."""
+"""Datasheet, net-class and native-serialization regressions for the assembled LVDS demo."""
 
 import importlib.util
 import shutil
 from pathlib import Path
 
 from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+from kicad_tools.core.project_clearance import authored_netclass_widths
+from kicad_tools.core.project_file import load_project
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import parse_file
 from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
@@ -18,6 +20,26 @@ def _generator():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _generate(tmp_path, monkeypatch):
+    generator = _generator()
+    monkeypatch.setattr("sys.argv", ["generate.py", str(tmp_path)])
+    generator.main()
+    return generator
+
+
+def _resolved_classes(pcb_path, project_path):
+    """``{class: (widths, member nets)}`` the project resolver reports for a board."""
+    pcb = PCB.load(pcb_path)
+    nets = [net.name for net in pcb.nets.values() if net.name]
+    classes = {}
+    resolved = authored_netclass_widths(load_project(project_path), nets)
+    for net, width in resolved.items():
+        widths, members = classes.setdefault(width.source_class, (set(), set()))
+        widths.add(width.width)
+        members.add(net)
+    return classes, pcb
 
 
 def test_ti_soic_driver_receiver_have_different_power_pinouts():
@@ -71,6 +93,58 @@ def test_generator_leaves_routed_project_to_the_router(tmp_path, monkeypatch):
     generator.main()
     assert (tmp_path / "diffpair_test.kicad_pro").is_file()
     assert not stale.exists()
+
+
+def test_source_project_declares_routing_classes_at_reviewed_widths(tmp_path, monkeypatch):
+    """Issue #10450: the source project declares the classes the copper is drawn at."""
+    _generate(tmp_path, monkeypatch)
+    classes, _ = _resolved_classes(
+        tmp_path / "diffpair_test.kicad_pcb", tmp_path / "diffpair_test.kicad_pro"
+    )
+    assert classes == {
+        "LVTTL": ({0.2}, {f"{prefix}{i}" for prefix in ("IN", "OUT") for i in range(1, 5)}),
+        "LVDS": ({0.26}, {f"LVDS{i}_{suffix}" for i in range(1, 5) for suffix in "PN"}),
+        "Power": ({0.3}, {"+3V3", "GND"}),
+    }
+
+
+def test_generated_copper_is_drawn_at_its_class_width(tmp_path, monkeypatch):
+    _generate(tmp_path, monkeypatch)
+    classes, pcb = _resolved_classes(
+        tmp_path / "diffpair_test.kicad_pcb", tmp_path / "diffpair_test.kicad_pro"
+    )
+    declared = {net: widths for _, (widths, nets) in classes.items() for net in nets}
+    drawn = set()
+    for segment in pcb.segments:
+        name = pcb.nets[segment.net_number].name
+        if name in declared:
+            assert segment.width in declared[name], (name, segment.width)
+            drawn.add(name)
+    assert drawn == {f"LVDS{i}_{suffix}" for i in range(1, 5) for suffix in "PN"} | {
+        "+3V3",
+        "GND",
+    }
+
+
+def test_route_project_writers_keep_the_authored_classes(tmp_path, monkeypatch, capsys):
+    """The routed sidecar ``kct route`` derives resolves the same classes as the source."""
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.router.rules import net_class_map_from_path
+
+    _generate(tmp_path, monkeypatch)
+    source = tmp_path / "diffpair_test.kicad_pcb"
+    routed = tmp_path / "diffpair_test_routed.kicad_pcb"
+    shutil.copyfile(source, routed)
+    rules = net_class_map_from_path(tmp_path / "net_class_map.json", layer_stack=None)
+    route_cmd._write_drc_constraint_sidecars(
+        routed, "jlcpcb", 4, quiet=True, source_pcb_path=source, net_class_map=rules
+    )
+    route_cmd._write_netclasses_to_project(routed, rules, quiet=True, via_drill=0.3)
+    capsys.readouterr()
+    assert (
+        _resolved_classes(routed, routed.with_suffix(".kicad_pro"))[0]
+        == _resolved_classes(source, source.with_suffix(".kicad_pro"))[0]
+    )
 
 
 def test_generated_lvds_legs_have_no_redundant_staircases(tmp_path):

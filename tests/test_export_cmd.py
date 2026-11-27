@@ -1,5 +1,6 @@
 """Tests for the kct export CLI command."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,30 @@ class TestExportCmdParsing:
 
 class TestExportCmdIntegration:
     """Integration tests that mock the assembly pipeline."""
+
+    def test_project_root_reaches_manufacturing_package(self, tmp_path, monkeypatch, capsys):
+        from types import SimpleNamespace
+
+        from kicad_tools.export.manufacturing import ManufacturingPackage
+
+        board = tmp_path / "assembly/kicad/board.kicad_pcb"
+        board.parent.mkdir(parents=True)
+        board.write_text("(kicad_pcb)")
+        seen = []
+
+        def dry_run(package, output_dir, dry_run):
+            seen.append(package.config.project_root)
+            return SimpleNamespace(output_dir=output_dir, all_files=[])
+
+        monkeypatch.setattr(ManufacturingPackage, "export", dry_run)
+        monkeypatch.chdir(tmp_path)
+        assert export_main([str(board), "--dry-run"]) == 0
+        assert export_main([str(board), "--project-root", "assembly", "--dry-run"]) == 0
+        unrelated = tmp_path / "elsewhere"
+        unrelated.mkdir()
+        assert export_main([str(board), "--project-root", str(unrelated), "--dry-run"]) == 1
+        assert "--project-root must be a directory containing" in capsys.readouterr().err
+        assert seen == [None, board.parents[1].resolve()]
 
     def test_full_export_with_mocked_assembly(self, tmp_path, monkeypatch):
         """Test full export pipeline with mocked assembly."""
@@ -170,6 +195,105 @@ class TestExportCmdIntegration:
         )
         assert rc == 0
         assert captured_manufacturer["value"] == "pcbway"
+
+
+class TestExportCmdPurchasingList:
+    """Issue #10431: the console names the purchasing list and its open selections."""
+
+    @staticmethod
+    def _project(tmp_path, purchasing):
+        from kicad_tools.export import assembly
+        from tests.test_manufacturing_package import _fuse_assembly_export
+
+        project = tmp_path / "project"
+        project.mkdir()
+        pcb = project / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project / "board.kicad_sch").write_text("(kicad_sch)")
+        (project / "project.kct").write_text(
+            "kct_version: '1.0'\nproject:\n  name: Fuse bench controller\n" + purchasing
+        )
+        return pcb, assembly, _fuse_assembly_export
+
+    @staticmethod
+    def _export(monkeypatch, assembly, fake, pcb, out, *flags):
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake)
+        return export_main(
+            [str(pcb), "--mfr", "jlcpcb", "-o", str(out), "--no-report", "--skip-preflight", *flags]
+        )
+
+    def test_console_names_the_list_and_each_pending_selection(self, tmp_path, monkeypatch, capsys):
+        from tests.test_manufacturing_package import FUSE_PURCHASING
+
+        pcb, assembly, fake = self._project(tmp_path, FUSE_PURCHASING)
+
+        rc = self._export(monkeypatch, assembly, fake, pcb, tmp_path / "out")
+
+        console = capsys.readouterr().out
+        assert rc == 0
+        assert "[ok] Purchasing list: purchasing.json" in console
+        assert "1 purchasing selection(s) still pending:" in console
+        assert "  - 5 x 20 mm cartridge, DC" in console
+
+    def test_console_is_silent_without_a_list(self, tmp_path, monkeypatch, capsys):
+        pcb, assembly, fake = self._project(tmp_path, "")
+
+        rc = self._export(monkeypatch, assembly, fake, pcb, tmp_path / "out")
+
+        assert rc == 0
+        assert "Purchasing" not in capsys.readouterr().out
+
+    def test_dry_run_lists_the_file(self, tmp_path, monkeypatch, capsys):
+        from tests.test_manufacturing_package import FUSE_PURCHASING
+
+        pcb, assembly, fake = self._project(tmp_path, FUSE_PURCHASING)
+        out = tmp_path / "out"
+
+        rc = self._export(monkeypatch, assembly, fake, pcb, out, "--dry-run")
+
+        assert rc == 0
+        assert "purchasing.json" in capsys.readouterr().out
+        assert not out.exists()
+
+    def test_invalid_row_fails_and_names_the_row(self, tmp_path, monkeypatch, capsys):
+        pcb, assembly, fake = self._project(
+            tmp_path,
+            "purchasing:\n  - description: Cover\n    quantity: 3\n"
+            "    manufacturer: Example Fuse Co\n    mpn: SYN-COVER-1\n"
+            "  - description: 5 x 20 mm cartridge, DC\n    quantity: 0\n",
+        )
+
+        rc = self._export(monkeypatch, assembly, fake, pcb, tmp_path / "out")
+
+        assert rc == 1
+        assert "purchasing row 2 (5 x 20 mm cartridge, DC) quantity" in capsys.readouterr().err
+        assert not (tmp_path / "out").exists()
+
+    def test_invalid_row_fails_the_dry_run_too(self, tmp_path, monkeypatch, capsys):
+        pcb, assembly, fake = self._project(
+            tmp_path, "purchasing:\n  - description: Cover\n    quantity: 0\n"
+        )
+        out = tmp_path / "out"
+
+        rc = self._export(monkeypatch, assembly, fake, pcb, out, "--dry-run")
+
+        assert rc == 1
+        assert "purchasing row 1 (Cover) quantity" in capsys.readouterr().err
+        assert not out.exists()
+
+    def test_dry_run_json_carries_the_error(self, tmp_path, monkeypatch, capsys):
+        pcb, assembly, fake = self._project(
+            tmp_path, "purchasing:\n  - description: Cover\n    quantity: 0\n"
+        )
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake)
+
+        rc = export_main([str(pcb), "--dry-run", "--format", "json", "-o", str(tmp_path / "out")])
+
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 1 and payload["dry_run"] is True
+        [error] = payload["errors"]
+        assert "purchasing row 1 (Cover) quantity" in error
+        assert not (tmp_path / "out").exists()
 
 
 class TestExportCmdFromMainParser:
@@ -1197,6 +1321,7 @@ _EXPORT_PASS_THROUGH_CASES = {
     "no_auto_lcsc": (["--no-auto-lcsc"], True),
     "no_spec": (["--no-spec"], True),
     "spec": (["--spec", "project.kct"], "project.kct"),
+    "project_root": (["--project-root", "assembly"], "assembly"),
     "no_merge_lcsc": (["--no-merge-lcsc"], True),
     "merge_lcsc_from": (["--merge-lcsc-from", "prev_bom.csv"], "prev_bom.csv"),
     "skip_preflight": (["--skip-preflight"], True),
