@@ -571,3 +571,34 @@ def test_regulator_voltage_polarity_and_role(catalog_db, capsys, description, ke
         _insert(db, 810, "REG", "SOT23", "basic", kept, {})
         _insert(db, 811, "REG", "SOT23", "basic", description, {})
     assert _alternatives(capsys, "C800") == ["C810", "C811"]
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["attributes", "legacy"])
+@pytest.mark.parametrize(
+    ("source", "equivalent", "conflicting"),
+    [
+        ("Fixed Output 3V3", "Fixed Output 3.3V", "Fixed Output 5V"),
+        ("Fixed Output 1V8", "Fixed Output 1.8V", "Fixed Output 5V"),
+        ("Fixed Output -1V8", "Fixed Output -1.8V", "Fixed Output +1V8"),
+        ("Input 4.5V~32V Output 3.3V", "Output 3V3 Input 4.5V~32V", "Input 4V~32V Output 3V3"),
+        ("Input 32V Output 0.8V~24V", "Output 0.8V~24V Input 32V", "Output 0.8V~32V Input 24V"),
+        ("4.5–32V Input 3V3 Output", "3.3V Output 4.5V-32V Input", "3.3V Input 4.5V-32V Output"),
+        (
+            "Input 450...900mV Output 1V8",
+            "Output 1.8V Input 0.45V to 0.9V",
+            "Output 1.8V Input 450...950mV",
+        ),
+    ],
+)
+def test_regulator_voltage_notation(catalog_db, capsys, legacy, source, equivalent, conflicting):
+    with sqlite3.connect(catalog_db) as db:
+        for code, tier, description in (
+            (800, "extended", source),
+            (801, "basic", equivalent),
+            (802, "basic", conflicting),
+            (803, "basic", source),
+        ):
+            _insert(db, code, "AP63203WU-7", "SOT-23-6", tier, f"{description} Buck", {})
+        if legacy:
+            db.execute("ALTER TABLE jlc_components DROP COLUMN attributes")
+    assert _alternatives(capsys, "C800") == ["C801", "C803"]

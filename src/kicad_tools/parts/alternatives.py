@@ -107,10 +107,8 @@ def _quantity(unit: str) -> re.Pattern[str]:
 # Voltage keeps its sign and AC/DC qualifier ("250VAC", "-5V"): a 250 V AC
 # rating is not a 250 V DC one, and a -5 V output is not a +5 V output.
 # An unqualified voltage is treated as DC, as catalogs publish it.
-_VOLTAGE = re.compile(
-    rf"(?<![\w./+-])(?:(?:±|\+/-)\s*)?([+\-−])?({_NUMBER})\s*([mkµu]?)V"
-    r"(?:\s*((?i:AC|DC)))?(?![A-Za-z0-9_])"
-)
+_VOLTAGE_VALUE = rf"(?:(?:±|\+/-)\s*)?([+\-−])?({_NUMBER})\s*([mkµu]?)V(?:\s*((?i:AC|DC)))?"
+_VOLTAGE = re.compile(rf"(?<![\w./+-]){_VOLTAGE_VALUE}(?![A-Za-z0-9_])")
 
 _RATINGS = {
     "Voltage Rating": _quantity(r"V(?:\s*(?i:DC))?"),
@@ -285,36 +283,49 @@ def _safety_compatible(source: Part, candidate: Part, same_device: bool) -> bool
     return same_device or not re.search(r"\bsafety\b", source.description, re.I)
 
 
-_DEVICE_TOKEN = re.compile(_VOLTAGE.pattern + r"|\b(?i:input|output)\b")
+_COMPACT_VOLTAGE = re.compile(r"(?<![\w.])(\d+)V(\d+)(?=(?i:AC|DC)?\b)")
+_DEVICE_TOKEN = re.compile(
+    rf"(?<![\w./+-])(?:(?P<low>{_VOLTAGE_VALUE}|[+\-−]?{_NUMBER})"
+    r"\s*(?:~|～|(?i:to)|[–—-]|\.{2,3}|…)\s*)?"
+    rf"(?P<high>{_VOLTAGE_VALUE})(?![A-Za-z0-9_])"
+    r"|\b(?P<role>(?i:input|output))\b"
+)
+_Voltage = tuple[Fraction, str]
 
 
-def _signed_voltage(match: re.Match[str]) -> tuple[Fraction, str]:
+def _signed_voltage(match: re.Match[str]) -> _Voltage:
     value = Fraction(match[2]) * _FACTORS[match[3]]
     if match[1] in ("-", "−"):
         value = -value
     return value, (match[4] or "dc").casefold()
 
 
-def _device_voltages(part: Part) -> dict[str | None, tuple[tuple[Fraction, str], ...]]:
-    """Group each published voltage under the input/output role it is named with.
-
-    A role word binds to the adjacent voltage (before it, else after it), each
-    word to one voltage, so the result does not depend on description order.
-    """
-    tokens = list(_DEVICE_TOKEN.finditer(part.description))
+def _device_voltages(part: Part) -> set[tuple[str | None, _Voltage, _Voltage]]:
+    """Pair each voltage or range with its adjacent input/output label."""
+    description = _COMPACT_VOLTAGE.sub(r"\1.\2V", part.description)
+    tokens = list(_DEVICE_TOKEN.finditer(description))
     claimed: set[int] = set()
-    found: dict[str | None, list[tuple[Fraction, str]]] = {}
+    found = set()
     for i, token in enumerate(tokens):
-        if token[2] is None:
+        if token["role"]:
             continue
         role = None
         for j in (i - 1, i + 1):
-            if 0 <= j < len(tokens) and tokens[j][2] is None and j not in claimed:
+            if 0 <= j < len(tokens) and tokens[j]["role"] and j not in claimed:
                 claimed.add(j)
-                role = tokens[j][0].casefold()
+                role = tokens[j]["role"].casefold()
                 break
-        found.setdefault(role, []).append(_signed_voltage(token))
-    return {role: tuple(sorted(values)) for role, values in found.items()}
+        high_match = _VOLTAGE.fullmatch(token["high"])
+        assert high_match is not None  # Both patterns use _VOLTAGE_VALUE.
+        low = high = _signed_voltage(high_match)
+        if start := token["low"]:
+            if low_match := _VOLTAGE.fullmatch(start):
+                low = _signed_voltage(low_match)
+            else:
+                # In "450–900mV" both endpoints use the trailing unit.
+                low = Fraction(start.replace("−", "-")) * _FACTORS[high_match[3]], high[1]
+        found.add((role, low, high))
+    return found
 
 
 def _passive_voltages(part: Part) -> dict[str, set[Fraction]]:

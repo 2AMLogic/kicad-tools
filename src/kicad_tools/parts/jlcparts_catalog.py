@@ -50,7 +50,7 @@ import sqlite3
 import struct
 import zipfile
 import zlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from datetime import datetime
 from enum import IntEnum
 from pathlib import Path
@@ -277,9 +277,6 @@ class JlcpartsCatalog:
         *,
         min_stock: int = 0,
         limit: int = 100,
-        attribute: str | None = None,
-        values: Sequence[str] = (),
-        offset: int = 0,
     ) -> list[Part]:
         """Parametrically search the catalog by free-text value + package.
 
@@ -302,13 +299,6 @@ class JlcpartsCatalog:
         only returns a *candidate pool* shaped like the live-API path.
 
         Args:
-            attribute: If supplied, match the whole ``query`` or any of ``values``
-                (alternative spellings of the same nominal) against this flat JSON
-                attribute, or against the free-text ``description`` when the
-                snapshot has no attribute data, instead of word-wise search.
-            values: Alternative spellings accepted with ``attribute``.
-            offset: Rows to skip, for paging through every match (ordering is
-                deterministic: tier, stock, then LCSC number).
             query: Free-text search string (e.g. ``"10k 0402"`` or an MPN like
                 ``"UCC27524"``). Split on whitespace into AND-combined terms,
                 each matched against ``description`` OR ``mfr``. An empty/blank
@@ -337,33 +327,14 @@ class JlcpartsCatalog:
                 columns = {r["name"] for r in conn.execute("PRAGMA table_info(jlc_components)")}
                 conditions = []
                 params: list[object] = []
-                if attribute is not None:
-                    spellings = [query, *values]
-                    alternatives = []
-                    if "attributes" in columns:
-                        # Some snapshots contain malformed JSON. Guard extraction per row.
-                        marks = ",".join("?" * len(spellings))
-                        alternatives.append(
-                            "trim(json_extract(CASE WHEN json_valid(attributes) "
-                            f"THEN attributes END, ?)) IN ({marks})"
-                        )
-                        params.append(f'$."{attribute}"')
-                        params.extend(spellings)
-                    for spelling in spellings:
-                        alternatives.append("description LIKE ? ESCAPE '\\' COLLATE NOCASE")
-                        params.append(f"%{_escape_like(spelling)}%")
-                    conditions.append("(" + " OR ".join(alternatives) + ")")
-                else:
-                    for term in terms:
-                        conditions.append(
-                            "(description LIKE ? ESCAPE '\\' COLLATE NOCASE "
-                            "OR mfr LIKE ? ESCAPE '\\' COLLATE NOCASE)"
-                        )
-                        like = f"%{_escape_like(term)}%"
-                        params.extend((like, like))
-                return self._select(
-                    conn, columns, conditions, params, package, min_stock, limit, offset
-                )
+                for term in terms:
+                    conditions.append(
+                        "(description LIKE ? ESCAPE '\\' COLLATE NOCASE "
+                        "OR mfr LIKE ? ESCAPE '\\' COLLATE NOCASE)"
+                    )
+                    like = f"%{_escape_like(term)}%"
+                    params.extend((like, like))
+                return self._select(conn, columns, conditions, params, package, min_stock, limit)
         except sqlite3.Error as e:
             logger.warning(f"jlcparts catalog search failed for {query!r}: {e}")
             return []
@@ -424,7 +395,7 @@ class JlcpartsCatalog:
         package: str | None,
         min_stock: int,
         limit: int,
-        offset: int,
+        offset: int = 0,
     ) -> list[Part]:
         if package:
             conditions.append("package = ? COLLATE NOCASE")
