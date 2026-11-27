@@ -158,6 +158,14 @@ def test_only_columns_narrower_than_a_via_footprint_are_fenced() -> None:
     # One wide-via net is enough to fence its whole column.
     wide = tight_fence_lanes(lanes, lambda net: 0.8 if net == 1 else 0.4, 0.15)
     assert {fl.column for fl in wide} == {fl.column for fl in left}
+    # The only wide via belongs to an idle pin, so no routing net needs fences.
+    owners = {fl.lane.pad_key for fl in left if fl.lane.net != 1}
+    assert (
+        tight_fence_lanes(left, lambda net: 0.8 if net == 1 else 0.4, 0.15, lane_owners=owners)
+        == []
+    )
+    # A lone routing target has no foreign lane to protect on its column.
+    assert tight_fence_lanes(left, lambda net: 0.8, 0.15, lane_owners={left[0].lane.pad_key}) == []
 
 
 def test_escape_hatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -209,8 +217,8 @@ def test_fence_keeps_wide_escape_out_of_neighbour_lane(
 ) -> None:
     """Fails without the fix: WIDE crosses NB's row 0.81 mm out and NB needs vias."""
     installed, wide, nb, nb_y = _route_wide_then_nb(monkeypatch, fences=True)
-    # Four left-column lanes; the right column's pads are NC (no lane).
-    assert installed == 4
+    # WIDE and NB are the two pins with routing targets.
+    assert installed == 2
     assert wide, "WIDE must route"
     crossings = _fcu_crossings(wide, nb_y)
     assert not crossings or min(crossings) >= LANE_LENGTH_MM, crossings
@@ -250,7 +258,7 @@ def test_python_backend_installs_no_fences() -> None:
     from kicad_tools.router.core import Autorouter
 
     router = Autorouter(width=20, height=20, force_python=True)
-    assert router._install_escape_fences([object()]) == 0
+    assert router._install_escape_fences([object()], set()) == 0
 
 
 @requires_cpp

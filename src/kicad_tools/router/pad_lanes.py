@@ -319,12 +319,14 @@ def build_pad_lane_budgets(
     *,
     length: float | None = None,
     penalty_factor: float | None = None,
+    lane_owners: set[tuple[str, str]] | None = None,
 ) -> list:
     """Build ``router_cpp.PadChannelBudget`` lanes for the fine-pitch pads.
 
     Returns an empty list when the C++ backend is unavailable, when
     ``KCT_DISABLE_PAD_LANES`` is set, when no region is detected, or when
-    the length or penalty resolves to zero.
+    the length or penalty resolves to zero. When supplied, ``lane_owners``
+    selects which pads reserve a lane after computing the package geometry.
     """
     if pad_lanes_disabled():
         return []
@@ -348,6 +350,8 @@ def build_pad_lane_budgets(
 
     budgets: list = []
     for lane in collect_fine_pitch_lanes(pads, regions, length):
+        if lane_owners is not None and lane.pad_key not in lane_owners:
+            continue
         rect = lane_grid_rect(lane, grid)
         if rect is None:
             continue
@@ -468,6 +472,8 @@ def tight_fence_lanes(
     fence_lanes: Iterable[FenceLane],
     via_diameter: Any,
     via_clearance: float,
+    *,
+    lane_owners: set[tuple[str, str]] | None = None,
 ) -> list[FenceLane]:
     """Keep the lanes of columns too tight for a via of their own nets.
 
@@ -486,6 +492,12 @@ def tight_fence_lanes(
         pitch = column_pitch(lanes)
         if pitch is None:
             continue
+        # An idle pin still sets the physical pitch. Only routing targets
+        # contribute a via diameter or reserve an exit in that column.
+        if lane_owners is not None:
+            lanes = [fl for fl in lanes if fl.lane.pad_key in lane_owners]
+            if len(lanes) < 2:
+                continue  # No other lane on this column to fence.
         footprint = max(float(via_diameter(fl.lane.net)) for fl in lanes) + float(via_clearance)
         if pitch < footprint - 1e-9:
             kept.extend(lanes)
