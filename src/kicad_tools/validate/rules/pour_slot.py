@@ -64,6 +64,7 @@ from kicad_tools.router.board_clearance_rules import (
 )
 from kicad_tools.schema.pcb import _segment_dedup_key
 
+from ..copper_refs import Origin, board_origin, segment_witness
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
 
@@ -241,8 +242,9 @@ class PourSlotRule(DRCRule):
         results = DRCResults()
         results.rules_checked = 1
         results.rules_checked_by_rule[RULE_ID] = 1
+        origin = board_origin(pcb)
         for pair in self.iter_pairs(pcb):
-            results.add(self._violation(pair))
+            results.add(self._violation(pair, origin))
         return results
 
     def iter_pairs(self, pcb: PCB) -> Iterator[PourSlotPair]:
@@ -306,7 +308,7 @@ class PourSlotRule(DRCRule):
             yield from self._check_layer(layer, items, zones[layer])
 
     @staticmethod
-    def _violation(pair: PourSlotPair) -> DRCViolation:
+    def _violation(pair: PourSlotPair, origin: Origin) -> DRCViolation:
         a, b = pair.first, pair.second
         na = a.net_name or f"net {a.net_number}"
         nb = b.net_name or f"net {b.net_number}"
@@ -332,6 +334,7 @@ class PourSlotRule(DRCRule):
             layer=pair.layer,
             actual_value=pair.gap,
             required_value=None if pair.unresolved_rules else pair.threshold,
+            witnesses=(segment_witness(a, origin), segment_witness(b, origin)),
             nets=(na, nb),
         )
 

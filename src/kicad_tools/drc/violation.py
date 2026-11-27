@@ -690,6 +690,9 @@ class DRCViolation:
     # clearance repairer resolves each side of a violation by uuid first
     # (Issue #6434).
     item_uuids: list[str] = field(default_factory=list)
+    # Copper identity from ``kct check`` (UUID or geometry), used by the
+    # fix-drc repair guard; not part of the waiver key (Issue #9424).
+    witnesses: list[str] = field(default_factory=list, kw_only=True)
 
     # Extracted numeric values (when available)
     required_value_mm: float | None = None
