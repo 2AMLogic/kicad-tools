@@ -356,8 +356,12 @@ def _fail_on_fatal_exit(proc: subprocess.CompletedProcess[str]) -> None:
 
 @pytest.mark.slow
 # The class-scoped route runs once per xdist worker that receives one of its
-# tests; pin the class to one worker so the ~10 min route runs once
-# (Slow Tests uses ``--dist loadgroup``; PR #6228 review).
+# tests, so the ~10 min route has to stay on one worker.  Slow Tests runs
+# ``--dist loadscope`` (Issue #10565): the methods of this class share a
+# worker, module-level functions share their file's worker, and the other
+# class in this file may run on a different one.  The ``xdist_group`` mark
+# below does not decide placement on the pinned pytest 9.2.0 / pytest-xdist
+# 3.8.0.
 @pytest.mark.xdist_group("mfr_tier_4l")
 class TestAutoMfrTierIntegration:
     """End-to-end chain test at 4L: jlcpcb -> escalate to jlcpcb-tier1.
