@@ -305,6 +305,113 @@ def write_receipt(
     return path
 
 
+@pytest.fixture
+def render_receipt(env):
+    """Mirror a generated receipt that delegates render coverage to its manufacturing manifest."""
+    from kicad_tools.cli.board_readiness import readiness_input_hash
+
+    bundle = env["bundle"]
+    renders = bundle / "renders"
+    renders.mkdir()
+    (renders / "pcb-front.svg").write_text("<svg/>")
+    (renders / "assembly.csv").write_text("Ref,Part\nR1,example\n")
+    export_shaped_manifest(env)
+    manifest = bundle / "manifest.json"
+    receipt = write_receipt(env)
+    record = json.loads(receipt.read_bytes())
+    del record["inputs"][(renders / "pcb-front.svg").relative_to(env["src"]).as_posix()]
+    key = manifest.relative_to(env["src"]).as_posix()
+    record["inputs"][key] = readiness_input_hash(key, manifest.read_bytes())
+    receipt.write_text(json.dumps(record))
+    return receipt
+
+
+@pytest.mark.parametrize("canonical", [True, False], ids=["canonical", "legacy-raw"])
+def test_signoff_binds_render_through_recorded_manifest(env, render_receipt, canonical):
+    from kicad_tools.cli import main as kct
+
+    bundle = env["bundle"]
+    board = env["src"] / "b.kicad_pcb"
+    manifest = bundle / "manifest.json"
+    if not canonical:
+        record = json.loads(render_receipt.read_bytes())
+        record["inputs"][manifest.relative_to(env["src"]).as_posix()] = sha(manifest.read_bytes())
+        render_receipt.write_text(json.dumps(record))
+
+    args = [
+        "tapeout-sign-off",
+        str(bundle),
+        "--board",
+        str(board),
+        "--readiness",
+        str(render_receipt),
+        "--reviewer",
+        "unit test",
+    ]
+    assert kct(args) == 0
+    tapeout = wf.preflight(bundle, board).manifest["tapeout"]
+    assert tapeout["human_signoff"]["reviewer"] == "unit test"
+    assert tapeout["readiness_sha256"] == sha(render_receipt.read_bytes())
+    if canonical:
+        assert kct(args) == 0
+
+
+@pytest.mark.parametrize("missing", ["gerbers.zip", "bom.csv", "cpl.csv", "renders/assembly.csv"])
+def test_signoff_still_requires_direct_fabrication_coverage(env, render_receipt, missing):
+    bundle = env["bundle"]
+    manifest = bundle / "manifest.json"
+    original = manifest.read_bytes()
+    record = json.loads(render_receipt.read_bytes())
+    del record["inputs"][(bundle / missing).relative_to(env["src"]).as_posix()]
+    render_receipt.write_text(json.dumps(record))
+
+    with pytest.raises(wf.WorkflowError, match="does not cover bundle files"):
+        wf.sign_off_bundle(
+            bundle, env["src"] / "b.kicad_pcb", "unit test", readiness=render_receipt
+        )
+    assert manifest.read_bytes() == original
+
+
+@pytest.mark.parametrize("condition", ["missing", "different-digest", "other-path"])
+def test_indirect_render_coverage_requires_the_selected_manifest(env, render_receipt, condition):
+    bundle = env["bundle"]
+    manifest = bundle / "manifest.json"
+    original = manifest.read_bytes()
+    record = json.loads(render_receipt.read_bytes())
+    key = manifest.relative_to(env["src"]).as_posix()
+    del record["inputs"][key]
+    if condition == "different-digest":
+        record["inputs"][key] = sha(b"different revision")
+    elif condition == "other-path":
+        archive = env["src"] / "previous/manufacturing/manifest.json"
+        archive.parent.mkdir(parents=True)
+        archive.write_bytes(original)
+        record["inputs"][archive.relative_to(env["src"]).as_posix()] = sha(original)
+    render_receipt.write_text(json.dumps(record))
+
+    with pytest.raises(wf.WorkflowError, match="does not cover bundle files"):
+        wf.sign_off_bundle(
+            bundle, env["src"] / "b.kicad_pcb", "unit test", readiness=render_receipt
+        )
+    assert manifest.read_bytes() == original
+
+
+@pytest.mark.parametrize("regenerate_manifest", [False, True])
+def test_new_render_needs_a_matching_release_receipt(env, render_receipt, regenerate_manifest):
+    bundle = env["bundle"]
+    (bundle / "renders/pcb-front.svg").write_text("<svg>updated board</svg>")
+    if regenerate_manifest:
+        export_shaped_manifest(env)
+    manifest = bundle / "manifest.json"
+    original = manifest.read_bytes()
+
+    with pytest.raises(wf.WorkflowError, match="sha256|does not cover bundle files"):
+        wf.sign_off_bundle(
+            bundle, env["src"] / "b.kicad_pcb", "unit test", readiness=render_receipt
+        )
+    assert manifest.read_bytes() == original
+
+
 def test_export_bundle_plus_signoff_passes_preflight_and_dry_run(env):
     (env["bundle"] / "gerbers").mkdir()
     (env["bundle"] / "gerbers" / "gerbers.zip").write_bytes(b"PK\x03\x04gerber")

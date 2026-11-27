@@ -46,6 +46,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1050,6 +1051,8 @@ class ReadinessOptions:
     # Receipt and archive paths remain relative to the directory containing
     # the output declaration when an explicit --project-root narrows source access.
     declared_project_root: Path | None = None
+    # An implicit map is available to the HV gate, but kct check does its own discovery.
+    net_class_map_implicit: bool = False
 
     @property
     def root(self) -> Path:
@@ -1308,6 +1311,15 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         Path(args.net_class_map).resolve() if args.net_class_map else _find_net_class_map(pcb)
     )
 
+    if net_class_map is not None:
+        net_class_map = net_class_map.resolve()
+        if not net_class_map.is_file():
+            return None, f"net-class map not found: {net_class_map}"
+        if not net_class_map.is_relative_to(boundary):
+            return None, _outside_root_message(
+                str(net_class_map), "net-class map", project_root is not None
+            )
+
     ack = frozenset(rule.strip() for rule in (args.ack_warnings or "").split(",") if rule.strip())
 
     baseline: Path | None = None
@@ -1367,6 +1379,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             include_tht=bool(args.include_tht),
             archive=not args.no_archive,
             net_class_map=net_class_map,
+            net_class_map_implicit=not args.net_class_map,
             hv_net_class=args.hv_net_class,
             hv_min=args.hv_min,
             hv_standard=args.hv_standard,
@@ -1865,14 +1878,9 @@ def _gate_kct_check(
     right after the cleanup and still blocking here -- and points at
     ``--skip-cleanup``.  No new gate: only the blocker message changes.
     """
-    invocation_args = list(options.check_args)
-    if options.schematic is not None:
-        invocation_args.extend(
-            ["--schematic", options.schematic.relative_to(options.project_base).as_posix()]
-        )
-    invocation = " ".join(
-        ["kct", "check", "<pcb>", "--mfr", options.manufacturer, *invocation_args]
-    )
+    invocation_args = ["--mfr", options.manufacturer]
+    invocation_args.extend(_current_board_check_args(options, relative_to=options.project_base))
+    invocation = f"kct check <pcb> {shlex.join(invocation_args)}"
     outcome, report = _gate_kct_check_run(options, engines)
     if outcome.status == FAILED and pre_cleanup is not None and post_cleanup is not None:
         introduced = _cleanup_introduced_errors(options, engines, pre_cleanup, post_cleanup, report)
@@ -1966,10 +1974,20 @@ def _cleanup_introduced_errors(
     ]
 
 
-def _current_board_check_args(options: ReadinessOptions) -> list[str]:
+def _current_board_check_args(
+    options: ReadinessOptions, *, relative_to: Path | None = None
+) -> list[str]:
+    """Use staged paths for checking and project-relative paths for the recorded invocation."""
     extra = list(options.check_args)
-    if options.schematic is not None:
-        extra.extend(["--schematic", str(options.schematic)])
+    for flag, path in (
+        ("--schematic", options.schematic),
+        ("--net-class-map", None if options.net_class_map_implicit else options.net_class_map),
+    ):
+        if path is not None:
+            value = (
+                path.relative_to(relative_to).as_posix() if relative_to is not None else str(path)
+            )
+            extra.extend([flag, value])
     return extra
 
 
@@ -2953,6 +2971,8 @@ def _external_dependencies(options: ReadinessOptions) -> list[Path]:
     """Collected files that live outside ``board_dir`` but inside the project root."""
     board = options.board_dir.resolve()
     sources = set(_required_sources(options))
+    if options.net_class_map is not None:
+        sources.add(options.net_class_map.resolve())
     if options.schematic_spec is not None:
         sources.add(options.schematic_spec)
     return sorted(p for p in sources if not p.is_relative_to(board))

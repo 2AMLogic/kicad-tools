@@ -60,6 +60,7 @@ from shapely.geometry import LineString, Point, box  # type: ignore[import-untyp
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 from shapely.ops import nearest_points, unary_union  # type: ignore[import-untyped]
 
+from ..router.quantize import is_45_aligned, off_angle_degrees
 from ..schema.pcb import Arc
 from ..sexp import SExp
 from .mask_trace_angles import MaskTraceAngleError, MaskTraceBend, off_angle_tracks
@@ -118,6 +119,13 @@ _MIN_TAIL_MM = 0.005
 _SLIDE_STEP_MM = 0.005
 _RUN_AXIS_TOLERANCE_MM = 0.0002
 _MIN_RUN_MM = 0.05
+# Verdict of ``_bridge_aligned_pads`` for a topology it does not apply to; the
+# finding then keeps its ordinary ``not_own_pad_entry`` decline.
+_NOT_A_BRIDGE = "not_a_bridge"
+# Perpendicular offset (mm) within which a second pad's centre is treated as a
+# near-aligned bridge candidate; ``is_45_aligned`` then gates the pad-to-pad
+# angle before any copper is moved (issue #10601).
+_BRIDGE_AXIS_TOLERANCE_MM = 0.001
 # Step of the slide that carries an escape stopped on its pad's edge on into the
 # pad (issue #9939).
 _EXTEND_STEP_MM = 0.005
@@ -238,6 +246,25 @@ class MaskViaRelocateAction(MaskNudgeAction):
 
 
 @dataclass
+class MaskBridgeAction(MaskNudgeAction):
+    """Replace an offset same-net run with a pad-centre-to-pad-centre bridge.
+
+    The run that grazes one pad's opening slides onto the line through two
+    aligned same-net pad centres and the join on its far side slides along its
+    own direction to meet that line.  The short lead into the second pad is no
+    longer needed there (the run now reaches that pad's centre itself), so it
+    is re-used as the entry from the join to the first pad's centre: each part
+    of the former run then terminates inside a pad, and no segment is added or
+    removed, so every conductor keeps its identity through the edit.
+    ``points`` names every moved segment for finding attribution; undo
+    restores each recorded end.
+    """
+
+    #: ``(segment uuid, end tag, old_x, old_y, new_x, new_y)`` per moved end.
+    end_moves: list[tuple[str, str, float, float, float, float]] = field(default_factory=list)
+
+
+@dataclass
 class MaskUnrepaired:
     """A finding the repairer left alone, with the reason."""
 
@@ -320,6 +347,12 @@ def _num(node: SExp | None) -> float:
 
 def _bare(value: object) -> str:
     return str(value).strip().strip('"')
+
+
+def _on_45_grid(ux: float, uy: float) -> bool:
+    """Whether a unit direction is a multiple of 45 degrees."""
+    ax, ay = abs(ux), abs(uy)
+    return ax < 1e-4 or ay < 1e-4 or abs(ax - ay) < 1e-4
 
 
 def _coord_displacement_within(
@@ -1012,6 +1045,40 @@ class MaskCopperRepairer(CopperGapRepairer):
                     if isinstance(action, MaskNudgeAction):
                         touched_by_action.update(point[1] for point in action.points)
                     continue
+                # An overlapping run beside a pad whose neighbour on the same
+                # axis is another pad of its net becomes a straight bridge
+                # between the two pad centres (#9939, Board 03 J1/A4).
+                bridge_seg = segments.get(conductor)
+                if (
+                    PASS_THROUGH_MARKER in violation.message
+                    and _OVERLAP_RELATION_MARKER in violation.message
+                    and bridge_seg is not None
+                    and len(openings) == 1
+                    and openings[0] in pads
+                    and conductor not in moved
+                    and conductor not in touched_by_action
+                ):
+                    bridge_refusal = self._bridge_aligned_pads(
+                        bridge_seg,
+                        conductor,
+                        openings[0],
+                        pads,
+                        result,
+                        max_displacement,
+                        dry_run,
+                        clearance_mm,
+                        violation.required_value_mm,
+                        touched_by_action,
+                    )
+                    if bridge_refusal is None:
+                        moved.add(conductor)
+                        action = result.actions[-1]
+                        if isinstance(action, MaskBridgeAction):
+                            touched_by_action.update(point[1] for point in action.points)
+                        continue
+                    if bridge_refusal[0] != _NOT_A_BRIDGE:
+                        result.skip(bridge_refusal[0], violation, conductor, bridge_refusal[1])
+                        continue
                 result.skip("not_own_pad_entry", violation, conductor)
                 continue
             seg = segments.get(conductor)
@@ -2789,6 +2856,299 @@ class MaskCopperRepairer(CopperGapRepairer):
                 )
                 return self._apply_nudge(action, result, dry_run) is None
         return False
+
+    def _bridge_aligned_pads(
+        self,
+        seg: SExp,
+        seg_uuid: str,
+        opening: str,
+        pads: dict,
+        result: MaskRepairResult,
+        max_displacement: float,
+        dry_run: bool,
+        clearance_mm: float | None,
+        required_mm: float | None,
+        touched_by_action: set[str],
+    ) -> tuple[str, str] | None:
+        """Bridge two aligned same-net pad centres with a run that grazes one of them.
+
+        Applies to an overlapping same-net pass-through finding on a straight
+        run ``S`` (a multiple of 45 degrees) that sits beside pad ``A`` while
+        its far end reaches pad ``B`` of the same net through one short lead
+        ``N``, ``A`` and ``B`` having their centres on one line parallel to
+        ``S`` (issue #9939, Board 03 J1/A4 and J1/B9).  ``S`` slides onto that
+        line; the single same-net join ``M`` on its other end slides along its
+        own direction to meet the line (angle kept); ``N`` is dropped because
+        ``S`` now ends on ``B``'s centre; and ``S`` is split at ``A``'s centre
+        so each part terminates inside a pad -- a run that merely passes
+        through a pad stays a pass-through finding.
+
+        Returns ``None`` when applied (or predicted, in a dry run),
+        ``(_NOT_A_BRIDGE, "")`` for a topology this repair does not cover (the
+        caller keeps the ordinary decline), or ``(reason, detail)`` for a
+        candidate it built and refused.
+        """
+        not_a_bridge = (_NOT_A_BRIDGE, "")
+        entry = pads.get(opening)
+        if entry is None or entry[5] == "unsupported":
+            return not_a_bridge
+        pad_poly, centre_a, pad_layers, pad_net, pad_ref, _shape = entry
+        net_name = self._net_name(seg)
+        layer_node = seg.find("layer")
+        layer = _bare(layer_node.get_first_atom()) if layer_node is not None else ""
+        start, end = self._xy(seg.find("start")), self._xy(seg.find("end"))
+        width_node = seg.find("width")
+        if (
+            not net_name
+            or pad_net != net_name
+            or not layer
+            or start is None
+            or end is None
+            or width_node is None
+            or (layer not in pad_layers and "*.Cu" not in pad_layers)
+            or self._locks.is_locked(seg)
+            or self._locks.is_generator_owned(seg)
+        ):
+            return not_a_bridge
+        width = _num(width_node)
+        length = math.dist(start, end)
+        if length < _MIN_RUN_MM:
+            return not_a_bridge
+        ux, uy = (end[0] - start[0]) / length, (end[1] - start[1]) / length
+        if not _on_45_grid(ux, uy):
+            return not_a_bridge
+        nx, ny = -uy, ux
+        offset = (centre_a[0] - start[0]) * nx + (centre_a[1] - start[1]) * ny
+        if abs(offset) < _TOLERANCE_MM:
+            return not_a_bridge
+
+        for b_tag in ("end", "start"):
+            d_tag = "start" if b_tag == "end" else "end"
+            b_point = end if b_tag == "end" else start
+            d_point = start if b_tag == "end" else end
+            b_members, b_blocked = self._junction(layer, b_point, seg_uuid, net_name)
+            d_members, d_blocked = self._junction(layer, d_point, seg_uuid, net_name)
+            if b_blocked or d_blocked or len(b_members) != 1 or len(d_members) != 1:
+                continue
+            n_uuid, n_node, n_tag = b_members[0]
+            m_uuid, m_node, m_tag = d_members[0]
+            if n_uuid == m_uuid:
+                continue
+            n_far = self._xy(n_node.find("end" if n_tag == "start" else "start"))
+            m_far = self._xy(m_node.find("end" if m_tag == "start" else "start"))
+            n_width_node, m_width_node = n_node.find("width"), m_node.find("width")
+            if n_far is None or m_far is None or n_width_node is None or m_width_node is None:
+                continue
+            # The second pad: same net, on this layer, with the lead ending at its
+            # centre and its centre near the line through the first pad's centre.
+            b_uuid = next(
+                (
+                    uid
+                    for uid, other in pads.items()
+                    if uid != opening
+                    and other[3] == net_name
+                    and other[5] != "unsupported"
+                    and (layer in other[2] or "*.Cu" in other[2])
+                    and math.dist(other[1], n_far) < 0.005
+                    and abs((other[1][0] - centre_a[0]) * nx + (other[1][1] - centre_a[1]) * ny)
+                    < _BRIDGE_AXIS_TOLERANCE_MM
+                ),
+                None,
+            )
+            if b_uuid is None:
+                continue
+            centre_b = pads[b_uuid][1]
+            n_dir = (n_far[0] - b_point[0], n_far[1] - b_point[1])
+            m_dir = (d_point[0] - m_far[0], d_point[1] - m_far[1])
+            n_len, m_len = math.hypot(*n_dir), math.hypot(*m_dir)
+            if n_len < _TOLERANCE_MM or m_len < _TOLERANCE_MM:
+                continue
+            # Neither lead may run along the bridge axis: the join must be a corner
+            # whose line meets the new line at one point.
+            m_cross = (m_dir[0] * uy - m_dir[1] * ux) / m_len
+            if abs((n_dir[0] * uy - n_dir[1] * ux) / n_len) < 1e-3 or abs(m_cross) < 1e-3:
+                continue
+            if abs(_num(n_width_node) - width) > 1e-3:
+                continue
+            # The join M keeps its direction and its far end; its near end slides
+            # along its own line onto the line through both pad centres.
+            s_param = ((centre_a[0] - m_far[0]) * nx + (centre_a[1] - m_far[1]) * ny) / (
+                (m_dir[0] * nx + m_dir[1] * ny) / m_len
+            )
+            q = (m_far[0] + m_dir[0] / m_len * s_param, m_far[1] + m_dir[1] / m_len * s_param)
+            if s_param < _MIN_RUN_MM:
+                continue
+            t_q = (q[0] - centre_a[0]) * ux + (q[1] - centre_a[1]) * uy
+            t_b = (centre_b[0] - centre_a[0]) * ux + (centre_b[1] - centre_a[1]) * uy
+            if t_q * t_b >= 0 or min(abs(t_q), abs(t_b)) < _MIN_RUN_MM:
+                continue
+
+            # A topology match: from here on a failure is a declined candidate.
+            start_ab, end_ab = (centre_a, centre_b) if b_tag == "end" else (centre_b, centre_a)
+            bridge_dx = round(end_ab[0], 6) - round(start_ab[0], 6)
+            bridge_dy = round(end_ab[1], 6) - round(start_ab[1], 6)
+            if not is_45_aligned(bridge_dx, bridge_dy):
+                off_deg = off_angle_degrees(bridge_dx, bridge_dy)
+                return (
+                    "pad_centres_not_aligned",
+                    f"{pad_ref} and {pads[b_uuid][4]} centres off 45-degree axis by {off_deg:.4f} deg",
+                )
+            if any(
+                self._locks.is_locked(node) or self._locks.is_generator_owned(node)
+                for node in (n_node, m_node)
+            ):
+                return "locked_segment", ""
+            if {seg_uuid, n_uuid, m_uuid} & touched_by_action:
+                return "segment_end_already_moved", ""
+            travel = max(abs(offset), math.dist(q, d_point), n_len)
+            if travel > max_displacement:
+                return "exceeds_max_displacement", f"needs {travel:.4f}mm"
+            if pad_poly.buffer(-_INSIDE_EPS_MM).contains(Point(q)):
+                return "no_room_for_entry", ""
+            for other_uuid, other in pads.items():
+                if other_uuid in (opening, b_uuid):
+                    continue
+                if not (layer in other[2] or "*.Cu" in other[2]):
+                    continue
+                grown = other[0].buffer(_INSIDE_EPS_MM)
+                if grown.contains(Point(d_point)) or grown.contains(Point(q)):
+                    return "junction_at_moved_end", ""
+
+            m_width = _num(m_width_node) or width
+            old_copper = unary_union(
+                [
+                    LineString([start, end]).buffer(width / 2, quad_segs=16),
+                    LineString([m_far, d_point]).buffer(m_width / 2, quad_segs=16),
+                    LineString([b_point, n_far]).buffer(width / 2, quad_segs=16),
+                ]
+            )
+            new_run = LineString([q, centre_b]).buffer(width / 2, quad_segs=16)
+            new_join = LineString([m_far, q]).buffer(m_width / 2, quad_segs=16)
+            moves = [
+                (
+                    LineString([start, end]).buffer(width / 2, quad_segs=16),
+                    new_run,
+                    layer,
+                ),
+                (
+                    LineString([m_far, d_point]).buffer(m_width / 2, quad_segs=16),
+                    new_join,
+                    layer,
+                ),
+            ]
+            refusal = self._copper_floor_reason(
+                moves, layer, net_name, seg_uuid, pads, clearance_mm
+            )
+            if refusal is None and self._loses_same_net_contact(
+                [(old_copper, unary_union([new_run, new_join]), layer)],
+                layer,
+                net_name,
+                {seg_uuid, n_uuid, m_uuid},
+                pads,
+            ):
+                refusal = ("would_break_same_net_contact", "")
+            if refusal is None:
+                refusal = self._other_opening_reason(
+                    [opening, b_uuid],
+                    moves,
+                    [(d_point, q, frozenset({layer}))],
+                    pads,
+                    required_mm or 0.0,
+                    travel,
+                )
+            if refusal is not None:
+                return refusal
+
+            m_end = self._xy(m_node.find(m_tag)) or d_point
+            n_end = self._xy(n_node.find(n_tag)) or b_point
+            n_other = "end" if n_tag == "start" else "start"
+            end_moves = [
+                (seg_uuid, b_tag, *b_point, *centre_b),
+                (seg_uuid, d_tag, *d_point, *centre_a),
+                (m_uuid, m_tag, *m_end, *q),
+                # The lead becomes the entry from the join to the first pad.
+                (n_uuid, n_tag, *n_end, *q),
+                (n_uuid, n_other, *n_far, *centre_a),
+            ]
+            action = MaskBridgeAction(
+                action="bridge_aligned_pads",
+                uuid=seg_uuid,
+                kind="segment",
+                pad_uuid=opening,
+                pad_ref=pad_ref,
+                net_name=net_name,
+                layer=layer,
+                old_x=d_point[0],
+                old_y=d_point[1],
+                new_x=q[0],
+                new_y=q[1],
+                dx=nx * offset,
+                dy=ny * offset,
+                displacement_mm=travel,
+                detail=(
+                    f"slid {abs(offset):.4f}mm onto the line through {pad_ref} and "
+                    f"{pads[b_uuid][4]} centres, re-using the lead to {pads[b_uuid][4]} "
+                    f"as the entry to {pad_ref}"
+                ),
+                openings=[opening],
+                points=[
+                    ("segment", seg_uuid, "start", *start),
+                    ("segment", seg_uuid, "end", *end),
+                    ("segment", m_uuid, m_tag, *m_end),
+                    ("segment", n_uuid, n_tag, *n_end),
+                ],
+                end_moves=end_moves,
+            )
+            return self._apply_bridge(action, dry_run, result)
+        return not_a_bridge
+
+    def _apply_bridge(
+        self, action: MaskBridgeAction, dry_run: bool, result: MaskRepairResult
+    ) -> tuple[str, str] | None:
+        """Record a bridge and, unless dry, write it; ``None`` on success."""
+        if not dry_run:
+            # Resolve every end first so a lookup miss can neither leave the
+            # document half-moved nor record an unapplied action.
+            targets: list[tuple[SExp, float, float]] = []
+            for uuid, tag, old_x, old_y, new_x, new_y in action.end_moves:
+                node = self._segment_by_uuid(uuid)
+                end_node = node.find(tag) if node is not None else None
+                xy = self._xy(end_node)
+                if end_node is None or xy is None or math.dist(xy, (old_x, old_y)) > _TOLERANCE_MM:
+                    return "stale_geometry", ""
+                targets.append((end_node, new_x, new_y))
+            for end_node, new_x, new_y in targets:
+                # Full file precision keeps the join exactly on its own line.
+                end_node.set_value(0, round(new_x, 6))
+                end_node.set_value(1, round(new_y, 6))
+            self.modified = True
+        result.actions.append(action)
+        result.repaired += 1
+        return None
+
+    def _undo_bridge(self, action: MaskBridgeAction) -> bool:
+        """Reverse a bridge: every recorded end returns to its authored coordinates.
+
+        Returns ``False`` when a node is gone or an end no longer sits at its
+        post-move position (callers fall back to a snapshot restore).
+        """
+        restore: list[tuple[SExp, float, float]] = []
+        for uuid, tag, old_x, old_y, new_x, new_y in action.end_moves:
+            node = self._segment_by_uuid(uuid)
+            end_node = node.find(tag) if node is not None else None
+            xy = self._xy(end_node)
+            if (
+                end_node is None
+                or xy is None
+                or math.dist(xy, (round(new_x, 6), round(new_y, 6))) > _TOLERANCE_MM
+            ):
+                return False
+            restore.append((end_node, old_x, old_y))
+        for end_node, old_x, old_y in restore:
+            end_node.set_value(0, old_x)
+            end_node.set_value(1, old_y)
+        self.modified = True
+        return True
 
     def _anchor_on_reported_via(
         self, anchor: tuple[float, float], net: str, reported_vias: set[str]
@@ -4770,7 +5130,9 @@ class MaskCopperRepairer(CopperGapRepairer):
         tracks = self._segment_nodes() if action.bends else {}
         if not all(bend.intact(tracks) for bend in action.bends):
             return False
-        if isinstance(action, MaskViaRelocateAction):
+        if isinstance(action, MaskBridgeAction):
+            restored = self._undo_bridge(action)
+        elif isinstance(action, MaskViaRelocateAction):
             restored = self._undo_via_relocate(action)
         elif isinstance(action, MaskNudgeAction):
             restored = self._undo_nudge(action)

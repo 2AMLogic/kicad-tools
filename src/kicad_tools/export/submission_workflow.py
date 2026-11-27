@@ -55,6 +55,8 @@ from ..cli.board_readiness import (
     ReadinessLayout,
     board_directory_for_pcb,
     declared_readiness_layout,
+    is_manufacturing_manifest,
+    readiness_input_hash_matches,
     validate_source_pcb,
 )
 from ..parts.jlcpcb_api import JLCCredentials, JLCNoInventorySourceError
@@ -211,12 +213,13 @@ def _verify_file_records(bundle_root: Path, files: dict[str, Any]) -> None:
             )
 
 
-def _load_manifest(bundle_root: Path) -> dict[str, Any]:
+def _load_manifest(bundle_root: Path) -> tuple[dict[str, Any], bytes]:
     manifest_path = bundle_root / "manifest.json"
     if not manifest_path.is_file():
         raise WorkflowError("Tapeout manifest.json not found in bundle")
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw = manifest_path.read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
     except ValueError as exc:
         raise WorkflowError("Tapeout manifest.json is not valid JSON") from exc
     if not isinstance(manifest, dict):
@@ -224,7 +227,7 @@ def _load_manifest(bundle_root: Path) -> dict[str, Any]:
     files = manifest.get("files")
     if not isinstance(files, dict) or not files:
         raise WorkflowError("Tapeout manifest lists no files")
-    return manifest
+    return manifest, raw
 
 
 #: Receipt checks that must be present and ``passed`` before a bundle can be signed.
@@ -301,8 +304,30 @@ def _readiness_record(
     return data
 
 
+def _manifest_covers_renders(
+    uncovered: list[str], manifest: Path, raw: bytes, base: Path, inputs: dict[str, Any]
+) -> bool:
+    """Use the receipt pin for the same manifest whose file records we just verified."""
+    from ..cli.render_cmd import COVERAGE_FILE, PROVENANCE_FILE, RENDER_OUTPUTS
+
+    if not manifest.is_relative_to(base):
+        return False
+    name = manifest.relative_to(base).as_posix()
+    if not is_manufacturing_manifest(name) or not readiness_input_hash_matches(
+        name, raw, inputs.get(name)
+    ):
+        return False
+    render_names = (*RENDER_OUTPUTS.values(), COVERAGE_FILE, PROVENANCE_FILE)
+    return set(uncovered).issubset(f"renders/{name}" for name in render_names)
+
+
 def _load_readiness(
-    readiness: Path, board: Path, board_sha: str, bundle_shas: dict[str, str], bundle_root: Path
+    readiness: Path,
+    board: Path,
+    board_sha: str,
+    bundle_shas: dict[str, str],
+    bundle_root: Path,
+    manifest_bytes: bytes,
 ) -> tuple[str, bool]:
     """Refuse unless a ``kct readiness`` receipt proves every gate passed for this board.
 
@@ -312,8 +337,9 @@ def _load_readiness(
     (including :data:`REQUIRED_GATE_CHECKS`). Every ``inputs`` / ``external_inputs``
     entry is re-hashed against disk (as ``read_readiness`` does), exempting only
     the bundle ``manifest.json`` that sign-off rewrites. Its ``inputs`` must hash
-    a ``.kicad_pcb`` equal to ``--board``, and every bundle file (bar
-    ``manifest.json``) must appear in ``inputs`` by sha256.
+    a ``.kicad_pcb`` equal to ``--board`` and directly cover every fabrication
+    file. The receipt can cover the standard render outputs through its hash
+    of the selected manufacturing manifest.
     """
     if not readiness.is_file():
         raise WorkflowError(f"Readiness receipt not found: {readiness}")
@@ -386,7 +412,9 @@ def _load_readiness(
     else:
         covered = set(inputs.values())
         uncovered = sorted(name for name, sha in bundle_shas.items() if sha not in covered)
-    if uncovered:
+    if uncovered and not _manifest_covers_renders(
+        uncovered, exempt, manifest_bytes, input_base, inputs
+    ):
         raise WorkflowError(f"Readiness receipt does not cover bundle files: {uncovered}")
     return _sha(raw), layout is not None
 
@@ -570,7 +598,7 @@ def sign_off_bundle(
         raise WorkflowError("Sign-off needs a non-blank --reviewer (a human's name)")
     if not board.is_file():
         raise WorkflowError(f"Board file not found: {board}")
-    manifest = _load_manifest(bundle_root)
+    manifest, manifest_bytes = _load_manifest(bundle_root)
     files = manifest["files"]
     on_disk = {
         p.relative_to(bundle_root).as_posix() for p in bundle_root.rglob("*") if p.is_file()
@@ -631,6 +659,7 @@ def sign_off_bundle(
             board_sha,
             {n: r["sha256"] for n, r in files.items() if n != "manifest.json"},
             bundle_root,
+            manifest_bytes,
         )
         tapeout = {
             "board_sha256": board_sha,
@@ -670,7 +699,7 @@ def preflight(bundle_root: Path, board: Path) -> Preflight:
     checks that a receipt hash was recorded.
     """
     bundle_root, board = Path(bundle_root), Path(board)
-    manifest = _load_manifest(bundle_root)
+    manifest, _ = _load_manifest(bundle_root)
     files = manifest["files"]
     _verify_file_records(bundle_root, files)
 
