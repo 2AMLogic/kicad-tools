@@ -3279,8 +3279,11 @@ def test_chamfer_between_perpendicular_runs_slides_each_end_along_its_run(tmp_pa
     assert {k: _end(board, k) for k in original} == original
 
 
-def test_chamfer_slide_declines_and_leaves_the_board_alone_when_vetoed(tmp_path):
+def test_chamfer_slide_declines_and_leaves_the_board_alone_when_vetoed(tmp_path, monkeypatch):
     # Every case also crowds the plain recentre, so only the slide's own veto is tested.
+    # The edge-end extension (issue #9939) is a separate repair that would carry this
+    # chamfer's pad-edge end into the pad, so it is switched off here.
+    monkeypatch.setattr(MaskCopperRepairer, "_extend_entry_one", lambda *args, **kwargs: args[-1])
     cases = {
         # Other-net copper beside the chamfer's new position.
         "foreign-copper": (
@@ -3927,6 +3930,380 @@ def test_verified_slid_elbow_that_leaves_the_finding_restores_every_end(
         ("diag", "finding_not_cleared")
     ]
     assert board.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Issue #9939: an escape that stops on its pad's edge is carried into the pad
+# ---------------------------------------------------------------------------
+
+# An LQFP pin row on a 0.8 mm pitch (Board 03 U1/16..18, moved by (-40, +15)).
+_EDGE_BOARD = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "N1")
+  (net 2 "N2")
+  (net 3 "N3")
+  (footprint "test:U1" (layer "F.Cu") (at 100.8375 %s)
+    (property "Reference" "U1" (at 0 -3 0) (layer "F.SilkS")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (property "Value" "U" (at 0 3 0) (layer "F.Fab")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (pad "16" smd roundrect (at 0 -0.8) (size 1.475 0.55) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 2 "N2") (uuid "pad-u1-16"))
+    (pad "17" smd roundrect (at 0 0) (size 1.475 0.55) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "N1") (uuid "pad-u1-17"))
+    (pad "18" smd roundrect (at 0 0.8) (size 1.475 0.55) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 3 "N3") (uuid "pad-u1-18"))
+  )
+%s
+)
+"""
+_EDGE_PAD = "pad-u1-17"
+_EDGE_OPTS = {"max_displacement": 2.0, "clearance_mm": 0.127}
+
+
+def _edge_escape_fixture(tmp_path, *, width=0.2, horizontal=False, y=100.5, extra="", lock=""):
+    """An escape that ends in the middle of its pin's end edge.
+
+    By default ``diag`` is the 45-degree escape ending on a via, ``lead`` ends
+    at the same edge point and ``through`` crosses it on its way to a second
+    via.  With ``horizontal=True`` only the escape, its remote via and its
+    back-layer continuation are present along the specified y coordinate.
+    """
+    far = (99.3, y if horizontal else y + 0.8)
+    diag = _seg("diag", (100.1, y), far, width=width)
+    shapes = [
+        diag.replace("(segment ", f"(segment {lock} " if lock else "(segment "),
+        _seg("diag-b", far, (93.3, far[1]), layer="B.Cu"),
+        _via("v-diag", far),
+    ]
+    if not horizontal:
+        shapes.extend(
+            [
+                _seg("lead", (100.5, y), (100.1, y)),
+                _seg("through", (100.5, y), (99.685, y)),
+                _seg("through-b", (99.685, y), (96.5, y), layer="B.Cu"),
+                _via("v-through", (99.685, y)),
+            ]
+        )
+    path = tmp_path / "b.kicad_pcb"
+    path.write_text(_EDGE_BOARD % (y, "\n".join([*shapes, extra])))
+    return path
+
+
+def _edge_finding() -> DRCViolation:
+    finding = _own_finding("diag", _EDGE_PAD, "U1/17")
+    finding.required_value_mm = 0.09
+    finding.actual_value_mm = 0.0
+    return finding
+
+
+def _is_clean_entry(board: Path, copper, ends) -> bool:
+    """The mask rule's own verdict on one straight track at U1/17."""
+    from kicad_tools.validate.mask_copper import clean_own_pad_entry
+
+    repairer = MaskCopperRepairer(board)
+    pad = next(entry for entry in repairer._openings().values() if entry[4] == "U1/17")
+    aperture = repairer._pad_mask_openings[_EDGE_PAD, "F.Cu"]
+    return clean_own_pad_entry(
+        aperture.geometry,
+        copper,
+        pad[0],
+        f"pad:{pad[5]}",
+        0.2,
+        ends,
+        clearance_mm=0.09,
+        uncertainty_mm=0.0101,
+        margin_mm=aperture.margin_mm,
+    )
+
+
+@pytest.mark.parametrize("connectivity", [True, False])
+def test_native_veto_preserves_board_after_pad_entry_extension(
+    tmp_path, monkeypatch, capsys, connectivity
+):
+    from collections import Counter
+
+    board = _edge_escape_fixture(tmp_path)
+    original = board.read_bytes()
+    native = iter(
+        [
+            fix_drc_cmd._MaskNativeState(),
+            fix_drc_cmd._MaskNativeState(Counter({("clearance", "track rule", ("a", "b")): 1})),
+        ]
+    )
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda candidate: next(native))
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", lambda candidate: [])
+    _run(
+        monkeypatch,
+        board,
+        [_report(_edge_finding()), _report()],
+        extra=("--max-displacement", "0.5", "--max-passes", "1", "--verify", "--format", "json"),
+        connectivity=connectivity,
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert result["repaired"] == 0
+    assert any("1 new errors" in finding["detail"] for finding in result["unrepaired"])
+    assert board.read_bytes() == original
+
+
+def test_edge_stopped_escape_is_carried_into_the_pad_along_its_own_line(tmp_path):
+    board = _edge_escape_fixture(tmp_path)
+    before = board.read_bytes()
+    original = {name: _end(board, name) for name in ("diag", "lead", "through")}
+    repairer = MaskCopperRepairer(board)
+    finding = _edge_finding()
+    # The incumbent is one straight crossing that the rule does not count.
+    assert not _is_clean_entry(
+        board, LineString(original["diag"]).buffer(0.1), tuple(original["diag"])
+    )
+
+    assert repairer.repair([finding], dry_run=True, **_EDGE_OPTS).repaired == 1
+    assert board.read_bytes() == before
+
+    result = repairer.repair([finding], **_EDGE_OPTS)
+    assert result.repaired == 1 and not result.unrepaired
+    (action,) = result.actions
+    assert action.action == "extend_entry" and action.joined == []
+    repairer.save(board)
+    diag = _end(board, "diag")
+    # The via end and both tracks meeting the old end stay exactly as authored.
+    assert diag[1] == original["diag"][1]
+    assert {n: _end(board, n) for n in ("lead", "through")} == {
+        n: original[n] for n in ("lead", "through")
+    }
+    # The edge end moved on along the same 45-degree line, the shortest slide
+    # that leaves the whole track width ending on the pad.
+    assert diag[0] == (100.2025, 100.3975)
+    assert _pad_poly(board, "U1/17").covers(Point(diag[0]).buffer(0.1))
+    assert not repairer.off_angle_tracks()
+    moved = LineString(diag).buffer(0.1, quad_segs=16)
+    assert moved.distance(Point(original["lead"][1])) == 0
+    assert _is_clean_entry(board, moved, tuple(diag))
+
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert _end(board, "diag") == original["diag"]
+
+
+def test_edge_escape_is_not_carried_past_the_displacement_limit(tmp_path):
+    # The shortest clean slide is 0.145 mm; the recentre's own refusal stands.
+    board = _edge_escape_fixture(tmp_path)
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    result = repairer.repair([_edge_finding()], **{**_EDGE_OPTS, "max_displacement": 0.1})
+    assert result.repaired == 0
+    assert [(u.uuid, u.reason) for u in result.unrepaired] == [("diag", "exceeds_max_displacement")]
+    assert not repairer.modified and repairer.doc.to_string() == before
+
+
+@pytest.mark.parametrize(
+    ("horizontal", "width", "y", "limit", "moves", "target"),
+    [
+        (False, 0.19, 100.5, 0.135, False, (100.1955, 100.4045)),
+        (False, 0.19, 100.5, 0.1351, True, (100.1955, 100.4045)),
+        (True, 0.2, 100.5, 0.099999, False, (100.2, 100.5)),
+        (True, 0.2, 100.5, 0.1, True, (100.2, 100.5)),
+        (True, 0.2, 100.5, 0.100001, True, (100.2, 100.5)),
+        (True, 0.2, 100.53125, 0.099999, False, (100.2, 100.53125)),
+        (True, 0.2, 100.53125, 0.1, True, (100.2, 100.53125)),
+    ],
+    ids=[
+        "diagonal-overshoot-vetoed",
+        "diagonal-overshoot-accepted",
+        "horizontal-just-under",
+        "horizontal-exact-equality",
+        "horizontal-just-over",
+        "translated-horizontal-just-under",
+        "translated-horizontal-exact-equality",
+    ],
+)
+def test_edge_escape_limit_applies_to_saved_coordinates(
+    tmp_path, horizontal, width, y, limit, moves, target
+):
+    from decimal import Decimal
+
+    board = _edge_escape_fixture(tmp_path, width=width, horizontal=horizontal, y=y)
+    original = _end(board, "diag")
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_edge_finding()], max_displacement=limit, clearance_mm=0.127)
+    assert result.repaired == int(moves)
+    if moves:
+        assert result.actions[0].displacement_mm <= limit
+    else:
+        assert [(u.uuid, u.reason) for u in result.unrepaired] == [
+            ("diag", "exceeds_max_displacement")
+        ]
+    repairer.save(board)
+    saved = _end(board, "diag")
+    assert saved[1] == original[1]
+    dx = Decimal(str(saved[0][0])) - Decimal(str(original[0][0]))
+    dy = Decimal(str(saved[0][1])) - Decimal(str(original[0][1]))
+    assert dx * dx + dy * dy <= Decimal(str(limit)) ** 2
+    assert saved[0] == (target if moves else original[0])
+
+
+@pytest.mark.parametrize("limit", [0.5, 2.0])
+@pytest.mark.parametrize(
+    ("groups", "expected"),
+    [
+        ('(generated (type "track_length_tuning_single") (uuid tuning) (members diag))', 0),
+        (
+            '(group "escapes" (uuid child) (members diag)) (generated (uuid tuning) (members CHILD))',
+            0,
+        ),
+        ('(group "escapes" (uuid child) (members diag))', 1),
+    ],
+    ids=["direct-generated", "nested-generated", "ordinary-group"],
+)
+def test_edge_escape_extension_respects_generator_ownership(
+    tmp_path, monkeypatch, capsys, groups, expected, limit
+):
+    board = _edge_escape_fixture(tmp_path, extra=groups)
+    original = board.read_bytes()
+    probe = MaskCopperRepairer(board)
+    seg = probe._segment_nodes()["diag"]
+    assert not probe._locks.is_locked(seg)
+    assert probe._locks.is_generator_owned(seg) is (not bool(expected))
+    assert (
+        probe.repair([_edge_finding()], max_displacement=limit, clearance_mm=0.127).repaired
+        == expected
+    )
+
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda candidate: fix_drc_cmd._MaskNativeState()
+    )
+    _run(
+        monkeypatch,
+        board,
+        [_report(_edge_finding()), _report()],
+        extra=(
+            "--max-displacement",
+            str(limit),
+            "--max-passes",
+            "1",
+            "--verify",
+            "--format",
+            "json",
+        ),
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert result["repaired"] == expected
+    if expected:
+        assert _end(board, "diag")[0] == (100.2025, 100.3975)
+    else:
+        assert board.read_bytes() == original
+
+
+@pytest.mark.parametrize("limit", [0.5, 2.0])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        _via("v-edge", (100.1, 100.5)),
+        _seg("foreign", (100.1, 100.5), (99.6, 100.0), net=2),
+        _seg("locked", (100.1, 100.5), (99.6, 100.0)).replace("(segment ", "(segment locked "),
+    ],
+    ids=["via-at-end", "foreign-end", "locked-same-net-end"],
+)
+def test_edge_escape_extension_respects_fixed_junction(tmp_path, extra, limit):
+    board = _edge_escape_fixture(tmp_path, extra=extra)
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    result = repairer.repair([_edge_finding()], max_displacement=limit, clearance_mm=0.127)
+    assert result.repaired == 0
+    assert [(u.uuid, u.reason) for u in result.unrepaired] == [("diag", "junction_at_moved_end")]
+    assert not repairer.modified and repairer.doc.to_string() == before
+
+
+@pytest.mark.parametrize(
+    ("name", "width", "extra", "lock", "reason"),
+    [
+        # As wide as the pad's corner radius: its end can never lie wholly on
+        # the pad along this line.
+        ("wide-track", 0.3, "", "", "would_violate_clearance"),
+        ("locked", 0.2, "", "locked", "locked_segment"),
+    ],
+)
+def test_edge_escape_extension_declined_leaves_every_track_alone(
+    tmp_path, name, width, extra, lock, reason
+):
+    sub = tmp_path / name
+    sub.mkdir()
+    board = _edge_escape_fixture(sub, width=width, extra=extra, lock=lock)
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    result = repairer.repair([_edge_finding()], **_EDGE_OPTS)
+    assert result.repaired == 0, name
+    assert [(u.uuid, u.reason) for u in result.unrepaired] == [("diag", reason)], name
+    assert not repairer.modified and repairer.doc.to_string() == before, name
+
+
+def test_verified_edge_extension_that_leaves_the_finding_restores_the_end(
+    tmp_path, monkeypatch, capsys
+):
+    board = _edge_escape_fixture(tmp_path)
+    before = board.read_bytes()
+    finding = _edge_finding()
+    _run(
+        monkeypatch,
+        board,
+        [_report(finding), _report(finding)],
+        extra=("--max-displacement", "2.0", "--format", "json"),
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert [(u["uuid"], u["reason"]) for u in result["unrepaired"]] == [
+        ("diag", "finding_not_cleared")
+    ]
+    assert board.read_bytes() == before
+
+
+@pytest.mark.timeout(180)
+def test_verified_edge_escape_clears_the_plotted_opening(tmp_path, capsys):
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+
+    fixture = Path(__file__).parent / "fixtures" / "mask_edge_stopped_escape.kicad_pcb"
+    board = tmp_path / fixture.name
+    board.write_text(fixture.read_text())
+    board.with_suffix(".kicad_pro").write_text("{}")
+    diag = "a60d1b45-13e7-5f9c-8a1b-0f5a5f3e2c11"
+    with evidence_toolchain([tmp_path]):
+        fix_drc_cmd.main(
+            [
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--max-displacement",
+                "2",
+                "--max-passes",
+                "1",
+                "--format",
+                "json",
+            ]
+        )
+        report = json.loads(capsys.readouterr().out)["mask_copper"]
+        checked = fix_drc_cmd._run_python_drc(board, manufacturer="jlcpcb-tier1", mask_copper=True)
+    assert report["repaired"] == 1
+    assert checked is not None
+    findings = [
+        v
+        for v in checked.violations
+        if v.type == ViolationType.MASK_TO_COPPER and (v.is_error or diag in v.items)
+    ]
+    assert [(v.is_error, "within_own_pad" in v.message) for v in findings] == [(False, True)]
+    assert _end(board, diag) == [(100.2025, 100.3975), (99.3, 101.3)]
 
 
 def test_elbow_flip_vetoed_by_foreign_copper_a_lock_or_a_branch_restores_everything(tmp_path):
@@ -5090,3 +5467,130 @@ def test_elbow_repair_preserves_tracks_on_neighbor_pour(tmp_path, capsys):
         for entry in outcome["unrepaired"]
     )
     assert board.read_bytes() == original
+
+
+# ---------------------------------------------------------------------------
+# Aligned-pad bridge (issue #9939, Board 03 J1/A4 and J1/B9)
+#
+# R1/1 (the finding's owner) is centred at (100, 100) and R2/1 at (100, 97), both
+# on N1 and both 2 x 1 mm, so their centres share the vertical line x = 100.  An
+# offset 0.2 mm run at x = 99.8 reaches R2/1 through a 45 degree lead and is
+# fed through a 45 degree join, grazing R1/1 on the way.
+# ---------------------------------------------------------------------------
+
+BRIDGE_RUN = _seg("run", (99.8, 102.0), (99.8, 97.2))
+BRIDGE_LEAD = _seg("lead", (99.8, 97.2), (100.0, 97.0))
+BRIDGE_JOIN = _seg("join", (99.4, 102.4), (99.8, 102.0))
+BRIDGE_FEED = _seg("feed", (99.4, 102.4), (99.4, 105.0))
+BRIDGE_COPPER = "\n".join([BRIDGE_RUN, BRIDGE_LEAD, BRIDGE_JOIN, BRIDGE_FEED])
+
+
+def _bridge_finding(conductor: str = "run") -> DRCViolation:
+    return DRCViolation(
+        type=ViolationType.MASK_TO_COPPER,
+        type_str="mask_to_copper",
+        severity=Severity.ERROR,
+        message=f"Mask-to-copper overlap: violation; opening R1/1; {PASS_THROUGH}",
+        locations=[Location(x_mm=99.8, y_mm=100.0, layer="F.Cu")],
+        items=[PAD, conductor],
+        required_value_mm=0.09,
+    )
+
+
+def _segments(board: Path) -> dict[str, tuple[tuple[float, float], tuple[float, float]]]:
+    out = {}
+    for node in parse_file(board).find_all("segment"):
+        uuid = str(node.find("uuid").get_first_atom()).strip('"')
+        s = [float(a) for a in node.find("start").get_atoms()]
+        e = [float(a) for a in node.find("end").get_atoms()]
+        out[uuid] = ((s[0], s[1]), (e[0], e[1]))
+    return out
+
+
+def test_offset_run_becomes_a_bridge_between_the_two_pad_centres(tmp_path):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100 97")
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_bridge_finding()], max_displacement=1.0)
+    assert result.repaired == 1 and not result.unrepaired
+    action = result.actions[0]
+    assert action.action == "bridge_aligned_pads"
+    repairer.save(board)
+    segments = _segments(board)
+    # The run now joins the two pad centres directly; its lead is gone.
+    assert segments["run"] == ((100.0, 100.0), (100.0, 97.0))
+    # The join kept its 45 degree direction and now meets the pad-centre line;
+    # the former lead is the entry from the join to the first pad's centre, so
+    # each part ends in a pad and no conductor is added or dropped.
+    assert segments["join"] == ((99.4, 102.4), (pytest.approx(100.0), pytest.approx(101.8)))
+    assert segments["lead"] == ((pytest.approx(100.0), pytest.approx(101.8)), (100.0, 100.0))
+    assert set(segments) == {"run", "lead", "join", "feed"}
+    assert segments["feed"] == ((99.4, 102.4), (99.4, 105.0))  # untouched
+
+
+def test_bridge_dry_run_predicts_without_touching_the_board(tmp_path):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100 97")
+    original = board.read_bytes()
+    result = MaskCopperRepairer(board).repair(
+        [_bridge_finding()], max_displacement=1.0, dry_run=True
+    )
+    assert result.repaired == 1 and result.actions[0].action == "bridge_aligned_pads"
+    assert board.read_bytes() == original
+
+
+def test_bridge_undo_restores_every_segment_exactly(tmp_path):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100 97")
+    before = _segments(board)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_bridge_finding()], max_displacement=1.0)
+    repairer.save(board)
+    undo = MaskCopperRepairer(board)
+    assert undo.undo_action(result.actions[0])
+    undo.save(board)
+    assert _segments(board) == before
+
+
+def test_bridge_is_declined_when_the_new_line_crowds_other_net_copper(tmp_path):
+    # An N2 track ends 0.1 mm from the centre line: the bridge would leave it
+    # closer than the 0.15 mm floor while the old run was 0.3 mm away.
+    crowd = _seg("crowd", (100.3, 98.5), (102.0, 98.5), net=2)
+    board = _board2(tmp_path, BRIDGE_COPPER + "\n" + crowd, "100 97")
+    before = _segments(board)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_bridge_finding()], max_displacement=1.0, clearance_mm=0.15)
+    assert result.repaired == 0
+    assert [u.reason for u in result.unrepaired] == ["would_violate_clearance"]
+    repairer.save(board)
+    assert _segments(board) == before  # the run, its lead and the join are untouched
+
+
+def test_bridge_is_declined_beyond_the_displacement_limit(tmp_path):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100 97")
+    result = MaskCopperRepairer(board).repair([_bridge_finding()], max_displacement=0.1)
+    assert result.repaired == 0
+    assert [u.reason for u in result.unrepaired] == ["exceeds_max_displacement"]
+
+
+def test_bridge_does_not_apply_when_the_pad_centres_are_not_aligned(tmp_path):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100.6 97")
+    result = MaskCopperRepairer(board).repair([_bridge_finding()], max_displacement=1.0)
+    assert result.repaired == 0
+    assert [u.reason for u in result.unrepaired] == ["not_own_pad_entry"]
+
+
+def test_fix_drc_keeps_a_bridge_that_clears_its_finding(tmp_path, monkeypatch):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100 97")
+    code = _run(monkeypatch, board, [_report(_bridge_finding()), _report(), _report()])
+    assert code == 0
+    assert _segments(board)["run"] == ((100.0, 100.0), (100.0, 97.0))
+
+
+def test_fix_drc_restores_the_run_and_its_lead_when_the_bridge_does_not_clear(
+    tmp_path, monkeypatch, capsys
+):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100 97")
+    before = _segments(board)
+    still = _report(_bridge_finding())
+    code = _run(monkeypatch, board, [still, still, still])
+    assert code != 0
+    assert _segments(board) == before  # run, lead and join all back where they were
+    assert "finding_not_cleared" in capsys.readouterr().out

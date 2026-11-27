@@ -16,6 +16,24 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10587** (closed): test flake: test_count_corners_serpentine_4000_under_budget exceeds its 1.0s wall-clock budget in the Test job
+- **PR #10591**: test: gate _count_corners serpentine budget on best of 3 runs
+- **Issue #10590** (closed): Placement treats a large interior Edge.Cuts opening as the board exterior
+- **PR #10592**: fix(pcb): select board outline face by exterior ring area
+- **PR #10128**: fix(validate): stop pour_slot reporting packed parallel track pairs
+- **Issue #10561** (closed): Board 03 USB common-run measurement depends on where an unchanged track is split
+- **PR #10571**: fix(board03): clip the USB common run to its window before measuring coupling
+- **PR #10472**: fix: carry a pad-edge escape end into the pad along its own line
+- **Issue #10588** (closed): create-issue.sh (and every config-resolver.sh caller) exits 126 on dispatch workers: 208 KB private-defaults tier overflows jq's per-argument limit
+- **Issue #10582** (closed): Reject terminal landings outside a purchasing row’s declared references
+- **PR #10583**: fix: reject purchasing terminal landings outside the row's declared refs
+- **Issue #10492** (closed): Offer an export mode that verifies reviewed copper before publishing manufacturing artwork
+- **PR #10545**: feat: add kct export --verify-reviewed-copper to publish only reviewed copper
+- **Issue #10476** (closed): Assembly preflight: check snap-in mounting-hole limits against both finished-hole tolerances
+- **PR #10498**: feat: check declared mounting holes against their drawing and finished-hole interval
+- **Issue #10577** (closed): Preserve Board 05 sourcing fields and no-connect identities in the editable KiCad project
+- **PR #10580**: fix(board05): preserve sourcing and unused pad identities in the editable project
+- **PR #10576**: fix(board03): stage the two USB project widths for the coordinated reissue
 - **Issue #10130** (closed): route: GND pads inside a same-net pour still get a stub trace and via (60 of 64 pads on a consumer board)
 - **Issue #10261** (closed): Fill the routed board before optional power-plane stitching on mixed-signal layouts
 - **PR #10262**: fix(route): stitch power planes after the routed copper is refilled

@@ -33,6 +33,9 @@ class NetclassClearance:
 #: makes no difference to the result.
 CURRENT_NET_SETTINGS_SCHEMA = 5
 
+#: KiCad's built-in Default netclass clearance when the project omits it.
+DEFAULT_NETCLASS_CLEARANCE_MM = 0.2
+
 
 def _schema_version(settings: dict[str, Any]) -> object:
     """The ``net_settings`` schema version, reading an unversioned block as current.
@@ -148,7 +151,9 @@ def _prepare_netclass_resolution(
                     raise ProjectClearanceError("Schema 3 assignments must be strings")
                 assignments[net] = [value] if value else []
     if not any(isinstance(item, dict) and item.get("name") == "Default" for item in classes):
-        classes.append({"name": "Default", "clearance": 0.2, "priority": 2**31 - 1})
+        classes.append(
+            {"name": "Default", "clearance": DEFAULT_NETCLASS_CLEARANCE_MM, "priority": 2**31 - 1}
+        )
         settings["classes"] = classes
     report = diagnose_netclasses(data, names)
     ignored = {"missing_default", "no_matches"}

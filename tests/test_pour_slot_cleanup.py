@@ -11,6 +11,8 @@ from kicad_tools.validate.rules.pour_slot import PourSlotRule, iter_pour_slot_pa
 
 @dataclass
 class _Zone:
+    rule_area_contours: list = field(default_factory=list)
+    polygon = ((-50, -50), (100, -50), (100, 100), (-50, 100))
     layer: str = "F.Cu"
     layers: list = field(default_factory=list)
     keepout: object = None
@@ -52,6 +54,17 @@ def test_spread_widens_gap_to_threshold():
     assert list(iter_pour_slot_pairs(pcb)) == []
     gap = abs(_seg(pcb, "B").start[1] - _seg(pcb, "A").start[1]) - 0.2
     assert gap >= 0.85
+
+
+def test_cleanup_uses_the_checker_bounds_for_unequal_clearances():
+    for gap, thickness, count in ((0.65, 0.3, 1), (0.65, 0.025, 0), (0.95, 0.3, 0)):
+        pcb = _board(gap)
+        pcb.zones[0].clearance = 0.2
+        pcb.zones[0].min_thickness = thickness
+        result = cleanup_pour_slots(pcb, referee=_ok, netclass_clearances={"A": 0.4})
+        assert result.pairs_before == count
+        assert result.spread == count
+        assert result.pairs_after == 0
 
 
 def test_pack_when_spread_blocked_by_third_trace():

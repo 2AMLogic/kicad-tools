@@ -6196,6 +6196,7 @@ class DiffPairRouter:
             shape=template.shape,
             roundrect_rratio=template.roundrect_rratio,
             chamfered_outline=template.chamfered_outline,
+            mask_chamfered_outline=template.mask_chamfered_outline,
             copper_offset=template.copper_offset,
         )
 

@@ -28,7 +28,7 @@ from .rules.match_group_length_skew import MatchGroupLengthSkewRule
 from .rules.path_ampacity import PathAmpacityRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.plane_split import PlaneSplitRule
-from .rules.pour_slot import PourSlotRule
+from .rules.pour_slot import PourSlotClearances, PourSlotRule
 from .rules.redundant_copper import RedundantCopperRule
 from .rules.reinforcement_courtyard import ReinforcementCourtyardRule
 from .rules.reinforcement_incomplete import ReinforcementIncompleteRule
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from .rules.physical_gap import FabGapPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Sequence
     from pathlib import Path
 
     from kicad_tools.router.current_paths import CurrentPathSpec, OperatingCase
@@ -1150,11 +1150,11 @@ class DRCChecker:
         rule = DanglingCopperRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
-    def check_pour_slot(self, netclass_clearances: Mapping[str, float] | None = None) -> DRCResults:
+    def check_pour_slot(self, netclass_clearances: PourSlotClearances | None = None) -> DRCResults:
         """Report parallel tracks too close for the zone fill (Issue #8435).
 
         Own CLI category (``pour_slot``) so ``--skip pour_slot`` works.
-        ``netclass_clearances`` maps net name to authored netclass clearance.
+        Accepts board clearance rules or a mapping of per-net clearances.
         """
         rule = PourSlotRule(netclass_clearances)
         return self._absolutize(rule.check(self.pcb, self.design_rules))

@@ -11,6 +11,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
+- **#10427**: Reject incompatible automatic parts in assembly BOM exports
 - **#10474**: feat(export): report revision-bound simulation limits and fault-case evidence
 - **#10497**: ci: retry the pinned actionlint download on a transient 504
 - **#10520**: fix(route-link): resolve the non-plated hole clearance through the board's rules
@@ -45,41 +46,37 @@ Issues currently being built (`loom:building`).
 - **#8486**: Reduce repeated full-budget reroutes of six narrow nets on the 97-net board
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410)
+- **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package
 - **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill
-- **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film
 - **#10424**: BOM enrichment assigns incompatible packages, tolerance and wattage despite explicit schematic intent
 - **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes
 - **#10468**: Manufacturing review: include revision-bound simulation limits and fault-case evidence
-- **#10476**: Assembly preflight: check snap-in mounting-hole limits against both finished-hole tolerances
 - **#10485**: CI flake: Install pinned actionlint download returned HTTP 504 in Test
 - **#10486**: Route-link option to join an existing same-net branch outside a component pad
-- **#10492**: Offer an export mode that verifies reviewed copper before publishing manufacturing artwork
 - **#10504**: route-link: non-plated-hole clearance ignores the board's hole_clearance rule
 - **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313
-- **#10561**: Board 03 USB common-run measurement depends on where an unchanged track is split
-- **#10582**: Reject terminal landings outside a purchasing row’s declared references
+- **#10594**: Manufacturing design reports label a revision-B PCB as Rev 1
+- **#10595**: Editable manufacturing ZIP omits the net-class map used to regenerate ampacity rules
+- **#10601**: Mask-copper aligned-pad bridge admits a candidate the angle census rejects (_BRIDGE_AXIS_TOLERANCE_MM vs ANGLE_TOL_DEG)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
-- **#10128**: fix(validate): stop pour_slot reporting packed parallel track pairs
-- **#10427**: Reject incompatible automatic parts in assembly BOM exports
-- **#10472**: fix: carry a pad-edge escape end into the pad along its own line
-- **#10498**: feat: check declared mounting holes against their drawing and finished-hole interval
 - **#10502**: Check electrical compatibility and identify catalog inventory in parts alternatives
 - **#10507**: fix(boards): declare Board 07's reviewed class widths and re-pin its SDRAM evidence
 - **#10519**: feat: add route-link --join-track to tee into a pad's track
-- **#10545**: feat: add kct export --verify-reviewed-copper to publish only reviewed copper
 - **#10563**: fix(router): decline optimizer shortcuts that park a bend beside their own pad's mask opening
-- **#10571**: fix(board03): clip the USB common run to its window before measuring coupling
-- **#10583**: fix: reject purchasing terminal landings outside the row's declared refs
+- **#10597**: fix: ship the selected net-class map with editable KiCad projects
+- **#10598**: fix: use authored PCB revision in report and export headers
+- **#10600**: fix(boards): reissue Board 05 revision B with matching copper and design rules
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
+- **#10427**: Reject incompatible automatic parts in assembly BOM exports
 - **#10474**: feat(export): report revision-bound simulation limits and fault-case evidence
 - **#10497**: ci: retry the pinned actionlint download on a transient 504
 - **#10518**: Reject simulation results with undeclared measured inputs
@@ -115,22 +112,18 @@ Issues carrying `loom:curated`.
 - **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package *(curated)*
 - **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill *(curated)*
 - **#10105**: Support a repository layout with editable KiCad sources and a sibling generated-output directory *(curated)*
-- **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film *(curated)*
 - **#10385**: Refresh maintained board schematics after the instance Datasheet fix *(curated)*
 - **#10424**: BOM enrichment assigns incompatible packages, tolerance and wattage despite explicit schematic intent *(curated)*
 - **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes *(curated)*
 - **#10468**: Manufacturing review: include revision-bound simulation limits and fault-case evidence *(curated)*
-- **#10476**: Assembly preflight: check snap-in mounting-hole limits against both finished-hole tolerances *(curated)*
 - **#10485**: CI flake: Install pinned actionlint download returned HTTP 504 in Test *(curated)*
 - **#10486**: Route-link option to join an existing same-net branch outside a component pad *(curated)*
-- **#10492**: Offer an export mode that verifies reviewed copper before publishing manufacturing artwork *(curated)*
 - **#10499**: parts alternatives offers a 30 Ω resistor for 4.7 kΩ and adjustable regulators for a fixed 3.3 V part *(curated)*
 - **#10504**: route-link: non-plated-hole clearance ignores the board's hole_clearance rule *(curated)*
 - **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313 *(curated)*
 - **#10530**: Expand BOM numeric reference ranges with a shared suffix such as Q1A-Q4A *(curated)*
-- **#10561**: Board 03 USB common-run measurement depends on where an unchanged track is split *(curated)*
 - **#10575**: Preserve Board 03’s connector and MCU USB widths in the routed KiCad project *(curated)*
-- **#10582**: Reject terminal landings outside a purchasing row’s declared references *(curated)*
+- **#10601**: Mask-copper aligned-pad bridge admits a candidate the angle census rejects (_BRIDGE_AXIS_TOLERANCE_MM vs ANGLE_TOL_DEG) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -147,14 +140,14 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 6 |
+| Operator merge-risk holds | 7 |
 | Very important | 1 |
 | Important | 3 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 16 |
-| PRs awaiting review | 12 |
-| Approved PRs awaiting merge | 7 |
-| Curated | 39 |
+| In Progress (`loom:building`) | 15 |
+| PRs awaiting review | 8 |
+| Approved PRs awaiting merge | 8 |
+| Curated | 35 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
