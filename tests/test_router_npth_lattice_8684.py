@@ -41,3 +41,17 @@ def test_npth_pad_extra_reaches_hole_clearance(router):
 def test_no_npth_is_unchanged(router):
     pads = [p for p in router.grid._pads if p.through_hole]
     assert LatticePathfinder._npth_pad_extra(_stub(pads, router.rules)) is None
+
+
+def test_from_board_applies_npth_keepout():
+    """Issue #10629: the analysis loader keeps np_thru_hole pads non-plated."""
+    pf = LatticePathfinder.from_board(PCB, rules=DesignRules(grid_resolution=0.1))
+    npth = [p for p in pf.pads if p.drill > 0 and not p.through_hole]
+    assert len(npth) == 1
+    extra = pf._npth_pad_extra()
+    assert extra is not None
+    for pad, e in zip(pf.pads, extra, strict=True):
+        if pad in npth:
+            assert pf.rules.trace_clearance + e >= _KICAD_HOLE_CLEARANCE_MM
+        else:
+            assert e == 0.0
