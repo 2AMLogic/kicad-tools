@@ -43,7 +43,7 @@ def test_no_npth_is_unchanged(router):
     assert LatticePathfinder._npth_pad_extra(_stub(pads, router.rules)) is None
 
 
-def test_from_board_applies_npth_keepout(tmp_path):
+def test_from_board_applies_npth_keepout():
     """Issue #10629: the analysis loader keeps np_thru_hole pads non-plated."""
     pf = LatticePathfinder.from_board(PCB, rules=DesignRules(grid_resolution=0.1))
     npth = [p for p in pf.pads if p.drill > 0 and not p.through_hole]
