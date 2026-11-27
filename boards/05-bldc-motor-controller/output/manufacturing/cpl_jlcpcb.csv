@@ -40,4 +40,4 @@ R9,10k,Resistor_SMD:R_0805_2012Metric,159.5000mm,-122.0000mm,0.0,Top
 RV1,10k,Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical,169.9600mm,-131.0000mm,0.0,Top
 U1,ATmega328P-AU,Package_QFP:TQFP-32_7x7mm_P0.8mm,160.5000mm,-100.0000mm,270.0,Top
 U2,DRV8313PWPR,board05_revB:TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias,138.5000mm,-100.0000mm,0.0,Top
-U3,TPS7A1650DGNR,Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias,161.5000mm,-75.0000mm,0.0,Top
+U3,TPS7A1650DGNR,board05_revB:TI_DGN0008C_Lands1.4x0.45_EP1.57x1.89_ThermalVias,161.5000mm,-75.0000mm,0.0,Top

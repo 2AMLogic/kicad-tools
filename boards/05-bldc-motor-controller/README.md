@@ -13,8 +13,13 @@ caps duty at 25%. Physical motor operation and thermal performance have not
 yet been measured. Read [HARDWARE.md](redesign/HARDWARE.md) before assembly,
 programming or power-up; it contains all connector pinouts and verified BOM identities.
 
-Generate the real circuit and reviewed route, run native refill/DRC/ERC and
-manufacturer/LVS gates, and export its assembly bundle:
+Assembly export checks stock for all 22 LCSC numbers. On a fresh machine,
+`uv run kct parts sync-catalog` downloads the parts catalog. If preflight
+reports a missing part, look up its LCSC number. For example,
+`uv run kct parts lookup --no-cache C3167176` refreshes the stock record for fuse F1.
+
+Generate the circuit and reviewed route, run native and manufacturer checks,
+and export the assembly bundle with the board recipe.
 
 ```sh
 uv run python boards/05-bldc-motor-controller/design.py [output-directory]
@@ -40,7 +45,9 @@ zero native opens/errors and clean copper LVS (149 bound pads); the historical
 regression in `tests/fixtures/stitch-5388` demonstrates why added vias alone cannot
 prove completion. Issue #4410 remains open for its later routing/Kelvin/QFN phases.
 
-The manufacturing bundle has 36 SMT placements; hand-solder J1–J5 and RV1.
+The JLCPCB placement file lists all 42 assembly parts, including 36 SMT parts
+and the six through-hole parts J1–J5 and RV1. The three board fiducials appear
+in the fabrication artwork and are excluded from the placement file.
 Solder both driver/regulator exposed pads. Use the included local symbol and
 footprint libraries, native drawings, BOM/CPL and firmware. Fresh reconstruction
 passed native KiCad DRC/ERC with zero findings and manufacturer checks with
