@@ -1326,6 +1326,73 @@ class TestPurchasingEntries:
         assert "purchasing.0.terminals" in str(refused.value)
         assert message in str(refused.value)
 
+    @pytest.mark.parametrize(
+        ("refs", "landing"),
+        [
+            ("[SW1]", "R1"),
+            ("[ SW1 ]", "SW9"),
+            ("[R2]", "R1"),
+        ],
+        ids=["unrelated-reference", "whitespace-normalized-list", "other-footprint"],
+    )
+    def test_terminal_landing_outside_the_rows_refs_is_refused(self, tmp_path, refs, landing):
+        """A mapped ``ref`` must be a designator the row declares (Issue #10582)."""
+        from pydantic import ValidationError
+
+        row = self.SWITCH_ROW.replace("refs: [SW1]", f"refs: {refs}")
+        terminals = (
+            f"    terminals:\n      - {{terminal: 3, ref: {landing}, pad: 1, net: VDD_CTRL}}\n"
+        )
+        with pytest.raises(ValidationError) as refused:
+            self._load(tmp_path, row + terminals)
+
+        message = str(refused.value)
+        declared = ", ".join(r.strip(" []") for r in [refs])
+        assert "purchasing.0" in message
+        assert (
+            f"terminal '3' maps to {landing}, which is not among the row's declared refs" in message
+        )
+        assert f"({declared})" in message
+        assert f"add {landing} to refs" in message
+
+    def test_terminals_may_land_on_any_declared_reference(self, tmp_path):
+        """Every wired footprint is listed once; extra refs and unused terminals need no landing."""
+        rows = (
+            "purchasing:\n"
+            "  - description: Panel switch bridging two landings\n"
+            "    quantity: 1\n"
+            "    refs: [SW1, SW2, J9]\n"
+            "    manufacturer: Example Switch Co\n"
+            "    mpn: SYN-TOGGLE-1\n"
+            "    terminals:\n"
+            "      - {terminal: 3, ref: SW1, pad: 1, net: VDD_CTRL}\n"
+            "      - {terminal: 2, ref: SW2, pad: 1, net: ARMED_3V3}\n"
+            "      - {terminal: 1, unused: true}\n"
+        )
+        (switch,) = self._load(tmp_path, rows).purchasing
+        assert switch.refs == ["SW1", "SW2", "J9"]
+        assert [a.landing for a in switch.terminals] == [
+            ("SW1", "1", "VDD_CTRL"),
+            ("SW2", "1", "ARMED_3V3"),
+            None,
+        ]
+
+        only_unused = rows.split("    terminals:\n")[0] + (
+            "    terminals:\n      - {terminal: 1, unused: true}\n"
+        ).replace("[SW1, SW2, J9]", "[SW1]")
+        assert self._load(tmp_path, only_unused).purchasing[0].terminals[0].unused
+
+    @pytest.mark.parametrize("refs", ["    refs: []\n", ""], ids=["empty-list", "omitted"])
+    def test_undeclared_refs_leave_the_terminal_map_to_the_board_check(self, tmp_path, refs):
+        row = self.SWITCH_ROW.replace("    refs: [SW1]\n", refs)
+        (switch,) = self._load(tmp_path, row + self.TERMINAL_MAP).purchasing
+        assert not switch.refs
+        assert switch.terminals[0].ref == "SW1"
+
+    def test_row_without_a_terminal_map_still_loads_with_any_refs(self, tmp_path):
+        (switch,) = self._load(tmp_path, self.SWITCH_ROW).purchasing
+        assert switch.refs == ["SW1"] and switch.terminals is None
+
     def test_pending_row_must_not_declare_a_terminal_map(self, tmp_path):
         from pydantic import ValidationError
 
