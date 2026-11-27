@@ -596,8 +596,9 @@ def drop_wires(
     sidecar is absent. The file is rewritten deterministically.
 
     Raises:
-        ValueError: The sidecar holds an entry that is not a JSON object
-            (:func:`load_wire_records`). Nothing is written then.
+        ValueError: The sidecar holds an entry that is not a JSON object, or a
+            record whose coordinate data is malformed (:func:`load_wire_records`).
+            Nothing is written then.
     """
     if not path.is_file():
         return 0
@@ -619,10 +620,11 @@ def drop_wires(
 def load_wires(path: Path) -> list[dict[str, Any]]:
     """Read a sidecar's wires, every entry as written. Raises ``OSError``/``ValueError``.
 
-    An entry that is not a JSON object comes back too: the writers
-    (:func:`write_sidecar`, :func:`drop_wires`) read through this and must not
-    drop anything from the owner's file. Read-only consumers go through
-    :func:`load_wires_if_present`.
+    An entry that is not a JSON object comes back too, and no field inside
+    an entry is checked: the writers (:func:`write_sidecar`, :func:`drop_wires`)
+    read through this and must not drop anything from the owner's file, so
+    they refuse the list instead (:func:`check_wire_records`). Read-only
+    consumers go through :func:`load_wires_if_present`.
     """
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or data.get("version") != SIDECAR_VERSION:
@@ -700,8 +702,9 @@ def write_sidecar(board: Path, new_wires: list[dict[str, Any]], record: Path | N
     """Merge ``new_wires`` into the board's sidecar and write it deterministically.
 
     An existing sidecar is read with :func:`load_wire_records`: one that holds
-    an entry which is not a JSON object raises ``ValueError`` and is left as
-    it is (Issue #10401), rather than being rewritten without the entry.
+    an entry which is not a JSON object (Issue #10401), or a record whose
+    coordinate data is malformed (Issue #10559), raises ``ValueError`` and is
+    left as it is, rather than being rewritten without the entry.
     """
     path = record if record is not None else sidecar_path(board)
     existing = load_wire_records(path) if path.is_file() else []
@@ -712,7 +715,7 @@ def write_sidecar(board: Path, new_wires: list[dict[str, Any]], record: Path | N
 
 
 def _json_type(value: Any) -> str:
-    """A loaded entry's JSON type, as a phrase that reads after ``is``."""
+    """A loaded value's JSON type, as a phrase that reads after ``is``."""
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -723,10 +726,60 @@ def _json_type(value: Any) -> str:
         return "a string"
     if isinstance(value, list):
         return "an array"
+    if isinstance(value, dict):
+        return "an object"
     return type(value).__name__
 
 
-def check_wire_records(path: Path, wires: Sequence[Any]) -> None:
+_ABSENT = object()
+_POINT = "an object with numeric 'x' and 'y'"
+
+
+def _check_point(path: Path, where: str, point: Any) -> None:
+    """Refuse ``point`` unless it is an object whose ``x`` and ``y`` are numbers.
+
+    A JSON boolean is a number to Python and not to a coordinate, so it is
+    refused too.
+    """
+    if not isinstance(point, dict):
+        raise ValueError(f"{path}: {where} is {_json_type(point)}, expected {_POINT}")
+    for axis in "xy":
+        value = point.get(axis, _ABSENT)
+        if value is _ABSENT:
+            raise ValueError(f"{path}: {where} has no {axis!r}, expected a number")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{path}: {where}.{axis} is {_json_type(value)}, expected a number")
+
+
+def _check_points(path: Path, where: str, points: Any) -> None:
+    """Refuse ``points`` unless it is an array, possibly empty, of points."""
+    if not isinstance(points, list):
+        raise ValueError(f"{path}: {where} is {_json_type(points)}, expected an array of points")
+    for index, point in enumerate(points):
+        _check_point(path, f"{where}[{index}]", point)
+
+
+def _check_copy_segments(path: Path, where: str, segments: Any) -> None:
+    """Refuse ``segments`` unless it is an array of objects with ``start`` and ``end`` points."""
+    if not isinstance(segments, list):
+        raise ValueError(
+            f"{path}: {where} is {_json_type(segments)}, expected an array of segments "
+            "with 'start' and 'end' points"
+        )
+    for index, segment in enumerate(segments):
+        at = f"{where}[{index}]"
+        if not isinstance(segment, dict):
+            raise ValueError(
+                f"{path}: {at} is {_json_type(segment)}, expected an object with "
+                "'start' and 'end' points"
+            )
+        for end in ("start", "end"):
+            if end not in segment:
+                raise ValueError(f"{path}: {at} has no {end!r}, expected {_POINT}")
+            _check_point(path, f"{at}.{end}", segment[end])
+
+
+def check_wire_objects(path: Path, wires: Sequence[Any]) -> None:
     """Raise ``ValueError`` when an entry of ``wires`` is not a JSON object (Issue #10401).
 
     A hand-edited sidecar can carry ``null``, a number, a string, an array or
@@ -735,18 +788,69 @@ def check_wire_records(path: Path, wires: Sequence[Any]) -> None:
     the list as records calls this first and refuses the whole list, before
     it filters by net, looks for a match or saves anything. The message names
     the sidecar, the zero-based index of the first offending entry and what
-    every entry must be. Fields inside an object are not checked.
+    every entry must be. Fields inside an object are not checked: a reader that
+    only filters or dumps the entries needs no more, and a writer runs
+    :func:`check_wire_records` instead.
     """
     for index, wire in enumerate(wires):
         if not isinstance(wire, dict):
             raise ValueError(f"{path}: wires[{index}] is {_json_type(wire)}, not a JSON object")
 
 
-def load_wire_records(path: Path) -> list[dict[str, Any]]:
-    """:func:`load_wires` for a consumer that reads the list as records (Issue #10401).
+def check_wire_records(path: Path, wires: Sequence[Any]) -> None:
+    """Raise ``ValueError`` when ``wires`` holds an entry a writer cannot use as a record.
 
-    Raises ``OSError`` / ``ValueError`` when the file, its envelope or one of
-    its entries is unreadable; nothing is written either way.
+    :func:`check_wire_objects` runs first: an entry that is not a JSON object
+    (Issue #10401). Then, entry by entry in file order, the coordinate data a
+    writer does arithmetic on (Issue #10559): a hand-edited sidecar can carry
+    ``"anchors": ["not-a-point"]``, a leg end with no ``y``, or a string or a
+    boolean where a number belongs. :func:`load_wires` returns those as they
+    are, so a writer never drops them from the owner's file; a caller that
+    merges or sorts the list (every writer keys on the leg ends), matches
+    anchors, translates or formats the points calls this first and refuses the
+    whole list, before it filters by net, looks for a match or saves anything.
+
+    Every record carries ``leg_start``, ``leg_end`` and ``anchors``. The
+    parallel-copy fields (Issue #8916) are checked when present and may be
+    absent, as they are on a legacy record:
+
+    * ``leg_start``, ``leg_end``: an object whose ``x`` and ``y`` are numbers;
+    * ``anchors``, ``polyline``, ``stitch_vias``: an array of such objects, possibly empty;
+    * ``copy_segments``: an array of objects with a ``start`` and an ``end`` point.
+
+    A JSON boolean is not a number here. No other field of a record is checked.
+
+    The message names the sidecar, the zero-based index of the entry in the
+    file -- its position before any sorting or filtering -- and the offending
+    field or element, and says what it should be::
+
+        <path>: wires[1].anchors[0] is a string, expected an object with numeric 'x' and 'y'
+        <path>: wires[0].leg_start has no 'y', expected a number
+        <path>: wires[1].copy_segments[0].end.y is a boolean, expected a number
+    """
+    check_wire_objects(path, wires)
+    for index, wire in enumerate(wires):
+        where = f"wires[{index}]"
+        for field in ("leg_start", "leg_end"):
+            if field not in wire:
+                raise ValueError(f"{path}: {where} has no {field!r}, expected {_POINT}")
+            _check_point(path, f"{where}.{field}", wire[field])
+        if "anchors" not in wire:
+            raise ValueError(f"{path}: {where} has no 'anchors', expected an array of points")
+        _check_points(path, f"{where}.anchors", wire["anchors"])
+        for field in ("polyline", "stitch_vias"):
+            if field in wire:
+                _check_points(path, f"{where}.{field}", wire[field])
+        if "copy_segments" in wire:
+            _check_copy_segments(path, f"{where}.copy_segments", wire["copy_segments"])
+
+
+def load_wire_records(path: Path) -> list[dict[str, Any]]:
+    """:func:`load_wires` for a consumer that reads the list as records (Issues #10401, #10559).
+
+    Raises ``OSError`` / ``ValueError`` when the file, its envelope, one of its
+    entries or its coordinate data is unreadable (:func:`check_wire_records`);
+    nothing is written either way.
     """
     wires = load_wires(path)
     check_wire_records(path, wires)
