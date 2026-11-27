@@ -473,3 +473,46 @@ def test_legacy_mlcc_description_and_equivalent_spellings(catalog_db, capsys):
             _insert(db, code, str(code), "0805", tier, f"{nominal} 50V ±10% X7R {CAP_FAMILY}", {})
         db.execute("ALTER TABLE jlc_components DROP COLUMN attributes")
     assert _alternatives(capsys, "C800") == ["C801", "C802"]
+
+
+@pytest.mark.parametrize(
+    "description,wrong",
+    [
+        ("Fixed Output 3.3V Buck Regulator", "Fixed Output 5V Buck Regulator"),
+        ("32V Input 3.3V Fixed Output", "32V Fixed Output 3.3V Input"),
+        ("32V Input 3.3V Fixed Output Buck Regulator", "32V Input 5V Fixed Output Buck Regulator"),
+    ],
+)
+def test_exact_regulator_voltage(catalog_db, capsys, description, wrong):
+    with sqlite3.connect(catalog_db) as db:
+        _insert(db, 800, "BUCK", "SOT23", "extended", description, {})
+        _insert(db, 801, "BUCK", "SOT23", "basic", wrong, {})
+        _insert(db, 802, "BUCK", "SOT23", "basic", description, {})
+    assert _alternatives(capsys, "C800") == ["C802"]
+
+
+def test_resistor_dc_working_voltage(catalog_db, capsys):
+    attrs = _attributes("10kΩ 1% 0603")[1]
+    with sqlite3.connect(catalog_db) as db:
+        for code, voltage in enumerate(("200VDC", "50VDC", "", "200VDC", "250 VDC"), 800):
+            tier = "extended" if code == 800 else "basic"
+            _insert(db, code, str(code), "0603", tier, f"{RES_FAMILY} {voltage}", attrs)
+    assert _alternatives(capsys, "C800") == ["C803", "C804"]
+
+
+def test_mlcc_safety_class(catalog_db, capsys):
+    with sqlite3.connect(catalog_db) as db:
+        for code, safety in enumerate(("X1/Y2 Safety Certified", "", "X1", "X1/Y2"), 800):
+            tier = "extended" if code == 800 else "basic"
+            _insert(db, code, str(code), "2220", tier, f"{CAP_FAMILY} {safety}", _cap())
+    assert _alternatives(capsys, "C800") == ["C803"]
+
+
+def test_absolute_capacitance_tolerance(catalog_db, capsys):
+    with sqlite3.connect(catalog_db) as db:
+        for code, tol in enumerate(("±0.5pF", "±0.25pF", "±1pF", "±0.5pF", "±5%"), 800):
+            tier = "extended" if code == 800 else "basic"
+            attrs = {**_cap("10pF", tolerance=tol), "Temperature Coefficient": "C0G"}
+            desc = f"10pF 50V {tol} C0G {CAP_FAMILY}"
+            _insert(db, code, str(code), "0402", tier, desc, attrs)
+    assert _alternatives(capsys, "C800") == ["C801", "C803", "C804"]

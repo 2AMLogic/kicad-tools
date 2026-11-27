@@ -105,7 +105,7 @@ def _quantity(unit: str) -> re.Pattern[str]:
 
 
 _RATINGS = {
-    "Voltage Rating": _quantity("V"),
+    "Voltage Rating": _quantity(r"V(?:\s*(?i:DC))?"),
     "Power(Watts)": _quantity("W"),
     "Tolerance": _quantity("%"),
 }
@@ -176,6 +176,10 @@ _NOMINALS = {
         },
     ),
 }
+_FARADS = rf"({_DEC})\s*([pnuµμm]?)[Ff](?!\w)"
+_ABSOLUTE_CAP_TOL = re.compile(rf"(?:±|\+/-)\s*{_FARADS}")
+_STRUCTURED_CAP_TOL = re.compile(rf"(?:(?:±|\+/-)\s*)?{_FARADS}")
+_SAFETY_CLASS = re.compile(r"\b([XY][1-4])\b", re.I)
 _DIELECTRIC = re.compile(r"(?<!\w)(C0G|NP0|X5R|X6S|X7R|X7S|X7T|X8R|X8L|Y5V|Z5U)(?!\w)", re.I)
 
 
@@ -196,7 +200,13 @@ def _kind(part: Part) -> str | None:
     # Legacy rows can consist solely of capacitor ratings and the package.
     if _DIELECTRIC.search(part.description) and _NOMINALS["cap"][1].search(part.description):
         remainder = part.description
-        for pattern in (_RANGE, _NOMINALS["cap"][1], _DIELECTRIC, *_RATINGS.values()):
+        for pattern in (
+            _RANGE,
+            _ABSOLUTE_CAP_TOL,
+            _NOMINALS["cap"][1],
+            _DIELECTRIC,
+            *_RATINGS.values(),
+        ):
             remainder = pattern.sub(" ", remainder)
         if remainder.strip().casefold() in ("", part.package.casefold()):
             return "cap"
@@ -205,7 +215,10 @@ def _kind(part: Part) -> str | None:
 
 def _nominals(part: Part, kind: str) -> set[Fraction]:
     key, pattern, factors = _NOMINALS[kind]
-    found = {Fraction(n) * factors[prefix] for n, prefix in pattern.findall(part.description)}
+    description = (
+        _ABSOLUTE_CAP_TOL.sub(" ", part.description) if kind == "cap" else part.description
+    )
+    found = {Fraction(n) * factors[prefix] for n, prefix in pattern.findall(description)}
     if key in part.specs:
         structured = pattern.fullmatch(part.specs[key].strip())
         if structured:
@@ -234,15 +247,73 @@ def _covers_coefficient(source: Part, candidate: Part) -> bool:
         return False
 
 
-def _covers_ratings(source: Part, candidate: Part, mandatory: tuple[str, ...] = ()) -> bool:
+def _cap_tolerances(part: Part) -> set[Fraction]:
+    """Return each published tolerance as a percentage of nominal capacitance."""
+    percent = _RATINGS["Tolerance"]
+    values = {Fraction(n) * _FACTORS[p] for n, p in percent.findall(part.description)}
+    absolute = _ABSOLUTE_CAP_TOL.findall(part.description)
+    if "Tolerance" in part.specs:
+        value = part.specs["Tolerance"].strip()
+        if match := percent.fullmatch(value):
+            values.add(Fraction(match[1]) * _FACTORS[match[2]])
+        elif match := _STRUCTURED_CAP_TOL.fullmatch(value):
+            absolute.append((match[1], match[2]))
+        else:
+            raise ValueError("Unrecognized capacitance tolerance")
+    if absolute:
+        nominal = _nominals(part, "cap")
+        if len(nominal) != 1 or 0 in nominal:
+            raise ValueError("Absolute tolerance needs a known positive capacitance")
+        scale = 100 / nominal.pop()
+        values.update(Fraction(n) * _NOMINALS["cap"][2][p] * scale for n, p in absolute)
+    return values
+
+
+def _safety_compatible(source: Part, candidate: Part, same_device: bool) -> bool:
+    required = set(_SAFETY_CLASS.findall(source.description.upper()))
+    offered = set(_SAFETY_CLASS.findall(candidate.description.upper()))
+    if required:
+        return required <= offered or (same_device and not offered)
+    return same_device or not re.search(r"\bsafety\b", source.description, re.I)
+
+
+# Preserve input/output roles alongside the voltages in exact-device descriptions.
+_DEVICE_VOLTAGE = re.compile(_RATINGS["Voltage Rating"].pattern + r"|\b(?i:input|output)\b")
+
+
+def _device_voltages(part: Part) -> list[str | Fraction]:
+    evidence: list[str | Fraction] = []
+    for match in _DEVICE_VOLTAGE.finditer(part.description):
+        if match[1]:
+            evidence.append(Fraction(match[1]) * _FACTORS[match[2]])
+        else:
+            evidence.append(match[0].casefold())
+    return evidence if any(isinstance(item, Fraction) for item in evidence) else []
+
+
+def _covers_ratings(
+    source: Part, candidate: Part, mandatory: tuple[str, ...], passive: str | None
+) -> bool:
     try:
         for key, pattern in _RATINGS.items():
-            required = _rating_values(source, key, pattern)
+            if passive is None and key == "Voltage Rating":
+                left, right = _device_voltages(source), _device_voltages(candidate)
+                if left and right and left != right:
+                    return False
+                continue
+            cap_tolerance = passive == "cap" and key == "Tolerance"
+            required = (
+                _cap_tolerances(source) if cap_tolerance else _rating_values(source, key, pattern)
+            )
             if not required:
                 if key in mandatory:
                     return False
                 continue
-            offered = _rating_values(candidate, key, pattern)
+            offered = (
+                _cap_tolerances(candidate)
+                if cap_tolerance
+                else _rating_values(candidate, key, pattern)
+            )
             if len(required) != 1 or len(offered) != 1:
                 return False
             rating, replacement = required.pop(), offered.pop()
@@ -289,6 +360,7 @@ def _compatible(source: Part, candidate: Part) -> bool:
         ):
             return False
     if same_device and passive is None:
+        skip.discard("Voltage Rating")
         # Incomplete descriptions still carry evidence against an identity match.
         for possible in _NOMINALS:
             values = _nominals(source, possible) | _nominals(candidate, possible)
@@ -314,6 +386,8 @@ def _compatible(source: Part, candidate: Part) -> bool:
                     return False
         skip.add(key)
         if passive == "cap":
+            if not _safety_compatible(source, candidate, same_device):
+                return False
             dielectric = _dielectrics(source)
             other_dielectric = _dielectrics(candidate)
             if len(dielectric | other_dielectric) > 1:
@@ -336,7 +410,7 @@ def _compatible(source: Part, candidate: Part) -> bool:
     for key, value in source.specs.items():
         if key not in skip and candidate.specs.get(key) != value:
             return False
-    return _covers_ratings(source, candidate, mandatory)
+    return _covers_ratings(source, candidate, mandatory, passive)
 
 
 def _device_rows(catalog: JlcpartsCatalog, source: Part) -> Iterator[Part]:
