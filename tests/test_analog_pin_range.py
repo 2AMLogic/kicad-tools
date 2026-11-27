@@ -903,3 +903,63 @@ def test_unrepresentable_numbers_keep_a_json_result(tmp_path, capsys):
     code, report = board.run(capsys)
     assert code == 2 and report["pins"][0]["outcome"] == "unassessed"
     assert "not representable" in " ".join(report["pins"][0]["reasons"])
+
+
+@pytest.mark.parametrize("state", ["powered", "unpowered"])
+def test_reference_rail_must_be_zero(board, capsys, state):
+    case = powered("biased", BIASED) if state == "powered" else unpowered()
+    case["rails"]["VSS"]["voltage_v"] = 3.3
+    board.policy["cases"] = [case]
+    code, report = board.run(capsys)
+    assert (code, report["status"]) == (2, "unassessed")
+    for entry in report["pins"]:
+        assert entry["outcome"] == "unassessed"
+        assert any("reference net GND" in reason for reason in entry["reasons"])
+
+
+@pytest.mark.parametrize(
+    ("state", "vdd", "vss", "expected_code", "outcome"),
+    [
+        ("powered", 3.3, 3.3, 2, "unassessed"),
+        ("powered", 0.0, -3.3, 0, "pass"),
+        ("unpowered", 3.3, 3.3, 1, "fail"),
+        ("unpowered", 0.0, 3.3, 2, "unassessed"),
+    ],
+)
+def test_supply_difference_with_separate_reference(
+    board, capsys, state, vdd, vss, expected_code, outcome
+):
+    case = powered("biased", BIASED) if state == "powered" else unpowered()
+    case["reference_net"] = "BUF_OUT"
+    case["rails"]["VDD"]["voltage_v"] = vdd
+    case["rails"]["VSS"]["voltage_v"] = vss
+    board.policy["cases"] = [case]
+    code, report = board.run(capsys)
+    assert code == expected_code
+    assert [entry["outcome"] for entry in report["pins"]] == [outcome, outcome]
+    if outcome == "unassessed":
+        assert all(entry["reasons"] for entry in report["pins"])
+
+
+def test_cli_failure_takes_precedence_over_unassessed_pin(board, capsys):
+    original, biased, _ = board.policy["cases"]
+    del biased["pins"][1]["limits"]
+    board.policy["cases"] = [original, biased]
+    code, report = board.run(capsys)
+    assert (code, report["status"]) == (1, "failed")
+    assert row(report, original["id"], "U2", "3")["outcome"] == "fail"
+    assert row(report, biased["id"], "U2", "3")["outcome"] == "unassessed"
+
+
+def test_device_with_only_one_supply_net_is_unassessed(board):
+    schematic = board.schematic.read_text().replace("(pin power_in line", "(pin passive line", 1)
+    board.schematic.write_text(schematic)
+    board.policy["schematic_sha256"] = sha256(board.schematic)
+    case = powered("biased", BIASED)
+    case["reference_net"] = "BUF_OUT"
+    board.policy["cases"] = [case]
+    report = board.report()
+    amplifier = row(report, "biased", "U1", "1")
+    assert amplifier["outcome"] == "unassessed"
+    assert any("two distinct supply nets" in reason for reason in amplifier["reasons"])
+    assert row(report, "biased", "U2", "3")["outcome"] == "pass"

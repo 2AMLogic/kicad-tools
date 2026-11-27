@@ -16,9 +16,9 @@ The evaluator reads three reviewed inputs and runs nothing:
 uv run python -m kicad_tools.analysis.analog_pin_range line_sense.kicad_sch pin-ranges.json > pin-range-report.json
 ```
 
-Exit 0 means every assertion passed inside its declared scope, 1 means at least
-one pin violated a limit, and 2 means at least one result is unassessed or the
-sidecar could not be bound. Every report carries `release_eligible: false`.
+Exit 1 takes precedence when any pin violates a limit, even if another pin is
+unassessed. Otherwise, an unassessed result or a sidecar binding error gives
+exit 2. Exit 0 means every assertion passed inside its declared scope. Every report carries `release_eligible: false`.
 
 ## Sample files
 
@@ -80,6 +80,12 @@ assessed.
 | `samples` | Name of the sample set that holds this case's traces |
 | `model` | `input_protection` (`omitted` or `modeled`) and `assumptions` |
 | `pins` | Pin assertions |
+
+Rail voltages use the same reference net as the traces. If a rail names the
+reference net, its voltage must be zero. In a powered case, at least two of
+the device’s supply nets must differ in voltage. In an unpowered case, all
+supply nets must be at the same voltage, which can be nonzero when measured
+against a separate reference net.
 
 Each pin assertion maps a `reference`, a `pin` number and the `net` the pin is
 expected on in the schematic to a `trace` name, and gives the `limits` that

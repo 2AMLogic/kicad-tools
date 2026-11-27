@@ -286,6 +286,8 @@ def _scope(case: dict[str, Any], binding: _Binding) -> tuple[_Scope, list[str]]:
     if scope.rails:
         for rail in scope.rails.values():
             scope.rail_voltages.setdefault(rail["net"], set()).add(rail["voltage_v"])
+        if scope.reference_net and scope.rail_voltages.get(scope.reference_net, {0.0}) != {0.0}:
+            problems.append(f"{name}: reference net {scope.reference_net} must be at 0 V")
     sample_set = case.get("samples")
     if _text(sample_set):
         scope.samples = sample_set
@@ -338,11 +340,16 @@ def _supply(
         problems.append(f"{who}: conflicting rail voltages for {net}: {values}")
     if not required or missing or conflicts:
         return
-    volts = [v for net in required for v in scope.rail_voltages[net]]
-    if scope.state == "powered" and not any(v != 0.0 for v in volts):
-        problems.append(f"{who}: every supply rail of {reference} is 0 V in a powered case")
-    elif scope.state == "unpowered" and any(v != 0.0 for v in volts):
-        problems.append(f"{who}: a supply rail of {reference} is nonzero in an unpowered case")
+    if len(supply_nets) < 2:
+        problems.append(f"{who}: need two distinct supply nets to establish the device voltage")
+        return
+    potentials = {v for net in required for v in scope.rail_voltages[net]}
+    if scope.reference_net in supply_nets:
+        potentials.add(0.0)
+    if scope.state == "powered" and len(potentials) == 1:
+        problems.append(f"{who}: no voltage difference across the supply pins in a powered case")
+    elif scope.state == "unpowered" and len(potentials) > 1:
+        problems.append(f"{who}: voltage differs across the supply pins in an unpowered case")
 
 
 def _trace(
