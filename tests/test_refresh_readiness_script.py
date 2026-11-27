@@ -325,6 +325,76 @@ def test_refresh_uses_selected_map_for_delivered_board(mod, tmp_path, selection)
     assert archive.read_bytes() == before
 
 
+def _legacy_board(tmp_path, selection):
+    """A board whose archive keeps the checked ``board_routed`` basename (Issue #10637)."""
+    out = tmp_path / "output"
+    out.mkdir()
+    pcb = out / "board_routed.kicad_pcb"
+    schematic = out / "board.kicad_sch"
+    pcb.write_bytes(b"routed")
+    schematic.write_bytes(b"sch")
+    (out / "board_routed.kicad_pro").write_bytes(b"pro")
+    (out / "net_class_map.json").write_bytes(b"bare")
+    if selection != "bare":
+        (out / "board_routed.net_class_map.json").write_bytes(b"stem")
+    if selection == "explicit":
+        (tmp_path / "chosen.json").write_bytes(b"explicit")
+        (out / "readiness.json").write_text('{"selected_net_class_map":"chosen.json"}')
+    return out, pcb, schematic
+
+
+@pytest.mark.parametrize(
+    ("selection", "member"),
+    [
+        ("bare", "net_class_map.json"),
+        ("stem", "board_routed.net_class_map.json"),
+        ("explicit", "net_class_map.json"),
+    ],
+)
+def test_legacy_archive_map_member_follows_the_selected_source(mod, tmp_path, selection, member):
+    out, pcb, schematic = _legacy_board(tmp_path, selection)
+    archive = out / "kicad_project.zip"
+    mod.write_deterministic_zip(
+        archive, {"board_routed.kicad_pcb": b"routed", "board_routed.kicad_pro": b"pro"}
+    )
+    names = ["board_routed.kicad_pcb", "board_routed.kicad_pro"]
+    # A plain refresh never grows a legacy member list ...
+    assert mod.legacy_net_class_map_member(names, pcb, schematic) == {}
+    before = archive.read_bytes()
+    assert mod.rebuild_archive(archive, [out]) == []
+    assert archive.read_bytes() == before
+    # ... but the producer that owns the bundle can add the selected map.
+    pinned = mod.legacy_net_class_map_member(names, pcb, schematic, add=True)
+    assert pinned == {member: selection.encode()}
+    assert mod.rebuild_archive(archive, [out], additional_members=tuple(pinned), pinned=pinned) == [
+        member
+    ]
+    with zipfile.ZipFile(archive) as z:
+        assert z.read(member) == selection.encode()
+        assert z.read("board_routed.kicad_pcb") == b"routed"
+        assert z.read("board_routed.kicad_pro") == b"pro"
+    # An archived map is then refreshed from the selected source on a plain refresh.
+    names = [*names, member]
+    pinned = mod.legacy_net_class_map_member(names, pcb, schematic)
+    assert pinned == {member: selection.encode()}
+    selected = {
+        "bare": out / "net_class_map.json",
+        "stem": out / "board_routed.net_class_map.json",
+        "explicit": tmp_path / "chosen.json",
+    }[selection]
+    selected.write_bytes(b"changed")
+    pinned = mod.legacy_net_class_map_member(names, pcb, schematic)
+    assert mod.rebuild_archive(archive, [out], pinned=pinned) == [member]
+    with zipfile.ZipFile(archive) as z:
+        assert z.read(member) == b"changed"
+
+
+def test_delivered_layout_archive_takes_no_legacy_map_member(mod, tmp_path):
+    out, pcb, schematic = _legacy_board(tmp_path, "bare")
+    names = ["board.kicad_pcb", "board.kicad_pro", "board.kicad_sch"]
+    assert mod.legacy_net_class_map_member(names, pcb, schematic, add=True) == {}
+
+
 def test_rebuild_archive_refreshes_the_delivered_project_members(mod, tmp_path):
     """A package filed under the root sheet's basename refreshes from the routed board (#10108)."""
     out = tmp_path / "output"

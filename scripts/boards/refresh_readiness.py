@@ -339,6 +339,7 @@ def rebuild_archive(
     additional_members: tuple[str, ...] = (),
     derived: dict[str, bytes] | None = None,
     replaces: frozenset[str] = frozenset(),
+    pinned: dict[str, bytes] | None = None,
 ) -> list[str]:
     """Refresh existing and explicitly requested members from current files.
 
@@ -355,6 +356,13 @@ def rebuild_archive(
     while none of *replaces* -- the checked file names those members displaced
     -- is still archived under its own name: such a bundle was written before
     the renaming and keeps refreshing member by member.
+
+    *pinned* names members whose bytes come from a selected source rather than
+    a same-named file under *search* (Issue #10637: the net-class map a legacy
+    archive keeps beside its checked-basename PCB).  Unlike *derived* it applies
+    whatever the archive layout, and it never adds a member by itself: a pinned
+    name is written only when it is already archived or listed in
+    *additional_members*.
     """
     with zipfile.ZipFile(archive) as existing:
         old = {name: existing.read(name) for name in existing.namelist() if not name.endswith("/")}
@@ -362,6 +370,9 @@ def rebuild_archive(
         derived = None
     members: dict[str, bytes] = {}
     for name in sorted(old.keys() | set(additional_members)):
+        if pinned and name in pinned:
+            members[name] = pinned[name]
+            continue
         if derived and name in derived:
             members[name] = derived[name]
             continue
@@ -378,6 +389,66 @@ def rebuild_archive(
     return changed
 
 
+def selected_net_class_map(pcb: Path) -> Path | None:
+    """The net-class map a board's readiness gate binds, bounded to its directory.
+
+    The explicitly selected readiness input wins; otherwise the sidecar
+    discovered for the checked board.  Registered boards keep the checked PCB
+    and readiness receipt in ``output/``.
+    """
+    from kicad_tools.cli.readiness_cmd import _find_net_class_map
+
+    receipt = pcb.parent / "readiness.json"
+    selected = (
+        json.loads(receipt.read_text()).get("selected_net_class_map") if receipt.is_file() else None
+    )
+    board = pcb.parent.parent.resolve()
+    source = board / selected if selected is not None else _find_net_class_map(pcb)
+    if source is None:
+        return None
+    source = source.resolve()
+    if not source.is_relative_to(board) or not source.is_file():
+        raise GateFailure(f"Invalid net-class map source for {pcb.name}: {source}")
+    return source
+
+
+def legacy_net_class_map_member(
+    names: list[str], pcb: Path, schematic: Path | None, *, add: bool = False
+) -> dict[str, bytes]:
+    """The selected map's bytes under the member a checked-basename archive uses.
+
+    A ``kicad_project.zip`` written before the delivered-basename layout
+    (Issue #10108) keeps the checked PCB name, and an extracted copy finds its
+    map through the sidecar probe for *that* name (Issue #10637).  Returns
+    ``{member: bytes}`` for the archived candidate of that probe or, with
+    *add*, the member a missing map should be filed under; empty when the
+    board selects no map, the archive uses the delivered layout (whose map
+    rides in ``delivered_project_members``), or nothing is archived and *add*
+    is false -- so a plain refresh never grows a legacy member list.
+    """
+    from kicad_tools.sidecars import net_class_map_sidecar_candidates, net_class_map_sidecar_names
+
+    _, replaces = delivered_project_members(pcb, schematic)
+    source = selected_net_class_map(pcb)
+    if source is None or replaces.isdisjoint(names):
+        return {}
+    member = next(
+        (
+            path.as_posix()
+            for path in net_class_map_sidecar_candidates(pcb.name)
+            if path.as_posix() in names
+        ),
+        None,
+    )
+    if member is None:
+        if not add:
+            return {}
+        standard = source.name in net_class_map_sidecar_names(pcb.stem)
+        member = Path(pcb.name).with_name(source.name if standard else "net_class_map.json")
+        member = member.as_posix()
+    return {member: source.read_bytes()}
+
+
 def delivered_project_members(
     pcb: Path, schematic: Path | None
 ) -> tuple[dict[str, bytes], frozenset[str]]:
@@ -390,7 +461,6 @@ def delivered_project_members(
     The delivered map takes its bytes from the explicitly selected readiness
     input or the sidecar discovered for the checked board.
     """
-    from kicad_tools.cli.readiness_cmd import _find_net_class_map
     from kicad_tools.export.project_identity import (
         archived_member,
         project_identity,
@@ -408,17 +478,8 @@ def delivered_project_members(
     if identity.renamed:
         derived["VERSION.md"] = record
 
-    # Registered boards keep the checked PCB and readiness receipt in output/.
-    receipt = pcb.parent / "readiness.json"
-    selected = (
-        json.loads(receipt.read_text()).get("selected_net_class_map") if receipt.is_file() else None
-    )
-    board = pcb.parent.parent.resolve()
-    source = board / selected if selected is not None else _find_net_class_map(pcb)
+    source = selected_net_class_map(pcb)
     if source is not None:
-        source = source.resolve()
-        if not source.is_relative_to(board) or not source.is_file():
-            raise GateFailure(f"Invalid net-class map source for {pcb.name}: {source}")
         derived[net_class_map_sidecar_names(identity.name)[0]] = source.read_bytes()
     return derived, frozenset(source.name for source, _ in identity.renamed)
 
@@ -889,12 +950,19 @@ def repin_staged(
             if Path(archive).name == "kicad_project.zip"
             else ({}, frozenset())
         )
+        pinned: dict[str, bytes] = {}
+        if Path(archive).name == "kicad_project.zip":
+            with zipfile.ZipFile(staged / archive) as existing:
+                pinned = legacy_net_class_map_member(
+                    existing.namelist(), staged / cfg.routed_pcb, staged / cfg.schematic
+                )
         changed = rebuild_archive(
             staged / archive,
             [staged / s for s in search],
             additional_members=extra,
             derived=derived or None,
             replaces=replaces,
+            pinned=pinned or None,
         )
         log(f"  {archive}: rebuilt; members with new content {changed}")
 
