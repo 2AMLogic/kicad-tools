@@ -274,10 +274,19 @@ def archive_is_current(
     *,
     derived: dict[str, bytes] | None = None,
     replaces: frozenset[str] = frozenset(),
+    pinned: dict[str, bytes] | None = None,
 ) -> bool:
-    """Compare the delivered project or its older, source-named layout."""
+    """Compare the delivered project or its older, source-named layout.
+
+    *pinned* members -- the selected net-class map a legacy archive keeps
+    beside its checked-basename PCB (Issue #10637) -- must be present with
+    exactly those bytes; they are not looked up under *search*.
+    """
+    pinned = pinned or {}
     with zipfile.ZipFile(archive) as existing:
         names = existing.namelist()
+        if any(name not in names or existing.read(name) != data for name, data in pinned.items()):
+            return False
         if replaces.isdisjoint(names) and derived:
             if any(
                 name not in names or existing.read(name) != data for name, data in derived.items()
@@ -286,7 +295,7 @@ def archive_is_current(
         else:
             derived = {}
         for name in names:
-            if name in derived or name.endswith("/"):
+            if name in derived or name in pinned or name.endswith("/"):
                 continue
             for base in search:
                 candidate = base / name
@@ -639,14 +648,55 @@ def _project_archive(cfg: rr.BoardConfig) -> tuple[str, tuple[str, ...]]:
     raise GateFailure("board configuration has no kicad_project.zip archive")
 
 
+def _legacy_project_map(staged: Path, cfg: rr.BoardConfig) -> dict[str, bytes]:
+    """The selected map under the member the archived checked-basename PCB selects.
+
+    Empty for a delivered-layout archive (its map rides in ``derived``) and for a
+    board that selects no map (Issue #10637).
+    """
+    archive, _ = _project_archive(cfg)
+    with zipfile.ZipFile(staged / archive) as existing:
+        return rr.legacy_net_class_map_member(
+            existing.namelist(), staged / cfg.routed_pcb, staged / cfg.schematic, add=True
+        )
+
+
 def bundle_is_stale(staged: Path, cfg: rr.BoardConfig) -> bool:
     archive, search = _project_archive(cfg)
     derived, replaces = rr.delivered_project_members(
         staged / cfg.routed_pcb, staged / cfg.schematic
     )
     return not archive_is_current(
-        staged / archive, [staged / s for s in search], derived=derived, replaces=replaces
+        staged / archive,
+        [staged / s for s in search],
+        derived=derived,
+        replaces=replaces,
+        pinned=_legacy_project_map(staged, cfg),
     )
+
+
+def stage_project_map(staged: Path, cfg: rr.BoardConfig) -> list[str]:
+    """Deliver the selected net-class map inside a legacy ``kicad_project.zip`` (Issue #10637).
+
+    ``kct readiness --verify`` resolves the map an extracted board loads, and a
+    legacy archive keeps the checked PCB basename, so the map is filed under the
+    name that PCB probes.  Every existing member keeps its bytes.  The plain
+    receipt refresh deliberately never adds members to a legacy archive, so the
+    producer that owns the bundle adds it here.
+    """
+    archive, search = _project_archive(cfg)
+    pinned = _legacy_project_map(staged, cfg)
+    if not pinned:
+        return []
+    changed = rr.rebuild_archive(
+        staged / archive,
+        [staged / s for s in search],
+        additional_members=tuple(pinned),
+        pinned=pinned,
+    )
+    if changed:
+        log(f"  {archive}: net-class map delivered {changed}")
+    return changed
 
 
 def check_recipe_drc_preflight(staged: Path, cfg: rr.BoardConfig, *, refresh: bool = False) -> bool:
@@ -1031,6 +1081,7 @@ def refresh_bundle(
             if bundle.recipe_manufacturing is not None:
                 stage_recipe_manufacturing(staged, cfg, bundle)
             stage_replot(staged, cfg, bundle, saved_drc=saved_drc)
+            stage_project_map(staged, cfg)
             _write_targets(staged, bundle.saved_drc_reports, saved_drc)
             _write_targets(staged, bundle.fill_consistency, _json_bytes(refill["deltas_mm2"]))
             routed = staged / cfg.routed_pcb

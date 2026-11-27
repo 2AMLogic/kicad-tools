@@ -207,6 +207,71 @@ def test_archive_is_current(mod, tmp_path):
     assert not mod.archive_is_current(archive, [tmp_path])
 
 
+def test_archive_is_current_requires_pinned_members_with_their_bytes(mod, tmp_path):
+    (tmp_path / "a.txt").write_text("a")
+    archive = tmp_path / "x.zip"
+    mod.rr.write_deterministic_zip(archive, {"a.txt": b"a"})
+    assert not mod.archive_is_current(archive, [tmp_path], pinned={"map.json": b"m"})
+    mod.rr.write_deterministic_zip(archive, {"a.txt": b"a", "map.json": b"old"})
+    assert not mod.archive_is_current(archive, [tmp_path], pinned={"map.json": b"m"})
+    mod.rr.write_deterministic_zip(archive, {"a.txt": b"a", "map.json": b"m"})
+    # A pinned member is never looked up under the search roots.
+    assert mod.archive_is_current(archive, [tmp_path], pinned={"map.json": b"m"})
+
+
+def _legacy_project(tmp_path, mod):
+    """Board 06's shape: checked-basename project archive, no map member (Issue #10637)."""
+    board = tmp_path / "06-diffpair-test"
+    out = board / "output"
+    out.mkdir(parents=True)
+    for name, data in {
+        "board.kicad_sch": b"sch",
+        "board_routed.kicad_pcb": b"routed",
+        "board_routed.kicad_pro": b"pro",
+        "board_routed.kicad_dru": b"dru",
+        "net_class_map.json": b'{"selected": true}',
+    }.items():
+        (out / name).write_bytes(data)
+    cfg = mod.rr.BoardConfig(
+        routed_pcb="output/board_routed.kicad_pcb",
+        schematic="output/board.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+        archives=(("output/kicad_project.zip", ("output",)),),
+    )
+    return board, out, cfg
+
+
+def test_legacy_project_archive_gains_the_selected_map(mod, tmp_path):
+    board, out, cfg = _legacy_project(tmp_path, mod)
+    members = {
+        "board_routed.kicad_pcb": b"routed",
+        "board_routed.kicad_pro": b"pro",
+        "board_routed.kicad_dru": b"dru",
+    }
+    archive = out / "kicad_project.zip"
+    mod.rr.write_deterministic_zip(archive, members)
+    assert mod.bundle_is_stale(board, cfg)
+    assert mod.stage_project_map(board, cfg) == ["net_class_map.json"]
+    assert not mod.bundle_is_stale(board, cfg)
+    with zipfile.ZipFile(archive) as z:
+        assert z.read("net_class_map.json") == b'{"selected": true}'
+        assert {n: z.read(n) for n in members} == members
+        names = z.namelist()
+    # The extracted board resolves exactly the map the verifier compares.
+    from kicad_tools.sidecars import net_class_map_sidecar_candidates
+
+    assert [
+        p.as_posix()
+        for p in net_class_map_sidecar_candidates("board_routed.kicad_pcb")
+        if p.as_posix() in names
+    ] == ["net_class_map.json"]
+    assert mod.stage_project_map(board, cfg) == []
+    # A changed selected map makes the archive stale again.
+    (out / "net_class_map.json").write_bytes(b"changed")
+    assert mod.bundle_is_stale(board, cfg)
+
+
 def test_write_targets_never_adds_files(mod, tmp_path):
     (tmp_path / "kept.json").write_text("{}")
     mod._write_targets(tmp_path, ("kept.json",), b"new")
