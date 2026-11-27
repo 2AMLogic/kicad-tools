@@ -154,8 +154,13 @@ class DRCReport:
 
     @property
     def warning_count(self) -> int:
-        """Number of warning-level violations."""
-        return sum(1 for v in self.violations if not v.is_error)
+        """Number of warning-level violations (``info`` findings are not warnings)."""
+        return sum(1 for v in self.violations if v.is_warning)
+
+    @property
+    def info_count(self) -> int:
+        """Number of informational findings (Issue #10650)."""
+        return sum(1 for v in self.violations if v.is_info)
 
     @property
     def errors(self) -> list[DRCViolation]:
@@ -165,7 +170,12 @@ class DRCReport:
     @property
     def warnings(self) -> list[DRCViolation]:
         """Get only warning-level violations."""
-        return [v for v in self.violations if not v.is_error]
+        return [v for v in self.violations if v.is_warning]
+
+    @property
+    def infos(self) -> list[DRCViolation]:
+        """Get only informational findings."""
+        return [v for v in self.violations if v.is_info]
 
     def by_type(self, vtype: ViolationType) -> list[DRCViolation]:
         """Get violations of a specific type."""
@@ -242,6 +252,7 @@ class DRCReport:
             "total_violations": self.violation_count,
             "errors": self.error_count,
             "warnings": self.warning_count,
+            "infos": self.info_count,
             "footprint_errors": self.footprint_errors,
             "by_type": {
                 vtype.value: len(violations)
@@ -260,6 +271,7 @@ class DRCReport:
             "violation_count": self.violation_count,
             "error_count": self.error_count,
             "warning_count": self.warning_count,
+            "info_count": self.info_count,
             "footprint_errors": self.footprint_errors,
             "violations": [v.to_dict() for v in self.violations],
             "passed": self.passed,

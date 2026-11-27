@@ -8082,12 +8082,15 @@ def _finish_post_stitch_drc(result, pcb_path: Path) -> dict:
         print("BY TYPE:")
         for vtype, violations in sorted(by_type.items(), key=lambda x: -len(x[1])):
             errors = sum(1 for v in violations if v.is_error)
-            warnings = len(violations) - errors
+            warnings = sum(1 for v in violations if v.is_warning)
+            infos = sum(1 for v in violations if v.is_info)
             parts = []
             if errors:
                 parts.append(f"{errors} error{'s' if errors != 1 else ''}")
             if warnings:
                 parts.append(f"{warnings} warning{'s' if warnings != 1 else ''}")
+            if infos:
+                parts.append(f"{infos} info{'s' if infos != 1 else ''}")
             print(f"  {vtype.value}: {', '.join(parts)}")
 
         if error_count > 0:

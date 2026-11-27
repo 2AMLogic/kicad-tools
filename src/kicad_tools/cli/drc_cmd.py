@@ -18,6 +18,9 @@ Exit Codes:
     2 - Warnings found (only with --strict; includes parity warnings), or
         schematic parity NOT RUN (unless --allow-incomplete).
 
+    Informational (``info``) findings are listed but never gate: they count
+    as neither errors nor warnings (Issue #10650).
+
     --mfr mode uses the same codes (Issue #7170).  Its errors are the
     findings that breach the manufacturer's limits plus every error-severity
     finding kct could not judge against them ("not checked"); a finding that
@@ -398,7 +401,11 @@ def main(argv: list[str] | None = None) -> int:
 
     from ._gate import hidden_by_view_filter
 
-    hidden = hidden_by_view_filter([v for v in gate_violations if not v.is_waived], violations)
+    # Waived and ``info`` findings are not gate inputs, so a hidden one is not
+    # a hidden error or warning (Issue #10650).
+    hidden = hidden_by_view_filter(
+        [v for v in gate_violations if v.is_error or v.is_warning], violations
+    )
 
     # Generate suggestions if requested
     if args.suggest:
@@ -411,10 +418,10 @@ def main(argv: list[str] | None = None) -> int:
     # (Issue #7230).  ``is_error`` already excludes waived findings (Issue
     # #4691), so the gate is "nonzero iff UNWAIVED errors remain".  Waived
     # findings are likewise kept out of the warning count so --strict never
-    # trips on them.
+    # trips on them, and ``is_warning`` keeps out ``info`` findings (Issue
+    # #10650).
     error_count = sum(1 for v in gate_violations if v.is_error)
-    waived_count = sum(1 for v in gate_violations if v.is_waived)
-    warning_count = len(gate_violations) - error_count - waived_count
+    warning_count = sum(1 for v in gate_violations if v.is_warning)
 
     exit_code, verdict = _drc_gate(
         error_count,
@@ -713,9 +720,11 @@ def output_table(
     parity = report.schematic_parity_status
     error_count = sum(1 for v in violations if v.is_error)
     # Issue #4691/#4696: waived findings get their own bucket -- they are never
-    # folded into the warning count.
+    # folded into the warning count.  ``is_warning`` keeps out ``info``
+    # findings (Issue #10650).
     waived_count = sum(1 for v in violations if v.is_waived)
-    warning_count = len(violations) - error_count - waived_count
+    warning_count = sum(1 for v in violations if v.is_warning)
+    info_count = sum(1 for v in violations if v.is_info)
 
     print(f"\n{'=' * 60}")
     print("DRC VALIDATION SUMMARY")
@@ -729,6 +738,8 @@ def output_table(
     print("\nResults:")
     print(f"  Errors:     {error_count}")
     print(f"  Warnings:   {warning_count}")
+    if info_count > 0:
+        print(f"  Infos:      {info_count}")
     if waived_count > 0:
         print(f"  Waived:     {waived_count}")
     if filtered_count > 0:
@@ -761,7 +772,7 @@ def output_table(
     by_type: dict = {}
     for v in violations:
         if v.type_str not in by_type:
-            by_type[v.type_str] = {"errors": 0, "warnings": 0, "waived": 0}
+            by_type[v.type_str] = {"errors": 0, "warnings": 0, "infos": 0, "waived": 0}
         by_type[v.type_str][_bucket(v)] += 1
 
     print(f"\n{'-' * 60}")
@@ -774,7 +785,7 @@ def output_table(
     for v in violations:
         cat = v.category.value
         if cat not in by_category:
-            by_category[cat] = {"errors": 0, "warnings": 0, "waived": 0}
+            by_category[cat] = {"errors": 0, "warnings": 0, "infos": 0, "waived": 0}
         by_category[cat][_bucket(v)] += 1
 
     print(f"\n{'-' * 60}")
@@ -784,7 +795,8 @@ def output_table(
 
     # Detailed output
     errors = [v for v in violations if v.is_error]
-    warnings = [v for v in violations if not v.is_error and not v.is_waived]
+    warnings = [v for v in violations if v.is_warning]
+    infos = [v for v in violations if v.is_info]
     waived = [v for v in violations if v.is_waived]
 
     if errors:
@@ -801,6 +813,16 @@ def output_table(
             _print_single(v, verbose, show_suggestions)
         if len(warnings) > 10 and not verbose:
             print(f"\n  ... and {len(warnings) - 10} more warnings (use --verbose)")
+
+    # Issue #10650: ``info`` findings never gate but stay listed for inspection.
+    if infos:
+        print(f"\n{'-' * 60}")
+        print("INFO (informational, non-gating):")
+        display_infos = infos if verbose else infos[:10]
+        for v in display_infos:
+            _print_single(v, verbose, show_suggestions)
+        if len(infos) > 10 and not verbose:
+            print(f"\n  ... and {len(infos) - 10} more infos (use --verbose)")
 
     # Issue #4691: waived findings stay visible in their own section so a
     # reviewer can audit each documented exception, but never gate.
@@ -841,16 +863,20 @@ def _bucket(v: DRCViolation) -> str:
     """Return the count bucket a violation belongs to (waived is its own)."""
     if v.is_waived:
         return "waived"
-    return "errors" if v.is_error else "warnings"
+    if v.is_error:
+        return "errors"
+    return "warnings" if v.is_warning else "infos"
 
 
 def _format_counts(counts: dict) -> str:
-    """Render a {errors, warnings, waived} bucket dict, omitting empty buckets."""
+    """Render a {errors, warnings, infos, waived} bucket dict, omitting empty buckets."""
     parts = []
     if counts.get("errors"):
         parts.append(f"{counts['errors']} error{'s' if counts['errors'] != 1 else ''}")
     if counts.get("warnings"):
         parts.append(f"{counts['warnings']} warning{'s' if counts['warnings'] != 1 else ''}")
+    if counts.get("infos"):
+        parts.append(f"{counts['infos']} info{'s' if counts['infos'] != 1 else ''}")
     if counts.get("waived"):
         parts.append(f"{counts['waived']} waived")
     return ", ".join(parts)
@@ -863,7 +889,7 @@ def _print_single(
     indent: str = "  ",
 ) -> None:
     """Print a single violation."""
-    symbol = "~" if v.is_waived else ("X" if v.is_error else "!")
+    symbol = "~" if v.is_waived else ("X" if v.is_error else ("!" if v.is_warning else "i"))
     print(f"\n{indent}[{symbol}] {v.type_str}")
     print(f"{indent}    {v.message}")
     if v.wire_end:
@@ -918,7 +944,8 @@ def output_json(
     plus ``parity_errors``/``parity_warnings`` in ``summary``.
     ``schematic_parity_checked`` is a convenience alias derived from the
     status (``false`` for NOT RUN, including report input that does not
-    record whether parity ran).
+    record whether parity ran).  Issue #10650: ``info`` findings are never
+    counted as ``warnings``; ``summary.infos`` appears when there are any.
     """
     parity = report.schematic_parity_status
     violations_data = []
@@ -935,12 +962,16 @@ def output_json(
     waived_count = sum(1 for v in violations if v.is_waived)
     summary: dict = {
         "errors": sum(1 for v in violations if v.is_error),
-        "warnings": sum(1 for v in violations if not v.is_error and not v.is_waived),
+        "warnings": sum(1 for v in violations if v.is_warning),
     }
     # Issue #7096: explicit count of missing-connection findings in ``violations``.
     summary["unconnected"] = sum(1 for v in violations if v.type == ViolationType.UNCONNECTED_ITEMS)
     summary["parity_errors"] = parity.error_count
     summary["parity_warnings"] = parity.warning_count
+    # Issue #10650: ``info`` findings get their own OMIT-when-absent bucket.
+    info_count = sum(1 for v in violations if v.is_info)
+    if info_count > 0:
+        summary["infos"] = info_count
     if waived_count > 0:
         summary["waived"] = waived_count
     if filtered_count > 0:
@@ -997,24 +1028,32 @@ def output_summary(
     for v in violations:
         key = v.type_str
         if key not in by_type:
-            by_type[key] = {"errors": 0, "warnings": 0, "waived": 0}
+            by_type[key] = {"errors": 0, "warnings": 0, "infos": 0, "waived": 0}
         by_type[key][_bucket(v)] += 1
 
+    # Issue #10650: ``info`` findings get their own column, never "Warnings".
+    any_info = any(c["infos"] for c in by_type.values())
+    info_header = f" {'Infos':<8}" if any_info else ""
     any_waived = any(c["waived"] for c in by_type.values())
     waived_header = f" {'Waived':<8}" if any_waived else ""
-    print(f"{'Type':<25} {'Errors':<8} {'Warnings':<8}{waived_header}")
+    print(f"{'Type':<25} {'Errors':<8} {'Warnings':<8}{info_header}{waived_header}")
     print("-" * 50)
 
     for type_name, counts in sorted(by_type.items()):
+        info_col = f" {counts['infos']:<8}" if any_info else ""
         waived_col = f" {counts['waived']:<8}" if any_waived else ""
-        print(f"{type_name:<25} {counts['errors']:<8} {counts['warnings']:<8}{waived_col}")
+        print(
+            f"{type_name:<25} {counts['errors']:<8} {counts['warnings']:<8}{info_col}{waived_col}"
+        )
 
     print("-" * 50)
     total_errors = sum(c["errors"] for c in by_type.values())
     total_warnings = sum(c["warnings"] for c in by_type.values())
+    total_infos = sum(c["infos"] for c in by_type.values())
     total_waived = sum(c["waived"] for c in by_type.values())
+    info_total_col = f" {total_infos:<8}" if any_info else ""
     waived_total_col = f" {total_waived:<8}" if any_waived else ""
-    print(f"{'TOTAL':<25} {total_errors:<8} {total_warnings:<8}{waived_total_col}")
+    print(f"{'TOTAL':<25} {total_errors:<8} {total_warnings:<8}{info_total_col}{waived_total_col}")
     if hidden:
         print(f"Hidden by view filter: {_hidden_text(hidden)} (still counted)")
 
@@ -1036,9 +1075,10 @@ def _manufacturer_gate_counts(checks: list["ManufacturerCheck"]) -> tuple[int, i
     """``(error_count, warning_count)`` of ``--mfr`` checks for :func:`_drc_exit_code`.
 
     Issue #7170: a fab-limit breach (FAIL) is blocking whatever kicad-cli's
-    severity was; a finding kct could not judge keeps kicad-cli's severity;
-    a WARNING result (no measured value) is a warning; a PASS (the fab's
-    limit is met) clears the kicad-cli finding.
+    severity was; a finding kct could not judge keeps kicad-cli's severity
+    (an ``info`` finding stays non-gating, Issue #10650); a WARNING result
+    (no measured value) is a warning; a PASS (the fab's limit is met) clears
+    the kicad-cli finding.
     """
     from ..drc.checker import CheckResult
 
@@ -1050,7 +1090,7 @@ def _manufacturer_gate_counts(checks: list["ManufacturerCheck"]) -> tuple[int, i
         elif check.result == CheckResult.UNKNOWN:
             if check.violation.is_error:
                 errors += 1
-            else:
+            elif check.violation.is_warning:
                 warnings += 1
         elif check.result == CheckResult.WARNING:
             warnings += 1
@@ -1099,7 +1139,8 @@ def output_manufacturer_check(
     checks = check_manufacturer_rules(report, mfr, layers=layers)
     compatible, incompatible, not_checked = _bucket_manufacturer_checks(checks)
     nc_errors = sum(1 for c in not_checked if c.violation.is_error)
-    nc_warnings = len(not_checked) - nc_errors
+    nc_warnings = sum(1 for c in not_checked if c.violation.is_warning)
+    nc_infos = sum(1 for c in not_checked if c.violation.is_info)
     error_count, warning_count = _manufacturer_gate_counts(checks)
     # Issue #7096: every error-severity connectivity item, for display; only
     # the ones not already judged in ``checks`` add to the gate.
@@ -1128,6 +1169,7 @@ def output_manufacturer_check(
                 "not_checked": len(not_checked),
                 "not_checked_errors": nc_errors,
                 "not_checked_warnings": nc_warnings,
+                **({"not_checked_infos": nc_infos} if nc_infos else {}),
                 "not_checked_by_type": _count_by_type(not_checked),
                 "unconnected": len(unconnected),
                 "parity_errors": parity.error_count,
@@ -1180,9 +1222,10 @@ def output_manufacturer_check(
 
     if not_checked:
         print(f"\n{'-' * 60}")
+        nc_info_text = f", {nc_infos} info" if nc_infos else ""
         print(
             f"NOT CHECKED against {profile.name} limits: {len(not_checked)} "
-            f"(errors {nc_errors}, warnings {nc_warnings})"
+            f"(errors {nc_errors}, warnings {nc_warnings}{nc_info_text})"
         )
         by_type = ", ".join(f"{t} {n}" for t, n in _count_by_type(not_checked).items())
         print(f"  by type: {by_type}")
