@@ -3047,12 +3047,22 @@ class ManufacturingPackage:
         reference or pad the board does not have, a non-copper pad, or a pad on
         another or mixed net is reported by row, terminal and landing.
         """
+        from ..core.layers import is_declared_copper_layer
         from ..schema.pcb import PCB
 
         try:
             board = PCB.load(str(self.pcb_path))
         except (OSError, KiCadToolsError) as exc:
             return [f"terminal maps cannot be checked: {self.pcb_path} could not be read ({exc})"]
+        copper_layers = {
+            layer.name
+            for layer in board.layers.values()
+            if is_declared_copper_layer(layer.name, layer.type)
+        }
+        if copper_layers & {"F.Cu", "B.Cu"}:
+            copper_layers.add("F&B.Cu")
+        if copper_layers:
+            copper_layers.add("*.Cu")
         faults: list[str] = []
         for index, row in enumerate(rows, 1):
             for assignment in row.terminals or ():
@@ -3071,17 +3081,24 @@ class ManufacturingPackage:
                 if not pads:
                     faults.append(f"{where}: {ref} has no pad {pad_number}")
                     continue
-                copper_pads = [pad for pad in pads if pad.type != "np_thru_hole"]
+                copper_pads = [
+                    pad
+                    for pad in pads
+                    if pad.type != "np_thru_hole" and not copper_layers.isdisjoint(pad.layers)
+                ]
                 if not copper_pads:
                     faults.append(f"{where}: {ref} pad {pad_number} has no copper")
                     continue
-                observed = list(dict.fromkeys((pad.net_name or "no net") for pad in copper_pads))
+                observed = list(dict.fromkeys(pad.net_name for pad in copper_pads))
                 if len(observed) > 1:
-                    nets = ", ".join(observed[:-1]) + f" and {observed[-1]}"
+                    labels = [name or "(unconnected)" for name in observed]
+                    nets = ", ".join(labels[:-1]) + f" and {labels[-1]}"
                     faults.append(
                         f"{where}: {ref} pad {pad_number} carries conflicting nets "
                         f"on the board ({nets}); expected {net}"
                     )
+                elif not observed[0]:
+                    faults.append(f"{where}: {ref} pad {pad_number} is unconnected; expected {net}")
                 elif observed[0] != net:
                     faults.append(
                         f"{where}: {ref} pad {pad_number} carries {observed[0]} "

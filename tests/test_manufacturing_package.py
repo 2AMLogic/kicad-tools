@@ -3557,6 +3557,44 @@ class TestPurchasingList:
         assert "R1 pad 1 carries VCC on the board, not GND" in str(refused.errors)
         assert not (tmp_path / "refused").exists()
 
+    @pytest.mark.parametrize(
+        ("layers", "net_clause", "fault"),
+        [
+            ('"F.Paste"', '(net 1 "no net")', "has no copper"),
+            ('"F.Cu" "F.Paste"', "", "is unconnected"),
+        ],
+        ids=["paste-only", "unconnected"],
+    )
+    def test_invalid_pad_preserves_named_net_handoff(
+        self, tmp_path, monkeypatch, local_symbol_project, layers, net_clause, fault
+    ):
+        purchasing = "purchasing:\n" + SWITCH_ROW + SWITCH_MAP.replace("VDD_CTRL", "no net")
+        self._write_spec(local_symbol_project, purchasing)
+        board = SWITCH_LAND.replace("VDD_CTRL", "no net").replace(
+            "thru_hole rect (at -2.5 0) (size 1.7 1.7) (drill 1)",
+            "smd rect (at -2.5 0) (size 1.7 1.7)",
+        )
+        pad = '(layers "*.Cu" "*.Mask") (net 1 "no net")'
+        assert board.count(pad) == 1
+        local_symbol_project.write_text(
+            board.replace(pad, '(layers "F.Cu" "F.Paste") (net 1 "no net")')
+        )
+        bundle = tmp_path / "bundle"
+        _, valid = self._export(monkeypatch, local_symbol_project, bundle)
+        assert valid.success, valid.errors
+        terminals = self._read_exported_list(valid.purchasing_path)["items"][0]["terminals"]
+        assert {"terminal": "3", "ref": "SW1", "pad": "1", "net": "no net"} in terminals
+        before = {p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+
+        local_symbol_project.write_text(board.replace(pad, f"(layers {layers}) {net_clause}"))
+        _, refused = self._export(monkeypatch, local_symbol_project, bundle)
+        assert not refused.success
+        assert f"SW1 pad 1 {fault}" in refused.errors[0]
+        assert {
+            p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()
+        } == before
+        assert verify_manifest(valid.manifest_path) == []
+
     def test_multi_pad_landing_checks_every_physical_pad(
         self, tmp_path, monkeypatch, local_symbol_project
     ):
@@ -3593,7 +3631,7 @@ class TestPurchasingList:
         for label, nets, observed in (
             ("declared-first", ("VDD_CTRL", "ARMED_3V3"), "VDD_CTRL and ARMED_3V3"),
             ("declared-second", ("ARMED_3V3", "VDD_CTRL"), "ARMED_3V3 and VDD_CTRL"),
-            ("second-unconnected", ("VDD_CTRL", ""), "VDD_CTRL and no net"),
+            ("second-unconnected", ("VDD_CTRL", ""), "VDD_CTRL and (unconnected)"),
         ):
             local_symbol_project.write_text(two_pad_board(*nets))
             fresh = tmp_path / label
