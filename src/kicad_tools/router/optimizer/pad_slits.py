@@ -90,112 +90,6 @@ def via_gap_check(grid: RoutingGrid | None, route: Route) -> ReplacementCheck | 
     )
 
 
-_MASK_UNCERTAINTY_MM = 0.0101
-
-_MASK_ENTRY_PAD_KINDS = frozenset({"pad:rect", "pad:roundrect", "pad:circle", "pad:oval"})
-
-
-def mask_opening_check(
-    grid: RoutingGrid | None, clearance: float, mask_margin: float = 0.0
-) -> ReplacementCheck | None:
-    """Decline a rewrite that adds same-net copper beside a pad's mask opening.
-
-    ``kct check --mfr`` judges every track segment against each mask opening of
-    its own net (Issue #9424): copper clear of the opening but nearer than the
-    fab's mask-to-copper *clearance* is a disjoint pass-through, and copper
-    over the opening is clean only as one entry -- an authored end inside the
-    pad and no more copper beside the opening than one steep crossing leaves
-    (:func:`kicad_tools.validate.mask_copper.clean_own_pad_entry`).  A shortcut
-    that parks its bend just outside the pad it enters fails both ways: the
-    bending leg ends outside the pad, so its rounded corner is copper beside
-    the opening (0.02 mm from U1/14 on board 05).
-
-    The check counts such ``(segment, opening)`` defects on the chain before
-    and after the rewrite and declines it only when the count grows.  Defects
-    the incoming chain already carries are not charged to the rewrite, so a
-    shortcut that trades one for a cleaner shape is kept.  Pads without a net
-    or a standard shape and vias are not modelled.  *mask_margin* is the
-    board's solder-mask expansion (0 when the board declares none); openings
-    and copper are compared with the plot's construction budget
-    (``_MASK_UNCERTAINTY_MM``, the one ``drc.repair_mask_copper`` judges
-    undrawn copper with).
-    """
-    if (
-        grid is None
-        or isinstance(clearance, bool)
-        or not isinstance(clearance, (int, float))
-        or not math.isfinite(clearance)
-        or clearance <= 0
-    ):
-        return None
-
-    from shapely.geometry import LineString  # type: ignore[import-untyped]
-    from shapely.strtree import STRtree  # type: ignore[import-untyped]
-
-    from kicad_tools.validate.mask_copper import clean_own_pad_entry
-
-    from ..layers import Layer
-
-    reach = clearance + _MASK_UNCERTAINTY_MM
-    openings: dict[tuple[int, Layer], list[tuple[BaseGeometry, BaseGeometry, str]]] = defaultdict(
-        list
-    )
-    for pad in grid.pads:
-        kind = f"pad:{pad.shape}"
-        if pad.steiner_point or not pad.net or kind not in _MASK_ENTRY_PAD_KINDS:
-            continue
-        copper = _pad_copper(pad)
-        if copper is None or copper.is_empty:
-            continue
-        opening = copper.buffer(mask_margin, quad_segs=64) if mask_margin else copper
-        if opening.is_empty:
-            continue
-        layers = (Layer.F_CU, Layer.B_CU) if pad.through_hole else (pad.layer,)
-        for layer in layers:
-            openings[pad.net, layer].append((opening, copper, kind))
-    if not openings:
-        return None
-    trees = {key: STRtree([item[0] for item in items]) for key, items in openings.items()}
-
-    def defects(segments: list[Segment]) -> int:
-        count = 0
-        for seg in segments:
-            items = openings.get((seg.net, seg.layer))
-            if not items:
-                continue
-            copper = LineString([(seg.x1, seg.y1), (seg.x2, seg.y2)]).buffer(
-                seg.width / 2, quad_segs=64
-            )
-            near = trees[seg.net, seg.layer].query(copper, predicate="dwithin", distance=reach)
-            for index in near:
-                opening, pad_copper, kind = items[int(index)]
-                gap = copper.distance(opening)
-                if gap > 0:
-                    count += gap < reach
-                elif not clean_own_pad_entry(
-                    opening,
-                    copper,
-                    pad_copper,
-                    kind,
-                    seg.width,
-                    ((seg.x1, seg.y1), (seg.x2, seg.y2)),
-                    clearance_mm=clearance,
-                    uncertainty_mm=_MASK_UNCERTAINTY_MM,
-                    margin_mm=mask_margin,
-                ):
-                    count += 1
-        return count
-
-    def replacement_is_mask_clean(
-        original: list[Segment], candidate: list[Segment], kept: list[Segment]
-    ) -> bool:
-        if not candidate or candidate == original:
-            return True
-        return defects(candidate) <= defects(original)
-
-    return replacement_is_mask_clean
-
-
 def via_exit_doglegs(
     segments: list[Segment], grid: RoutingGrid | None
 ) -> Iterator[tuple[list[Segment], list[Segment]]]:
@@ -628,3 +522,109 @@ def adds_trace_gap(
         return min(gaps, default=math.inf)
 
     return worst(candidate) < edge
+
+
+_MASK_UNCERTAINTY_MM = 0.0101
+
+_MASK_ENTRY_PAD_KINDS = frozenset({"pad:rect", "pad:roundrect", "pad:circle", "pad:oval"})
+
+
+def mask_opening_check(
+    grid: RoutingGrid | None, clearance: float, mask_margin: float = 0.0
+) -> ReplacementCheck | None:
+    """Decline a rewrite that adds same-net copper beside a pad's mask opening.
+
+    ``kct check --mfr`` judges every track segment against each mask opening of
+    its own net (Issue #9424): copper clear of the opening but nearer than the
+    fab's mask-to-copper *clearance* is a disjoint pass-through, and copper
+    over the opening is clean only as one entry -- an authored end inside the
+    pad and no more copper beside the opening than one steep crossing leaves
+    (:func:`kicad_tools.validate.mask_copper.clean_own_pad_entry`).  A shortcut
+    that parks its bend just outside the pad it enters fails both ways: the
+    bending leg ends outside the pad, so its rounded corner is copper beside
+    the opening (0.02 mm from U1/14 on board 05).
+
+    The check counts such ``(segment, opening)`` defects on the chain before
+    and after the rewrite and declines it only when the count grows.  Defects
+    the incoming chain already carries are not charged to the rewrite, so a
+    shortcut that trades one for a cleaner shape is kept.  Pads without a net
+    or a standard shape and vias are not modelled.  *mask_margin* is the
+    board's solder-mask expansion (0 when the board declares none); openings
+    and copper are compared with the plot's construction budget
+    (``_MASK_UNCERTAINTY_MM``, the one ``drc.repair_mask_copper`` judges
+    undrawn copper with).
+    """
+    if (
+        grid is None
+        or isinstance(clearance, bool)
+        or not isinstance(clearance, (int, float))
+        or not math.isfinite(clearance)
+        or clearance <= 0
+    ):
+        return None
+
+    from shapely.geometry import LineString
+    from shapely.strtree import STRtree
+
+    from kicad_tools.validate.mask_copper import clean_own_pad_entry
+
+    from ..layers import Layer
+
+    reach = clearance + _MASK_UNCERTAINTY_MM
+    openings: dict[tuple[int, Layer], list[tuple[BaseGeometry, BaseGeometry, str]]] = defaultdict(
+        list
+    )
+    for pad in grid.pads:
+        kind = f"pad:{pad.shape}"
+        if pad.steiner_point or not pad.net or kind not in _MASK_ENTRY_PAD_KINDS:
+            continue
+        copper = _pad_copper(pad)
+        if copper is None or copper.is_empty:
+            continue
+        opening = copper.buffer(mask_margin, quad_segs=64) if mask_margin else copper
+        if opening.is_empty:
+            continue
+        layers = (Layer.F_CU, Layer.B_CU) if pad.through_hole else (pad.layer,)
+        for layer in layers:
+            openings[pad.net, layer].append((opening, copper, kind))
+    if not openings:
+        return None
+    trees = {key: STRtree([item[0] for item in items]) for key, items in openings.items()}
+
+    def defects(segments: list[Segment]) -> int:
+        count = 0
+        for seg in segments:
+            items = openings.get((seg.net, seg.layer))
+            if not items:
+                continue
+            copper = LineString([(seg.x1, seg.y1), (seg.x2, seg.y2)]).buffer(
+                seg.width / 2, quad_segs=64
+            )
+            near = trees[seg.net, seg.layer].query(copper, predicate="dwithin", distance=reach)
+            for index in near:
+                opening, pad_copper, kind = items[int(index)]
+                gap = copper.distance(opening)
+                if gap > 0:
+                    count += gap < reach
+                elif not clean_own_pad_entry(
+                    opening,
+                    copper,
+                    pad_copper,
+                    kind,
+                    seg.width,
+                    ((seg.x1, seg.y1), (seg.x2, seg.y2)),
+                    clearance_mm=clearance,
+                    uncertainty_mm=_MASK_UNCERTAINTY_MM,
+                    margin_mm=mask_margin,
+                ):
+                    count += 1
+        return count
+
+    def replacement_is_mask_clean(
+        original: list[Segment], candidate: list[Segment], kept: list[Segment]
+    ) -> bool:
+        if not candidate or candidate == original:
+            return True
+        return defects(candidate) <= defects(original)
+
+    return replacement_is_mask_clean
