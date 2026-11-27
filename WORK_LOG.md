@@ -16,6 +16,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10587** (closed): test flake: test_count_corners_serpentine_4000_under_budget exceeds its 1.0s wall-clock budget in the Test job
+- **PR #10591**: test: gate _count_corners serpentine budget on best of 3 runs
+- **Issue #10590** (closed): Placement treats a large interior Edge.Cuts opening as the board exterior
+- **PR #10592**: fix(pcb): select board outline face by exterior ring area
+- **PR #10128**: fix(validate): stop pour_slot reporting packed parallel track pairs
 - **Issue #10561** (closed): Board 03 USB common-run measurement depends on where an unchanged track is split
 - **PR #10571**: fix(board03): clip the USB common run to its window before measuring coupling
 - **PR #10472**: fix: carry a pad-edge escape end into the pad along its own line
