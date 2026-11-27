@@ -11,6 +11,7 @@ is supplied, while preserving:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from unittest.mock import patch
@@ -20,7 +21,7 @@ import pytest
 import yaml
 
 from kicad_tools.cli import main as cli_main
-from kicad_tools.report.renderers import _weasyprint_available
+from kicad_tools.report.renderers import _weasyprint_available, render_pdf_pandoc
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schema.schematic import Schematic
 
@@ -164,7 +165,7 @@ class TestReportRevisionCLIAndExport:
         data_dir = tmp_path / "snapshot_data"
         data_dir.mkdir()
         (data_dir / "metadata.json").write_text(
-            json.dumps({"revision": "LAB-8", "date": "2026-11-27"}),
+            json.dumps({"revision": "LAB-🧪", "date": "2026-11-27"}),
             encoding="utf-8",
         )
         reports_dir = tmp_path / "reports"
@@ -186,9 +187,35 @@ class TestReportRevisionCLIAndExport:
         assert rc == 0
 
         md_text = (reports_dir / "v1" / "report.md").read_text(encoding="utf-8")
-        assert 'date: "Rev LAB-8 | 2026-11-27 | jlcpcb"' in md_text
+        header = yaml.safe_load(md_text.split("---", 2)[1])
+        assert header["date"] == "Rev LAB-🧪 | 2026-11-27 | jlcpcb"
         assert "Rev B |" not in md_text
         assert "Rev 1 |" not in md_text
+
+    @pytest.mark.skipif(shutil.which("pandoc") is None, reason="Pandoc is unavailable")
+    def test_pandoc_cover_preserves_literal_revision(self, tmp_path: Path) -> None:
+        pcb_path = _write_one_pad_board(tmp_path, rev="C.2 <bench> 🧪")
+        reports_dir = tmp_path / "reports"
+        assert (
+            cli_main(
+                [
+                    "report",
+                    "generate",
+                    str(pcb_path),
+                    "--skip-collect",
+                    "--no-figures",
+                    "-o",
+                    str(reports_dir),
+                ]
+            )
+            == 0
+        )
+
+        # Inspect the actual LaTeX title without requiring a TeX installation.
+        tex_path = tmp_path / "report.tex"
+        render_pdf_pandoc(reports_dir / "v1" / "report.md", tex_path)
+        tex = tex_path.read_text(encoding="utf-8")
+        assert re.search(r"\\date\{Rev C\.2 \\textless(?: |\{\})bench\\textgreater\{\} 🧪", tex)
 
     def test_report_generate_data_dir_without_revision_uses_pcb_revision(
         self, tmp_path: Path

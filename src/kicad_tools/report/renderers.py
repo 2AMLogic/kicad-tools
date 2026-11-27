@@ -213,6 +213,7 @@ def render_pdf_pandoc(
         "-o",
         str(output_path),
         f"--pdf-engine={pdf_engine}",
+        "--standalone",
         "--from=markdown+yaml_metadata_block+pipe_tables+raw_tex",
         "--variable=geometry:margin=1in",
         "--variable=colorlinks:true",
@@ -220,6 +221,18 @@ def render_pdf_pandoc(
         # not the caller's cwd. This is the core fix for issue #4023.
         f"--resource-path={markdown_path.parent}",
     ]
+
+    # Pandoc parses YAML metadata as Markdown. Supply the decoded report
+    # date as literal metadata so markup in a PCB revision survives in TeX.
+    with markdown_path.open(encoding="utf-8") as source:
+        if source.readline().strip() == "---":
+            for line in source:
+                if line.rstrip() in {"---", "..."}:
+                    break
+                if line.startswith('date: "Rev '):
+                    with contextlib.suppress(json.JSONDecodeError):
+                        cmd.append(f"--metadata=date:{json.loads(line.partition(':')[2])}")
+                    break
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
