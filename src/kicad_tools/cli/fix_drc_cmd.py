@@ -1700,10 +1700,10 @@ def _run_mask_pass(
                 if not args.no_connectivity_check
                 else {}
             )
-            # Nudges and pull-ins change copper subject to KiCad's project and
-            # item-specific clearance rules, even when pad connectivity is skipped.
+            # Nudges, pull-ins and entry extensions can cross project clearance
+            # or keepout boundaries even when pad connectivity is skipped.
             check_copper = any(
-                isinstance(action, MaskNudgeAction) or action.action == "pull_in"
+                isinstance(action, MaskNudgeAction) or action.action in {"pull_in", "extend_entry"}
                 for action in result.actions
             )
             bend_nets = {action.net_name for action in result.actions if action.bends}

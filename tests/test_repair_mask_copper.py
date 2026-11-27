@@ -3387,6 +3387,35 @@ def _is_clean_entry(board: Path, copper, ends) -> bool:
     )
 
 
+@pytest.mark.parametrize("connectivity", [True, False])
+def test_native_veto_preserves_board_after_pad_entry_extension(
+    tmp_path, monkeypatch, capsys, connectivity
+):
+    from collections import Counter
+
+    board = _edge_escape_fixture(tmp_path)
+    original = board.read_bytes()
+    native = iter(
+        [
+            fix_drc_cmd._MaskNativeState(),
+            fix_drc_cmd._MaskNativeState(Counter({("clearance", "track rule", ("a", "b")): 1})),
+        ]
+    )
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda candidate: next(native))
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", lambda candidate: [])
+    _run(
+        monkeypatch,
+        board,
+        [_report(_edge_finding()), _report()],
+        extra=("--max-displacement", "0.5", "--max-passes", "1", "--verify", "--format", "json"),
+        connectivity=connectivity,
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert result["repaired"] == 0
+    assert any("1 new errors" in finding["detail"] for finding in result["unrepaired"])
+    assert board.read_bytes() == original
+
+
 def test_edge_stopped_escape_is_carried_into_the_pad_along_its_own_line(tmp_path):
     board = _edge_escape_fixture(tmp_path)
     before = board.read_bytes()
