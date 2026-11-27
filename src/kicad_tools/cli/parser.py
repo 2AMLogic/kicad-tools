@@ -929,8 +929,8 @@ def _add_creepage_parser(subparsers) -> None:
             "and JSON) instead of the collapsed minimum, and the raw "
             "measurements/verdicts stay in the JSON.  The exit code follows "
             "the waiver-aware gate: exit 0 only when every un-waived metric "
-            "clears.  An invalid, ambiguous or unmatched selector is an error "
-            "-- it can never silently waive a finding.  Composes with "
+            "clears. Invalid or ambiguous selectors are errors. A valid selector "
+            "outside the audited pairs produces a warning and waives nothing. Composes with "
             "--waive-same-footprint; does NOT affect the kct audit gate."
         ),
     )
@@ -5894,12 +5894,22 @@ def _add_fix_drc_parser(subparsers) -> None:
         help="Output format (default: text)",
     )
     fix_drc_parser.add_argument(
+        "--no-new-warnings",
+        action="store_true",
+        help=(
+            "With --only mask-copper, compare the saved board with the pre-edit "
+            "board and revert moves that introduce errors or warnings. An error "
+            "may improve to a warning. Exit 4 means the mask assessment failed."
+        ),
+    )
+    fix_drc_parser.add_argument(
         "--transactional",
         action="store_true",
         help=(
             "Snapshot the output file before repairing and roll it back "
             "byte-identical if the run fails (exception, Ctrl-C, no-progress "
-            "exit 1, or connectivity-rollback exit 3); the failed attempt is "
+            "exit 1, connectivity-rollback exit 3, or failed mask assessment "
+            "exit 4); the failed attempt is "
             "preserved as a <file>.failed-<timestamp> sidecar. Exit 2 "
             "(partial repair) keeps the applied repairs."
         ),

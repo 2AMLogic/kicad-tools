@@ -1205,7 +1205,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" "http://ww1.microchip.com/downloads/en/DeviceDoc/atmel-2586-avr-8-bit-microcontroller-attiny25-attiny45-attiny85_datasheet.pdf"
 			(at 50.8 76.2 0)
 			(effects
 				(font
@@ -1271,7 +1271,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 25.4 127 0)
 			(effects
 				(font
@@ -1325,7 +1325,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 76.2 127 0)
 			(effects
 				(font
@@ -1387,7 +1387,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 25.4 38.1 0)
 			(effects
 				(font
@@ -1441,7 +1441,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 50.8 38.1 0)
 			(effects
 				(font
@@ -1495,7 +1495,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 76.2 38.1 0)
 			(effects
 				(font
@@ -1549,7 +1549,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 114.3 50.8 0)
 			(effects
 				(font
@@ -1603,7 +1603,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 114.3 76.2 0)
 			(effects
 				(font
@@ -1657,7 +1657,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 114.3 101.6 0)
 			(effects
 				(font
@@ -1711,7 +1711,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 114.3 127 0)
 			(effects
 				(font
@@ -1765,7 +1765,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 165.1 50.8 0)
 			(effects
 				(font
@@ -1819,7 +1819,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 203.2 50.8 0)
 			(effects
 				(font
@@ -1873,7 +1873,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 241.3 50.8 0)
 			(effects
 				(font
@@ -1927,7 +1927,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 165.1 88.9 0)
 			(effects
 				(font
@@ -1981,7 +1981,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 203.2 88.9 0)
 			(effects
 				(font
@@ -2035,7 +2035,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 241.3 88.9 0)
 			(effects
 				(font
@@ -2089,7 +2089,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 165.1 127 0)
 			(effects
 				(font
@@ -2143,7 +2143,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 203.2 127 0)
 			(effects
 				(font
@@ -2197,7 +2197,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 241.3 127 0)
 			(effects
 				(font

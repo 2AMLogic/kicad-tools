@@ -87,6 +87,7 @@ from kicad_tools.core.layers import via_spans_layer
 from kicad_tools.pcb_prune import COVERED_TOL_MM  # shared with prune (#8734)
 
 from ..clearance_shapes import KSegment, KShape, KVia, copper_gap, segment_shape
+from ..copper_refs import board_origin, segment_witness, via_ref
 from ..mask_geometry import CURVE_ERROR_MM
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule, drc_clear
@@ -229,15 +230,13 @@ class RedundantCopperRule(DRCRule):
         results.rules_checked_by_rule["redundant_copper_pour_stub"] = 0
 
         segments = [s for s in pcb.segments if s.layer and s.width > 0]
+        self._origin = board_origin(pcb)
         self._check_duplicates(segments, results)
 
         groups: dict[tuple[int, str], list[Any]] = defaultdict(list)
         for seg in segments:
             groups[(seg.net_number, seg.layer)].append(seg)
         self._pcb = pcb
-        # Messages quote sheet-absolute coordinates, matching the location
-        # ``DRCChecker._absolutize`` produces (Issue #8868).
-        self._origin = tuple(getattr(pcb, "board_origin", (0.0, 0.0)))
         self._clearance = (
             getattr(design_rules, "min_clearance_mm", None) or STAIRCASE_DEFAULT_CLEARANCE_MM
         )
@@ -329,6 +328,7 @@ class RedundantCopperRule(DRCRule):
                     ),
                     location=seg.start,
                     layer=seg.layer,
+                    witnesses=(segment_witness(seg, self._origin),),
                     nets=(label,),
                 )
             )
@@ -360,6 +360,7 @@ class RedundantCopperRule(DRCRule):
                             ),
                             location=seg.start,
                             layer=seg.layer,
+                            witnesses=(segment_witness(seg, self._origin),),
                             nets=(label,),
                         )
                     )
@@ -510,6 +511,7 @@ class RedundantCopperRule(DRCRule):
                         layer=layer,
                         actual_value=float(len(run)),
                         required_value=float(FRAGMENT_RUN_MIN - 1),
+                        witnesses=tuple(segment_witness(s, self._origin) for s in run),
                         nets=(label,),
                     )
                 )
@@ -534,6 +536,7 @@ class RedundantCopperRule(DRCRule):
                         layer=layer,
                         actual_value=ratio,
                         required_value=DETOUR_RATIO,
+                        witnesses=tuple(segment_witness(s, self._origin) for s, _, _ in chain),
                         nets=(label,),
                     )
                 )
@@ -886,6 +889,7 @@ class RedundantCopperRule(DRCRule):
                     layer=layer,
                     actual_value=float(bends),
                     required_value=float(new_bends),
+                    witnesses=tuple(segment_witness(s, self._origin) for s in chain_segments),
                     nets=(label,),
                 )
             )
@@ -950,6 +954,10 @@ class RedundantCopperRule(DRCRule):
                             location=end,
                             layer=seg.layer,
                             actual_value=d,
+                            witnesses=(
+                                segment_witness(seg, self._origin),
+                                getattr(via, "uuid", "") or via_ref(via, self._origin),
+                            ),
                             nets=(label,),
                         )
                     )
