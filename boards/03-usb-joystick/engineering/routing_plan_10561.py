@@ -3,8 +3,8 @@
 This is the live ``routing_plan.py`` plus the window-clipping change.  It is
 deliberately not the live recipe: the published design-source archive must
 match the live recipe byte for byte (operator ruling, #8900), so the release
-PR that re-issues the archive moves this content into ``routing_plan.py`` and
-deletes this file.  Paths below resolve against the board directory.
+PR for #8900 should port the geometry changes into the live recipe, retain
+its board-relative plan and fabrication paths, and retire this staged copy.
 
 Replay the reviewed revision-B copper only on its exact physical circuit.
 
@@ -323,9 +323,11 @@ def fingerprint(path):
 
 
 # Issue #10561: KiCad stores copper on a 1 nm grid, so a track split anywhere
-# on its centerline and saved puts the two pieces back to back to within float
-# noise.  10 nm is far above that noise and far below any real break or bend.
-_COPPER_TOL_MM = 1e-5
+# on its centerline has a shared endpoint and at most half a grid step of
+# rounding per coordinate. Allow one grid step of transverse rounding.
+_SPLIT_ROUNDING_MM = 1e-6
+# Existing endpoint tolerance for saved runs.
+_ENDPOINT_TOL_MM = 1e-5
 # Widths on both sides of a split read the same decimal text.
 _WIDTH_TOL_MM = 1e-9
 # A clipped piece shorter than this is a point contact (a track touching the
@@ -376,52 +378,46 @@ def _join_collinear(pieces):
     line become one piece, however often a track was split there; a real
     bend, a break or a width change keeps the pieces apart.
     """
-    merged = True
-    while merged:
-        merged = False
+    while True:
+        best = None
+        best_score = (math.inf, math.inf)
         for i, (a1, b1, w1, track) in enumerate(pieces):
             for j in range(i + 1, len(pieces)):
                 a2, b2, w2, _ = pieces[j]
                 if abs(w1 - w2) > _WIDTH_TOL_MM:
                     continue
-                # Two pieces that match end for end are duplicates; leave them.
-                if (math.dist(a1, a2) < _COPPER_TOL_MM and math.dist(b1, b2) < _COPPER_TOL_MM) or (
-                    math.dist(a1, b2) < _COPPER_TOL_MM and math.dist(b1, a2) < _COPPER_TOL_MM
+                gap, joint, near, far1, far2 = min(
+                    (math.dist(p, q), p, q, f1, f2)
+                    for p, f1 in ((a1, b1), (b1, a1))
+                    for q, f2 in ((a2, b2), (b2, a2))
+                )
+                if gap >= _ENDPOINT_TOL_MM:
+                    continue
+                ux, uy = far1[0] - joint[0], far1[1] - joint[1]
+                vx, vy = far2[0] - near[0], far2[1] - near[1]
+                if ux * vx + uy * vy >= 0:
+                    continue
+                # Both ends at the joint must lie on the proposed joined line
+                # to within the rounding of a saved split point.
+                dx, dy = far2[0] - far1[0], far2[1] - far1[1]
+                tolerance = _SPLIT_ROUNDING_MM * math.hypot(dx, dy)
+                if any(
+                    abs(dx * (y - far1[1]) - dy * (x - far1[0])) > tolerance
+                    for x, y in (joint, near)
                 ):
                     continue
-                # Each piece contributes the endpoint it shares and its far end;
-                # the closest pairing is the joint (a sliver piece sits within
-                # tolerance of both ends of its neighbour).
-                shared = [
-                    (math.dist(joint, q), joint, far1, far2)
-                    for joint, far1 in ((a1, b1), (b1, a1))
-                    for q, far2 in ((a2, b2), (b2, a2))
-                    if math.dist(joint, q) < _COPPER_TOL_MM
-                ]
-                if not shared:
-                    continue
-                _, joint, far1, far2 = min(shared, key=lambda c: c[0])
-                long_far, short_far = sorted((far1, far2), key=lambda far: -math.dist(joint, far))
-                long_len = math.dist(joint, long_far)
-                ux, uy = long_far[0] - joint[0], long_far[1] - joint[1]
-                off_line = abs(ux * (short_far[1] - joint[1]) - uy * (short_far[0] - joint[0]))
-                if off_line > _COPPER_TOL_MM * long_len:
-                    continue
-                # A piece that doubles back on its neighbour is collinear too;
-                # only a continuation adds up to the joined length.
-                if (
-                    abs(math.dist(far1, far2) - long_len - math.dist(joint, short_far))
-                    > _COPPER_TOL_MM
-                ):
-                    continue
-                # Endpoints in a fixed order, so the result does not depend on
-                # the order the tracks were listed in.
-                a, b = sorted((far1, far2))
-                pieces = pieces[:i] + pieces[i + 1 : j] + pieces[j + 1 :] + [(a, b, w1, track)]
-                merged = True
-                break
-            if merged:
-                break
+                # A short piece near a bend can fit either neighbour's
+                # rounding allowance. Join the straightest pair first.
+                sine = abs(ux * vy - uy * vx) / (math.hypot(ux, uy) * math.hypot(vx, vy))
+                score = (sine, gap)
+                if score < best_score:
+                    best_score = score
+                    a, b = sorted((far1, far2))
+                    best = i, j, (a, b, w1, track)
+        if best is None:
+            break
+        i, j, joined = best
+        pieces = pieces[:i] + pieces[i + 1 : j] + pieces[j + 1 :] + [joined]
     return pieces
 
 
@@ -449,7 +445,7 @@ def usb_common_run(tracks, window, name):
             i
             for i, (a, b, _w, _t) in enumerate(pieces)
             if any(
-                math.dist(x, y) < _COPPER_TOL_MM
+                math.dist(x, y) < _ENDPOINT_TOL_MM
                 for j in reached
                 for x in (a, b)
                 for y in pieces[j][:2]
