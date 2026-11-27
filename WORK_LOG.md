@@ -16,6 +16,43 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10555** (closed): route: a pre-existing net class wider than its router width keeps the wider value, so _write_netclasses_to_project cannot declare a narrower class
+- **PR #10558**: fix(route): lower kct-created net classes to the routed width
+- **Issue #10487** (closed): Schematic validation misses trailing-letter references that native KiCad BOM marks unannotated
+- **PR #10488**: Warn when native KiCad BOM export changes a component reference
+- **Issue #10531** (closed): Docker platform notice invalidates a successful native solder-mask export
+- **PR #10533**: Recognize the Docker platform notice during native solder-mask export
+- **Issue #10515** (closed): reference-coverage reports coverage: "none" on layers a net only passes through via
+- **PR #10534**: fix: report not_applicable for via-only layers in reference-coverage
+- **Issue #10416** (closed): Validate repeated circuit channels against expected pins, values and assembly parts
+- **PR #10435**: feat: validate repeated circuit channels against explicit design intent
+- **Issue #10552** (closed): Pin the unverified-shortfall + unresolved-code row of the #10523 stock table
+- **PR #10554**: test: cover stock shortages alongside unresolved BOM items
+- **Issue #10501** (closed): Public kct parts stock command is unreachable from the root parser and dispatch
+- **PR #10503**: Wire authorized distributor stock lookup through kct parts
+- **Issue #10505** (closed): Request an MPN-specific SMD land-pattern check in assembly preflight
+- **PR #10513**: feat: verify MPN-specific two-terminal SMD land patterns in preflight
+- **Issue #10495** (closed): Export and readiness omit project-local .3dshapes libraries from the KiCad project archive
+- **PR #10496**: Include project-local 3D libraries in manufacturing archives
+- **Issue #10448** (closed): Reconcile LED_ANODE and mask clearances so Board 00 readiness can be re-pinned
+- **PR #10459**: fix(boards): align board 00's LED_ANODE net class and fiducial pours
+- **Issue #10543** (closed): test_drc_constraints_export::test_subspec_standard_via_fires_under_kicad_cli fails on main: board 04 via not found at the derived position
+- **PR #10546**: test: check the edited Board 04 via in native DRC
+- **Issue #10525** (closed): Test flake in test_escape_budget_expires_returns_early on CI
+- **PR #10528**: test: make escape-budget expiration deterministic under load
+- **Issue #10399** (closed): Remove duplicated _record_publication_paths call in center_on_sheet
+- **Issue #10250** (closed): pcb center-on-sheet moves wire anchors but leaves reinforcement coordinates at their old positions
+- **PR #10253**: fix: translate reinforcement sidecar with pcb center-on-sheet
+- **Issue #10521** (closed): Offer direct-pad layer validation in PCB.add_trace when a named SMD pad cannot reach the requested layer
+- **PR #10522**: Check direct pad layer access when authoring traces
+- **Issue #10445** (closed): Board 01's committed routed PCB is behind its recipe: a fresh regen moves the board-ID silkscreen and rewrites fiducial attributes and segment UUIDs
+- **PR #10550**: fix(board01): regenerate the front silkscreen and manufacturing package
+- **Issue #10511** (closed): Offset via contacts can bypass a routed bend and split a verified four-barrel transfer
+- **PR #10512**: Preserve a routed bend when its end already reaches the via
+- **Issue #10336** (closed): Request an explicit routing corridor on an inner layer with a partial plane
+- **PR #10375**: feat: route links through bounded inner-plane corridors
+- **Issue #10541** (closed): test flake: test_board_cutout_cannot_hide_a_required_stitch[refilled] times out in CI
+- **PR #10548**: test: report phase timings for the cutout stitching regression
 - **PR #10551**: fix(boards): refresh STM32 and LVDS datasheets in manufacturing bundles
 - **Issue #10265** (closed): Board 03 tier-1 USB_D+ route exceeds its 16 mm branch length limit
 - **PR #10272**: fix(router): shorten aligned differential-pair pad hops

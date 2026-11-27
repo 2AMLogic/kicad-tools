@@ -47,6 +47,7 @@ if TYPE_CHECKING:
         MountingHoleDeclaration,
         ProjectSpec,
         SmdLandPattern,
+        WireTermination,
     )
 
 logger = logging.getLogger(__name__)
@@ -228,6 +229,11 @@ def _lead_record(profile: LeadProfile) -> dict:
     return rec
 
 
+def _wire_record(wire: WireTermination) -> dict:
+    """Serialized form of a declared wire termination (prepared diameter + source)."""
+    return {"diameter_mm": wire.diameter_mm, "source": wire.source}
+
+
 def _lead_fit_finding(
     reference: str,
     pad: Pad,
@@ -237,6 +243,7 @@ def _lead_fit_finding(
     tolerance_source: str | None,
     tolerance_reason: str,
     profile_error: str | None,
+    wire: WireTermination | None = None,
 ) -> dict:
     """Build one per-pad lead-fit record (Issue #10299).
 
@@ -248,8 +255,16 @@ def _lead_fit_finding(
     computed at full precision (required diameter subtracted from the
     opening diameter) and rounded for reporting; the verdicts use the
     unrounded values.
+
+    A declared wire termination (Issue #10473) is assessed the same way
+    from the maximum outside diameter of its prepared end: *profile* is
+    the round profile built from the declaration, ``mpn`` stays unset
+    because no part describes the pad, and the declaration is carried in
+    ``wire`` instead of ``lead``.
     """
     mpn = entry.part if entry is not None else None
+    lead_record = _lead_record(profile) if profile is not None and wire is None else None
+    wire_record = _wire_record(wire) if wire is not None else None
 
     # A slot hole: identify it with both axes and stop -- a slot's long
     # axis must not be mistaken for a round hole diameter.
@@ -260,7 +275,8 @@ def _lead_fit_finding(
             "pad": pad.number,
             "mpn": mpn,
             "hole": {"shape": "slot", "size_mm": [slot_w, slot_h]},
-            "lead": _lead_record(profile) if profile is not None else None,
+            "lead": lead_record,
+            "wire": wire_record,
             "status": "unassessed",
             "reason": (
                 f"slot hole {slot_w:.{_LEAD_MARGIN_DECIMALS}f} x "
@@ -276,7 +292,8 @@ def _lead_fit_finding(
             "pad": pad.number,
             "mpn": mpn,
             "hole": hole,
-            "lead": _lead_record(profile) if profile is not None else None,
+            "lead": lead_record,
+            "wire": wire_record,
             "status": "unassessed",
             "reason": "through-hole pad has no drill diameter",
         }
@@ -284,6 +301,11 @@ def _lead_fit_finding(
     if profile is None:
         if profile_error:
             reason = profile_error
+        elif wire is not None:
+            reason = (
+                f"wire termination declared for pad {pad.number} of {reference} "
+                "without a prepared diameter"
+            )
         elif entry is None:
             reason = (
                 f"no verified lead dimensions: reference {reference} has no "
@@ -297,6 +319,7 @@ def _lead_fit_finding(
             "mpn": mpn,
             "hole": hole,
             "lead": None,
+            "wire": wire_record,
             "status": "unassessed",
             "reason": reason,
         }
@@ -310,7 +333,8 @@ def _lead_fit_finding(
         "pad": pad.number,
         "mpn": mpn,
         "hole": hole,
-        "lead": _lead_record(profile),
+        "lead": lead_record,
+        "wire": wire_record,
         "required_diameter_mm": round(float(required_mm), _LEAD_MARGIN_DECIMALS),
         "nominal_margin_mm": round(float(nominal_margin), _LEAD_MARGIN_DECIMALS),
         "nominal_status": "fail" if nominal_margin < 0 else "pass",
@@ -356,15 +380,21 @@ def _format_lead_finding(f: dict) -> str:
             f"{hole['size_mm'][1]:.{_LEAD_MARGIN_DECIMALS}f} mm"
         )
     )
+    wire = f.get("wire")
     lead = f["lead"] or {}
-    if lead.get("shape") == "round":
+    if wire is not None:
+        lead_desc = f"wire termination dia {wire['diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm"
+        source = wire.get("source")
+    elif lead.get("shape") == "round":
         lead_desc = f"round lead dia {lead['diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm"
+        source = lead.get("source")
     else:
         lead_desc = (
             f"rectangular lead {lead['width_mm']:.{_LEAD_MARGIN_DECIMALS}f} x "
             f"{lead['thickness_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm"
         )
-    src = f" per '{lead.get('source', '')}'" if lead.get("source") else ""
+        source = lead.get("source")
+    src = f" per '{source}'" if source else ""
     head = (
         f"{tag}: {hole_desc} vs {lead_desc} "
         f"(needs {f['required_diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm dia){src}"
@@ -2062,6 +2092,12 @@ class PreflightChecker:
         unknown tolerance are reported as unassessed, never as a fit;
         one pad's missing data never hides another pad's failure.
 
+        Issue #10473: a pad named by a ``wire_terminations`` declaration
+        is assessed by the maximum outside diameter of the prepared wire
+        or ferrule end that enters it instead of its part's lead, so a
+        wire land needs no ``bom_entries`` MPN.  Sibling pads keep the
+        component lead lookup.
+
         Vias (not pads), SMD pads and non-plated holes are excluded.  The
         result describes a centred geometric fit only -- one input to
         reviewing placement and lead-pitch tolerances.
@@ -2082,8 +2118,15 @@ class PreflightChecker:
             tolerance_reason = order.fab_mismatch
         tolerance_mm = order.lower_mm
         tolerance_source = order.source
+        wires: dict[tuple[str, str], list[tuple[int, WireTermination]]] = {}
+        if spec is not None:
+            from ..spec.schema import LeadProfile
+
+            for row, termination in enumerate(spec.wire_terminations or []):
+                wires.setdefault((termination.ref, termination.pad), []).append((row, termination))
 
         findings: list[dict] = []
+        matched_wires: set[tuple[str, str]] = set()
         for fp in self._pcb.footprints:
             if fp.dnp:
                 continue
@@ -2095,7 +2138,26 @@ class PreflightChecker:
                 entry = None
                 profile_error = None
                 profile: LeadProfile | None = None
-                if fp.reference in entries:
+                wire: WireTermination | None = None
+                declared = wires.get((fp.reference, pad.number))
+                if declared:
+                    matched_wires.add((fp.reference, pad.number))
+                    # The prepared wire or ferrule end enters a declared pad,
+                    # not its part's lead (Issue #10473).
+                    row, wire = declared[0]
+                    profile_error = spec_errors.wires.get(row)
+                    if len(declared) > 1:
+                        profile_error = (
+                            f"{len(declared)} wire terminations declared for "
+                            f"{fp.reference} pad {pad.number}"
+                        )
+                    elif profile_error is None and wire.diameter_mm is not None:
+                        profile = LeadProfile(
+                            shape="round",
+                            diameter_mm=wire.diameter_mm,
+                            source=wire.source or "",
+                        )
+                elif fp.reference in entries:
                     row, entry = entries[fp.reference]
                     profile_error = spec_errors.pad_containers.get(row) or spec_errors.profiles.get(
                         (row, pad.number)
@@ -2114,6 +2176,7 @@ class PreflightChecker:
                         tolerance_source,
                         tolerance_reason,
                         profile_error,
+                        wire=wire,
                     )
                 )
 
@@ -2124,8 +2187,15 @@ class PreflightChecker:
             for f in findings
             if f["status"] != "unassessed" and f["tolerance"]["status"] == "unassessed"
         ]
+        unmatched_wires = [
+            f"{ref} pad {pad}: no matching plated through-hole pad on PCB"
+            for (ref, pad) in wires
+            if (ref, pad) not in matched_wires
+        ]
+        not_applied = [*spec_errors.unattached_wires, *unmatched_wires]
         data: dict = {
             "pads": findings,
+            "wire_terminations_not_applied": list(not_applied),
             "summary": {
                 "pads": len(findings),
                 "failed": len(failed),
@@ -2136,7 +2206,7 @@ class PreflightChecker:
             },
         }
 
-        if not findings:
+        if not findings and not not_applied:
             return PreflightResult(
                 name=name,
                 status="OK",
@@ -2153,17 +2223,19 @@ class PreflightChecker:
         if failed:
             message = f"Through-hole lead fit fails on {len(failed)} pad(s): {_refs(failed)}"
             status: Literal["OK", "WARN", "FAIL"] = "FAIL"
-        elif unassessed or tolerance_unassessed:
+        elif unassessed or tolerance_unassessed or not_applied:
             bits = []
             if unassessed:
                 bits.append(
                     f"{len(unassessed)} pad(s) unassessed "
-                    "(no verified lead dimensions or unsupported geometry)"
+                    "(no verified lead or prepared wire dimensions, or unsupported geometry)"
                 )
             if tolerance_unassessed:
                 bits.append(
                     f"{len(tolerance_unassessed)} pad(s) assessed without a finished-hole tolerance"
                 )
+            if not_applied:
+                bits.append(f"{len(not_applied)} wire termination declaration(s) not applied")
             message = "Through-hole lead fit unverified: " + "; ".join(bits) + "; no failures"
             status = "WARN"
         else:
@@ -2176,6 +2248,7 @@ class PreflightChecker:
         lines = [_format_lead_finding(f) for f in sorted(findings, key=_lead_finding_sort_key)]
         if len(lines) > 40:  # pragma: no cover - large boards
             lines = lines[:40] + [f"(and {len(lines) - 40} more pads in data.pads)"]
+        lines.extend(f"Wire termination declaration not applied: {note}" for note in not_applied)
         lines.append(
             "Assessment covers centred geometric fit only (not lead pitch or placement tolerances)."
         )

@@ -34,13 +34,17 @@ class AssemblySpecErrors:
     tolerance_upper: str | None = None
     mounting: dict[int, str] = field(default_factory=dict)
     guarantees: dict[str, str] = field(default_factory=dict)
+    wires: dict[int, str] = field(default_factory=dict)
+    """Invalid prepared diameter or source, keyed by the wire declaration's row (Issue #10473)."""
+    unattached_wires: list[str] = field(default_factory=list)
+    """Wire declarations that name no usable pad, as ``wire_terminations[<row>]: <reason>``."""
 
 
 def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
     """Keep BOM assignments usable when an optional assembly declaration is invalid.
 
     Profile errors identify the BOM row and pad (None for the part-level lead).
-    Land-pattern errors identify the BOM row.
+    Land-pattern errors identify the BOM row. Wire errors identify the termination row.
     A malformed mounting declaration, upper finished-hole tolerance or
     finished-hole guarantee (Issue #10476) is dropped alone, so the valid
     declarations beside it keep their effect.  Other schema errors retain
@@ -57,6 +61,7 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
         return ProjectSpec.model_validate(data), errors
     except ValidationError as exc:
         dropped_guarantees: set[int] = set()
+        dropped: set[int] = set()
         for error in exc.errors():
             loc = error["loc"]
             if loc == ("requirements", "manufacturing", "finished_hole_tolerance_mm"):
@@ -86,6 +91,29 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
                     dropped_guarantees.add(loc[3])
                     where = f"finished_hole_guarantees[{loc[3]}]"
                     errors.guarantees.setdefault(where, f"invalid {where}: {error['msg']}")
+                continue
+            if loc and loc[0] == "wire_terminations":
+                if len(loc) < 2 or not isinstance(loc[1], int):
+                    # The list itself is unusable: none of it can be tied to a pad.
+                    if "wire_terminations" in data:
+                        del data["wire_terminations"]
+                        errors.unattached_wires.append(f"wire_terminations: {error['msg']}")
+                elif loc[1] not in dropped:
+                    row = loc[1]
+                    declaration = data["wire_terminations"][row]
+                    if loc[2:] in (("diameter_mm",), ("source",)) and isinstance(declaration, dict):
+                        declaration.pop("diameter_mm", None)
+                        declaration.pop("source", None)
+                        errors.wires[row] = f"invalid {loc[2]}: {error['msg']}"
+                    else:
+                        # Without a usable reference and pad the declaration
+                        # names no pad; drop it and keep its siblings.
+                        dropped.add(row)
+                        errors.wires.pop(row, None)
+                        where = ".".join(map(str, loc[2:]))
+                        errors.unattached_wires.append(
+                            f"wire_terminations[{row}]: {where + ': ' if where else ''}{error['msg']}"
+                        )
                 continue
             if len(loc) < 3 or loc[0] != "bom_entries" or not isinstance(loc[1], int):
                 raise
@@ -123,17 +151,28 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
             errors.profiles[row, pad] = f"invalid {field_path}: {error['msg']}"
         if dropped_guarantees:
             manufacturing = data["requirements"]["manufacturing"]
-            kept = [
+            kept_guarantees = [
                 guarantee
                 for index, guarantee in enumerate(
                     manufacturing.get("finished_hole_guarantees") or []
                 )
                 if index not in dropped_guarantees
             ]
-            if kept:
-                manufacturing["finished_hole_guarantees"] = kept
+            if kept_guarantees:
+                manufacturing["finished_hole_guarantees"] = kept_guarantees
             else:
                 manufacturing.pop("finished_hole_guarantees", None)
+        if dropped:
+            kept: list[object] = []
+            remapped: dict[int, str] = {}
+            for row, declaration in enumerate(data["wire_terminations"]):
+                if row in dropped:
+                    continue
+                if row in errors.wires:
+                    remapped[len(kept)] = errors.wires[row]
+                kept.append(declaration)
+            data["wire_terminations"] = kept
+            errors.wires = remapped
     return ProjectSpec.model_validate(data), errors
 
 
