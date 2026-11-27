@@ -1006,6 +1006,16 @@ def test_incomplete_assessment_carries_a_remediation_hint():
     assert "remediation" not in incomplete.to_dict()
 
 
+@pytest.mark.parametrize(
+    "reason", ["OSError: [Errno 28] Disk full", "write: No space left on device"]
+)
+def test_native_mask_remediation_identifies_disk_exhaustion(reason):
+    result = MaskCopperAssessment(coverage="incomplete", reasons=[reason])
+    assert "TMPDIR" in result.remediation
+    assert not result.passed
+    assert reason in result.to_dict()["reasons"]
+
+
 def _run_mask_stdout(tmp_path, capsys, monkeypatch, reasons, *extra):
     """Run a --drc-only human-format check with a controlled incomplete assessment."""
     from kicad_tools.cli.check_cmd import main
