@@ -237,11 +237,10 @@ def route_and_refill(
 ) -> PCB:
     routed = board.with_name("routed.kicad_pcb")
     original = board.read_bytes()
-    subprocess.run(
+    run_phase(
+        "power-plane routing",
         [sys.executable, "-m", "kicad_tools.cli", "route"]
         + route_args(board, *route_options, stitch_planes=stitch_planes),
-        capture_output=True,
-        text=True,
         timeout=240,
         cwd=board.parent,
         env={**os.environ, "PYTHONPATH": str(SRC)},
