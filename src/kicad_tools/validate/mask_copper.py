@@ -619,40 +619,88 @@ _ENTRY_CROSSING_FACTOR = 1.45
 _AREA_EPSILON_MM2 = 1e-9
 
 
-def _straight_segments_at(conductors, index, net, point, tolerance):
-    """Same-net straight segments on this layer with an authored end at *point*.
+#: Declared (authored) widths agree at board-coordinate precision: KiCad stores
+#: coordinates and widths in nanometres, so 1e-6 mm. The construction budget is
+#: a polygon-approximation allowance, never a licence to treat 0.20 mm and
+#: 0.21 mm tracks as one width.
+_AUTHORED_WIDTH_TOLERANCE_MM = 1e-6
 
-    Within *tolerance* of it, so a joint the author did not land on the same
-    nanometre twice still joins. Each entry is ``(identity, item)``.
+
+def _tracks_at(conductors, index, net, point, tolerance):
+    """Same-net tracks and vias whose copper reaches *point* on this layer.
+
+    Every segment, arc or via of the net whose copper lies within *tolerance*
+    of the joint counts -- one ending there, one starting there, or one
+    passing through it -- so a branch is seen however it was authored or
+    split. Each entry is ``(identity, item, copper)``.
     """
-    from shapely.geometry import box
+    from shapely.geometry import LineString, Point, box
 
     x, y = point
+    probe = Point(point)
     found = []
     for position in index.query(box(x - tolerance, y - tolerance, x + tolerance, y + tolerance)):
-        identity, item, _ = conductors[position]
-        if item["kind"] != "segment" or item.get("net") != net or not item.get("width_mm"):
+        identity, item, copper = conductors[position]
+        if item.get("net") != net or item["kind"] not in ("segment", "arc", "via"):
             continue
         ends = item.get("endpoints_mm")
-        if ends and any(math.hypot(e[0] - x, e[1] - y) <= tolerance for e in ends):
-            found.append((identity, item))
+        if item["kind"] == "segment" and ends:
+            # A straight track's end cap is not a branch: measure its authored
+            # centreline, so a neighbour ending a cap-radius away is not "at" the joint.
+            reaches = LineString([tuple(e) for e in ends]).distance(probe) <= tolerance
+        else:
+            reaches = copper.distance(probe) <= tolerance
+        if reaches:
+            found.append((identity, item, copper))
     return found
 
 
+def _collinear_step(current, joint, outer, heading, norm, width, net, conductors, index, tol):
+    """``(identity, item, copper, far end)`` of the unbranched collinear piece at *joint*.
+
+    Only when *current* and one other straight, same-net segment are the only
+    tracks or vias at the joint, the other has an authored end there, is of
+    the same declared width, lies on the line through *outer* along *heading*
+    within *tol* and runs forward of the joint. ``None`` otherwise.
+    """
+    joined = _tracks_at(conductors, index, net, joint, tol)
+    if len(joined) != 2 or current not in (entry[0] for entry in joined):
+        return None
+    following_identity, following, copper = joined[0] if joined[0][0] != current else joined[1]
+    if following["kind"] != "segment" or not following.get("endpoints_mm"):
+        return None
+    ends = following["endpoints_mm"]
+    if not any(math.hypot(e[0] - joint[0], e[1] - joint[1]) <= tol for e in ends):
+        return None
+    far = max(ends, key=lambda e: (e[0] - joint[0]) ** 2 + (e[1] - joint[1]) ** 2)
+    off_line = abs(heading[0] * (far[1] - outer[1]) - heading[1] * (far[0] - outer[0]))
+    if (
+        abs((following.get("width_mm") or 0.0) - width) > _AUTHORED_WIDTH_TOLERANCE_MM
+        or off_line > tol * norm
+        or (far[0] - joint[0]) * heading[0] + (far[1] - joint[1]) * heading[1] <= 0
+    ):
+        return None
+    return following_identity, following, copper, far
+
+
 def _continuation_end(identity, item, core, conductors, index, tolerance):
-    """``(outer end, inside end)`` when the segment's authored continuation reaches the pad.
+    """``(outer end, inside end, chain copper)`` when the authored continuation reaches the pad.
 
     The walk of issue #10645. From each end of the straight segment in turn,
     the joint is followed to the other same-net straight segment ending there
-    -- only when the two are the only ones at that joint, so a branch stops
-    the walk -- which must be of the same width, lie on the segment's own line
-    within *tolerance* and run forward of the joint, never back. A far end
-    strictly inside ``core`` (the pad shrunk by the construction budget) ends
-    the walk with that end; any other is the next joint. The walk is finite:
-    every step moves strictly forward along the one line, and a segment is
-    never entered twice. ``None`` when no chain reaches the pad.
+    -- only when the two are the only tracks, arcs or vias at that joint
+    (counting any that pass through it), so a branch stops the walk -- which
+    must be of the same declared width, lie on the segment's own line within
+    *tolerance* and run forward of the joint, never back. A far end strictly
+    inside ``core`` (the pad shrunk by the construction budget) ends the walk
+    with that end, unless the same straight run goes on and leaves the pad
+    (a pass-through, not an entry that ends inside); any other end is the next
+    joint. The walk is finite: every step moves strictly forward along the one
+    line, and a segment is never entered twice. The chain copper is the union
+    of the pieces walked. ``None`` when no chain reaches the pad.
     """
     from shapely.geometry import Point
+    from shapely.ops import unary_union
 
     ends = item["endpoints_mm"]
     width = item["width_mm"]
@@ -664,32 +712,49 @@ def _continuation_end(identity, item, core, conductors, index, tolerance):
         if not norm:
             return None
         joint, current, visited = first, identity, {identity}
+        pieces = [next(c for i, _, c in conductors if i == identity)]
         while True:
-            joined = _straight_segments_at(conductors, index, net, joint, tolerance)
-            if len(joined) != 2:
-                break
-            following_identity, following = joined[0] if joined[0][0] != current else joined[1]
-            if following_identity in visited:
-                break
-            far = max(
-                following["endpoints_mm"],
-                key=lambda e: (e[0] - joint[0]) ** 2 + (e[1] - joint[1]) ** 2,
+            step = _collinear_step(
+                current, joint, outer, heading, norm, width, net, conductors, index, tolerance
             )
-            off_line = abs(heading[0] * (far[1] - outer[1]) - heading[1] * (far[0] - outer[0]))
-            if (
-                abs(following["width_mm"] - width) > tolerance
-                or off_line > tolerance * norm
-                or (far[0] - joint[0]) * heading[0] + (far[1] - joint[1]) * heading[1] <= 0
-            ):
+            if step is None or step[0] in visited:
                 break
+            following_identity, _, copper, far = step
+            pieces.append(copper)
             if core.contains(Point(far)):
-                return (outer, far)
+                # The run must end inside the pad: keep walking the same line.
+                onward, onward_joint, seen = following_identity, far, set(visited)
+                seen.add(following_identity)
+                exits = False
+                while True:
+                    more = _collinear_step(
+                        onward,
+                        onward_joint,
+                        outer,
+                        heading,
+                        norm,
+                        width,
+                        net,
+                        conductors,
+                        index,
+                        tolerance,
+                    )
+                    if more is None or more[0] in seen:
+                        break
+                    if not core.contains(Point(more[3])):
+                        exits = True
+                        break
+                    seen.add(more[0])
+                    onward, onward_joint = more[0], more[3]
+                if exits:
+                    break
+                return (outer, far, unary_union(pieces))
             visited.add(following_identity)
             current, joint = following_identity, far
     return None
 
 
-def _entry_item(identity, item, owner_copper, conductors, index, uncertainty):
+def _entry_item(identity, item, owner_copper, conductors, index, uncertainty, entry_check=None):
     """The conductor as the within-own-pad class reads its authored ends (issue #10645).
 
     A straight segment with an authored end strictly inside the pad is
@@ -699,10 +764,13 @@ def _entry_item(identity, item, owner_copper, conductors, index, uncertainty):
     end strictly inside the pad, the result is the segment with its ends
     replaced by ``(outer end, inside end)``, so the one-crossing allowance
     applies as it would to the unsplit entry while ``_within_own_pad`` still
-    measures the piece's own copper. No chain, and the segment is returned
-    unchanged and keeps its measured verdict; so is every other conductor
-    kind. The joint and collinearity tolerance is the construction budget
-    ``u``: a gap or bend past it is not one straight entry.
+    measures the piece's own copper. The allowance is granted only when the
+    equivalent continuous entry -- the chain's joined copper, read through
+    ``entry_check(item, chain_copper)`` -- earns it itself, so a split never
+    clears what the unsplit track would keep. No chain, and the segment is
+    returned unchanged and keeps its measured verdict; so is every other
+    conductor kind. The joint and collinearity tolerance is the construction
+    budget ``u``: a gap or bend past it is not one straight entry.
     """
     from shapely.geometry import Point
 
@@ -714,7 +782,11 @@ def _entry_item(identity, item, owner_copper, conductors, index, uncertainty):
     reached = _continuation_end(identity, item, core, conductors, index, uncertainty)
     if reached is None:
         return item
-    return {**item, "endpoints_mm": reached}
+    outer, inside, chain_copper = reached
+    merged = {**item, "endpoints_mm": (outer, inside)}
+    if entry_check is not None and not entry_check(merged, chain_copper):
+        return item
+    return merged
 
 
 def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearance, uncertainty):
@@ -1885,7 +1957,26 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                         copper,
                         owner_copper,
                         owner_items[0],
-                        _entry_item(identity, item, owner_copper, conductors, index, uncertainty),
+                        _entry_item(
+                            identity,
+                            item,
+                            owner_copper,
+                            conductors,
+                            index,
+                            uncertainty,
+                            lambda merged, chain, _o=opening, _own=owner_copper, _it=owner_items[0], _m=margin: (
+                                _within_own_pad(
+                                    _o,
+                                    chain,
+                                    _own,
+                                    _it,
+                                    merged,
+                                    _m,
+                                    policy.clearance_mm,
+                                    uncertainty,
+                                )[0]
+                            ),
+                        ),
                         margin,
                         policy.clearance_mm,
                         uncertainty,

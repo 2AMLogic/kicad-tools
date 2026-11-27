@@ -241,3 +241,64 @@ def test_chain_walk_terminates_when_two_pieces_continue_each_other():
     """
     board = _board(((7, Y), (9, Y)), ((9, Y), (9.005, Y)), max_error=0.005)
     assert _errors(board) == ["t0", "t1"]
+
+
+# --- review round: branches, shallow entries, pass-throughs, declared widths ------------
+
+ENTRY = ((7, Y), (9, Y)), ((9, Y), (10, Y))
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        [((9, 8), (9, 12))],  # unsplit crossing track through the joint
+        [((9, 8), (9, Y)), ((9, Y), (9, 12))],  # the same track split at the joint
+    ],
+    ids=["through-track", "split-track"],
+)
+def test_branch_through_the_joint_is_counted_however_it_was_authored(branch):
+    errors = _errors(_board(*ENTRY, *branch))
+    assert "t0" in errors
+
+
+def test_same_net_arc_at_the_joint_is_a_branch():
+    board = _board(*ENTRY)
+    arc = LineString([(9, Y), (9.3, Y + 0.3)]).buffer(0.1, quad_segs=64)
+    board.objects["arc0"] = {
+        "kind": "arc",
+        "net": "N1",
+        "layers_geometry": {"F.Cu": arc},
+        "margin_mm": {},
+        "width_mm": 0.2,
+        "endpoints_mm": ((9, Y), (9.3, Y + 0.3)),
+    }
+    assert "t0" in _errors(board)
+
+
+def test_shallow_entry_split_on_the_edge_keeps_what_the_continuous_entry_keeps():
+    one = _board(((8, 8.9), (9.2, 10.22), {"width": 0.20}), max_error=0.005)
+    split = _board(
+        ((8, 8.9), (9, 10.0), {"width": 0.20}),
+        ((9, 10.0), (9.2, 10.22), {"width": 0.20}),
+        max_error=0.005,
+    )
+    assert _errors(one) == ["t0"]
+    assert "t0" in _errors(split)
+
+
+def test_pass_through_continuing_past_the_inside_end_stays_an_error():
+    board = _board(((6, Y), (9, Y)), ((9, Y), (10, Y)), ((10, Y), (12, Y)))
+    assert "t0" in _errors(board)
+
+
+def test_declared_widths_are_compared_at_board_precision():
+    def board(inner):
+        return _board(
+            ((7, Y), (9, Y), {"width": 0.20}),
+            ((9, Y), (10, Y), {"width": inner}),
+            max_error=0.005,
+        )
+
+    assert _errors(board(0.21)) == ["t0"]
+    assert _errors(board(0.22)) == ["t0"]
+    assert _errors(board(0.2 + 1e-7)) == []
