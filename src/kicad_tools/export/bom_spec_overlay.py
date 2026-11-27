@@ -95,7 +95,7 @@ def expand_ref_range(ref_spec: str) -> list[str]:
 
         expand_ref_range("U1")        -> ["U1"]
         expand_ref_range("Q1-Q4")     -> ["Q1", "Q2", "Q3", "Q4"]
-        expand_ref_range("Q1A-Q3A")  -> ["Q1A", "Q2A", "Q3A"]
+        expand_ref_range("Q1A-Q3A")   -> ["Q1A", "Q2A", "Q3A"]
         expand_ref_range("R10-R12")   -> ["R10", "R11", "R12"]
 
     If the string cannot be parsed as a range it is returned as-is in a

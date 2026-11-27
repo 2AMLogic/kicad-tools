@@ -45,6 +45,7 @@ def _make_item(
 class TestExpandRefRange:
     def test_single_ref(self):
         assert expand_ref_range("U1") == ["U1"]
+        assert expand_ref_range("Q1A") == ["Q1A"]
 
     def test_range(self):
         assert expand_ref_range("Q1-Q4") == ["Q1", "Q2", "Q3", "Q4"]
@@ -70,6 +71,7 @@ class TestExpandRefRange:
     def test_mixed_prefix_range(self):
         # Different prefixes -- not a valid range
         assert expand_ref_range("R1-C4") == ["R1-C4"]
+        assert expand_ref_range("R1A-C4A") == ["R1A-C4A"]
 
     def test_non_numeric_ref(self):
         # No digits -- returned as-is
