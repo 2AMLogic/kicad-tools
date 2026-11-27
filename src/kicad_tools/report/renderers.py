@@ -370,13 +370,17 @@ def _metadata_to_title_block(metadata: dict) -> str:
     parts = []
     parts.append('<div class="cover-block">')
     if "title" in metadata:
-        parts.append(f"<h1>{metadata['title']}</h1>")
+        parts.append(f"<h1>{html.escape(str(metadata['title']), quote=False)}</h1>")
     if "subtitle" in metadata:
-        parts.append(f'<p class="cover-meta">{metadata["subtitle"]}</p>')
+        parts.append(
+            f'<p class="cover-meta">{html.escape(str(metadata["subtitle"]), quote=False)}</p>'
+        )
     if "date" in metadata:
         parts.append(f'<p class="cover-meta">{html.escape(str(metadata["date"]))}</p>')
     if "author" in metadata:
-        parts.append(f'<p class="cover-meta">{metadata["author"]}</p>')
+        parts.append(
+            f'<p class="cover-meta">{html.escape(str(metadata["author"]), quote=False)}</p>'
+        )
     parts.append("</div>")
     return "\n".join(parts)
 
@@ -460,7 +464,7 @@ def _wrap_html(body: str, css: str, title: str = "KiCad Design Report") -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="generator" content="kicad-tools report renderer">
-<title>{title}</title>
+<title>{html.escape(str(title), quote=False)}</title>
 <style>
 {css}
 </style>

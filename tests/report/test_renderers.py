@@ -237,6 +237,26 @@ class TestRenderHtml:
         assert 'class="cover-block"' in result
         assert "MyProject" in result
 
+    def test_front_matter_scalars_escaped_in_cover_and_title(self) -> None:
+        """Front matter cover scalars render as text, not live markup (Issue #10639)."""
+        from kicad_tools.report.renderers import render_html
+
+        md = (
+            "---\n"
+            'title: "R&D <b>x</b>"\n'
+            'subtitle: "Design <i>Report</i> & Co"\n'
+            'author: "kicad-tools <0.29.0> & me"\n'
+            'date: "R&D <b>x</b>"\n'
+            "---\n\n## Section\n\nContent.\n"
+        )
+        result = render_html(md)
+        assert "<h1>R&amp;D &lt;b&gt;x&lt;/b&gt;</h1>" in result
+        assert "<title>R&amp;D &lt;b&gt;x&lt;/b&gt;</title>" in result
+        assert '<p class="cover-meta">Design &lt;i&gt;Report&lt;/i&gt; &amp; Co</p>' in result
+        assert '<p class="cover-meta">kicad-tools &lt;0.29.0&gt; &amp; me</p>' in result
+        assert "<b>x</b>" not in result
+        assert "<i>Report</i>" not in result
+
 
 # ---------------------------------------------------------------------------
 # render_pdf tests
@@ -764,6 +784,101 @@ class TestWrapHtml:
         assert "<style>" in result
         assert css in result
         assert "<link" not in result
+
+    def test_title_text_escaped(self) -> None:
+        """Title text is escaped, so markup in it stays literal (Issue #10639)."""
+        from kicad_tools.report.renderers import _wrap_html
+
+        result = _wrap_html("<p>body</p>", "", title="R&D <b>x</b>")
+        assert "<title>R&amp;D &lt;b&gt;x&lt;/b&gt;</title>" in result
+        assert "<b>x</b>" not in result
+
+    def test_plain_title_unchanged(self) -> None:
+        """A title without markup characters is emitted verbatim."""
+        from kicad_tools.report.renderers import _wrap_html
+
+        result = _wrap_html("<p>body</p>", "", title='ctl "bench" Design Report')
+        assert '<title>ctl "bench" Design Report</title>' in result
+
+    def test_default_title(self) -> None:
+        """Omitting the title falls back to the default <title> text."""
+        from kicad_tools.report.renderers import _wrap_html
+
+        result = _wrap_html("<p>body</p>", "")
+        assert "<title>KiCad Design Report</title>" in result
+
+
+class TestMetadataToTitleBlock:
+    """Tests for the _metadata_to_title_block helper."""
+
+    @pytest.mark.parametrize(
+        ("key", "expected"),
+        [
+            ("title", "<h1>R&amp;D &lt;b&gt;x&lt;/b&gt;</h1>"),
+            ("subtitle", '<p class="cover-meta">R&amp;D &lt;b&gt;x&lt;/b&gt;</p>'),
+            ("date", '<p class="cover-meta">R&amp;D &lt;b&gt;x&lt;/b&gt;</p>'),
+            ("author", '<p class="cover-meta">R&amp;D &lt;b&gt;x&lt;/b&gt;</p>'),
+        ],
+    )
+    def test_markup_characters_escaped(self, key: str, expected: str) -> None:
+        """``&``, ``<`` and ``>`` in every cover scalar are escaped (Issue #10639)."""
+        from kicad_tools.report.renderers import _metadata_to_title_block
+
+        result = _metadata_to_title_block({key: "R&D <b>x</b>"})
+        assert expected in result
+        assert "<b>x</b>" not in result
+
+    @pytest.mark.parametrize(
+        ("key", "expected"),
+        [
+            ("title", '<h1>Bob\'s "bench" Board</h1>'),
+            ("subtitle", '<p class="cover-meta">Bob\'s "bench" Board</p>'),
+            ("author", '<p class="cover-meta">Bob\'s "bench" Board</p>'),
+        ],
+    )
+    def test_quotes_stay_literal_in_text_nodes(self, key: str, expected: str) -> None:
+        """Quotes need no escaping in element text and stay readable (Issue #10624)."""
+        from kicad_tools.report.renderers import _metadata_to_title_block
+
+        result = _metadata_to_title_block({key: 'Bob\'s "bench" Board'})
+        assert expected in result
+        assert "&quot;" not in result
+        assert "&#x27;" not in result
+
+    def test_plain_text_unchanged(self) -> None:
+        """Scalars without markup characters render verbatim."""
+        from kicad_tools.report.renderers import _metadata_to_title_block
+
+        result = _metadata_to_title_block(
+            {
+                "title": "TestBoard",
+                "subtitle": "Design Report",
+                "date": "Rev A | 2026-04-12 | jlcpcb",
+                "author": "kicad-tools 0.29.0",
+            }
+        )
+        assert result == (
+            '<div class="cover-block">\n'
+            "<h1>TestBoard</h1>\n"
+            '<p class="cover-meta">Design Report</p>\n'
+            '<p class="cover-meta">Rev A | 2026-04-12 | jlcpcb</p>\n'
+            '<p class="cover-meta">kicad-tools 0.29.0</p>\n'
+            "</div>"
+        )
+
+    def test_missing_scalars_omitted(self) -> None:
+        """Only the scalars present in the metadata are emitted."""
+        from kicad_tools.report.renderers import _metadata_to_title_block
+
+        result = _metadata_to_title_block({"title": "TestBoard"})
+        assert result == '<div class="cover-block">\n<h1>TestBoard</h1>\n</div>'
+
+    def test_non_string_scalar_coerced(self) -> None:
+        """A non-string value is escaped as its ``str()`` form, not rejected."""
+        from kicad_tools.report.renderers import _metadata_to_title_block
+
+        result = _metadata_to_title_block({"title": 123})
+        assert "<h1>123</h1>" in result
 
 
 class TestWeasprintAvailable:
