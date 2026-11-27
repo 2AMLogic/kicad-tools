@@ -363,8 +363,8 @@ def _clip_to_window(start, end, window):
     if t_low > t_high:
         return None
     return (
-        (start[0] + t_low * dx, start[1] + t_low * dy),
-        (start[0] + t_high * dx, start[1] + t_high * dy),
+        start if t_low == 0 else (start[0] + t_low * dx, start[1] + t_low * dy),
+        end if t_high == 1 else (start[0] + t_high * dx, start[1] + t_high * dy),
     )
 
 
@@ -380,38 +380,38 @@ def _join_collinear(pieces):
     """
     while True:
         best = None
-        best_score = (math.inf, math.inf)
+        best_sine = math.inf
         for i, (a1, b1, w1, track) in enumerate(pieces):
             for j in range(i + 1, len(pieces)):
                 a2, b2, w2, _ = pieces[j]
                 if abs(w1 - w2) > _WIDTH_TOL_MM:
                     continue
-                gap, joint, near, far1, far2 = min(
-                    (math.dist(p, q), p, q, f1, f2)
-                    for p, f1 in ((a1, b1), (b1, a1))
-                    for q, f2 in ((a2, b2), (b2, a2))
-                )
-                if gap >= _ENDPOINT_TOL_MM:
+                # A nearby endpoint can lie beyond a short intervening piece.
+                # Only a shared vertex is a split that we can remove.
+                if a1 == a2:
+                    joint, far1, far2 = a1, b1, b2
+                elif a1 == b2:
+                    joint, far1, far2 = a1, b1, a2
+                elif b1 == a2:
+                    joint, far1, far2 = b1, a1, b2
+                elif b1 == b2:
+                    joint, far1, far2 = b1, a1, a2
+                else:
                     continue
                 ux, uy = far1[0] - joint[0], far1[1] - joint[1]
-                vx, vy = far2[0] - near[0], far2[1] - near[1]
+                vx, vy = far2[0] - joint[0], far2[1] - joint[1]
                 if ux * vx + uy * vy >= 0:
                     continue
-                # Both ends at the joint must lie on the proposed joined line
-                # to within the rounding of a saved split point.
+                # A saved split point can be rounded off the joined line.
                 dx, dy = far2[0] - far1[0], far2[1] - far1[1]
                 tolerance = _SPLIT_ROUNDING_MM * math.hypot(dx, dy)
-                if any(
-                    abs(dx * (y - far1[1]) - dy * (x - far1[0])) > tolerance
-                    for x, y in (joint, near)
-                ):
+                if abs(dx * (joint[1] - far1[1]) - dy * (joint[0] - far1[0])) > tolerance:
                     continue
                 # A short piece near a bend can fit either neighbour's
                 # rounding allowance. Join the straightest pair first.
                 sine = abs(ux * vy - uy * vx) / (math.hypot(ux, uy) * math.hypot(vx, vy))
-                score = (sine, gap)
-                if score < best_score:
-                    best_score = score
+                if sine < best_sine:
+                    best_sine = sine
                     a, b = sorted((far1, far2))
                     best = i, j, (a, b, w1, track)
         if best is None:

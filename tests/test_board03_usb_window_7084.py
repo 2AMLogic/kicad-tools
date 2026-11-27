@@ -562,3 +562,19 @@ def test_splitting_diagonal_at_a_bend_preserves_coupling(
             with pytest.raises(ValueError, match="USB branch bounds failed") as exc:
                 staged_plan.usb_geometry(path)
             assert _measured_common_mm(exc.value) == pytest.approx(1.060660, abs=1e-6)
+
+
+@pytest.mark.parametrize("net,other", [("USB_D+", "USB_D-"), ("USB_D-", "USB_D+")])
+def test_short_middle_piece_is_credited_once(staged_plan, tmp_path, net, other):
+    diagonal = [(38, 12), (38, 16), (38.2, 16.2), (38.707106, 16.707106)]
+    runs = {
+        net: (0.1, diagonal),
+        other: (0.1, [(38.15, 12), (38.15, 16), (38.867106, 16.717106)]),
+    }
+    for variant in ("whole", "split"):
+        if variant == "split":
+            diagonal.insert(3, (38.200002, 16.200002))
+        path = _saved_run(tmp_path, runs, name=variant)
+        with pytest.raises(ValueError, match="USB branch bounds failed") as exc:
+            staged_plan.usb_geometry(path)
+        assert _measured_common_mm(exc.value) == pytest.approx(3.999998895, abs=1e-9)
