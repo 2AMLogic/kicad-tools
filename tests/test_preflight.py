@@ -1431,6 +1431,43 @@ class TestPreflightMountingHoleFit:
         assert finding["nominal"]["side"] == "upper"
         assert finding["nominal"]["overrun_mm"] == 0.0
 
+    @pytest.mark.parametrize(
+        ("second_x", "expected"),
+        [(0.0, "pass"), (0.002, "fail"), (0.004, "fail")],
+    )
+    def test_pitch_overrun_below_report_resolution_fails(self, tmp_path, second_x, expected):
+        """A 10.1000002 mm pitch is over the inclusive 10.10 mm limit despite 6-decimal rounding."""
+        pads = [
+            _tht_pad_at("1", 2.00, 0.0, 0.0),
+            _tht_pad_at("2", 2.00, second_x, 10.10),
+        ]
+        pcb = _create_mounting_pcb(tmp_path, c1=pads)
+        _write_snap_in_spec(
+            tmp_path, order=_snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(refs="C1, C2"))
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        (finding,) = [f for f in result.data["pitch"] if f["reference"] == "C1"]
+        assert finding["status"] == expected
+
+    def test_guarantee_without_target_fab_is_not_applied(self, tmp_path):
+        """An order-specific guarantee needs an identifiable matching fab to override the tolerance."""
+        pcb = _create_mounting_pcb(tmp_path)
+        order = (
+            "    finished_hole_tolerance_mm: -0.08\n"
+            "    finished_hole_tolerance_upper_mm: 0.13\n"
+            f"    finished_hole_tolerance_source: {_MOUNTING_ORDER_SOURCE}\n"
+        ) + _guarantee_yaml(_guarantee_item(refs="C1"))
+        _write_snap_in_spec(tmp_path, order=order)
+
+        result = _run_mounting_fit(pcb, manufacturer="pcbway")
+
+        holes = _holes(result)
+        for pad in ("1", "2"):
+            assert holes["C1", pad]["order"].get("kind") != "guarantee"
+            assert holes["C1", pad]["status"] == "fail"
+
     def test_rotated_footprint_pitch_honours_inclusive_limit(self, tmp_path):
         """A -179 degree placement computes 5.079999999999999 mm for an exact 5.08 mm pitch."""
         pads = [_tht_pad_at("1", 2.00, 0.635, 0.0), _tht_pad_at("2", 2.00, 5.715, 0.0)]

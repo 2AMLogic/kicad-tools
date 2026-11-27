@@ -568,14 +568,6 @@ def _mounting_hole_finding(
     return finding
 
 
-def _pad_centre_mm(footprint: Footprint, pad: Pad) -> tuple[float, float]:
-    """Board position of a pad's ``(at x y)`` anchor."""
-    from ..core.geometry import rotate_pad_offset
-
-    x, y = rotate_pad_offset(pad.position[0], pad.position[1], footprint.rotation)
-    return (footprint.position[0] + x, footprint.position[1] + y)
-
-
 def _pitch_member_issue(number: str, found: list[Pad], missing_reason: str | None) -> str | None:
     """Why a declared pad cannot serve as one end of the measured pitch."""
     if not found:
@@ -616,18 +608,41 @@ def _mounting_pitch_finding(
         "mpn": mpn,
         "drawing": _drawing_record(declaration, limits),
     }
-    centres: list[tuple[float, float]] = []
+    offsets: list[tuple[Decimal, Decimal]] = []
     for number in declaration.pads:
         found, missing_reason = located[number]
         issue = _pitch_member_issue(number, found, missing_reason)
         if issue is not None:
             finding.update(status="unassessed", reason=issue)
             return finding
-        centres.append(_pad_centre_mm(footprint, found[0]))
-    (x1, y1), (x2, y2) = centres
-    measured_mm = Decimal(f"{math.hypot(x1 - x2, y1 - y2):.{_PITCH_RESOLUTION_MM}f}")
-    nominal = _limit_result(measured_mm, _decimal_mm(limits.min_mm), _decimal_mm(limits.max_mm))
-    finding.update(measured_mm=float(measured_mm), nominal=nominal, status=nominal["status"])
+        # Both pads belong to one footprint, so rotation leaves their distance
+        # unchanged: the footprint-local coordinates give it exactly.
+        offsets.append((_decimal_mm(found[0].position[0]), _decimal_mm(found[0].position[1])))
+    (x1, y1), (x2, y2) = offsets
+    distance_sq = (x1 - x2) ** 2 + (y1 - y2) ** 2
+    low, high = _decimal_mm(limits.min_mm), _decimal_mm(limits.max_mm)
+    # Judge squared distances against squared limits so no rounding of the
+    # measured distance can hide an overrun; only the report is rounded.
+    measured = distance_sq.sqrt()
+    if distance_sq < low**2:
+        nominal = {
+            "status": "fail",
+            "side": "lower",
+            "overrun_mm": round(float(low - measured), _LEAD_MARGIN_DECIMALS),
+        }
+    elif distance_sq > high**2:
+        nominal = {
+            "status": "fail",
+            "side": "upper",
+            "overrun_mm": round(float(measured - high), _LEAD_MARGIN_DECIMALS),
+        }
+    else:
+        nominal = {"status": "pass"}
+    finding.update(
+        measured_mm=round(float(measured), _PITCH_RESOLUTION_MM),
+        nominal=nominal,
+        status=nominal["status"],
+    )
     return finding
 
 
@@ -1716,12 +1731,15 @@ class PreflightChecker:
                 f"no applicable tolerance for {self.manufacturer} (spec targets {mfg.target_fab})"
             )
             return replace(not_declared, fab_mismatch=mismatch)
+        # An order-specific guarantee is only the issuing fabricator's: with no
+        # target_fab there is no fab to bind it to, so only the general
+        # tolerance applies.
         return replace(
             not_declared,
             lower_mm=mfg.finished_hole_tolerance_mm,
             upper_mm=mfg.finished_hole_tolerance_upper_mm,
             source=mfg.finished_hole_tolerance_source,
-            guarantees=tuple(mfg.finished_hole_guarantees or ()),
+            guarantees=tuple(mfg.finished_hole_guarantees or ()) if mfg.target_fab else (),
         )
 
     def _check_assembly_lead_fit(self) -> PreflightResult:
