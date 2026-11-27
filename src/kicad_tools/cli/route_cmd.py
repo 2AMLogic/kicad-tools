@@ -2079,6 +2079,9 @@ def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: b
         net_anchors=_detour_net_anchors(router),
     )
     _provide_via_connection_context(router, optimizer)
+    mask_guard = getattr(args, "_mfr_mask_guard", None)
+    if mask_guard is not None:
+        optimizer.set_mask_opening_guard(*mask_guard)
 
     # Issue #2596: snapshot per-net connectivity before optimize so any net
     # whose pad-to-pad connectivity regresses can be reverted.
@@ -12399,6 +12402,56 @@ def _sub_floor_net_class_widths(net_class_map, floor: float) -> list[tuple[str, 
     return sorted(worst.items(), key=lambda kv: (kv[1], kv[0]))
 
 
+_MASK_MARGIN_OVERRIDE = "(solder_mask_margin"
+_BOARD_MASK_MARGIN = re.compile(r"\(pad_to_mask_clearance\s+(-?\d+(?:\.\d+)?)\s*\)")
+
+
+def _uniform_board_mask_margin(pcb_path) -> float | None:
+    """The board's solder-mask expansion when no pad overrides it, else ``None``.
+
+    The trace optimizer's mask-opening guard (Issue #9424) models each pad's
+    opening as its copper grown by one margin.  A per-pad or per-footprint
+    ``solder_mask_margin``, or a custom rule file that touches the mask, makes
+    that false, so ``None`` keeps the guard off rather than guessing.  A board
+    that declares no ``pad_to_mask_clearance`` has no expansion (0.0).
+    """
+    try:
+        text = Path(pcb_path).read_text(errors="replace")
+        if _MASK_MARGIN_OVERRIDE in text:
+            return None
+        rules = Path(pcb_path).with_suffix(".kicad_dru")
+        if rules.is_file() and "solder_mask" in rules.read_text(errors="replace"):
+            return None
+    except OSError:
+        return None
+    match = _BOARD_MASK_MARGIN.search(text)
+    if match is None:
+        return 0.0
+    margin = float(match.group(1))
+    return margin if math.isfinite(margin) else None
+
+
+def _resolve_route_mask_guard(manufacturer, pcb_path) -> tuple[float, float] | None:
+    """``(clearance, mask_margin)`` for the trace optimizer's mask-opening guard.
+
+    Issue #9424.  The clearance is the cited mask policy ``kct check --mfr``
+    judges ``mask_to_copper`` with; the margin comes from
+    :func:`_uniform_board_mask_margin`.  ``None`` -- no manufacturer, no cited
+    policy, or a board without one mask margin -- keeps the guard off.
+    """
+    if not manufacturer:
+        return None
+    from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+    request = default_request_for_manufacturer(str(manufacturer))
+    if request is None or request.policy is None:
+        return None
+    margin = _uniform_board_mask_margin(pcb_path)
+    if margin is None:
+        return None
+    return request.policy.clearance_mm, margin
+
+
 def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False) -> int:
     """Resolve the trace-width default/floor from the manufacturer profile.
 
@@ -12491,6 +12544,8 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
         if manufacturer
         else None
     )
+
+    args._mfr_mask_guard = _resolve_route_mask_guard(manufacturer, pcb_path)
 
     explicit_width = getattr(args, "trace_width", None)
     with contextlib.suppress(AttributeError):
