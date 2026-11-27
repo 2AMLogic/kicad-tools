@@ -131,10 +131,22 @@ def test_kelvin_replay_cache_consumers_reach_one_worker(tmp_path):
     # Under --dist loadgroup, all consumers of test_access_witness_replay_5508._CACHE
     # (_routed_kelvin / _stranding_kelvin / stranding_witness) across both 5508 and
     # 6292 must land on one worker while bulk selection still excludes ci_extended.
+    # Supply a controlled timing list so routine refreshes of tests/ci_extended.txt
+    # cannot change which cases belong to bulk vs extended here.
+    extended_ids = {
+        "tests/router/test_access_witness_replay_5508.py::"
+        "TestStrandedTerminals::test_witness_is_memoized_per_router",
+        "tests/router/test_access_witness_replay_5508.py::"
+        "TestReplayOnTheKelvinFixture::test_comp_closes_u3_at_iteration_zero_of_the_initial_pass",
+    }
+    (tmp_path / "ci_extended.txt").write_text("\n".join(sorted(extended_ids)) + "\n")
     (tmp_path / "record_kelvin_worker.py").write_text(
         "import inspect, json\n"
         "from pathlib import Path\n"
-        "def pytest_runtest_setup(item):\n"
+        "import pytest\n"
+        "def _canonical_nodeid(nodeid):\n"
+        "    return nodeid.rsplit('@', 1)[0] if nodeid.rfind('@') > nodeid.rfind(']') else nodeid\n"
+        "def _consumer_flags(item):\n"
         "    src = ''\n"
         "    try:\n"
         "        src = inspect.getsource(item.obj)\n"
@@ -142,11 +154,27 @@ def test_kelvin_replay_cache_consumers_reach_one_worker(tmp_path):
         "        pass\n"
         "    uses_stranding = 'stranding_witness' in item.fixturenames or '_stranding_kelvin(' in src\n"
         "    uses_routed = '_routed_kelvin(' in src\n"
+        "    return uses_stranding, uses_routed\n"
+        "def pytest_plugin_registered(plugin):\n"
+        "    if hasattr(plugin, '_CI_EXTENDED_LIST'):\n"
+        "        plugin._CI_EXTENDED_LIST = Path(__file__).with_name('ci_extended.txt')\n"
+        "@pytest.hookimpl(tryfirst=True)\n"
+        "def pytest_collection_modifyitems(config, items):\n"
+        "    if not hasattr(config, 'workerinput') or config.workerinput['workerid'] != 'gw0':\n"
+        "        return\n"
+        "    collected = [\n"
+        "        _canonical_nodeid(item.nodeid)\n"
+        "        for item in items\n"
+        "        if item.get_closest_marker('slow') is None and any(_consumer_flags(item))\n"
+        "    ]\n"
+        "    Path(__file__).with_suffix('.collected.json').write_text(json.dumps(collected))\n"
+        "def pytest_runtest_setup(item):\n"
+        "    uses_stranding, uses_routed = _consumer_flags(item)\n"
         "    if uses_stranding or uses_routed:\n"
         "        worker = item.config.workerinput['workerid']\n"
         "        entry = {\n"
         "            'worker': worker,\n"
-        "            'nodeid': item.nodeid.rsplit('@', 1)[0],\n"
+        "            'nodeid': _canonical_nodeid(item.nodeid),\n"
         "            'stranding': uses_stranding,\n"
         "            'routed': uses_routed,\n"
         "        }\n"
@@ -181,34 +209,19 @@ def test_kelvin_replay_cache_consumers_reach_one_worker(tmp_path):
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    all_consumers = set(json.loads((tmp_path / "record_kelvin_worker.collected.json").read_text()))
     worker_files = sorted(tmp_path.glob("record_kelvin_worker.gw*.jsonl"))
     entries = [json.loads(line) for path in worker_files for line in path.read_text().splitlines()]
     workers = {entry["worker"] for entry in entries}
     nodeids = {entry["nodeid"] for entry in entries}
-    stranding_5508 = [
-        entry
-        for entry in entries
-        if entry["stranding"]
-        and entry["nodeid"].startswith("tests/router/test_access_witness_replay_5508.py::")
-    ]
+    assert extended_ids < all_consumers
+    assert extended_ids.isdisjoint(nodeids)
+    assert nodeids == all_consumers - extended_ids
+    assert {nid.split("::", 1)[0] for nid in nodeids} == {
+        "tests/router/test_access_witness_replay_5508.py",
+        "tests/router/test_access_witness_replay_6292.py",
+    }
     assert len(workers) == 1, entries
-    assert len(stranding_5508) == 9, stranding_5508
-    assert (
-        "tests/router/test_access_witness_replay_6292.py::"
-        "TestRoutedFixtures::test_stranding_kelvin_matches_the_reference"
-    ) in nodeids
-    assert (
-        "tests/router/test_access_witness_replay_6292.py::"
-        "TestRoutedFixtures::test_routed_kelvin_matches_the_reference"
-    ) in nodeids
-    assert (
-        "tests/router/test_access_witness_replay_5508.py::"
-        "TestStrandedTerminals::test_pads_of_a_net_that_never_landed_are_tracked"
-    ) not in nodeids
-    assert (
-        "tests/router/test_access_witness_replay_5508.py::"
-        "TestReplayOnTheKelvinFixture::test_comp_closes_u3_at_iteration_zero_of_the_initial_pass"
-    ) not in nodeids
 
 
 @pytest.mark.parametrize("group", [*GROUPS, "extended"])
