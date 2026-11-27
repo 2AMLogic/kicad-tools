@@ -1,0 +1,45 @@
+(export (version "E")
+  (components
+    (comp
+      (ref "C127")
+      (value "1 µF")
+      (fields (field (name "LCSC") "C106248") (field (name "Footprint")) (field (name "Datasheet")) (field (name "Description")))
+      (property (name "LCSC") (value "C106248"))
+    )
+    (comp
+      (ref "C128")
+      (value "1 µF")
+      (fields (field (name "LCSC") "C106248") (field (name "Footprint")) (field (name "Datasheet")) (field (name "Description")))
+      (property (name "LCSC") (value "C106248"))
+    )
+    (comp
+      (ref "R327")
+      (value "10k")
+      (fields (field (name "Footprint")) (field (name "Datasheet")) (field (name "Description")))
+    )
+    (comp
+      (ref "R328")
+      (value "10k")
+      (fields (field (name "Footprint")) (field (name "Datasheet")) (field (name "Description")))
+    )
+    (comp
+      (ref "R427")
+      (value "4k7")
+      (fields (field (name "Footprint")) (field (name "Datasheet")) (field (name "Description")))
+    )
+    (comp
+      (ref "R428")
+      (value "4k7")
+      (fields (field (name "Footprint")) (field (name "Datasheet")) (field (name "Description")))
+    )
+  )
+  (nets
+    (net (code "1") (name "/K27") (class "Default") (node (ref "C127") (pin "1") (pintype "passive")))
+    (net (code "2") (name "/K28") (class "Default") (node (ref "C128") (pin "1") (pintype "passive")))
+    (net (code "3") (name "/REF27") (class "Default") (node (ref "C127") (pin "2") (pintype "passive")) (node (ref "R327") (pin "2") (pintype "passive")) (node (ref "R427") (pin "1") (pintype "passive")))
+    (net (code "4") (name "/REF28") (class "Default") (node (ref "C128") (pin "2") (pintype "passive")) (node (ref "R328") (pin "2") (pintype "passive")) (node (ref "R428") (pin "1") (pintype "passive")))
+    (net (code "5") (name "T27") (class "Default") (node (ref "R427") (pin "2") (pintype "passive")))
+    (net (code "6") (name "T28") (class "Default") (node (ref "R327") (pin "1") (pintype "passive")) (node (ref "R428") (pin "2") (pintype "passive")))
+    (net (code "7") (name "T29") (class "Default") (node (ref "R328") (pin "1") (pintype "passive")))
+  )
+)

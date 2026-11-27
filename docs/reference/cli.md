@@ -490,6 +490,22 @@ both mask sides. Wires the sidecar already records are kept, so a re-run changes
 nothing; strips that cannot be resolved (branched, or an end with no anchor hole)
 are reported, never guessed.
 
+**Export preflight measurement (#10422).** `kct export` reads the Gerber archive
+it has just written back and, for a board with a wire list sidecar, adds a
+`reinforcement_clearance` entry to the package's preflight report
+(`manifest.json`, `--format json`, `README.txt`). For the joined mask strip on its
+own face and for each anchor's opening on both faces it reports two edge-to-edge
+minima in mm: one to any other net's plotted copper, covered or not, and one to
+the part of that copper the same face's mask leaves exposed. Each minimum names
+its own nearest net, the pad when the X2 attributes identify one, and the copper
+and mask archive members with their SHA-256 digests. The distances are nominal
+geometry for review and carry no verdict: they never fail the export and feed
+neither `reinforcement_incomplete` nor the creepage rule. An opening the artwork
+cannot vouch for -- a missing or mislabelled archive member, a missing X2 net
+attribute, an anchor that stands neither on its net's plotted copper nor on a
+plotted mask opening, two records claiming one strip -- is reported `incomplete`
+with its reason, and the results on the other face stand.
+
 Declared current paths that do not resolve (moved/removed pad, ambiguous
 loop) are listed under `unresolved_paths` and warned about on stderr; they
 get no anchors and the exit code stays 0. `--format json` adds `anchor_mode`,
@@ -842,6 +858,34 @@ top-level `verdict` (`pass`|`fail`) and `exit_code` (#7230). See
 ```bash
 kct validate --sync project.kicad_sch board.kicad_pcb
 ```
+
+#### Repeated circuit channels
+
+Use `--channel-intent` when a project specifies what each repeated circuit must contain.
+It checks a native schematic or KiCad S-expression netlist and the PCB independently.
+Schematic input requires `kicad-cli` to export the current design with resolved
+project variables, placement annotations and net names. An existing exported
+netlist can be checked without KiCad installed.
+Run sync and copper LVS separately to check agreement and physical connectivity.
+
+```bash
+kct validate --channel-intent intent.json bank.kicad_sch bank.kicad_pcb
+kct validate --channel-intent intent.json --netlist bank.net --pcb bank.kicad_pcb --format json
+```
+
+In the declaration, each role specifies a `value`, a `pins` map from pin numbers
+to net aliases, and optional `fields` such as `{"LCSC": "C106248"}`. Each instance
+binds every role to a unique component reference and every alias to a board net
+name. List channel-local aliases in `private_nets` to require a distinct net for
+each binding. Other aliases may share a board net, as adjacent series taps do.
+Use exact KiCad strings, including units and sheet paths. See the
+[two-channel declaration](../../tests/fixtures/channel_intent/intent.json).
+
+Exit code 0 means all declared pins and fields matched, 1 means mismatches,
+and 2 means an input or declaration error. Each finding identifies the source,
+instance, reference, pin or field, and expected and observed values. A missing
+component produces one `Reference` finding per affected source. JSON represents
+a missing observation as `null`.
 
 ---
 
@@ -1494,6 +1538,7 @@ kct parts <subcommand> [options]
 | `import` | Import a part's symbol/footprint from its datasheet into a library |
 | `suggest` | Suggest LCSC part numbers for components without them |
 | `alternatives` | Suggest in-stock Basic/Preferred JLCPCB substitutes for an LCSC part from the offline jlcparts catalog (`--limit N`, default 5) |
+| `stock` | Query distributor stock and pricing for a manufacturer part number (`-q N` quantity, `--format json`); requires network access to the distributor APIs |
 | `cache` | Cache management (`stats`, `clear`, `clear-expired`) |
 | `sync-catalog` | Download the jlcparts dataset (~620 MB) into the cache dir for fully-offline lookups (#4117) |
 
@@ -1502,6 +1547,7 @@ kct parts <subcommand> [options]
 kct parts search "STM32F103"
 kct parts lookup C8734
 kct parts alternatives C123456 --limit 3
+kct parts stock AP63203WU-7 -q 5 --format json
 kct parts availability project.kicad_sch --quantity 100
 kct parts import STM32F103C8T6 --library my.kicad_sym --dry-run
 ```
@@ -1868,9 +1914,11 @@ that refers to it describes the same physical case.
   one shared by several declarations, lists a path twice, or includes a path
   that is `unresolved` or `ambiguous` is an `error` (`Operating case ...
   cannot be evaluated`) and yields no finding from a partial total. A
-  malformed case (a contribution without a numeric `current_a`, a repeated
-  case name, an unknown `pulse_overlap`) is rejected when the sidecar loads,
-  like any other malformed path.
+  contribution whose `current_a` is zero or non-finite, and a case that
+  lists no contributions, are that same `error`; neither is silently
+  skipped. A malformed case (a contribution without a numeric `current_a`,
+  a repeated case name, an unknown `pulse_overlap`) is rejected when the
+  sidecar loads, like any other malformed path.
 - **What a case reports.** Shared copper that cannot carry the combined
   current is an `error` naming the case, the contributing paths with their
   signed currents, the combined current and the location. A shared layer

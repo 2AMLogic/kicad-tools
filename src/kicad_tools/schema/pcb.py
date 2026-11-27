@@ -34,7 +34,7 @@ from ..core.board_outline import (
     outline_polygon_points,
     outline_rect_points,
 )
-from ..core.layers import is_declared_copper_layer
+from ..core.layers import is_declared_copper_layer, pad_copper_layers
 from ..core.outline_tessellation import DegenerateArcError, tessellate_arc, tessellate_cubic
 from ..core.schematic_uuids import UuidMinter
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
@@ -2603,6 +2603,19 @@ class Via:
     # board); the source S-expression is not rewritten.
     layers_read_as_through: bool = field(default=False, compare=False, repr=False)
     locked: bool = field(default=False, compare=False)
+    # Issue #10364: read-only evidence for verifying wire ends. Per-layer copper
+    # diameters from a ``(padstack (layer "B.Cu" (size D)) ...)`` block (outer
+    # layers only, keyed ``F.Cu``/``B.Cu``; empty when the via has no padstack
+    # block) and whether the bore is closed by per-via ``(filling yes)``,
+    # ``(capping yes)`` or ``(plugging (front|back yes))``. Not re-serialized.
+    padstack_sizes: dict[str, float] = field(default_factory=dict, compare=False, repr=False)
+    hole_closed: bool = field(default=False, compare=False, repr=False)
+
+    def copper_diameter(self, layer: str) -> float | None:
+        """Copper diameter on ``layer``; ``None`` if a padstack hides that layer."""
+        if not self.padstack_sizes:
+            return self.size
+        return self.padstack_sizes.get(layer)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Via:
@@ -2656,6 +2669,30 @@ class Via:
                 via.tenting_front = front.get_string(0)
             if back := tenting.find("back"):
                 via.tenting_back = back.get_string(0)
+        # Issue #10364: per-layer padstack diameters and closed-bore flags.
+        if padstack := sexp.find("padstack"):
+            aliases = {"F.Cu": "F.Cu", "Top": "F.Cu", "B.Cu": "B.Cu", "Bottom": "B.Cu"}
+            mode = padstack.find("mode")
+            mode_name = mode.get_string(0) if mode else None
+            if mode_name in ("front_inner_back", "custom"):
+                # KiCad writes the front diameter in the via's top-level size.
+                via.padstack_sizes["F.Cu"] = via.size
+            for layer in padstack.find_all("layer"):
+                name = aliases.get(layer.get_string(0) or "")
+                lsize = layer.find("size")
+                if name and lsize and (d := lsize.get_float(0)):
+                    via.padstack_sizes[name] = d
+            if mode_name == "normal" and not via.padstack_sizes:
+                pass  # uniform diameter: the top-level size applies everywhere
+            elif not via.padstack_sizes:
+                via.padstack_sizes = {"?": 0.0}  # unreadable: nothing verifiable
+        for token in ("filling", "capping"):
+            if node := sexp.find(token):
+                via.hole_closed |= node.get_string(0) == "yes"
+        if plug := sexp.find("plugging"):
+            for side in ("front", "back"):
+                if (n := plug.find(side)) and n.get_string(0) == "yes":
+                    via.hole_closed = True
         # Net — handles both (net N "name") and (net "name") formats.
         # KiCad 10 may emit (net "name") without a numeric net number.
         if net := sexp.find("net"):
@@ -7837,6 +7874,8 @@ class PCB:
         net: str | int | None = None,
         waypoints: list[tuple[float, float]] | None = None,
         dedupe: bool = True,
+        *,
+        require_pad_layer: bool = False,
     ) -> list[Segment]:
         """
         Add a trace (one or more segments) between two points or pads.
@@ -7859,6 +7898,10 @@ class PCB:
                 accumulating exact-duplicate copper.  Set False only if you
                 deliberately need identical-geometry duplicates.
 
+            require_pad_layer: Require named endpoints to declare copper on the
+                requested layer. Use coordinates for intentional transitions
+                through vias. This check leaves coordinate endpoints alone.
+
         Returns:
             List of Segment objects that were created (skipped duplicates are
             excluded, so this may be shorter than the number of point-pairs).
@@ -7874,6 +7917,27 @@ class PCB:
             >>> pcb.add_trace((50, 30), (60, 30), waypoints=[(55, 35)])
             >>> pcb.save("board.kicad_pcb")
         """
+        if require_pad_layer:
+            copper = [
+                v.name for v in self.layers.values() if is_declared_copper_layer(v.name, v.type)
+            ]
+            for endpoint in (start, end):
+                if not isinstance(endpoint[0], str):
+                    continue
+                ref, number = endpoint
+                fp = self.get_footprint(ref)
+                endpoint_pad = (
+                    next((p for p in fp.pads if p.number == number), None) if fp else None
+                )
+                if endpoint_pad is None:
+                    raise ValueError(f"Cannot find pad {number} on footprint {ref}")
+                available = pad_copper_layers(endpoint_pad.layers, copper)
+                if layer not in available:
+                    raise ValueError(
+                        f"Pad {ref}.{number} has no declared copper on {layer}; "
+                        f"available copper: {', '.join(sorted(available)) or 'none'}"
+                    )
+
         # Resolve start position
         if isinstance(start[0], str):
             ref, pad = start[0], start[1]

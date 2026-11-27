@@ -13,6 +13,7 @@ both of which shift with the copper.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from inspect import signature
@@ -28,6 +29,7 @@ from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
 from kicad_tools.router.quantize import _is_quantum_aligned
 from kicad_tools.sexp import parse_file
+from kicad_tools.validate.mask_copper import MaskCopperAssessment
 
 PAD = "pad-r1-1"
 
@@ -62,6 +64,7 @@ OWN_ENTRY = "same-net own-pad entry"
 
 
 def _board(tmp_path: Path, copper: str) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "b.kicad_pcb"
     path.write_text(BOARD % copper)
     return path
@@ -236,6 +239,7 @@ def _report(*violations: DRCViolation) -> DRCReport:
         created_at=None,
         pcb_name="b.kicad_pcb",
         violations=list(violations),
+        mask_copper_assessments=[MaskCopperAssessment(coverage="complete")],
     )
 
 
@@ -510,6 +514,618 @@ def test_fix_drc_reverts_a_move_that_creates_a_new_clearance_error(tmp_path, mon
     assert "new_drc_error" in capsys.readouterr().out
 
 
+def _pour_slot_warning(x: float = 99.0, y: float = 100.3) -> DRCViolation:
+    return DRCViolation(
+        type=ViolationType.from_string("pour_slot"),
+        type_str="pour_slot",
+        severity=Severity.WARNING,
+        message="Pour slot beside the move",
+        locations=[Location(x_mm=x, y_mm=y, layer="F.Cu")],
+        items=["trk-a", "trk-b"],
+        nets=["N1", "N2"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("manufacturer", "coverage", "target", "expected_code"),
+    [
+        ("pcbway", [], True, 4),
+        ("pcbway", ["complete"], True, 4),
+        ("jlcpcb", [], False, 4),
+        ("jlcpcb", ["complete", "incomplete"], False, 4),
+        ("jlcpcb", ["not_run"], False, 4),
+        ("jlcpcb", ["complete"], False, 0),
+        ("jlc", ["complete"], False, 0),
+        ("lcsc", ["complete"], False, 0),
+    ],
+)
+def test_guard_requires_mask_coverage(tmp_path, manufacturer, coverage, target, expected_code):
+    board = _board(tmp_path, ENTRY)
+    original = board.read_bytes()
+    finding = _finding("trk-a")
+    report = tmp_path / "check.json"
+    report.write_text(
+        json.dumps(
+            {
+                "manufacturer": "jlcpcb",
+                "violations": [
+                    {
+                        "rule_id": finding.type_str,
+                        "severity": "error",
+                        "message": finding.message,
+                        "items": finding.items,
+                        "location": [100.0, 100.3],
+                        "layer": "F.Cu",
+                    }
+                ]
+                if target
+                else [],
+                "mask_copper_assessments": [
+                    MaskCopperAssessment(coverage=status).to_dict() for status in coverage
+                ],
+            }
+        )
+    )
+    code = fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-new-warnings",
+            "--transactional",
+            "--mfr",
+            manufacturer,
+            "--max-displacement",
+            "1.0",
+            "--drc-report",
+            str(report),
+        ]
+    )
+    assert code == expected_code
+    assert board.read_bytes() == original
+
+
+def test_live_report_preserves_mask_coverage():
+    from kicad_tools.drc.compat import drc_results_to_report
+    from kicad_tools.validate.violations import DRCResults
+
+    assessment = MaskCopperAssessment(coverage="complete")
+    results = DRCResults(mask_copper_assessments=[assessment])
+    assert drc_results_to_report(results).mask_copper_assessments == [assessment]
+
+
+def test_a_new_warning_reverts_the_move_only_under_no_new_warnings(tmp_path, monkeypatch, capsys):
+    """Issue #9424: a mask repair must not trade an error for a warning on request."""
+    before = _report(_finding("trk-a"))
+    after = _report(_pour_slot_warning())
+    clean = _report()
+    # calls: detection, mask verification, baseline with the move undone, final re-check
+    guarded = _board(tmp_path / "guarded", ENTRY)
+    _run(monkeypatch, guarded, [before, after, clean, after], extra=["--no-new-warnings"])
+    assert _end(guarded, "trk-a")[1] == (100.7, 100.3)  # reverted
+    assert "new_drc_error" in capsys.readouterr().out
+
+    default = _board(tmp_path / "default", ENTRY)
+    _run(monkeypatch, default, [before, after, after])
+    assert _end(default, "trk-a")[1] == (100.0, 100.0)  # a warning never vetoed a move
+
+
+def test_a_preexisting_warning_keeps_the_move_under_no_new_warnings(tmp_path, monkeypatch):
+    board = _board(tmp_path, ENTRY)
+    # The live detection report is the pre-edit baseline for the guarded pass.
+    before = _report(_finding("trk-a"), _pour_slot_warning(x=99.1, y=100.35))
+    after = _report(_pour_slot_warning(x=99.0, y=100.3))
+    _run(monkeypatch, board, [before, after, after], extra=["--no-new-warnings"])
+    assert _end(board, "trk-a")[1] == (100.0, 100.0)
+
+
+@pytest.mark.parametrize("preview", [False, True])
+@pytest.mark.parametrize("old_covered", [True, False])
+def test_guard_reverts_new_covered_segment(tmp_path, monkeypatch, capsys, old_covered, preview):
+    from kicad_tools.drc.compat import drc_results_to_report
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+
+    copper = [ENTRY, _seg("new", (99.76, 100.24), (99.86, 100.14))]
+    if old_covered:
+        copper.append(_seg("old", (99.74, 100.30), (99.84, 100.30)))
+    board = _board(tmp_path, "\n".join(copper))
+    original = board.read_bytes()
+    covered = []
+
+    def assess(path, **kwargs):
+        assert kwargs["manufacturer"] == "jlcpcb"
+        pcb = PCB.load(path)
+        results = RedundantCopperRule().check(pcb, get_profile("jlcpcb").get_design_rules(2))
+        report = drc_results_to_report(results, path)
+        covered.append(
+            [v.witnesses for v in report.violations if v.type_str == "redundant_copper_covered"]
+        )
+        report.mask_copper_assessments = [MaskCopperAssessment(coverage="complete")]
+        if _end(path, "trk-a")[1] == (100.7, 100.3):
+            report.violations.append(_finding("trk-a"))
+        return report
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
+    code = fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-new-warnings",
+            "--max-displacement",
+            "1",
+            "--no-connectivity-check",
+            "--format",
+            "json",
+            *(["--dry-run"] if preview else []),
+            "--mfr",
+            "lcsc",
+        ]
+    )
+    assert covered[0] == ([["old"]] if old_covered else [])
+    assert [["new"]] in covered
+    result = json.loads(capsys.readouterr().out)
+    assert code == (2 if old_covered else 1)
+    assert result["dry_run"] is preview
+    assert result["total_repaired"] == 0
+    assert result["mask_copper"]["unrepaired"][-1]["reason"] == "new_drc_error"
+    assert board.read_bytes() == original
+
+
+def test_rejected_repair_ignores_prior_output(tmp_path, monkeypatch, capsys):
+    """A leftover --output file is not this run's result: preview and apply agree."""
+    from kicad_tools.drc.compat import drc_results_to_report
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+
+    board = _board(tmp_path, "\n".join([ENTRY, _seg("new", (99.76, 100.24), (99.86, 100.14))]))
+
+    def assess(path, **kwargs):
+        pcb = PCB.load(path)
+        results = RedundantCopperRule().check(pcb, get_profile("jlcpcb").get_design_rules(2))
+        report = drc_results_to_report(results, path)
+        report.mask_copper_assessments = [MaskCopperAssessment(coverage="complete")]
+        if _end(path, "trk-a")[1] == (100.7, 100.3):
+            report.violations.append(_finding("trk-a"))
+        return report
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
+    prior = tmp_path / "prior.kicad_pcb"
+    prior.write_bytes(b"unreadable prior output")
+    argv = [
+        str(board),
+        "--only",
+        "mask-copper",
+        "--no-new-warnings",
+        "--max-displacement",
+        "1",
+        "--no-connectivity-check",
+        "--format",
+        "json",
+        "--output",
+        str(prior),
+    ]
+    preview_code = fix_drc_cmd.main([*argv, "--dry-run"])
+    preview = json.loads(capsys.readouterr().out)
+    apply_code = fix_drc_cmd.main(argv)
+    captured = capsys.readouterr()
+    assert "final mask assessment" not in captured.err
+    applied = json.loads(captured.out)
+    assert apply_code == preview_code
+    assert applied["total_repaired"] == preview["total_repaired"] == 0
+    assert applied["mask_copper"]["unrepaired"] == preview["mask_copper"]["unrepaired"]
+
+
+@pytest.mark.parametrize("destination", ["in_place", "renamed_with_record", "renamed_no_record"])
+def test_guard_grades_reinforcement_at_result_path(tmp_path, monkeypatch, capsys, destination):
+    from kicad_tools.pcb.reinforcement_sidecar import sidecar_path
+    from kicad_tools.validate import mask_copper_geometry
+    from tests.test_mask_copper_reinforce_9315 import reinforce_record, straight_geometry
+
+    board = _board(tmp_path, ENTRY)
+    original = board.read_bytes()
+    record = json.dumps({"version": 1, "wires": [reinforce_record()]})
+    sidecar_path(board).write_text(record)
+    output = board if destination == "in_place" else tmp_path / "renamed.kicad_pcb"
+    if destination == "renamed_with_record":
+        sidecar_path(output).write_text(record)
+
+    def capture(path, **kwargs):
+        geometry = straight_geometry()
+        geometry.exported.source_sha256 = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        return geometry
+
+    monkeypatch.setattr(mask_copper_geometry, "inspect_attributed_mask_geometry", capture)
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
+    run_drc = fix_drc_cmd._run_python_drc
+
+    def assess(path, **kwargs):
+        report = run_drc(path, **kwargs)
+        if _end(path, "trk-a")[1] == (100.7, 100.3):
+            report.violations.append(_finding("trk-a"))
+        return report
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    argv = [
+        str(board),
+        "--only",
+        "mask-copper",
+        "--no-new-warnings",
+        "--max-displacement",
+        "1",
+        "--no-connectivity-check",
+        "--format",
+        "json",
+        "--output",
+        str(output),
+    ]
+    # A supplied report selects the repair but the guard must establish its own
+    # baseline on the input, including when the output has no matching record.
+    finding = _finding("trk-a")
+    report_path = tmp_path / "check.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "manufacturer": "jlcpcb",
+                "violations": [
+                    {
+                        "rule_id": finding.type_str,
+                        "severity": "error",
+                        "message": finding.message,
+                        "items": finding.items,
+                        "location": [100.0, 100.3],
+                        "layer": "F.Cu",
+                    }
+                ],
+                "mask_copper_assessments": [MaskCopperAssessment(coverage="complete").to_dict()],
+            }
+        )
+    )
+    argv.extend(["--drc-report", str(report_path)])
+    preview_code = fix_drc_cmd.main([*argv, "--dry-run"])
+    captured = capsys.readouterr()
+    assert captured.out, captured.err
+    preview = json.loads(captured.out)
+    assert board.read_bytes() == original
+    if output != board:
+        assert not output.exists()
+
+    assert fix_drc_cmd.main(argv) == preview_code
+    applied = json.loads(capsys.readouterr().out)
+    rejected = destination == "renamed_no_record"
+    assert applied["total_repaired"] == preview["total_repaired"] == int(not rejected)
+    assert applied["recheck"] == preview["recheck"]
+    assert applied["recheck"]["errors_after"] == int(rejected)
+    if rejected:
+        assert applied["mask_copper"]["unrepaired"][-1]["reason"] == "new_mask_finding"
+        assert not output.exists()
+        assert not sidecar_path(output).exists()
+    else:
+        assert _end(output, "trk-a")[1] == (100.0, 100.0)
+    if output != board:
+        assert board.read_bytes() == original
+
+
+def test_staged_board_preview_needs_no_destination_write_access(tmp_path):
+    from kicad_tools.creepage.output_audit import staged_board
+
+    source = tmp_path / "src.kicad_pcb"
+    source.write_text("x")
+    destination = tmp_path / "board" / "out.kicad_pcb"
+    destination.parent.mkdir()
+    with staged_board(source, destination, in_destination_dir=False) as candidate:
+        assert destination.parent not in candidate.parents
+    with staged_board(source, destination) as candidate:
+        assert candidate.parent.parent == destination.parent
+
+
+def test_guard_preview_keeps_verified_move_private(tmp_path, monkeypatch, capsys):
+    board = _board(tmp_path, ENTRY)
+    original = board.read_bytes()
+    output = tmp_path / "prior.kicad_pcb"
+    output.write_bytes(b"prior output")
+    code = _run(
+        monkeypatch,
+        board,
+        [_report(_finding("trk-a")), _report()],
+        extra=["--no-new-warnings", "--dry-run", "--format", "json", "--output", str(output)],
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert result["dry_run"] and result["total_repaired"] == 1
+    assert board.read_bytes() == original
+    assert output.read_bytes() == b"prior output"
+
+
+@pytest.mark.parametrize("voltage_map", [False, True])
+def test_guard_refill_failure_exits_four(tmp_path, monkeypatch, voltage_map):
+    from unittest.mock import Mock
+
+    from kicad_tools.cli import runner
+
+    zone = '(zone (net 2) (net_name "N2") (layer "F.Cu") (uuid "zone-a"))'
+    board = _board(tmp_path, ENTRY + zone)
+    original = board.read_bytes()
+    idle = tmp_path / "idle.json"
+    idle.write_text(json.dumps({"N1": 0, "N2": 0}))
+    refill = Mock(return_value=runner.KiCadCLIResult(success=False, stderr="refill failed"))
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
+    code = _run(
+        monkeypatch,
+        board,
+        [_report(_finding("trk-a"))],
+        extra=["--no-new-warnings", *(["--voltage-map", str(idle)] if voltage_map else [])],
+    )
+    refill.assert_called_once()
+    assert code == 4
+    assert board.read_bytes() == original
+
+
+def test_guard_rejects_unattributed_mask_warning_at_proposal(tmp_path, monkeypatch, capsys):
+    from dataclasses import replace
+
+    board = _board(tmp_path, ENTRY)
+    original = board.read_bytes()
+    target = _finding("trk-a")
+    warning = replace(target, items=["unrelated-opening", "zone-uuid"], severity=Severity.WARNING)
+    _run(
+        monkeypatch,
+        board,
+        [_report(target), _report(warning), _report()],
+        extra=["--no-new-warnings"],
+    )
+    assert "new_mask_finding" in capsys.readouterr().out
+    assert board.read_bytes() == original
+
+
+def test_a_new_mask_warning_on_the_moved_conductor_reverts_the_move(tmp_path, monkeypatch, capsys):
+    board = _board(tmp_path, ENTRY)
+    before = _report(_finding("trk-a"))
+    after = _report(_finding("trk-a", severity=Severity.WARNING))  # same pair, now a warning
+    new_pair = _report(
+        DRCViolation(
+            type=ViolationType.MASK_TO_COPPER,
+            type_str="mask_to_copper",
+            severity=Severity.WARNING,
+            message="Mask-to-copper disjoint: warning",
+            locations=[Location(x_mm=100.0, y_mm=100.3, layer="F.Cu")],
+            items=["other-pad", "trk-a"],
+        )
+    )
+    _run(monkeypatch, board, [before, new_pair, new_pair], extra=["--no-new-warnings"])
+    assert _end(board, "trk-a")[1] == (100.7, 100.3)  # reverted
+    assert "new_mask_finding" in capsys.readouterr().out
+
+    # An error that only drops to a warning on the same pair is still progress.
+    again = _board(tmp_path / "again", ENTRY)
+    _run(monkeypatch, again, [before, after, after], extra=["--no-new-warnings"])
+    assert _end(again, "trk-a")[1] == (100.0, 100.0)
+
+
+@pytest.mark.parametrize(
+    ("before_level", "after_level", "kept"),
+    [(Severity.WARNING, Severity.ERROR, False), (Severity.ERROR, Severity.WARNING, True)],
+)
+def test_guard_preserves_non_mask_severity(tmp_path, monkeypatch, before_level, after_level, kept):
+    from dataclasses import replace
+
+    board = _board(tmp_path, ENTRY)
+    before_other = replace(
+        _pour_slot_warning(),
+        type=ViolationType.from_string("physical_copper_gap"),
+        type_str="physical_copper_gap",
+        severity=before_level,
+    )
+    after = _report(replace(before_other, severity=after_level))
+    baseline = _report(_finding("trk-a"), before_other)
+    _run(monkeypatch, board, [baseline, after, baseline, after], extra=["--no-new-warnings"])
+    assert _end(board, "trk-a")[1] == ((100, 100) if kept else (100.7, 100.3))
+
+
+@pytest.mark.parametrize("refill_only", [False, True])
+@pytest.mark.parametrize("finding", ["unattributed_mask", "unattributed_non_mask", "promoted_mask"])
+def test_guard_checks_unattributed_and_post_refill_findings(
+    tmp_path, monkeypatch, refill_only, finding
+):
+    from dataclasses import replace
+
+    from kicad_tools.cli import runner
+
+    zone = '(zone (net 2) (net_name "N2") (layer "F.Cu") (uuid "zone-a"))'
+    board = _board(tmp_path, ENTRY + zone)
+    original = board.read_bytes()
+    target = _finding("trk-a")
+    warning = replace(_finding("trk-a"), items=["other-pad", "trk-a"], severity=Severity.WARNING)
+    before = _report(target)
+    if finding == "promoted_mask":
+        before.violations.append(replace(warning, severity=Severity.INFO))
+    elif finding == "unattributed_mask":
+        warning = replace(warning, items=["unrelated-opening", "zone-uuid"])
+    else:
+        warning = _pour_slot_warning(x=180, y=190)
+    refilled = False
+
+    def refill(path, *, require_save):
+        nonlocal refilled
+        refilled = True
+        return runner.KiCadCLIResult(success=True)
+
+    def assess(path, **kwargs):
+        if _end(path, "trk-a")[1] != (100.0, 100.0):
+            return before
+        return _report(warning) if refilled or not refill_only else _report()
+
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-new-warnings",
+            "--no-connectivity-check",
+            "--max-displacement",
+            "1.0",
+        ]
+    )
+    assert board.read_bytes() == original
+
+
+def test_guard_compares_stock_warning_band_when_elbow_margin_needs_wider_measurements(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from kicad_tools.cli import check_cmd
+    from kicad_tools.drc import compat
+
+    board = _board(tmp_path, ENTRY)
+    bands = []
+    gaps = Mock(required={("pad", "track"): 0.30})
+
+    def assess(rule_set):
+        band = rule_set.checker.mask_copper_request.policy.warning_clearance_mm
+        bands.append(band)
+        return SimpleNamespace(violations=[], mask_copper_assessments=[band])
+
+    def report(results, path):
+        # The 0.20 mm gap shows up only in the expanded measurement pass.
+        if results.mask_copper_assessments[0] >= 0.20:
+            return _report(_finding("other", severity=Severity.WARNING))
+        return _report()
+
+    monkeypatch.setattr(check_cmd, "run_check_rule_set", assess)
+    monkeypatch.setattr(compat, "drc_results_to_report", report)
+    saved = fix_drc_cmd._run_python_drc(
+        board, manufacturer="jlcpcb", mask_copper=True, guard_warnings=True, elbow_gaps=gaps
+    )
+    assert saved is not None and not saved.violations
+    assert bands == [0.30, 0.15]
+    gaps.check.assert_called_once_with([0.30])
+
+
+def test_guard_rechecks_geometry_left_by_selective_undo(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    other = _seg("trk-b", (105, 100.3), (110.7, 100.3))
+    board = _board2(tmp_path, ENTRY + other, r2_at="110 100")
+    original = board.read_bytes()
+    second = replace(_finding("trk-b"), items=["pad-r2-1", "trk-b"])
+    baseline = _report(_finding("trk-a"), second)
+    partial_seen = False
+
+    def assess(path, **kwargs):
+        nonlocal partial_seen
+        if _end(path, "trk-a")[1] != (100, 100):
+            return baseline
+        if _end(path, "trk-b")[1] == (110, 100):
+            return _report(second)  # retain the first move, undo the second
+        partial_seen = True
+        return _report(second, _pour_slot_warning(x=180, y=190))
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-new-warnings",
+            "--no-connectivity-check",
+            "--max-displacement",
+            "1.0",
+        ]
+    )
+    assert partial_seen
+    assert board.read_bytes() == original
+
+
+def test_guard_restores_whole_pass_when_connectivity_regresses(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    other = _seg("trk-b", (105, 100.3), (110.7, 100.3), net=2)
+    board = _board2(tmp_path, ENTRY + other, r2_at="110 100")
+    board.write_text(
+        board.read_text().replace(
+            '(net 1 "N1") (uuid "pad-r2-1")', '(net 2 "N2") (uuid "pad-r2-1")'
+        )
+    )
+    original = board.read_bytes()
+    second = replace(_finding("trk-b"), items=["pad-r2-1", "trk-b"])
+
+    def connected_nets(path):
+        if path.read_bytes() == original:
+            return 2
+        assert _end(path, "trk-a")[1] == (100, 100)
+        return 1 if _end(path, "trk-b")[1] == (110, 100) else 2
+
+    monkeypatch.setattr(fix_drc_cmd, "_count_connected_nets", connected_nets)
+    monkeypatch.setattr(fix_drc_cmd, "_regressed_nets", lambda before, after: {"N2"})
+    code = _run(
+        monkeypatch,
+        board,
+        [_report(_finding("trk-a"), second), _report()],
+        extra=["--no-new-warnings"],
+        connectivity=True,
+    )
+    assert code == 3
+    assert board.read_bytes() == original
+
+
+def test_later_mask_detection_failure_rolls_back_saved_pass(tmp_path, monkeypatch):
+    board = _board(tmp_path, ENTRY)
+    original = board.read_bytes()
+    seen_saved = False
+
+    def assess(path, **kwargs):
+        nonlocal seen_saved
+        if path != board:
+            # A real provisional move passed its assessment.
+            assert _end(path, "trk-a")[1] == (100, 100)
+            return _report()
+        if board.read_bytes() == original:
+            return _report(_finding("trk-a"))
+        seen_saved = True
+        assert _end(board, "trk-a")[1] == (100, 100)
+        return None
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    code = fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-new-warnings",
+            "--transactional",
+            "--max-passes",
+            "3",
+            "--no-connectivity-check",
+            "--max-displacement",
+            "1.0",
+        ]
+    )
+    assert code == 4
+    assert seen_saved
+    assert board.read_bytes() == original
+
+
 def test_fix_drc_keeps_a_move_when_the_error_was_already_there(tmp_path, monkeypatch):
     board = _board(tmp_path, ENTRY)
     before = _report(_finding("trk-a"))
@@ -710,6 +1326,27 @@ def test_native_pull_in_check_preserves_prior_output_on_new_error(
     assert "1 new errors" in result["unrepaired"][-1]["detail"]
     assert board.read_bytes() == original
     assert output.read_bytes() == b"previous output"
+
+
+def test_guard_reports_worsened_native_clearance_and_preserves_board(tmp_path, monkeypatch, capsys):
+    board = _board(tmp_path, _seg("trk-p", (100.35, 102), (100.55, 100.55)))
+    original = board.read_bytes()
+    pair = ("clearance", "rule", ("pad", "track"), 0.65)
+    native = iter(
+        fix_drc_cmd._MaskNativeState(clearance_gaps={pair: [gap]}) for gap in (0.61, 0.55)
+    )
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda candidate: next(native))
+    before = _report(_finding("trk-p"))
+    _run(
+        monkeypatch,
+        board,
+        [before, _report()],
+        extra=("--no-new-warnings", "--format", "json"),
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert result["repaired"] == 0
+    assert result["unrepaired"][-1]["reason"] == "would_violate_clearance"
+    assert board.read_bytes() == original
 
 
 @pytest.mark.parametrize(
@@ -4237,6 +4874,246 @@ def test_direct_pad_via_veto_preserves_the_copper(tmp_path, obstacle):
     result = repairer.repair([_bonded_via_finding()], **opts)
     assert not result.actions and not repairer.modified
     assert result.unrepaired and board.read_bytes() == before
+
+
+def test_copper_witnesses_do_not_change_public_finding_keys(tmp_path):
+    """Regenerated UUIDs keep the same finding key (waivers keep matching)."""
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+
+    def covered(uuid: str):
+        copper = "\n".join(
+            [_seg("big", (95.0, 100.3), (100.7, 100.3)), _seg(uuid, (99.74, 100.3), (99.84, 100.3))]
+        )
+        board = _board(tmp_path / uuid, copper)
+        results = RedundantCopperRule().check(
+            PCB.load(board), get_profile("jlcpcb").get_design_rules(2)
+        )
+        return [v for v in results.violations if v.rule_id == "redundant_copper_covered"]
+
+    first, second = covered("old-a"), covered("old-b")
+    assert first and [v.key for v in first] == [v.key for v in second]
+    assert all("old-" not in v.key for v in first)
+    assert [v.witnesses for v in first] != [v.witnesses for v in second]
+
+
+def _run_guard_with_rule(monkeypatch, board, target, check):
+    from kicad_tools.drc.compat import drc_results_to_report
+    from kicad_tools.schema.pcb import PCB
+
+    original = board.read_bytes()
+    seen = []
+
+    def assess(path, **kwargs):
+        report = drc_results_to_report(check(PCB.load(path)), path)
+        seen.append(report.violations.copy())
+        report.mask_copper_assessments = [MaskCopperAssessment(coverage="complete")]
+        if path.read_bytes() == original:
+            report.violations.append(target)
+        return report
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-new-warnings",
+            "--max-displacement",
+            "1.1",
+            "--margin",
+            ".45",
+            "--mfr",
+            "jlcpcb",
+        ]
+    )
+    return seen
+
+
+def test_guard_reverts_gap_against_different_stationary_track(tmp_path, monkeypatch):
+    from kicad_tools.validate.rules.physical_gap import check_physical_copper_gap
+
+    board = _board(
+        tmp_path,
+        "\n".join(
+            [
+                PASS,
+                _seg("old", (97, 100.855), (98, 100.855), width=0.1),
+                _seg("new", (97, 101.375), (98, 101.375), width=0.1),
+            ]
+        ),
+    )
+    original = board.read_bytes()
+    seen = _run_guard_with_rule(
+        monkeypatch, board, _pt_finding("trk-p"), lambda pcb: check_physical_copper_gap(pcb, 0.1)
+    )
+    assert any(v.witnesses == ["old", "trk-p"] for v in seen[0])
+    assert any(v.witnesses == ["new", "trk-p"] for findings in seen for v in findings)
+    assert board.read_bytes() == original
+
+
+def test_guard_keeps_split_with_existing_dangling_end(tmp_path, monkeypatch):
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.validate.rules.dangling_copper import DanglingCopperRule
+
+    board = _board(tmp_path, ENTRY)
+    rules = get_profile("jlcpcb").get_design_rules(2)
+    seen = _run_guard_with_rule(
+        monkeypatch, board, _finding("trk-a"), lambda pcb: DanglingCopperRule().check(pcb, rules)
+    )
+    (before,) = seen[0]
+    (after,) = seen[-1]
+    assert before.items != after.items
+    assert before.locations == after.locations
+    assert _end(board, "trk-a")[1] == (100, 100)
+
+
+def test_violation_positional_constructors_preserve_fields():
+    from kicad_tools.validate.violations import DRCViolation as ValidationViolation
+
+    validation = ValidationViolation(
+        "physical_copper_gap", "error", "", None, None, 0.15, 0.25, (), (), True
+    )
+    assert validation.same_net is True
+    assert validation.to_dict()["witnesses"] == []
+    report = DRCViolation(
+        ViolationType.PHYSICAL_COPPER_GAP,
+        "physical_copper_gap",
+        Severity.ERROR,
+        "",
+        "",
+        [],
+        [],
+        [],
+        [],
+        0.25,
+        0.15,
+    )
+    assert (report.required_value_mm, report.actual_value_mm) == (0.25, 0.15)
+
+
+def _witness_finding(rule: str, witnesses: list[str], x: float = 97.0) -> DRCViolation:
+    return DRCViolation(
+        type=ViolationType.from_string(rule),
+        type_str=rule,
+        severity=Severity.WARNING,
+        message=rule,
+        locations=[Location(x_mm=x, y_mm=100.5, layer="F.Cu")],
+        items=list(witnesses),
+        witnesses=list(witnesses),
+        nets=["N1", "N2"],
+    )
+
+
+@pytest.mark.parametrize("rule", ["pour_slot", "redundant_copper_covered"])
+def test_split_leg_warning_matches_its_original_conductor(rule):
+    """An unchanged warning on a retained split leg is not new; another is."""
+    before = [_witness_finding(rule, ["trk-a", "trk-n2"])]
+    same = [_witness_finding(rule, ["leg-a", "trk-n2"])]
+    other = [_witness_finding(rule, ["leg-a", "trk-other"])]
+    parents = {"leg-a": "trk-a"}
+    assert fix_drc_cmd._new_errors(same, before, 0.5, parents) == []
+    assert fix_drc_cmd._new_errors(other, before, 0.5, parents) == other
+    # Without the split map the retained leg would read as new.
+    assert fix_drc_cmd._new_errors(same, before, 0.5, {}) == same
+
+
+def test_split_leg_mask_warning_matches_its_original_conductor():
+    before = _report(_finding("trk-a", severity=Severity.WARNING))
+    same = _report(_finding("leg-a", severity=Severity.WARNING))
+    parents = {"leg-a": "trk-a"}
+    assert not fix_drc_cmd._new_mask_keys(before, same, guard_warnings=True, split_parents=parents)
+    assert fix_drc_cmd._new_mask_keys(before, same, guard_warnings=True)
+    # A second warning on the leg is still a new one (multiplicity preserved).
+    doubled = _report(
+        _finding("leg-a", severity=Severity.WARNING), _finding("leg-a", severity=Severity.WARNING)
+    )
+    assert fix_drc_cmd._new_mask_keys(before, doubled, guard_warnings=True, split_parents=parents)
+    # An error is never covered by a retained warning.
+    error = _report(_finding("leg-a"))
+    assert fix_drc_cmd._new_mask_keys(before, error, guard_warnings=True, split_parents=parents)
+
+
+@pytest.mark.parametrize("guard", [False, True])
+@pytest.mark.parametrize("after_refill", [False, True])
+@pytest.mark.parametrize("same_opening", [False, True])
+def test_mask_error_on_split_leg_restores_board(
+    tmp_path, monkeypatch, capsys, guard, after_refill, same_opening
+):
+    from kicad_tools.cli import runner
+
+    zone = '(zone (net 2) (net_name "N2") (layer "F.Cu") (uuid "zone-a"))'
+    board = _board(tmp_path, ENTRY + (zone if after_refill else ""))
+    original = board.read_bytes()
+    refilled = False
+    split_errors = []
+
+    def refill(path, *, require_save):
+        nonlocal refilled
+        refilled = True
+        return runner.KiCadCLIResult(success=True)
+
+    def assess(path, **kwargs):
+        segments = parse_file(path).find_all("segment")
+        uuids = [str(s.find("uuid").get_first_atom()).strip('"') for s in segments]
+        if uuids == ["trk-a"]:
+            return _report(_finding("trk-a"))
+        (leg,) = set(uuids) - {"trk-a"}
+        if after_refill and not refilled:
+            return _report()
+        split_errors.append(leg)
+        finding = _finding(leg)
+        if not same_opening:
+            finding.items[0] = "another-opening"
+        return _report(finding)
+
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    code = fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-connectivity-check",
+            "--max-displacement",
+            "1",
+            "--max-passes",
+            "1",
+            "--format",
+            "json",
+            *(["--no-new-warnings"] if guard else []),
+        ]
+    )
+    assert split_errors
+    assert code == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["total_repaired"] == 0
+    reason = "finding_not_cleared" if same_opening else "new_mask_finding"
+    assert result["mask_copper"]["unrepaired"][-1]["reason"] == reason
+    assert board.read_bytes() == original
+
+
+def test_guard_detects_mask_warning_on_other_face():
+    from dataclasses import replace
+
+    front = _finding("trk-a", severity=Severity.WARNING)
+    back_location = replace(front.locations[0], layer="B.Cu")
+    back = replace(front, locations=[back_location])
+    assert fix_drc_cmd._new_mask_keys(_report(front), _report(back), guard_warnings=True) == {
+        (PAD, "trk-a")
+    }
+
+
+def test_guard_detects_clearance_warning_on_other_face():
+    from dataclasses import replace
+
+    front = replace(_clearance_error(), severity=Severity.WARNING)
+    back = replace(front, locations=[replace(front.locations[0], layer="B.Cu")])
+    assert fix_drc_cmd._new_errors([back], [front], 0.5, {}) == [back]
 
 
 # ---------------------------------------------------------------------------

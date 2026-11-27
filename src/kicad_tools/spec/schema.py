@@ -57,7 +57,9 @@ __all__ = [
     "Suggestions",
     "ComponentSuggestion",
     "BOMEntry",
+    "PurchasingEntry",
     "LeadProfile",
+    "SmdLandPattern",
     "Decision",
     "Progress",
     "PhaseProgress",
@@ -947,6 +949,120 @@ class LeadProfile(SpecModel):
         return (float(self.width_mm or 0.0), float(self.thickness_mm or 0.0))
 
 
+class SmdLandPattern(SpecModel):
+    """Source-attributed two-terminal SMD land pattern for an exact BOM MPN (Issue #10505).
+
+    Assembly preflight compares these target copper dimensions against the placed
+    two-terminal SMD footprint after undoing placement rotation and front-to-back
+    mirroring.  Either ``pitch_mm`` (center-to-center spacing), ``outer_span_mm``
+    (outer copper-to-copper extent along the terminal axis), or both may be
+    declared: for two equal pads along the terminal axis,
+    ``outer_span_mm = pitch_mm + pad_depth_mm``.  ``source`` must identify the
+    manufacturer drawing and page.
+    """
+
+    pad_shape: Literal["rect", "roundrect", "oval", "circle"] = Field(
+        ...,
+        description="Expected copper pad shape for both terminals (e.g. 'rect', 'roundrect').",
+    )
+    pad_depth_mm: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Expected pad extent along the terminal axis, in millimetres.",
+    )
+    pad_width_mm: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Expected transverse pad width perpendicular to the terminal axis, in mm.",
+    )
+    pitch_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description=(
+            "Expected center-to-center pad pitch along the terminal axis, in millimetres. "
+            "Derived as ``outer_span_mm - pad_depth_mm`` when omitted."
+        ),
+    )
+    outer_span_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description=(
+            "Expected outer copper-to-copper span along the terminal axis, in millimetres. "
+            "Derived as ``pitch_mm + pad_depth_mm`` when omitted."
+        ),
+    )
+    source: str = Field(
+        ...,
+        description=(
+            "Manufacturer drawing and page reference where the land pattern was taken, "
+            "e.g. 'Stackpole RHC series, page 2'."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_land_pattern(self) -> SmdLandPattern:
+        """Require non-blank source, valid span/pitch geometry and non-overlapping pads."""
+        if not (self.source and self.source.strip()):
+            raise ValueError(
+                "SMD land pattern requires a non-empty source (manufacturer drawing and page)"
+            )
+        if self.pitch_mm is None and self.outer_span_mm is None:
+            raise ValueError("SMD land pattern requires pitch_mm, outer_span_mm, or both")
+
+        depth = Decimal(str(self.pad_depth_mm))
+        width = Decimal(str(self.pad_width_mm))
+        if self.pad_shape == "circle" and abs(depth - width) > Decimal("0.001"):
+            raise ValueError(
+                f"SMD land pattern with pad_shape 'circle' requires equal pad_depth_mm "
+                f"({self.pad_depth_mm}) and pad_width_mm ({self.pad_width_mm})"
+            )
+
+        if self.pitch_mm is not None and self.outer_span_mm is not None:
+            implied_outer = Decimal(str(self.pitch_mm)) + depth
+            declared_outer = Decimal(str(self.outer_span_mm))
+            if abs(declared_outer - implied_outer) > Decimal("0.001"):
+                raise ValueError(
+                    f"outer_span_mm ({self.outer_span_mm}) is inconsistent with "
+                    f"pitch_mm + pad_depth_mm ({float(implied_outer):.3f})"
+                )
+
+        pitch = self.resolved_pitch_decimal_mm()
+        if pitch <= depth:
+            raise ValueError(
+                "pitch_mm must exceed pad_depth_mm (outer_span_mm must exceed "
+                "2 * pad_depth_mm) so the two pads do not overlap"
+            )
+        return self
+
+    def resolved_pitch_decimal_mm(self) -> Decimal:
+        """Exact decimal center-to-center pad pitch along the terminal axis."""
+        if self.pitch_mm is not None:
+            return Decimal(str(self.pitch_mm))
+        return Decimal(str(self.outer_span_mm)) - Decimal(str(self.pad_depth_mm))
+
+    def resolved_outer_span_decimal_mm(self) -> Decimal:
+        """Exact decimal outer copper span along the terminal axis."""
+        if self.outer_span_mm is not None:
+            return Decimal(str(self.outer_span_mm))
+        return Decimal(str(self.pitch_mm)) + Decimal(str(self.pad_depth_mm))
+
+    def resolved_pitch_mm(self) -> float:
+        """Center-to-center pad pitch along the terminal axis, in millimetres."""
+        return float(self.resolved_pitch_decimal_mm())
+
+    def resolved_outer_span_mm(self) -> float:
+        """Outer copper span along the terminal axis, in millimetres."""
+        return float(self.resolved_outer_span_decimal_mm())
+
+
 class BOMEntry(SpecModel):
     """Per-reference BOM mapping for explicit part assignment.
 
@@ -988,6 +1104,14 @@ class BOMEntry(SpecModel):
             "precedence over ``lead`` for that pad number only."
         ),
     )
+    land_pattern: SmdLandPattern | None = Field(
+        default=None,
+        description=(
+            "Issue #10505: source-attributed manufacturer SMD land pattern for "
+            "this exact BOM MPN, compared by assembly preflight against placed "
+            "two-terminal SMD copper pads."
+        ),
+    )
 
     @field_validator("pad_leads", mode="before")
     @classmethod
@@ -1017,6 +1141,97 @@ class BOMEntry(SpecModel):
             raise ValueError(
                 f"bom_entries '{self.ref}': an exempt entry must not set lcsc "
                 f"(a part with an LCSC number is verified, not exempted)"
+            )
+        return self
+
+
+class PurchasingEntry(SpecModel):
+    """One supplementary procurement row: something to buy that is not placed (Issue #10431).
+
+    Accessories and off-board parts a complete assembly needs but that have no
+    KiCad placement of their own -- a fuse-holder cover, a cartridge bought
+    separately, chassis resistors wired to land footprints. They never enter the
+    fabricator BOM or CPL; the manufacturing export writes them beside those as a
+    per-board purchasing list, which the submission handoff scales by the board
+    quantity.
+    """
+
+    description: str = Field(..., description="What to buy")
+    quantity: int = Field(
+        ...,
+        description="Units per board; already covers every linked designator",
+    )
+    refs: list[str] | None = Field(
+        default=None,
+        description="Board designators the item belongs to (wire lands included); omit for none",
+    )
+    manufacturer: str | None = Field(default=None, description="Manufacturer of the selected part")
+    mpn: str | None = Field(
+        default=None,
+        description="Manufacturer Part Number of the selected part; quote it when it starts with a digit",
+    )
+    pending: str | None = Field(
+        default=None,
+        description="Set to what is still undecided instead of manufacturer/mpn: the part is not selected yet",
+    )
+
+    @field_validator("description")
+    @classmethod
+    def _description_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("purchasing rows need a non-blank description")
+        return value
+
+    @field_validator("quantity", mode="before")
+    @classmethod
+    def _quantity_not_boolean(cls, value: Any) -> Any:
+        if type(value) is bool:
+            raise ValueError("quantity must be a positive whole number of units per board")
+        return value
+
+    @field_validator("quantity")
+    @classmethod
+    def _quantity_positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("quantity must be a positive whole number of units per board")
+        return value
+
+    @field_validator("refs")
+    @classmethod
+    def _refs_not_blank(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        refs = []
+        for ref in value:
+            if not isinstance(ref, str) or not ref.strip():
+                raise ValueError("refs must list non-blank designators")
+            ref = ref.strip()
+            if ref in refs:
+                raise ValueError(f"refs must not repeat a designator: {ref}")
+            refs.append(ref)
+        return refs
+
+    @field_validator("manufacturer", "mpn", "pending")
+    @classmethod
+    def _optional_text_not_blank(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError(f"{info.field_name} must be non-blank when set")
+        return value
+
+    @model_validator(mode="after")
+    def _selection_is_complete(self) -> PurchasingEntry:
+        if self.pending is not None:
+            if self.manufacturer is not None or self.mpn is not None:
+                raise ValueError("a pending row must not set manufacturer or mpn")
+            return self
+        if self.manufacturer is None or self.mpn is None:
+            raise ValueError(
+                "a selected row needs both manufacturer and mpn; "
+                "otherwise pending must say what is still to be selected"
             )
         return self
 
@@ -1110,6 +1325,10 @@ class ProjectSpec(SpecModel):
     bom_entries: list[BOMEntry] | None = Field(
         default=None,
         description="Per-reference BOM part mappings (MPN, LCSC)",
+    )
+    purchasing: list[PurchasingEntry] | None = Field(
+        default=None,
+        description="Supplementary per-board procurement rows for accessories and off-board parts",
     )
     decisions: list[Decision] | None = Field(default=None, description="Design decisions")
     progress: Progress | None = Field(default=None, description="Progress tracking")

@@ -145,7 +145,9 @@ class SymbolInstance:
         (reference ...))))`` block. This returns the ``reference`` of the
         ``path`` entry equal to ``instance_path`` (the KiCad instance path
         of the sheet placement, e.g. :attr:`HierarchyNode.instance_path`),
-        or ``None`` when the symbol has no entry for that placement.
+        or ``None`` when the symbol has no entry for that placement. KiCad's
+        native export uses the last matching annotation in file order when
+        more than one project records the same placement path.
         """
         if not instance_path or self._sexp is None:
             return None
@@ -153,8 +155,8 @@ class SymbolInstance:
         instances = self._sexp.find_child("instances")
         if instances is None:
             return None
-        for project in instances.find_children("project"):
-            for path_node in project.find_children("path"):
+        for project in reversed(instances.find_children("project")):
+            for path_node in reversed(project.find_children("path")):
                 if (path_node.get_string(0) or "").rstrip("/") != wanted:
                     continue
                 ref_node = path_node.find_child("reference")

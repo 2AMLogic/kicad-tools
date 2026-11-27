@@ -929,8 +929,8 @@ def _add_creepage_parser(subparsers) -> None:
             "and JSON) instead of the collapsed minimum, and the raw "
             "measurements/verdicts stay in the JSON.  The exit code follows "
             "the waiver-aware gate: exit 0 only when every un-waived metric "
-            "clears.  An invalid, ambiguous or unmatched selector is an error "
-            "-- it can never silently waive a finding.  Composes with "
+            "clears. Invalid or ambiguous selectors are errors. A valid selector "
+            "outside the audited pairs produces a warning and waives nothing. Composes with "
             "--waive-same-footprint; does NOT affect the kct audit gate."
         ),
     )
@@ -5894,12 +5894,22 @@ def _add_fix_drc_parser(subparsers) -> None:
         help="Output format (default: text)",
     )
     fix_drc_parser.add_argument(
+        "--no-new-warnings",
+        action="store_true",
+        help=(
+            "With --only mask-copper, compare the saved board with the pre-edit "
+            "board and revert moves that introduce errors or warnings. An error "
+            "may improve to a warning. Exit 4 means the mask assessment failed."
+        ),
+    )
+    fix_drc_parser.add_argument(
         "--transactional",
         action="store_true",
         help=(
             "Snapshot the output file before repairing and roll it back "
             "byte-identical if the run fails (exception, Ctrl-C, no-progress "
-            "exit 1, or connectivity-rollback exit 3); the failed attempt is "
+            "exit 1, connectivity-rollback exit 3, or failed mask assessment "
+            "exit 4); the failed attempt is "
             "preserved as a <file>.failed-<timestamp> sidecar. Exit 2 "
             "(partial repair) keeps the applied repairs."
         ),
@@ -5933,6 +5943,10 @@ def _add_parts_parser(subparsers) -> None:
     """Add parts subcommand parser with its subcommands."""
     parts_parser = subparsers.add_parser("parts", help="LCSC parts lookup and search")
     parts_subparsers = parts_parser.add_subparsers(dest="parts_command", help="Parts commands")
+
+    from .parts_cmd import add_stock_parser
+
+    add_stock_parser(parts_subparsers)
 
     # parts lookup
     parts_lookup = parts_subparsers.add_parser("lookup", help="Look up part by LCSC number")
@@ -6880,7 +6894,15 @@ def _add_validate_parser(subparsers) -> None:
     validate_parser.add_argument(
         "validate_files",
         nargs="*",
-        help="Path(s) to project/schematic/PCB files. Accepts: .kicad_pro, .kicad_sch, .kicad_pcb",
+        help="Project, schematic or PCB paths. --channel-intent also accepts an exported netlist.",
+    )
+    validate_parser.add_argument(
+        "--channel-intent",
+        metavar="DECLARATION.json",
+        help="Check declared channel instances against a .kicad_sch or KiCad S-expression netlist and a .kicad_pcb",
+    )
+    validate_parser.add_argument(
+        "--netlist", dest="validate_netlist", help="Exported netlist for --channel-intent"
     )
     validate_parser.add_argument(
         "--sync",
@@ -6963,6 +6985,10 @@ def _add_analyze_parser(subparsers) -> None:
     analyze_subparsers = analyze_parser.add_subparsers(
         dest="analyze_command", help="Analysis commands"
     )
+
+    from .reference_coverage import add_parser as add_reference_coverage_parser
+
+    add_reference_coverage_parser(analyze_subparsers)
 
     # analyze congestion
     congestion_parser = analyze_subparsers.add_parser(
@@ -10736,6 +10762,12 @@ def _add_export_parser(subparsers) -> None:
         dest="export_no_spec",
         action="store_true",
         help="Disable BOM enrichment from .kct project spec",
+    )
+    export_parser.add_argument(
+        "--project-root",
+        dest="export_project_root",
+        metavar="DIR",
+        help="Root for project-relative export inputs (defaults to the PCB directory)",
     )
     export_parser.add_argument(
         "--spec",

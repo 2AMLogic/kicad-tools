@@ -742,6 +742,360 @@ class TestBOMEntryLeadDeclarations:
         assert spec.requirements.manufacturing.finished_hole_tolerance_mm == pytest.approx(-0.08)
 
 
+class TestSmdLandPattern:
+    """Verified SMD land-pattern declarations on a BOM entry (Issue #10505)."""
+
+    def test_outer_span_derives_pitch(self):
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        pattern = SmdLandPattern(
+            pad_shape="rect",
+            pad_depth_mm=3.00,
+            pad_width_mm=3.50,
+            outer_span_mm=8.00,
+            source="Stackpole RHC series, page 2",
+        )
+        assert pattern.resolved_pitch_mm() == pytest.approx(5.00)
+        assert pattern.resolved_outer_span_mm() == pytest.approx(8.00)
+
+    def test_pitch_derives_outer_span(self):
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        pattern = SmdLandPattern(
+            pad_shape="roundrect",
+            pad_depth_mm=1.225,
+            pad_width_mm=3.35,
+            pitch_mm=5.925,
+            source="KiCad R_2512_6332Metric",
+        )
+        assert pattern.resolved_pitch_mm() == pytest.approx(5.925)
+        assert pattern.resolved_outer_span_mm() == pytest.approx(7.150)
+
+    def test_both_pitch_and_outer_span_consistent(self):
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        pattern = SmdLandPattern(
+            pad_shape="rect",
+            pad_depth_mm=3.00,
+            pad_width_mm=3.50,
+            pitch_mm=5.00,
+            outer_span_mm=8.00,
+            source="Stackpole RHC series, page 2",
+        )
+        assert pattern.resolved_pitch_mm() == pytest.approx(5.00)
+        assert pattern.resolved_outer_span_mm() == pytest.approx(8.00)
+
+    def test_inconsistent_pitch_and_outer_span_rejected(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        with pytest.raises(ValidationError, match="outer_span_mm"):
+            SmdLandPattern(
+                pad_shape="rect",
+                pad_depth_mm=3.00,
+                pad_width_mm=3.50,
+                pitch_mm=5.00,
+                outer_span_mm=8.50,
+                source="Stackpole RHC series, page 2",
+            )
+
+    def test_missing_both_pitch_and_outer_span_rejected(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        with pytest.raises(ValidationError, match="pitch_mm"):
+            SmdLandPattern(
+                pad_shape="rect",
+                pad_depth_mm=3.00,
+                pad_width_mm=3.50,
+                source="Stackpole RHC series, page 2",
+            )
+
+    def test_overlapping_pads_rejected(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        with pytest.raises(ValidationError, match="overlap"):
+            SmdLandPattern(
+                pad_shape="rect",
+                pad_depth_mm=3.00,
+                pad_width_mm=3.50,
+                outer_span_mm=6.00,
+                source="Stackpole RHC series, page 2",
+            )
+
+    def test_blank_or_missing_source_rejected(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        with pytest.raises(ValidationError, match="source"):
+            SmdLandPattern(
+                pad_shape="rect",
+                pad_depth_mm=3.00,
+                pad_width_mm=3.50,
+                outer_span_mm=8.00,
+                source="   ",
+            )
+
+    def test_non_positive_or_invalid_shape_rejected(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        with pytest.raises(ValidationError):
+            SmdLandPattern(
+                pad_shape="rect",
+                pad_depth_mm=0.0,
+                pad_width_mm=3.50,
+                outer_span_mm=8.00,
+                source="Stackpole RHC series, page 2",
+            )
+        with pytest.raises(ValidationError):
+            SmdLandPattern(
+                pad_shape="trapezoid",  # type: ignore[arg-type]
+                pad_depth_mm=3.00,
+                pad_width_mm=3.50,
+                outer_span_mm=8.00,
+                source="Stackpole RHC series, page 2",
+            )
+
+    def test_circle_with_unequal_axes_rejected(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        with pytest.raises(ValidationError, match="circle"):
+            SmdLandPattern(
+                pad_shape="circle",
+                pad_depth_mm=1.0,
+                pad_width_mm=1.5,
+                pitch_mm=3.0,
+                source="drawing, p. 1",
+            )
+
+    def test_land_pattern_parses_and_round_trips(self, tmp_path):
+        from kicad_tools.spec.parser import load_spec, save_spec
+        from kicad_tools.spec.schema import (
+            BOMEntry,
+            ProjectMetadata,
+            ProjectSpec,
+            SmdLandPattern,
+        )
+
+        spec = ProjectSpec(
+            project=ProjectMetadata(name="T"),
+            bom_entries=[
+                BOMEntry(
+                    ref="R40-R41",
+                    part="RHC2512FT4K70",
+                    land_pattern=SmdLandPattern(
+                        pad_shape="rect",
+                        pad_depth_mm=3.00,
+                        pad_width_mm=3.50,
+                        outer_span_mm=8.00,
+                        source="Stackpole RHC series, page 2",
+                    ),
+                )
+            ],
+        )
+        path = tmp_path / "project.kct"
+        save_spec(spec, path)
+        loaded = load_spec(path)
+        assert loaded.bom_entries is not None
+        entry = loaded.bom_entries[0]
+        assert entry.land_pattern == spec.bom_entries[0].land_pattern
+
+
+class TestPurchasingEntries:
+    """Supplementary procurement rows declared in a .kct file (Issue #10431)."""
+
+    # Synthetic purchasing identifiers only: nothing here names a real product.
+    FUSE_ROWS = (
+        "purchasing:\n"
+        "  - description: Snap-on cover for the 5 x 20 mm fuse holder\n"
+        "    quantity: 3\n"
+        "    refs: [F1, F2, F3]\n"
+        "    manufacturer: Example Fuse Co\n"
+        "    mpn: SYN-COVER-1\n"
+        "  - description: 5 x 20 mm cartridge, AC\n"
+        "    quantity: 1\n"
+        "    refs: [F1]\n"
+        "    manufacturer: Example Fuse Co\n"
+        "    mpn: SYN-CART-AC\n"
+        "  - description: 5 x 20 mm cartridge, DC\n"
+        "    quantity: 2\n"
+        "    refs: [F2, F3]\n"
+        "    pending: DC rating and breaking capacity still to be chosen\n"
+        "  - description: Chassis ballast resistor, wire wound\n"
+        "    quantity: 2\n"
+        "    refs: [R9, R10]\n"
+        "    manufacturer: Example Resistor Co\n"
+        "    mpn: SYN-BALLAST-1\n"
+    )
+
+    def _load(self, tmp_path, rows):
+        from kicad_tools.spec.parser import load_spec
+
+        path = tmp_path / "project.kct"
+        path.write_text(f"kct_version: '1.0'\nproject:\n  name: T\n{rows}")
+        return load_spec(path)
+
+    def test_unset_by_default(self):
+        from kicad_tools.spec.schema import ProjectMetadata, ProjectSpec
+
+        assert ProjectSpec(project=ProjectMetadata(name="T")).purchasing is None
+
+    def test_fuse_example_parses(self, tmp_path):
+        cover, ac, dc, ballast = self._load(tmp_path, self.FUSE_ROWS).purchasing
+
+        assert cover.description == "Snap-on cover for the 5 x 20 mm fuse holder"
+        assert cover.quantity == 3
+        assert cover.refs == ["F1", "F2", "F3"]
+        assert (cover.manufacturer, cover.mpn, cover.pending) == (
+            "Example Fuse Co",
+            "SYN-COVER-1",
+            None,
+        )
+        assert (ac.refs, ac.quantity, ac.mpn) == (["F1"], 1, "SYN-CART-AC")
+        # A pending row keeps its quantity and carries no part number at all.
+        assert (dc.quantity, dc.refs, dc.pending) == (
+            2,
+            ["F2", "F3"],
+            "DC rating and breaking capacity still to be chosen",
+        )
+        assert dc.manufacturer is None and dc.mpn is None
+        # A chassis item links to wire lands; another row may omit the board link.
+        assert (ballast.refs, ballast.mpn) == (["R9", "R10"], "SYN-BALLAST-1")
+
+    def test_row_without_board_reference_and_empty_list(self, tmp_path):
+        rows = (
+            "purchasing:\n"
+            "  - description: Chassis ballast resistor\n"
+            "    quantity: 1\n"
+            "    manufacturer: Example Resistor Co\n"
+            "    mpn: SYN-BALLAST-1\n"
+        )
+        only = self._load(tmp_path, rows).purchasing
+        assert only[0].refs is None
+        assert self._load(tmp_path, "purchasing: []\n").purchasing == []
+
+    @pytest.mark.parametrize("exclude_none", [True, False])
+    def test_round_trip(self, tmp_path, exclude_none):
+        from kicad_tools.spec.parser import load_spec, save_spec
+
+        path = tmp_path / "project.kct"
+        spec = self._load(tmp_path, self.FUSE_ROWS)
+        save_spec(spec, path, exclude_none=exclude_none)
+        assert load_spec(path).purchasing == spec.purchasing
+
+    def test_blank_surrounding_whitespace_is_trimmed(self, tmp_path):
+        rows = (
+            "purchasing:\n"
+            "  - description: '  Cover  '\n"
+            "    quantity: 1\n"
+            "    refs: [' F1 ', '']\n"
+            "    pending: undecided\n"
+        )
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="non-blank designators"):
+            self._load(tmp_path, rows)
+        rows = rows.replace("' F1 ', ''", "' F1 '")
+        (entry,) = self._load(tmp_path, rows).purchasing
+        assert (entry.description, entry.refs) == ("Cover", ["F1"])
+
+    @pytest.mark.parametrize(
+        ("rows", "message"),
+        [
+            (("    quantity: 0\n"), "positive whole number"),
+            (("    quantity: -2\n"), "positive whole number"),
+            (("    quantity: 1.5\n"), "valid integer"),
+            (("    quantity: true\n"), "positive whole number"),
+            (("    description: '   '\n    quantity: 1\n"), "non-blank description"),
+            (("    quantity: 1\n    manufacturer: Example\n"), "needs both manufacturer and mpn"),
+            (("    quantity: 1\n    mpn: SYN-1\n"), "needs both manufacturer and mpn"),
+            (("    quantity: 1\n"), "needs both manufacturer and mpn"),
+            (
+                ("    quantity: 1\n    manufacturer: Example\n    mpn: '  '\n"),
+                "non-blank",
+            ),
+            (
+                (
+                    "    quantity: 1\n    manufacturer: Example\n    mpn: SYN-1\n"
+                    "    pending: undecided\n"
+                ),
+                "must not set manufacturer or mpn",
+            ),
+            (("    quantity: 1\n    pending: '  '\n"), "pending must be non-blank"),
+            (("    quantity: 1\n    pending:\n"), "pending must say"),
+            (
+                ("    quantity: 1\n    refs: [F1, F1]\n    pending: undecided\n"),
+                "repeat a designator",
+            ),
+            (
+                ("    quantity: 1\n    refs: ['']\n    pending: undecided\n"),
+                "non-blank designators",
+            ),
+            (("    quantity: 1\n    refs: F1\n    pending: undecided\n"), "valid list"),
+            (("    quantity: 1\n    mpn: 12345\n    pending: undecided\n"), "valid string"),
+        ],
+        ids=[
+            "zero-quantity",
+            "negative-quantity",
+            "fractional-quantity",
+            "boolean-quantity",
+            "blank-description",
+            "manufacturer-without-mpn",
+            "mpn-without-manufacturer",
+            "neither-selected-nor-pending",
+            "blank-mpn",
+            "pending-with-part-number",
+            "blank-pending",
+            "bare-pending",
+            "repeated-designator",
+            "blank-designator",
+            "designators-not-a-list",
+            "numeric-mpn-needs-quoting",
+        ],
+    )
+    def test_invalid_row_is_refused_with_its_input_error(self, tmp_path, rows, message):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match=message) as refused:
+            self._load(tmp_path, f"purchasing:\n  - description: Cover\n{rows}")
+        assert "purchasing.0" in str(refused.value)
+
+    def test_unquoted_part_number_losing_leading_zeros_is_refused(self, tmp_path):
+        """``0031.8221`` unquoted is a YAML float; it must never become ``31.8221``."""
+        from pydantic import ValidationError
+
+        rows = "purchasing:\n  - description: Holder\n    quantity: 1\n    mpn: 0031.8221\n"
+        with pytest.raises(ValidationError, match="valid string"):
+            self._load(tmp_path, rows)
+        rows = rows.replace("mpn: 0031.8221", "manufacturer: Example\n    mpn: '0031.8221'")
+        assert self._load(tmp_path, rows).purchasing[0].mpn == "0031.8221"
+
+    def test_rows_may_share_a_designator(self, tmp_path):
+        rows = (
+            "purchasing:\n"
+            "  - description: Cover\n"
+            "    quantity: 1\n"
+            "    refs: [F1]\n"
+            "    manufacturer: Example\n"
+            "    mpn: SYN-COVER-1\n"
+            "  - description: Cartridge\n"
+            "    quantity: 1\n"
+            "    refs: [F1]\n"
+            "    manufacturer: Example\n"
+            "    mpn: SYN-CART-AC\n"
+        )
+        assert [row.refs for row in self._load(tmp_path, rows).purchasing] == [["F1"], ["F1"]]
+
+
 class TestMountingHoleGroupSpec:
     """Tests for the MountingHoleGroupSpec schema (Issue #3352, P_AS1)."""
 
