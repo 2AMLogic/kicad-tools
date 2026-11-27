@@ -286,9 +286,9 @@ def _tolerances(part: Part, passive: str | None) -> set[tuple[Fraction, Fraction
     """Return published (lower, upper) deviations as percentages of nominal."""
     values = set()
     percent_count = 0
-    for match in _PERCENT_TOL.finditer(part.description):
-        values.add(_percent_limits(match))
-        percent_count += match[0].count("%")
+    for description_match in _PERCENT_TOL.finditer(part.description):
+        values.add(_percent_limits(description_match))
+        percent_count += description_match[0].count("%")
     if percent_count != part.description.count("%"):
         raise ValueError("Unrecognized percentage tolerance")
     absolute = _ABSOLUTE_CAP_TOL.findall(part.description) if passive == "cap" else []
