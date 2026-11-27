@@ -12412,17 +12412,32 @@ def _uniform_board_mask_margin(pcb_path) -> float | None:
     The trace optimizer's mask-opening guard (Issue #9424) models each pad's
     opening as its copper grown by one margin.  A per-pad or per-footprint
     ``solder_mask_margin``, or a custom rule file that touches the mask, makes
-    that false, so ``None`` keeps the guard off rather than guessing.  A board
+    that false. Nonzero minimum web widths can merge adjacent openings, so
+    board or project settings that require this also disable the guard. A board
     that declares no ``pad_to_mask_clearance`` has no expansion (0.0).
     """
+    import json
+
     try:
         text = Path(pcb_path).read_text(errors="replace")
+        minimum = re.search(r"\(solder_mask_min_width\s+([^()\s]+)\s*\)", text)
+        if minimum and float(minimum[1]) != 0:
+            return None
+        project = Path(pcb_path).with_suffix(".kicad_pro")
+        if project.is_file():
+            settings = json.loads(project.read_text()).get("board", {}).get("design_settings", {})
+            rules_settings = settings.get("rules", {})
+            if any(
+                rules_settings.get(key, 0)
+                for key in ("solder_mask_min_width", "solder_mask_clearance")
+            ):
+                return None
         if _MASK_MARGIN_OVERRIDE in text:
             return None
         rules = Path(pcb_path).with_suffix(".kicad_dru")
         if rules.is_file() and "solder_mask" in rules.read_text(errors="replace"):
             return None
-    except OSError:
+    except (OSError, ValueError, AttributeError):
         return None
     match = _BOARD_MASK_MARGIN.search(text)
     if match is None:

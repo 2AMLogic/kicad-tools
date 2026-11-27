@@ -2861,6 +2861,7 @@ def load_pads_for_analysis(
                     shape=pad_shape,
                     roundrect_rratio=_pad_rratio_from_block(pad_block, pad_shape),
                     chamfered_outline=_pad_chamfered_outline(pad_block),
+                    authored_layers=_pad_authored_layers_from_block(pad_block),
                     copper_offset=_pad_copper_offset_from_block(pad_block, pad_rot),
                 )
             )
@@ -5002,6 +5003,7 @@ def route_pcb(
                     "shape": pad.get("shape", "rect"),
                     "roundrect_rratio": pad.get("roundrect_rratio"),
                     "chamfered_outline": pad.get("chamfered_outline", ()),
+                    "authored_layers": pad.get("authored_layers", ()),
                     "copper_offset": pad.get("copper_offset", (0.0, 0.0)),
                     "height": pad.get("height", 0.5),
                     "net": net_num,
@@ -5145,6 +5147,12 @@ def _schema_pad_shape(pad, ref: str) -> str:
     )
 
 
+def _pad_authored_layers_from_block(block: str) -> tuple[str, ...]:
+    """Read the layer names and wildcards declared by a pad."""
+    match = re.search(r"\(layers\s+([^()]*)\)", block)
+    return tuple(token.strip('"') for token in match[1].split()) if match else ()
+
+
 def _pad_copper_offset_from_block(block: str, rotation: float) -> tuple[float, float]:
     """KiCad stores the copper displacement in pad-local axes under ``drill``."""
     if "(offset" not in block:
@@ -5211,6 +5219,7 @@ def _schema_pad_shape_fields(pad, ref: str) -> dict:
         "shape": _schema_pad_shape(pad, ref),
         "roundrect_rratio": _schema_pad_rratio(pad),
         "chamfered_outline": _pad_chamfered_outline(getattr(pad, "_sexp_node", None)),
+        "authored_layers": tuple(pad.layers),
         "copper_offset": rotate_pad_offset(offset_x, offset_y, pad.rotation),
     }
 
@@ -5909,16 +5918,11 @@ def load_pcb_for_routing(
             # For thru-hole pads: (layers "*.Cu" "*.Paste" "*.Mask") - means all copper layers
             # We need to find the copper layer name (*.Cu pattern)
             pad_layer = Layer.F_CU  # Default to top layer
-            layers_match = re.search(r"\(layers\s+([^)]+)\)", pad_block)
-            if layers_match:
-                layers_str = layers_match.group(1)
-                # Find copper layer names (ending with .Cu)
-                copper_layers = re.findall(r'"([^"]+\.Cu)"', layers_str)
-                if copper_layers:
-                    # Check for wildcard (*.Cu means all copper layers - thru-hole)
-                    if copper_layers[0] != "*.Cu":
-                        with contextlib.suppress(ValueError):
-                            pad_layer = Layer.from_kicad_name(copper_layers[0])
+            authored_layers = _pad_authored_layers_from_block(pad_block)
+            first_copper = next((name for name in authored_layers if name.endswith(".Cu")), None)
+            if first_copper and first_copper != "*.Cu":
+                with contextlib.suppress(ValueError):
+                    pad_layer = Layer.from_kicad_name(first_copper)
 
             # Override with netlist if provided
             if netlist:
@@ -6036,6 +6040,7 @@ def load_pcb_for_routing(
                     "shape": pad_shape,
                     "roundrect_rratio": _pad_rratio_from_block(pad_block, pad_shape),
                     "chamfered_outline": _pad_chamfered_outline(pad_block),
+                    "authored_layers": authored_layers,
                     "copper_offset": _pad_copper_offset_from_block(pad_block, pad_rot),
                 }
             )

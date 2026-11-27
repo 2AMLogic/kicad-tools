@@ -569,6 +569,7 @@ def mask_opening_check(
     from kicad_tools.validate.mask_copper import clean_own_pad_entry
 
     from ..layers import Layer
+    from ..terminal_connectivity import _contact_outline
 
     reach = clearance + _MASK_UNCERTAINTY_MM
     openings: dict[tuple[int, Layer], list[tuple[BaseGeometry, BaseGeometry, str]]] = defaultdict(
@@ -578,13 +579,19 @@ def mask_opening_check(
         kind = f"pad:{pad.shape}"
         if pad.steiner_point or not pad.net or kind not in _MASK_ENTRY_PAD_KINDS:
             continue
-        copper = _pad_copper(pad)
+        layers = [
+            layer
+            for name, layer in (("F.Mask", Layer.F_CU), ("B.Mask", Layer.B_CU))
+            if name in pad.authored_layers or "*.Mask" in pad.authored_layers
+        ]
+        if not layers:
+            continue
+        copper = _contact_outline(pad)
         if copper is None or copper.is_empty:
             continue
         opening = copper.buffer(mask_margin, quad_segs=64) if mask_margin else copper
         if opening.is_empty:
             continue
-        layers = (Layer.F_CU, Layer.B_CU) if pad.through_hole else (pad.layer,)
         for layer in layers:
             openings[pad.net, layer].append((opening, copper, kind))
     if not openings:

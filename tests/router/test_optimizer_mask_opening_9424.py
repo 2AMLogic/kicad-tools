@@ -116,7 +116,18 @@ def _router(origin, pads, points, net, name):
         physics_enabled=False,
     )
     for ref, kwargs in pads:
-        router.add_component(ref, [{"number": "1", "net": net, "net_name": name, **kwargs}])
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": "1",
+                    "net": net,
+                    "net_name": name,
+                    "authored_layers": ("*.Mask",) if kwargs.get("through_hole") else ("F.Mask",),
+                    **kwargs,
+                }
+            ],
+        )
     route = Route(
         net=net,
         net_name=name,
@@ -272,3 +283,63 @@ def test_route_mask_guard_resolution(tmp_path):
     assert _resolve_route_mask_guard("jlcpcb", board) == GUARD
     board.write_text("(pad (solder_mask_margin 0.1))")
     assert _resolve_route_mask_guard("jlcpcb", board) is None
+
+
+def test_covered_pads_cannot_offset_a_new_front_mask_defect():
+    from pathlib import Path
+
+    from kicad_tools.router.io import load_pcb_for_routing
+
+    fixture = Path(__file__).parents[1] / "fixtures" / "mask_pass_through_via_contact.kicad_pcb"
+    router, _ = load_pcb_for_routing(str(fixture), validate_drc=False, force_python=True)
+    points = [(91, 99.35), (92.7, 101.05), (106, 101.05), (107.7, 99.35), (109, 99.35)]
+    check = mask_opening_check(router.grid, JLCPCB_MASK_CLEARANCE)
+    original = [
+        Segment(*a, *b, 0.2, Layer.F_CU, 1, "N1") for a, b in zip(points, points[1:], strict=False)
+    ]
+    shortcut = Segment(*points[0], *points[-1], 0.2, Layer.F_CU, 1, "N1")
+    assert not check(original, [shortcut], [])
+    shortcut.layer = Layer.B_CU
+    assert check([], [shortcut], [])
+
+
+def test_mask_opening_follows_offset_and_chamfer():
+    offset = {
+        "x": 100,
+        "y": 100,
+        "width": 2,
+        "height": 2,
+        "shape": "rect",
+        "through_hole": True,
+        "drill": 0.4,
+        "copper_offset": (0, 0.6),
+    }
+    grid = _router((92, 92), [("R1", offset)], [], 1, "N1").grid
+    check = mask_opening_check(grid, JLCPCB_MASK_CLEARANCE)
+    for layer in (Layer.F_CU, Layer.B_CU):
+        assert not check([], [Segment(97, 101.75, 103, 101.75, 0.2, layer, 1, "N1")], [])
+
+    chamfer = {
+        **offset,
+        "shape": "roundrect",
+        "copper_offset": (0, 0),
+        "chamfered_outline": ((-1, -1), (0, -1), (1, 0), (1, 1), (-1, 1)),
+    }
+    grid = _router((92, 92), [("R1", chamfer)], [], 1, "N1").grid
+    check = mask_opening_check(grid, JLCPCB_MASK_CLEARANCE)
+    assert check([], [Segment(100, 98, 102, 100, 0.1, Layer.F_CU, 1, "N1")], [])
+
+
+@pytest.mark.parametrize("minimum", [0, 0.65])
+def test_mask_web_merging_disables_guard_in_board_or_project(tmp_path, minimum):
+    import json
+
+    board = tmp_path / "board.kicad_pcb"
+    expected = GUARD if minimum == 0 else None
+    board.write_text(f"(setup (solder_mask_min_width {minimum}))")
+    assert _resolve_route_mask_guard("jlcpcb", board) == expected
+    board.write_text("(setup)")
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"solder_mask_min_width": minimum}}}})
+    )
+    assert _resolve_route_mask_guard("jlcpcb", board) == expected
