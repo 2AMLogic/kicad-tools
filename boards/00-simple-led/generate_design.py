@@ -962,7 +962,6 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         _write_drc_constraint_sidecars,
         _write_netclasses_to_project,
     )
-
     from kicad_tools.router.rules import NetClassRouting
 
     class_map = dict(router.net_class_map)

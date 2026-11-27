@@ -148,6 +148,8 @@ class _FakeRouter:
 
     def __init__(self, nets_routed: int) -> None:
         self.nets = {1: [("R1", "1")], 2: [("R1", "2"), ("D1", "2")]}
+        self.net_class_map: dict = {}
+        self.rules = SimpleNamespace(via_drill=0.3)
         self.routes: list = []
         self.grid = SimpleNamespace(width=20.0, height=20.0)
         self._nets_routed = nets_routed
