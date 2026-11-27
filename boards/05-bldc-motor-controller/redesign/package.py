@@ -2,15 +2,21 @@
 
 import csv
 import hashlib
+import io
 import json
-import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
 from hardware import ROOT
+
+from kicad_tools.cli.readiness_cmd import write_manufacturing_archive
+from kicad_tools.cli.runner import parity_skipped_in_output
+from kicad_tools.schema.pcb import PCB
 
 
 def export_package(output):
@@ -28,6 +34,8 @@ def export_package(output):
             "--output",
             str(destination),
             "--strict-preflight",
+            # Plot the silk already checked by native DRC and the manufacturer.
+            "--no-silk-fix",
             "--drc-report",
             str(output / "readiness" / "native-drc.json"),
             "--erc-report",
@@ -106,12 +114,8 @@ def export_package(output):
     cpl = list(csv.DictReader((destination / "cpl_jlcpcb.csv").open()))
     # JLCPCB assembles through-hole parts, so since #7242 the CPL lists every
     # placed footprint (36 SMT + J1-J5 + RV1), not only the SMT ones.
-    board_refs = set(
-        re.findall(
-            r'\(property "Reference" "([^"]+)"',
-            (output / "bldc_controller_routed.kicad_pcb").read_text(),
-        )
-    )
+    pcb = PCB.load(output / "bldc_controller_routed.kicad_pcb")
+    board_refs = {fp.reference for fp in pcb.footprints if not fp.exclude_from_pos_files}
     assert {row["Designator"] for row in cpl} == board_refs
     assert len(cpl) == len(board_refs) == 42
     assert {"J1", "J2", "J3", "J4", "J5", "RV1"} <= board_refs
@@ -124,7 +128,6 @@ def export_package(output):
         "board05_revB.kicad_sym",
         "fp-lib-table",
         "sym-lib-table",
-        "bldc_controller_routed.kicad_dru",
     ]:
         entries[name] = (output / name).read_bytes()
     for path in (output / "board05_revB.pretty").rglob("*.kicad_mod"):
@@ -133,7 +136,59 @@ def export_package(output):
         for name, data in entries.items():
             z.writestr(name, data)
     refresh_manifest(destination)
+    bundle = write_manufacturing_archive(destination)
+    with tempfile.TemporaryDirectory(prefix="bldc-editable-") as work, zipfile.ZipFile(bundle) as z:
+        with zipfile.ZipFile(io.BytesIO(z.read("manufacturing/kicad_project.zip"))) as project:
+            project.extractall(work)
+        (board,) = Path(work).rglob("*.kicad_pcb")
+        netlist = verify_editable_project(board)
+        schematic_parts = {
+            comp.attrib["ref"]: comp.findtext("./fields/field[@name='LCSC']")
+            for comp in netlist.findall("./components/comp")
+        }
+        with z.open("manufacturing/bom_jlcpcb.csv") as raw:
+            assignments = [
+                (ref.strip(), row["LCSC Part #"])
+                for row in csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8-sig"))
+                for ref in row["Designator"].split(",")
+            ]
+        if len(assignments) != 42 or sorted(assignments) != sorted(schematic_parts.items()):
+            raise RuntimeError("Grouped purchasing BOM differs from the editable schematic")
     return destination
+
+
+def verify_editable_project(board):
+    """Validate the delivered filenames and saved copper in an extracted project."""
+    sch = board.with_suffix(".kicad_sch")
+    report = board.parent / "parity.json"
+    flags = ["--severity-all", "--exit-code-violations", "--format", "json"]
+    result = subprocess.run(
+        ["kicad-cli", "pcb", "drc", board, "--schematic-parity", *flags, "-o", report],
+        capture_output=True,
+        text=True,
+    )
+    if parity_skipped_in_output(result.stdout, result.stderr):
+        raise RuntimeError(f"KiCad could not load the matching schematic {sch.name} for parity")
+    if not report.is_file():
+        raise RuntimeError(f"No editable-project DRC report: {result.stdout}{result.stderr}")
+    drc = json.loads(report.read_text())
+    for key in ("schematic_parity", "violations", "unconnected_items"):
+        if drc[key]:
+            raise RuntimeError(f"Editable project {key}: {drc[key]}")
+    result.check_returncode()
+    netlist = board.parent / "netlist.xml"
+    subprocess.run(
+        ["kicad-cli", "sch", "export", "netlist", sch, "--format", "kicadxml", "-o", netlist],
+        check=True,
+    )
+    exported = ET.parse(netlist)
+    if not exported.findall("./nets/net/node"):
+        raise RuntimeError(f"No schematic connections exported from {sch.name}")
+    erc = board.parent / "erc.json"
+    subprocess.run(["kicad-cli", "sch", "erc", sch, *flags, "-o", erc], check=True)
+    if any(sheet["violations"] for sheet in json.loads(erc.read_text())["sheets"]):
+        raise RuntimeError(f"Editable project ERC findings in {erc}")
+    return exported
 
 
 def refresh_manifest(destination):

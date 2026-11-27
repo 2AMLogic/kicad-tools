@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 from hardware import ROOT, generate
@@ -225,10 +226,24 @@ def reviewed_net_class_map(routed):
     read from the stage rather than from the recipe source: a stage carrying
     another copy is verified against what it actually ships.
     """
-    from kicad_tools.manufacturers.project_generator import board_net_names
+    from kicad_tools.cli.pcb_sync_netlist import _copper_net_usage
     from kicad_tools.router.rules import net_class_map_from_path
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.netlist import is_unconnected_pad_net
 
-    nets = {name for name in (board_net_names(routed) or ()) if name}
+    pcb = PCB.load(routed)
+    nets = {net.name for net in pcb.nets.values() if net.name}
+    # Only flagged, single-pad nets with no routing can omit a routing class.
+    uses = Counter(pad.net_name for fp in pcb.footprints for pad in fp.pads)
+    uses.update(_copper_net_usage(pcb))
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if (
+                uses[pad.net_name] == 1
+                and (pad.pintype or "").endswith("no_connect")
+                and is_unconnected_pad_net(pad.net_name, fp.reference, pad.number)
+            ):
+                nets.discard(pad.net_name)
     if not nets:
         raise RuntimeError(f"No named board nets found in {routed}")
     staged = net_class_map_from_path(routed.parent / "net_class_map.json", pcb_path=routed)
@@ -253,7 +268,7 @@ def declare_router_netclasses(routed):
     regeneration silently dropped the ``Reviewed clearance - <class>`` rules,
     loosening those nets to the 0.1016 mm fab floor.
 
-    Every named board net must have its own reviewed entry before any
+    Every signal net must have its own reviewed entry before any
     sidecar is written. These entries override the router defaults just as
     ``kct route`` applies a loaded ``--net-class-map``. The board map
     names the motor and ground nets ``Motor power`` and ``Ground plane`` where
