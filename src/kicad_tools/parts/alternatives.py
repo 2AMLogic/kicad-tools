@@ -110,11 +110,8 @@ def _quantity(unit: str) -> re.Pattern[str]:
 _VOLTAGE_VALUE = rf"(±|\+/-|[+\-−])?\s*({_NUMBER})\s*([mkµu]?)V(?:\s*((?i:AC|DC)))?"
 _VOLTAGE = re.compile(rf"(?<![\w./+-]){_VOLTAGE_VALUE}(?![A-Za-z0-9_])")
 
-_RATINGS = {
-    "Voltage Rating": _quantity(r"V(?:\s*(?i:DC))?"),
-    "Power(Watts)": _quantity("W"),
-    "Tolerance": _quantity("%"),
-}
+_DC_VOLTAGE = _quantity(r"V(?:\s*(?i:DC))?")
+_POWER = _quantity("W")
 _FACTORS = {
     "": Fraction(1),
     "k": Fraction(1000),
@@ -185,6 +182,12 @@ _NOMINALS = {
 _FARADS = rf"({_DEC})\s*([pnuµμm]?)[Ff](?!\w)"
 _ABSOLUTE_CAP_TOL = re.compile(rf"(?:±|\+/-)\s*{_FARADS}")
 _STRUCTURED_CAP_TOL = re.compile(rf"(?:(?:±|\+/-)\s*)?{_FARADS}")
+# Consume both signed endpoints together, before matching symmetric values.
+_PERCENT_TOL = re.compile(
+    rf"(?<![\w./+±−~-])(?:[-−]\s*(?P<lower>{_NUMBER})\s*%\s*"
+    rf"(?:~|～|to|–)\s*\+\s*(?P<upper>{_NUMBER})|"
+    rf"(?:(?:±|\+/-)\s*)?(?P<symmetric>{_NUMBER}))\s*%(?!\w)"
+)
 _SAFETY_CLASS = re.compile(r"\b([XY][1-4])\b", re.I)
 _C0G_ALIASES = re.compile(r"C0G(?:\s*/\s*NP0)?|NP0(?:\s*/\s*C0G)?", re.I)
 _DIELECTRIC = re.compile(
@@ -215,7 +218,9 @@ def _kind(part: Part) -> str | None:
             _ABSOLUTE_CAP_TOL,
             _NOMINALS["cap"][1],
             _DIELECTRIC,
-            *_RATINGS.values(),
+            _PERCENT_TOL,
+            _DC_VOLTAGE,
+            _POWER,
         ):
             remainder = pattern.sub(" ", remainder)
         if remainder.strip().casefold() in ("", part.package.casefold()):
@@ -270,25 +275,39 @@ def _covers_coefficient(source: Part, candidate: Part) -> bool:
         return False
 
 
-def _cap_tolerances(part: Part) -> set[Fraction]:
-    """Return each published tolerance as a percentage of nominal capacitance."""
-    percent = _RATINGS["Tolerance"]
-    values = {Fraction(n) * _FACTORS[p] for n, p in percent.findall(part.description)}
-    absolute = _ABSOLUTE_CAP_TOL.findall(part.description)
+def _percent_limits(match: re.Match[str]) -> tuple[Fraction, Fraction]:
+    if match["symmetric"] is not None:
+        magnitude = Fraction(match["symmetric"])
+        return -magnitude, magnitude
+    return -Fraction(match["lower"]), Fraction(match["upper"])
+
+
+def _tolerances(part: Part, passive: str | None) -> set[tuple[Fraction, Fraction]]:
+    """Return published (lower, upper) deviations as percentages of nominal."""
+    values = set()
+    percent_count = 0
+    for match in _PERCENT_TOL.finditer(part.description):
+        values.add(_percent_limits(match))
+        percent_count += match[0].count("%")
+    if percent_count != part.description.count("%"):
+        raise ValueError("Unrecognized percentage tolerance")
+    absolute = _ABSOLUTE_CAP_TOL.findall(part.description) if passive == "cap" else []
     if "Tolerance" in part.specs:
         value = part.specs["Tolerance"].strip()
-        if match := percent.fullmatch(value):
-            values.add(Fraction(match[1]) * _FACTORS[match[2]])
-        elif match := _STRUCTURED_CAP_TOL.fullmatch(value):
+        if match := _PERCENT_TOL.fullmatch(value):
+            values.add(_percent_limits(match))
+        elif passive == "cap" and (match := _STRUCTURED_CAP_TOL.fullmatch(value)):
             absolute.append((match[1], match[2]))
         else:
-            raise ValueError("Unrecognized capacitance tolerance")
+            raise ValueError("Unrecognized tolerance")
     if absolute:
         nominal = _nominals(part, "cap")
         if len(nominal) != 1 or 0 in nominal:
             raise ValueError("Absolute tolerance needs a known positive capacitance")
         scale = 100 / nominal.pop()
-        values.update(Fraction(n) * _NOMINALS["cap"][2][p] * scale for n, p in absolute)
+        for number, prefix in absolute:
+            magnitude = Fraction(number) * _NOMINALS["cap"][2][prefix] * scale
+            values.add((-magnitude, magnitude))
     return values
 
 
@@ -379,37 +398,30 @@ def _covers_ratings(
     source: Part, candidate: Part, mandatory: tuple[str, ...], passive: str | None
 ) -> bool:
     try:
-        for key, pattern in _RATINGS.items():
-            if passive is None and key == "Voltage Rating":
-                left, right = _device_voltages(source), _device_voltages(candidate)
-                if left and right and left != right:
-                    return False
-                continue
-            if key == "Voltage Rating":
-                if not _voltage_covered(source, candidate, mandatory):
-                    return False
-                continue
-            cap_tolerance = passive == "cap" and key == "Tolerance"
-            required = (
-                _cap_tolerances(source) if cap_tolerance else _rating_values(source, key, pattern)
-            )
-            if not required:
-                if key in mandatory:
-                    return False
-                continue
-            offered = (
-                _cap_tolerances(candidate)
-                if cap_tolerance
-                else _rating_values(candidate, key, pattern)
-            )
+        required = _tolerances(source, passive)
+        offered = _tolerances(candidate, passive)
+        if required:
             if len(required) != 1 or len(offered) != 1:
                 return False
-            rating, replacement = required.pop(), offered.pop()
-            if key == "Tolerance":
-                if replacement > rating:
-                    return False
-            elif replacement < rating:
+            low, high = required.pop()
+            other_low, other_high = offered.pop()
+            if other_low < low or other_high > high:
                 return False
+        elif "Tolerance" in mandatory:
+            return False
+        if passive is None:
+            left, right = _device_voltages(source), _device_voltages(candidate)
+            if left and right and left != right:
+                return False
+        elif not _voltage_covered(source, candidate, mandatory):
+            return False
+        power = _rating_values(source, "Power(Watts)", _POWER)
+        if power:
+            replacement = _rating_values(candidate, "Power(Watts)", _POWER)
+            if len(power) != 1 or len(replacement) != 1 or replacement.pop() < power.pop():
+                return False
+        elif "Power(Watts)" in mandatory:
+            return False
         temperatures = _temperature_ranges(source)
         if not temperatures:
             return True
@@ -432,7 +444,14 @@ def _compatible(source: Part, candidate: Part) -> bool:
         and source.manufacturer.casefold() == candidate.manufacturer.casefold()
         and source.mfr_part.casefold() == candidate.mfr_part.casefold()
     )
-    skip = {*_RATINGS, "Operating Temperature", "Operating Temperature Range", "Notes"}
+    skip = {
+        "Voltage Rating",
+        "Power(Watts)",
+        "Tolerance",
+        "Operating Temperature",
+        "Operating Temperature Range",
+        "Notes",
+    }
     mandatory: tuple[str, ...] = ()
     kind = _kind(source)
     other_kind = _kind(candidate)

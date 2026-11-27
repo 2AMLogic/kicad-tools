@@ -639,3 +639,47 @@ def test_dielectric_aliases(catalog_db, capsys, legacy):
         if legacy:
             db.execute("ALTER TABLE jlc_components DROP COLUMN attributes")
     assert _alternatives(capsys, "C800") == ["C801", "C802"]
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+@pytest.mark.parametrize(
+    "description,source,tighter,looser_lower,looser_upper",
+    [
+        ("1µF 16V Y5V {} 0805 " + CAP_FAMILY, "-20%~+80%", "±10%", "±80%", "-10%~+90%"),
+        ("1W 8.2Ω Thick Film {} " + RES_FAMILY, "-1%~+2%", "±1%", "±5%", "-1%~+3%"),
+    ],
+)
+def test_asymmetric_tolerance(
+    catalog_db, capsys, legacy, description, source, tighter, looser_lower, looser_upper
+):
+    with sqlite3.connect(catalog_db) as db:
+        for code, mpn, tolerance, attribute in (
+            (800, "SRC", source, source),
+            (801, "EQUAL", source, source),
+            (802, "TIGHTER", tighter, tighter),
+            (803, "SRC", looser_lower, looser_lower),
+            (804, "SRC", looser_upper, looser_upper),
+            (805, "SRC", "-?%~+1%", tighter),
+        ):
+            _insert(
+                db,
+                code,
+                mpn,
+                "0805",
+                "extended" if code == 800 else "basic",
+                description.format(tolerance),
+                {"Tolerance": attribute},
+            )
+        if legacy:
+            db.execute("ALTER TABLE jlc_components DROP COLUMN attributes")
+        else:
+            _insert(
+                db, 806, "SRC", "0805", "basic", description.format(source), {"Tolerance": tighter}
+            )
+    assert _alternatives(capsys, "C800") == ["C801", "C802"]
+    with sqlite3.connect(catalog_db) as db:
+        db.execute(
+            "UPDATE jlc_components SET description=? WHERE lcsc=800",
+            (description.format("-?%~+1%"),),
+        )
+    assert _alternatives(capsys, "C800") == []
