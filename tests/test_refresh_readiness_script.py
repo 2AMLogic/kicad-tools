@@ -297,6 +297,47 @@ def test_outer_archive_members_resolve_against_committed_tree(mod, tmp_path):
         )
 
 
+def test_board05_recipe_zip_refreshes_to_the_published_layout(mod, tmp_path):
+    from kicad_tools.cli.readiness_cmd import write_manufacturing_archive
+
+    mfg = tmp_path / "manufacturing"
+    (mfg / "gerbers").mkdir(parents=True)
+    (mfg / "gerbers/gerbers.zip").write_bytes(b"plots")
+    (mfg / "manifest.json").write_bytes(b"original manifest")
+    archive = write_manufacturing_archive(mfg)
+    names = {"gerbers/gerbers.zip", "manifest.json"}
+    with zipfile.ZipFile(archive) as raw:
+        assert set(raw.namelist()) == {f"manufacturing/{name}" for name in names}
+
+    (mfg / "manifest.json").write_bytes(b"updated manifest")
+    assert set(mod.rebuild_archive(archive, [mfg], flat_bundle_members=names)) == names
+    with zipfile.ZipFile(archive) as published:
+        assert set(published.namelist()) == names
+        assert all(published.read(name) == (mfg / name).read_bytes() for name in names)
+    final_bytes = archive.read_bytes()
+    assert mod.rebuild_archive(archive, [mfg], flat_bundle_members=names) == []
+    assert archive.read_bytes() == final_bytes
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        ["manifest.json", "manufacturing/artwork.zip"],
+        ["manufacturing/manifest.json"],
+        ["manufacturing/manifest.json", "manufacturing/artwork.zip", "extra.pdf"],
+    ],
+)
+def test_board05_rejects_an_incomplete_or_mixed_recipe_zip(mod, tmp_path, members):
+    mfg = tmp_path / "manufacturing"
+    mfg.mkdir()
+    archive = tmp_path / "manufacturing.zip"
+    mod.write_deterministic_zip(archive, dict.fromkeys(members, b"old"))
+    raw = archive.read_bytes()
+    with pytest.raises(mod.GateFailure, match="inventory"):
+        mod.rebuild_archive(archive, [mfg], flat_bundle_members={"artwork.zip", "manifest.json"})
+    assert archive.read_bytes() == raw
+
+
 @pytest.mark.parametrize("selection", ["bare", "stem", "explicit"])
 def test_refresh_uses_selected_map_for_delivered_board(mod, tmp_path, selection):
     out = tmp_path / "output"

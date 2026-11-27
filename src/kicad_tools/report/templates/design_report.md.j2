@@ -1,7 +1,7 @@
 ---
-title: "{{ project_name }}"
-subtitle: "Design Report"
-author: "kicad-tools {{ tool_version }}"
+title: {{ project_name | yaml_string }}
+subtitle: {{ "Design Report" | yaml_string }}
+author: {{ ("kicad-tools " ~ tool_version) | yaml_string }}
 date: {{ ("Rev " ~ revision ~ " | " ~ date ~ " | " ~ manufacturer) | yaml_string }}
 geometry: "margin=1in"
 fontsize: 11pt

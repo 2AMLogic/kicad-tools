@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **PR #10618**: fix(drc): relocate disjoint vias by sliding blocking foreign-net jogs
+- **Issue #9939** (closed): Repair the five remaining Board 03 mask-to-copper findings after verified refill
+- **PR #10628**: fix: measure fine-pitch escape-fence pitch across unassigned pins
+- **PR #10626**: fix: JSON-quote report front-matter title, subtitle and author
+- **Issue #10624** (closed): Report front matter: title/subtitle/author scalars are unescaped, so a quote in the PCB filename breaks strict YAML
+- **Issue #10623** (closed): Fine-pitch escape fences disappear when an unassigned pin separates two connected pins
 - **Issue #10499** (closed): parts alternatives offers a 30 Ω resistor for 4.7 kΩ and adjustable regulators for a fixed 3.3 V part
 - **PR #10502**: Check electrical compatibility and identify catalog inventory in parts alternatives
 - **Issue #10595** (closed): Editable manufacturing ZIP omits the net-class map used to regenerate ampacity rules

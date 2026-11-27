@@ -1149,7 +1149,7 @@
 					)
 				)
 			)
-			(property "Footprint" "Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias"
+			(property "Footprint" "board05_revB:TI_DGN0008C_Lands1.4x0.45_EP1.57x1.89_ThermalVias"
 				(at 0 0 0)
 				(effects
 					(font
@@ -3705,7 +3705,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias"
+		(property "Footprint" "board05_revB:TI_DGN0008C_Lands1.4x0.45_EP1.57x1.89_ThermalVias"
 			(at 266.7 53.34 0)
 			(effects
 				(font

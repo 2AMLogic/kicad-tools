@@ -5596,6 +5596,272 @@ def test_fix_drc_restores_the_run_and_its_lead_when_the_bridge_does_not_clear(
     assert "finding_not_cleared" in capsys.readouterr().out
 
 
+# ---------------------------------------------------------------------------
+# Joint via relocation + blocking foreign-jog slide (issue #9939, Board 03 U1/25)
+#
+# R1/1 (N1) spans x 99..101, y 99.5..100.5.  Through-hole via-j on N1 sits at
+# (99.8, 99.17), 0.03 mm from R1/1's opening, with an F.Cu elbow into R1/1 and
+# a B.Cu 45-degree elbow into a vertical B.Cu run.  Two B.Cu N3 walls confine x
+# to [99.75, 99.85], and an F.Cu N2 horizontal jog (with a coincident copy and
+# branching parallel 45-degree runs) sits 0.20 mm below via-j, blocking every
+# stationary move until the jog slides down-left along its parallel runs.
+# ---------------------------------------------------------------------------
+
+
+def _joint_via_jog_board(tmp_path: Path, *, extra: str = "", lock_jog: bool = False) -> Path:
+    jog_a = _seg("n2-jog-a", (98.8, 98.57), (100.4, 98.57), net=2)
+    if lock_jog:
+        jog_a = jog_a.replace('(uuid "n2-jog-a")', '(locked) (uuid "n2-jog-a")')
+    copper = "\n".join(
+        [
+            '  (net 3 "N3")',
+            _via("via-j", (99.8, 99.17), size=0.6, drill=0.3, net=1),
+            _seg("f-lead", (100.0, 100.0), (100.0, 99.17), net=1, layer="F.Cu"),
+            _seg("f-arm", (100.0, 99.17), (99.8, 99.17), net=1, layer="F.Cu"),
+            _seg("b-arm", (99.8, 99.17), (99.6, 98.97), net=1, layer="B.Cu"),
+            _seg("b-run", (99.6, 98.97), (99.6, 97.8), net=1, layer="B.Cu"),
+            _seg("wall-l", (99.15, 98.5), (99.15, 100.5), net=3, width=0.2, layer="B.Cu"),
+            _seg("wall-r", (100.45, 98.5), (100.45, 100.5), net=3, width=0.2, layer="B.Cu"),
+            _seg("n2-l", (98.4, 98.17), (98.8, 98.57), net=2, width=0.2, layer="F.Cu"),
+            jog_a,
+            _seg("n2-jog-b", (98.8, 98.57), (100.4, 98.57), net=2, width=0.2, layer="F.Cu"),
+            _seg("n2-r1", (100.4, 98.57), (100.8, 98.97), net=2, width=0.2, layer="F.Cu"),
+            _seg("n2-r2", (100.4, 98.57), (101.0, 99.17), net=2, width=0.2, layer="F.Cu"),
+            extra,
+        ]
+    )
+    return _board(tmp_path, copper)
+
+
+def _joint_via_finding() -> DRCViolation:
+    return _pt_finding("via-j", measured=0.03, location=(99.8, 99.48))
+
+
+def test_via_relocates_by_sliding_blocking_foreign_jog_and_approach_elbows(tmp_path):
+    board = _joint_via_jog_board(tmp_path)
+    before_uuids = set(_segments(board))
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair(
+        [_joint_via_finding()],
+        max_displacement=0.5,
+        clearance_mm=0.127,
+        warning_clearance_mm=0.15,
+    )
+    assert result.repaired == 1 and not result.unrepaired
+    repairer.save(board)
+
+    after_repairer = MaskCopperRepairer(board)
+    assert not after_repairer.off_angle_tracks()
+    assert set(_segments(board)) == before_uuids
+
+    disc, new_via = _saved_copper(board, "via-j")
+    assert _pad_poly(board, "R1/1").distance(disc) >= 0.17 - 1e-6
+    jog_copper, _ = _saved_copper(board, "n2-jog-a")
+    assert disc.distance(jog_copper) >= 0.20 - 1e-6
+    assert _segments(board)["n2-jog-a"] == _segments(board)["n2-jog-b"]
+    # Both N1 elbows slid cleanly to meet the relocated via with zero added stubs.
+    assert _segments(board)["f-arm"][1] == pytest.approx(new_via)
+    assert _segments(board)["f-lead"][1] == pytest.approx(_segments(board)["f-arm"][0])
+    assert _segments(board)["b-arm"][0] == pytest.approx(new_via)
+    assert _segments(board)["b-run"][0] == pytest.approx(_segments(board)["b-arm"][1])
+
+
+def test_joint_via_and_foreign_jog_dry_run_leaves_board_untouched(tmp_path):
+    board = _joint_via_jog_board(tmp_path)
+    original = board.read_bytes()
+    result = MaskCopperRepairer(board).repair(
+        [_joint_via_finding()],
+        max_displacement=0.5,
+        dry_run=True,
+        clearance_mm=0.127,
+        warning_clearance_mm=0.15,
+    )
+    assert result.repaired == 1
+    assert board.read_bytes() == original
+
+
+def test_joint_via_and_foreign_jog_undo_restores_both_nets_exactly(tmp_path):
+    board = _joint_via_jog_board(tmp_path)
+    before_segs = _segments(board)
+    before_via = _saved_copper(board, "via-j")[1]
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair(
+        [_joint_via_finding()],
+        max_displacement=0.5,
+        clearance_mm=0.127,
+        warning_clearance_mm=0.15,
+    )
+    assert result.repaired == 1
+    repairer.save(board)
+
+    reloaded = MaskCopperRepairer(board)
+    assert reloaded.undo_action(result.actions[0])
+    reloaded.save(board)
+    assert _saved_copper(board, "via-j")[1] == before_via
+    assert _segments(board) == before_segs
+
+
+def test_via_declines_when_blocking_foreign_jog_is_locked(tmp_path):
+    board = _joint_via_jog_board(tmp_path, lock_jog=True)
+    original = board.read_bytes()
+    result = MaskCopperRepairer(board).repair(
+        [_joint_via_finding()],
+        max_displacement=0.5,
+        clearance_mm=0.127,
+        warning_clearance_mm=0.15,
+    )
+    assert result.repaired == 0
+    assert result.skipped("would_violate_clearance") == 1
+    assert board.read_bytes() == original
+
+
+def test_via_declines_when_sliding_foreign_jog_would_crowd_another_net(tmp_path):
+    # Stationary N3 track 0.20 mm below the N2 jog prevents sliding N2 downward.
+    floor = _seg("n3-floor", (98.8, 98.17), (100.4, 98.17), net=3, width=0.2, layer="F.Cu")
+    board = _joint_via_jog_board(tmp_path, extra=floor)
+    original = board.read_bytes()
+    result = MaskCopperRepairer(board).repair(
+        [_joint_via_finding()],
+        max_displacement=0.5,
+        clearance_mm=0.2,
+        warning_clearance_mm=0.15,
+    )
+    assert result.repaired == 0
+    assert result.skipped("would_violate_clearance") == 1
+    assert board.read_bytes() == original
+
+
+def test_joint_via_and_foreign_jog_declines_beyond_max_displacement(tmp_path):
+    board = _joint_via_jog_board(tmp_path)
+    original = board.read_bytes()
+    result = MaskCopperRepairer(board).repair(
+        [_joint_via_finding()],
+        max_displacement=0.05,
+        clearance_mm=0.127,
+        warning_clearance_mm=0.15,
+    )
+    assert result.repaired == 0
+    assert board.read_bytes() == original
+
+
+def test_fix_drc_keeps_joint_via_and_foreign_jog_repair(tmp_path, monkeypatch):
+    board = _joint_via_jog_board(tmp_path)
+    before_jog = _segments(board)["n2-jog-a"]
+    code = _run(monkeypatch, board, [_report(_joint_via_finding()), _report(), _report()])
+    assert code == 0
+    assert _saved_copper(board, "via-j")[1] != (99.8, 99.17)
+    assert _segments(board)["n2-jog-a"] != before_jog
+
+
+def test_fix_drc_restores_via_and_foreign_jog_on_verification_veto(tmp_path, monkeypatch, capsys):
+    board = _joint_via_jog_board(tmp_path)
+    before_segs = _segments(board)
+    before_via = _saved_copper(board, "via-j")[1]
+    still = _report(_joint_via_finding())
+    code = _run(monkeypatch, board, [still, still, still])
+    assert code != 0
+    assert _saved_copper(board, "via-j")[1] == before_via
+    assert _segments(board) == before_segs
+    assert "finding_not_cleared" in capsys.readouterr().out
+
+
+def test_fix_drc_attributes_foreign_net_disconnection_to_joint_via_action(
+    tmp_path, monkeypatch, capsys
+):
+    board = _joint_via_jog_board(tmp_path)
+    before_segs = _segments(board)
+    before_via = _saved_copper(board, "via-j")[1]
+    monkeypatch.setattr(
+        MaskCopperRepairer,
+        "disconnected_copper_nets",
+        lambda self, before, names: {"N2"} if "N2" in names else set(),
+    )
+    code = _run(
+        monkeypatch,
+        board,
+        [_report(_joint_via_finding()), _report(), _report()],
+        extra=("--format", "json"),
+    )
+    assert code != 0
+    outcome = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert outcome["repaired"] == 0
+    assert [(u["uuid"], u["reason"]) for u in outcome["unrepaired"]] == [
+        ("via-j", "pad_connection_lost")
+    ]
+    assert _saved_copper(board, "via-j")[1] == before_via
+    assert _segments(board) == before_segs
+
+
+def test_joint_via_jog_run_undo_restores_the_runs_own_endpoint(tmp_path):
+    # n2-l ends 0.0057 mm from the jog endpoint (inside the junction tolerance):
+    # the move and undo record must carry the run's own coordinate.
+    off = _seg("n2-l", (98.4, 98.17), (98.804, 98.574), net=2, width=0.2, layer="F.Cu")
+    board = _joint_via_jog_board(tmp_path)
+    board.write_text(
+        board.read_text().replace(
+            _seg("n2-l", (98.4, 98.17), (98.8, 98.57), net=2, width=0.2, layer="F.Cu"), off
+        )
+    )
+    before = _segments(board)
+    assert before["n2-l"][1] == (98.804, 98.574)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair(
+        [_joint_via_finding()],
+        max_displacement=0.5,
+        clearance_mm=0.127,
+        warning_clearance_mm=0.15,
+    )
+    assert result.repaired == 1
+    repairer.save(board)
+    reloaded = MaskCopperRepairer(board)
+    assert reloaded.undo_action(result.actions[0])
+    reloaded.save(board)
+    assert _segments(board)["n2-l"] == before["n2-l"]
+
+
+def test_joint_via_tail_fallback_leaves_generator_owned_approach_alone(tmp_path):
+    board = _joint_via_jog_board(tmp_path)
+    text = board.read_text()
+    board.write_text(
+        text.rstrip().rstrip(")")
+        + '\n  (generated (uuid gen-1) (type tuning_pattern) (members "b-arm"))\n)\n'
+    )
+    before = _segments(board)
+    result = MaskCopperRepairer(board).repair(
+        [_joint_via_finding()],
+        max_displacement=0.5,
+        clearance_mm=0.127,
+        warning_clearance_mm=0.15,
+    )
+    assert result.repaired == 0
+    assert _segments(board) == before
+
+
+def test_joint_via_jog_selection_does_not_depend_on_hash_seed(tmp_path):
+    # Three blockers (both jog copies and n2-l); only the jog copies parse as a
+    # jog covering the whole set.  Sampling an arbitrary blocker used to decline
+    # under some PYTHONHASHSEED values; every blocker must be tried in turn.
+    board = _joint_via_jog_board(tmp_path)
+    text = board.read_text()
+    for uid in ("n2-jog-a", "n2-jog-b"):
+        text = text.replace(
+            _seg(uid, (98.8, 98.57), (100.4, 98.57), net=2, width=0.2, layer="F.Cu"),
+            _seg(uid, (99.7, 98.57), (100.4, 98.57), net=2, width=0.2, layer="F.Cu"),
+        )
+    text = text.replace(
+        _seg("n2-l", (98.4, 98.17), (98.8, 98.57), net=2, width=0.2, layer="F.Cu"),
+        _seg("n2-l", (99.3, 98.17), (99.7, 98.57), net=2, width=0.2, layer="F.Cu"),
+    )
+    board.write_text(text)
+    result = MaskCopperRepairer(board).repair(
+        [_joint_via_finding()],
+        max_displacement=0.25,
+        clearance_mm=0.127,
+        warning_clearance_mm=0.15,
+    )
+    assert result.repaired == 1 and not result.unrepaired
+
+
 def test_bridge_is_declined_early_when_pad_centres_exceed_angle_tolerance(tmp_path):
     from kicad_tools.router.quantize import segment_angle_census
 

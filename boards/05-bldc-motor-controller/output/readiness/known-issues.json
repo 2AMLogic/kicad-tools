@@ -3,7 +3,7 @@
     {
       "issue": 7209,
       "kind": "advisory",
-      "summary": "PHASE_A inner copper is sized for 1 oz; the order must request 1 oz inner copper (JLCPCB's default is 0.5 oz), and manufacturing/manifest.json does not yet record ordered_copper",
+      "summary": "Board 05 requires 1 oz outer and inner copper. The manufacturing manifest records both weights for the fabrication order.",
       "recorded": "2026-10-18"
     }
   ]

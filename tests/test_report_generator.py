@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from unittest import mock
@@ -408,6 +410,40 @@ class TestReportGenerator:
         assert "Design Report" in content
         assert "Rev A" in content
         assert "jlcpcb" in content
+
+    @pytest.mark.parametrize(
+        "project_name",
+        ["ctl", 'ctl "bench"', "a\\b: c # d", 'quote" back\\ slash'],
+    )
+    def test_front_matter_scalars_round_trip_strict_yaml(
+        self, tmp_path: Path, project_name: str
+    ) -> None:
+        """Filename-derived title survives strict YAML parsing (Issue #10624)."""
+        import yaml
+
+        gen = ReportGenerator()
+        report_path = gen.generate(_full_data(project_name=project_name), tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        header = yaml.safe_load(content.split("---", 2)[1])
+        assert header["title"] == project_name
+        assert header["subtitle"] == "Design Report"
+        assert header["author"].startswith("kicad-tools ")
+        assert header["date"] == "Rev A | 2026-04-12 | jlcpcb"
+
+    @pytest.mark.skipif(shutil.which("pandoc") is None, reason="Pandoc is unavailable")
+    def test_quoted_project_name_accepted_by_pandoc_metadata_reader(self, tmp_path: Path) -> None:
+        """Pandoc's strict YAML metadata reader accepts a quoted title (Issue #10624)."""
+        gen = ReportGenerator()
+        report_path = gen.generate(_full_data(project_name='ctl "bench"'), tmp_path)
+
+        result = subprocess.run(
+            ["pandoc", "-f", "markdown+yaml_metadata_block", "-t", "json", str(report_path)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "bench" in json.dumps(json.loads(result.stdout)["meta"]["title"])
 
     def test_pcb_figures_in_rendered_output(self, tmp_path: Path) -> None:
         """When both front and back PCB figures exist, both are in the markdown."""
