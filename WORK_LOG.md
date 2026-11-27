@@ -16,6 +16,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #9592** (closed): Audit kct route against ten router failure modes reported by agents in the PCBJam study
+- **Issue #9068** (closed): Board 05: clear the strict-gate flood (29 physical_copper_gap errors, 13 silk_hole_overlap, 348 provisional mask_to_copper) and re-pin readiness
+- **Issue #9921** (closed): Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package
+- **PR #10600**: fix(boards): reissue Board 05 revision B with matching copper and design rules
+- **PR #10635**: chore(boards): regenerate boards 00 and 01 packages with the net-class map
 - **PR #10618**: fix(drc): relocate disjoint vias by sliding blocking foreign-net jogs
 - **Issue #9939** (closed): Repair the five remaining Board 03 mask-to-copper findings after verified refill
 - **PR #10628**: fix: measure fine-pitch escape-fence pitch across unassigned pins
