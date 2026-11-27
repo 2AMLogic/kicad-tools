@@ -13,6 +13,7 @@ pytest.importorskip("shapely")
 
 from kicad_tools.cli import kicad_toolchain, main, route_link_cmd  # noqa: E402
 from kicad_tools.schema.pcb import PCB  # noqa: E402
+from tests.test_route_link_cmd import TEE_TRACK, _file_segments, _tee  # noqa: E402
 
 # Two independent links, each pad pair 10 mm apart on its own row.
 BOARD = """(kicad_pcb
@@ -89,6 +90,75 @@ def test_clean_links_all_commit(board, capsys, toolchain_ok, monkeypatch):
     assert rc == 0 and doc["ok"]
     assert [e["status"] for e in doc["links"]] == ["committed", "committed"]
     assert all(e["failed_check"] is None for e in doc["links"])
+
+
+@pytest.mark.parametrize("separate", [False, True], ids=["batch", "separate"])
+def test_join_sees_written_ten_mil_host(tmp_path, capsys, toolchain_ok, monkeypatch, separate):
+    _fake_gate(monkeypatch)
+    board = _tee(tmp_path)
+    first = ["--link", "SENSE P1.1 P2.1", "--link-layers", "F.Cu"]
+    second = ["--link", "SENSE P3.1 P2.1", "--link-layers", "F.Cu", "--join-track"]
+    rules = ["--trace-width", ".254", "--clearance", ".2"]
+    if separate:
+        rc, first_write = _run(capsys, str(board), *first, *rules)
+        assert rc == 0 and first_write["links"][0]["status"] == "committed"
+        first = []
+    rc, probe = _run(capsys, str(board), *first, *second, *rules, "--probe")
+    assert rc == 0
+    rc, write = _run(capsys, str(board), *first, *second, *rules)
+    assert rc == 0 and all(link["status"] == "committed" for link in write["links"])
+    assert (
+        probe["links"][-1]["junction"]
+        == write["links"][-1]["junction"]
+        == {"x": 5, "y": 9, "layer": "F.Cu"}
+    )
+    segments = _file_segments(board)
+    assert len(segments) == 3 and all(s[2] == 0.25 for s in segments)
+    assert sum((5, 9) in (s[0], s[1]) for s in segments) == 3
+
+
+def test_fractional_tee_keeps_original_centreline(tmp_path, capsys, toolchain_ok, monkeypatch):
+    _fake_gate(monkeypatch)
+    track = TEE_TRACK.replace("(start 5 4) (end 5 14)", "(start 5.004 4) (end 5.004 14)")
+    board = _tee(tmp_path, track)
+    args = ["--link", "SENSE P3.1 P2.1", "--link-layers", "F.Cu", "--join-track"]
+    rc, probe = _run(capsys, str(board), *args, "--probe")
+    assert rc == 0
+    rc, write = _run(capsys, str(board), *args)
+    assert rc == 0 and write["links"][0]["status"] == "committed"
+    assert (
+        probe["links"][0]["junction"]
+        == write["links"][0]["junction"]
+        == {"x": 5.004, "y": 9, "layer": "F.Cu"}
+    )
+    segments = _file_segments(board)
+    at = (5.004, 9)
+    assert len(segments) == 3 and all(at in (s[0], s[1]) for s in segments)
+    assert {s[:2] for s in segments if s[0][0] == s[1][0]} == {((5.004, 4), at), (at, (5.004, 14))}
+
+
+@pytest.mark.parametrize("end_x,can_split", [("5.324", True), ("5.004001", False)])
+def test_angled_tee_needs_an_interior_file_coordinate(
+    tmp_path, capsys, toolchain_ok, monkeypatch, end_x, can_split
+):
+    _fake_gate(monkeypatch)
+    track = TEE_TRACK.replace("(start 5 4) (end 5 14)", f"(start 5.004 4) (end {end_x} 14)")
+    board = _tee(tmp_path, track)
+    rc, write = _run(capsys, str(board), "--link", "SENSE P3.1 P2.1", "--join-track")
+    assert rc == 0 and write["links"][0]["status"] == "committed"
+    junction = write["links"][0].get("junction")
+    segments = _file_segments(board)
+    if can_split:
+        at = (junction["x"], junction["y"])
+        assert sum(at in (s[0], s[1]) for s in segments) == 3
+        dx = round((float(end_x) - 5.004) * 1_000_000)
+        assert (
+            round((at[0] - 5.004) * 1_000_000) * 10_000_000 == round((at[1] - 4) * 1_000_000) * dx
+        )
+    else:
+        # A 1 nm change in x over the entire segment leaves only its two pads.
+        assert junction is None
+        assert ((5.004, 4), (float(end_x), 14)) in {s[:2] for s in segments}
 
 
 def test_creepage_violating_link_rolls_back_byte_exactly(board, capsys, toolchain_ok, monkeypatch):
@@ -272,3 +342,26 @@ def test_drc_rollback_reason_names_items(board, capsys, toolchain_ok, monkeypatc
     reason = doc["links"][0]["reason"]
     assert reason.startswith("1 new DRC violation(s): clearance")
     assert "[clearance: SIGA]" in reason
+
+
+def test_rejected_branch_restores_the_unsplit_track(tmp_path, capsys, toolchain_ok, monkeypatch):
+    """Issue #10486: the host split goes with the branch when the gate rejects it."""
+    tee = _tee(tmp_path, TEE_TRACK)
+    before = tee.read_bytes()
+
+    def state(path, args):
+        # The baseline board holds one SENSE track; any added copper fails.
+        sense = sum(s.net_number == 1 for s in PCB.load(str(path)).segments)
+        drc = Counter()
+        if sense > 1:
+            drc[("clearance", "error", ("SENSE",))] += 1
+        return drc, None
+
+    monkeypatch.setattr(route_link_cmd, "_gate_state", state)
+    rc, doc = _run(capsys, str(tee), "--link", "SENSE P3.1 P2.1", "--join-track")
+    link = doc["links"][0]
+    assert rc == 1 and not doc["ok"] and doc["written"] is None
+    assert link["status"] == "rolled-back" and link["failed_check"] == "drc"
+    assert "junction" not in link
+    assert tee.read_bytes() == before
+    assert sum(s.net_number == 1 for s in PCB.load(str(tee)).segments) == 1
