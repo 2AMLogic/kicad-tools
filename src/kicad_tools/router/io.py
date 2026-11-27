@@ -2805,7 +2805,13 @@ def load_pads_for_analysis(
             pin = _pad_number(pad_node) or ""
             pad_shape = _pad_shape_from_block(pad_node, ref, pin, placement_only=placement_only)
 
-            is_thru = "thru_hole" in pad_block
+            # Issue #10629: decide plating from the parsed pad type atom, the
+            # same strict-equality rule load_pcb_for_routing uses. A raw
+            # substring test also matched ``np_thru_hole`` (and any quoted
+            # "thru_hole" in a child property), so an NPTH loaded here read as
+            # plated and LatticePathfinder.from_board dropped its hole keep-out.
+            is_thru = pad_node.get_value(1) == "thru_hole"
+            authored_layers = _pad_authored_layers(pad_node)
 
             at = _pad_at(pad_node)
             if at is None:
@@ -2826,10 +2832,8 @@ def load_pads_for_analysis(
 
             net_num, net_name = _resolve_pad_net(pad_block, net_name_to_num)
 
-            # Determine layer
-            layer = Layer.F_CU
-            if "B.Cu" in pad_block and "F.Cu" not in pad_block:
-                layer = Layer.B_CU
+            # Determine layer (shared with load_pcb_for_routing, Issue #10629)
+            layer = _pad_copper_layer(authored_layers)
 
             pads.append(
                 PadObj(
@@ -2852,7 +2856,7 @@ def load_pads_for_analysis(
                     shape=pad_shape,
                     roundrect_rratio=_pad_radius_ratio(pad_node, pad_shape),
                     **_chamfered_outlines(pad_node),
-                    authored_layers=_pad_authored_layers(pad_node),
+                    authored_layers=authored_layers,
                     copper_offset=_pad_copper_offset(pad_node, pad_rot),
                 )
             )
@@ -5157,6 +5161,23 @@ def _pad_authored_layers(node: SExp) -> tuple[str, ...]:
     return tuple(str(item.value) for item in layers.children) if layers is not None else ()
 
 
+def _pad_copper_layer(authored_layers: tuple[str, ...]) -> Layer:
+    """Copper layer a pad is attributed to, from its authored ``(layers ...)``.
+
+    The first ``*.Cu`` entry other than the all-copper wildcard ``"*.Cu"``
+    (through-hole pads author the wildcard and are attributed to the top layer,
+    their ``through_hole`` / ``drill`` fields say they span the stack). Pads
+    with no resolvable copper entry default to ``Layer.F_CU``. Shared by
+    :func:`load_pcb_for_routing` and :func:`load_pads_for_analysis` so the two
+    loaders cannot disagree on a pad's layer (Issue #10629).
+    """
+    first_copper = next((name for name in authored_layers if name.endswith(".Cu")), None)
+    if first_copper and first_copper != "*.Cu":
+        with contextlib.suppress(ValueError):
+            return Layer.from_kicad_name(first_copper)
+    return Layer.F_CU
+
+
 def _pad_copper_offset(node: SExp, rotation: float) -> tuple[float, float]:
     """KiCad stores the copper displacement in pad-local axes under drill."""
     drill = node.find_child("drill")
@@ -5899,12 +5920,8 @@ def load_pcb_for_routing(
             # KiCad pads have: (layers "F.Cu" "F.Paste" "F.Mask") or (layers "B.Cu" ...)
             # For thru-hole pads: (layers "*.Cu" "*.Paste" "*.Mask") - means all copper layers
             # We need to find the copper layer name (*.Cu pattern)
-            pad_layer = Layer.F_CU  # Default to top layer
             authored_layers = _pad_authored_layers(pad_node)
-            first_copper = next((name for name in authored_layers if name.endswith(".Cu")), None)
-            if first_copper and first_copper != "*.Cu":
-                with contextlib.suppress(ValueError):
-                    pad_layer = Layer.from_kicad_name(first_copper)
+            pad_layer = _pad_copper_layer(authored_layers)  # default top layer
 
             # Override with netlist if provided
             if netlist:
