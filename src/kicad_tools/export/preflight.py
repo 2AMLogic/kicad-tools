@@ -428,7 +428,6 @@ _NO_UPPER_TOLERANCE_REASON = (
     "no upper finished-hole tolerance declared in requirements.manufacturing"
 )
 _PLATED_HOLE_TYPES = ("thru_hole", "through_hole")
-_PITCH_RESOLUTION_MM = 6
 
 
 @dataclass(frozen=True)
@@ -460,22 +459,18 @@ def _decimal_mm(value: float) -> Decimal:
 
 
 def _limit_result(value: Decimal, low: Decimal, high: Decimal) -> dict:
-    """Compare one dimension with a drawing's inclusive limits.
-
-    The verdict uses the unrounded value; only the reported overrun is
-    rounded for display.
-    """
+    """Compare one dimension with inclusive drawing limits and report the excess in mm."""
     if value < low:
         return {
             "status": "fail",
             "side": "lower",
-            "overrun_mm": round(float(low - value), _LEAD_MARGIN_DECIMALS),
+            "overrun_mm": float(low - value),
         }
     if value > high:
         return {
             "status": "fail",
             "side": "upper",
-            "overrun_mm": round(float(value - high), _LEAD_MARGIN_DECIMALS),
+            "overrun_mm": float(value - high),
         }
     return {"status": "pass"}
 
@@ -626,13 +621,7 @@ def _mounting_pitch_finding(
     limits: DimensionLimits,
     located: dict[str, tuple[list[Pad], str | None]],
 ) -> dict:
-    """Build the per-pair pitch record: the nominal distance of the two hole centres.
-
-    A board file stores coordinates to 0.000001 mm, so the measured distance
-    is judged at that resolution: placing a footprint at an arbitrary angle
-    otherwise turns an exact 5.08 mm into 5.079999999999999 mm and fails a
-    pitch that sits on an inclusive limit.
-    """
+    """Compare the distance between footprint-local hole centres with the drawing limits."""
     finding: dict = {
         "reference": footprint.reference,
         "pads": list(declaration.pads),
@@ -653,24 +642,24 @@ def _mounting_pitch_finding(
     distance_sq = (x1 - x2) ** 2 + (y1 - y2) ** 2
     low, high = _decimal_mm(limits.min_mm), _decimal_mm(limits.max_mm)
     # Judge squared distances against squared limits so no rounding of the
-    # measured distance can hide an overrun; only the report is rounded.
+    # measured distance can hide an overrun.
     measured = distance_sq.sqrt()
     if distance_sq < low**2:
         nominal = {
             "status": "fail",
             "side": "lower",
-            "overrun_mm": round(float(low - measured), _LEAD_MARGIN_DECIMALS),
+            "overrun_mm": float(low - measured),
         }
     elif distance_sq > high**2:
         nominal = {
             "status": "fail",
             "side": "upper",
-            "overrun_mm": round(float(measured - high), _LEAD_MARGIN_DECIMALS),
+            "overrun_mm": float(measured - high),
         }
     else:
         nominal = {"status": "pass"}
     finding.update(
-        measured_mm=round(float(measured), _PITCH_RESOLUTION_MM),
+        measured_mm=float(measured),
         nominal=nominal,
         status=nominal["status"],
     )
@@ -695,7 +684,12 @@ def _format_limit_result(result: dict) -> str:
     if result["status"] != "fail":
         return "pass"
     verb, bound = ("exceeds", "max") if result["side"] == "upper" else ("undercuts", "min")
-    return f"{verb} drawing {bound} by {result['overrun_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm (fail)"
+    amount = result["overrun_mm"]
+    if amount < 10**-_LEAD_MARGIN_DECIMALS:
+        display = f"{amount:.3g}"
+    else:
+        display = f"{amount:.{_LEAD_MARGIN_DECIMALS}f}"
+    return f"{verb} drawing {bound} by {display} mm (fail)"
 
 
 def _format_mounting_finding(f: dict) -> str:

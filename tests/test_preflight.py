@@ -1831,11 +1831,11 @@ def _fake_assembly_export(self, output_dir=None):
     return assembly.AssemblyPackageResult(output_dir=od)
 
 
-def _export_project(tmp_path, order: str | None = None) -> Path:
+def _export_project(tmp_path, order: str | None = None, c1: list[str] | None = None) -> Path:
     """A snap-in project directory whose board and spec sit together."""
     project_dir = tmp_path / "project"
     project_dir.mkdir()
-    pcb = _create_mounting_pcb(project_dir)
+    pcb = _create_mounting_pcb(project_dir, c1=c1)
     _write_snap_in_spec(project_dir, order=order)
     symbols = "\n".join(
         f'(symbol (lib_id "{lib_id}") (unit 1) (in_bom yes) (on_board yes)'
@@ -1971,13 +1971,13 @@ class TestPreflightMountingHoleFit:
         [
             ("2.00", "2.13", {"status": "pass"}),
             ("2.001", "2.13", {"status": "fail", "side": "upper", "overrun_mm": 0.001}),
-            ("2.0001", "2.13", {"status": "fail", "side": "upper", "overrun_mm": 0.0}),
+            ("2.0001", "2.13", {"status": "fail", "side": "upper", "overrun_mm": 0.0001}),
         ],
     )
     def test_order_limit_is_inclusive_and_judged_before_display_rounding(
         self, tmp_path, drill, max_diameter, max_result
     ):
-        """2.13 mm at a 2.13 mm limit passes; 2.1301 mm fails although it displays as 0.000."""
+        """2.13 mm at a 2.13 mm limit passes; 2.1301 mm fails by 0.0001 mm."""
         pcb = _create_mounting_pcb(
             tmp_path,
             c1=[_tht_pad_at("1", float(drill), 0.0, -5.0), _tht_pad_at("2", 2.00, 0.0, 5.0)],
@@ -2000,7 +2000,7 @@ class TestPreflightMountingHoleFit:
             assert result.status == "OK"
 
     def test_pitch_verdict_precedes_display_rounding(self, tmp_path):
-        """A 10.1004 mm pitch is over a 10.10 mm limit although the overrun displays as 0.000."""
+        """A 10.1004 mm pitch is over a 10.10 mm limit by 0.0004 mm."""
         pcb = _create_mounting_pcb(tmp_path, c1=_snap_in_pads(second_y=5.1004))
         _write_snap_in_spec(
             tmp_path, order=_snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(refs="C1, C2"))
@@ -2013,7 +2013,7 @@ class TestPreflightMountingHoleFit:
         assert finding["measured_mm"] == pytest.approx(10.1004)
         assert finding["nominal"]["status"] == "fail"
         assert finding["nominal"]["side"] == "upper"
-        assert finding["nominal"]["overrun_mm"] == 0.0
+        assert finding["nominal"]["overrun_mm"] == 0.0004
 
     @pytest.mark.parametrize(
         ("second_x", "expected"),
@@ -2625,12 +2625,11 @@ class TestPreflightMountingHoleFit:
                     "reason": invalid["reason"],
                 }
 
-    def test_ordinary_export_records_findings_in_manifest(self, tmp_path, monkeypatch):
+    def _export_mounting_record(self, pcb, output_dir, monkeypatch):
         """Without strict preflight the export proceeds and the manifest carries the findings."""
         from kicad_tools.export import assembly
         from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
 
-        pcb = _export_project(tmp_path)
         monkeypatch.setattr(assembly.AssemblyPackage, "export", _fake_assembly_export)
 
         config = ManufacturingConfig(
@@ -2642,7 +2641,7 @@ class TestPreflightMountingHoleFit:
             manufacturer="jlcpcb",
             config=config,
         )
-        result = pkg.export(tmp_path / "output")
+        result = pkg.export(output_dir)
 
         assert result.success, result.errors
         assert any("assembly_mounting_hole_fit" in warning for warning in result.warnings)
@@ -2653,6 +2652,35 @@ class TestPreflightMountingHoleFit:
             if entry["name"] == "assembly_mounting_hole_fit"
         ]
         assert recorded["status"] == "FAIL"
+        return recorded
+
+    def test_small_overruns_survive_manifest_serialization(self, tmp_path, monkeypatch):
+        order = _snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(high="2.1004"))
+        pcb = _export_project(
+            tmp_path,
+            order=order,
+            c1=[_tht_pad_at("1", 1.8999, 0, 0), _tht_pad_at("2", 2, 0.002, 10.10)],
+        )
+
+        recorded = self._export_mounting_record(pcb, tmp_path / "output", monkeypatch)
+        hole = next(
+            f for f in recorded["data"]["diameters"] if f["reference"] == "C1" and f["pad"] == "1"
+        )
+        assert hole["nominal"] == {"status": "fail", "side": "lower", "overrun_mm": 0.0001}
+        assert hole["order"]["max"] == {"status": "fail", "side": "upper", "overrun_mm": 0.0004}
+        pitch = next(f for f in recorded["data"]["pitch"] if f["reference"] == "C1")
+        assert pitch["nominal"] == {
+            "status": "fail",
+            "side": "upper",
+            "overrun_mm": pytest.approx(1.980198e-7),
+        }
+        assert "undercuts drawing min by 0.0001 mm" in recorded["details"]
+        assert "exceeds drawing max by 0.0004 mm" in recorded["details"]
+        assert "exceeds drawing max by 1.98e-07 mm" in recorded["details"]
+
+    def test_ordinary_export_records_findings_in_manifest(self, tmp_path, monkeypatch):
+        pcb = _export_project(tmp_path)
+        recorded = self._export_mounting_record(pcb, tmp_path / "output", monkeypatch)
         overruns = [
             f for f in recorded["data"]["diameters"] if f["order"]["max"]["status"] == "fail"
         ]
