@@ -1154,6 +1154,11 @@ class CreepageReport:
         return not self.unresolved_pairs and all(p.gate_row_passed for p in self.pairs)
 
     @property
+    def gate_waived_count(self) -> int:
+        """Number of raw failures accepted by a whole-row or scoped waiver."""
+        return sum(not pair.passed and pair.gate_row_passed for pair in self.pairs)
+
+    @property
     def has_hv_nets(self) -> bool:
         return bool(self.hv_nets)
 
@@ -1192,12 +1197,13 @@ class CreepageReport:
             thickness["board_thickness_source"] = self.board_thickness_source
         if self.board_thickness_declarations_mm is not None:
             thickness["board_thickness_declarations_mm"] = self.board_thickness_declarations_mm
-        # Scoped exceptions that waived nothing (#10317): serialised only when
-        # an exception file was supplied AND some entry matched no census row,
-        # so every other report serialises unchanged.
+        # waived_count is the historical count of whole-row waiver flags.
+        # For scoped exceptions also report how many raw failures actually cleared.
         exc: dict[str, Any] = {}
-        if self.exceptions_unused:
-            exc["exceptions_unused"] = list(self.exceptions_unused)
+        if self.exceptions_unused is not None:
+            exc["gate_waived_count"] = self.gate_waived_count
+            if self.exceptions_unused:
+                exc["exceptions_unused"] = list(self.exceptions_unused)
         # Phase-1 backward compatibility: no standard -> phase-1 schema (plus
         # the additive verdict keys above, #4687).
         if self.standard is None:
@@ -2752,7 +2758,15 @@ def compute_creepage_census(
     applied_keys: set[tuple[str, tuple[str, str]]] = set()
     if exceptions:
         exception_waivers, affected_pairs = _scoped_exception_maps(pcb, exceptions)
-        report.exceptions_unused = []
+
+    def finish_report() -> CreepageReport:
+        if exceptions:
+            report.exceptions_unused = [
+                f"{ex.footprint} pads {ex.pads[0]}-{ex.pads[1]} ({ex.metric})"
+                for ex in exceptions
+                if (ex.footprint, ex.pads) not in applied_keys
+            ]
+        return report
 
     # Merged per-pair provenance (creepage + clearance citations together).
     pair_provenance: dict[str, Any] = {}
@@ -2892,7 +2906,7 @@ def compute_creepage_census(
         report.hv_nets = []
 
     if not hv_nets:
-        return report
+        return finish_report()
 
     def _partners(hv_num: int, unions: dict[int, Any]) -> list[tuple[int, Any]]:
         """Conductors to pair ``hv_num`` against within one layer/face's ``unions``."""
@@ -3506,14 +3520,7 @@ def compute_creepage_census(
             p.pad_numbers or ("", ""),
         )
     )
-    if exceptions:
-        for ex in exceptions:
-            if (ex.footprint, ex.pads) not in applied_keys:
-                assert report.exceptions_unused is not None
-                report.exceptions_unused.append(
-                    f"{ex.footprint} pads {ex.pads[0]}-{ex.pads[1]} ({ex.metric})"
-                )
-    return report
+    return finish_report()
 
 
 def _resolve_selected_pairs(
