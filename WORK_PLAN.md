@@ -32,13 +32,12 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
 - **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill
 - **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes
-- **#10616**: Router reserves entry lanes for explicit no-connect pads and leaves Board 05 nFAULT open
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
 
 ## In Progress
 
@@ -54,12 +53,12 @@ Issues currently being built (`loom:building`).
 - **#10485**: CI flake: Install pinned actionlint download returned HTTP 504 in Test
 - **#10504**: route-link: non-plated-hole clearance ignores the board's hole_clearance rule
 - **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313
-- **#10594**: Manufacturing design reports label a revision-B PCB as Rev 1
 - **#10595**: Editable manufacturing ZIP omits the net-class map used to regenerate ampacity rules
 - **#10604**: Default route-link misses a rotated, offset plated source pad
-- **#10609**: Router pad loader still reads at/size/drill/shape by regex, so equivalent S-expression spellings drop a pad from the grid
 - **#10611**: Board 03 exporter appends a second rules filename that makes the editable project fail readiness
-- **#10616**: Router reserves entry lanes for explicit no-connect pads and leaves Board 05 nFAULT open
+- **#10623**: Fine-pitch escape fences disappear when an unassigned pin separates two connected pins
+- **#10624**: Report front matter: title/subtitle/author scalars are unescaped, so a quote in the PCB filename breaks strict YAML
+- **#10627**: Pour completion writes power-plane welds and routed links at the board width instead of their net class width
 
 ## PRs Awaiting Review
 
@@ -68,11 +67,12 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
 - **#10502**: Check electrical compatibility and identify catalog inventory in parts alternatives
 - **#10507**: fix(boards): declare Board 07's reviewed class widths and re-pin its SDRAM evidence
-- **#10598**: fix: use authored PCB revision in report and export headers
 - **#10600**: fix(boards): reissue Board 05 revision B with matching copper and design rules
-- **#10610**: fix: read router pad geometry from parsed S-expressions
+- **#10608**: fix: land named route-link endpoints on the pad copper outline
 - **#10618**: fix(drc): relocate disjoint vias by sliding blocking foreign-net jogs
-- **#10620**: fix: reserve fine-pitch escape lanes for routing targets
+- **#10626**: fix: JSON-quote report front-matter title, subtitle and author
+- **#10628**: fix: measure fine-pitch escape-fence pitch across unassigned pins
+- **#10631**: fix: write pour-completion copper at the net-class width
 
 ## Approved (Awaiting Merge)
 
@@ -86,6 +86,7 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 - **#10526**: chore(loom): resync installed Loom to v0.20.37
 - **#10532**: Expand BOM reference intervals with matching designator suffixes
 - **#10544**: perf(router): prove a timed-out connection from its goal side before repeating its search
+- **#10597**: fix: ship the selected net-class map with editable KiCad projects
 
 ## Proposed
 
@@ -109,7 +110,6 @@ Issues carrying `loom:curated`.
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410) *(curated)*
 - **#9748**: optimize-traces --drc-aware --mfr jlcpcb introduces mask_to_copper errors at pad entries that the un-optimised board does not have *(curated)*
 - **#9800**: Boards 02/03/05: drop per-board silk wiring and retire silk tolerances (#9795 phase 4) *(curated)*
-- **#9844**: Router: route turns back past its own via inside the slit band (board 05 RESET V-turn) *(curated)*
 - **#9893**: docs: surface JLCPCB assembly and submission automation on kicad-tools.org and in the README *(curated)*
 - **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package *(curated)*
 - **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill *(curated)*
@@ -125,9 +125,12 @@ Issues carrying `loom:curated`.
 - **#10530**: Expand BOM numeric reference ranges with a shared suffix such as Q1A-Q4A *(curated)*
 - **#10575**: Preserve Board 03’s connector and MCU USB widths in the routed KiCad project *(curated)*
 - **#10604**: Default route-link misses a rotated, offset plated source pad *(curated)*
-- **#10609**: Router pad loader still reads at/size/drill/shape by regex, so equivalent S-expression spellings drop a pad from the grid *(curated)*
 - **#10611**: Board 03 exporter appends a second rules filename that makes the editable project fail readiness *(curated)*
-- **#10616**: Router reserves entry lanes for explicit no-connect pads and leaves Board 05 nFAULT open *(curated)*
+- **#10623**: Fine-pitch escape fences disappear when an unassigned pin separates two connected pins *(curated)*
+- **#10624**: Report front matter: title/subtitle/author scalars are unescaped, so a quote in the PCB filename breaks strict YAML *(curated)*
+- **#10627**: Pour completion writes power-plane welds and routed links at the board width instead of their net class width *(curated)*
+- **#10629**: load_pads_for_analysis still reads is_thru/layer from the raw pad block, diverging from load_pcb_for_routing *(curated)*
+- **#10630**: Pandoc PDF rendering fails for a report project name containing a literal backslash *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -146,12 +149,12 @@ _None._
 |------|-------|
 | Operator merge-risk holds | 7 |
 | Very important | 1 |
-| Important | 4 |
-| Ready (`loom:issue`) | 0 |
+| Important | 3 |
+| Ready (`loom:issue`) | 1 |
 | In Progress (`loom:building`) | 16 |
-| PRs awaiting review | 8 |
-| Approved PRs awaiting merge | 8 |
-| Curated | 37 |
+| PRs awaiting review | 9 |
+| Approved PRs awaiting merge | 9 |
+| Curated | 39 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
