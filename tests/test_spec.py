@@ -742,6 +742,335 @@ class TestBOMEntryLeadDeclarations:
         assert spec.requirements.manufacturing.finished_hole_tolerance_mm == pytest.approx(-0.08)
 
 
+class TestFinishedHoleToleranceUpper:
+    """Optional upper bound of the fabricator's finished-hole tolerance (Issue #10476)."""
+
+    def test_declared_alongside_the_lower_tolerance(self):
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(
+            finished_hole_tolerance_mm=-0.08,
+            finished_hole_tolerance_upper_mm=0.13,
+            finished_hole_tolerance_source="JLCPCB capabilities, through-hole tolerances",
+        )
+        assert mfg.finished_hole_tolerance_mm == -0.08
+        assert mfg.finished_hole_tolerance_upper_mm == 0.13
+
+    def test_may_be_declared_without_a_lower_tolerance(self):
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(
+            finished_hole_tolerance_upper_mm=0.13,
+            finished_hole_tolerance_source="fab quote 2026-11-25",
+        )
+        assert mfg.finished_hole_tolerance_mm is None
+        assert mfg.finished_hole_tolerance_upper_mm == 0.13
+
+    def test_zero_is_allowed(self):
+        """Zero (hole never larger than nominal) is a valid upper tolerance."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(
+            finished_hole_tolerance_upper_mm=0.0, finished_hole_tolerance_source="fab quote"
+        )
+        assert mfg.finished_hole_tolerance_upper_mm == 0.0
+
+    def test_requires_source(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        with pytest.raises(ValidationError, match="finished_hole_tolerance_source"):
+            ManufacturingRequirements(finished_hole_tolerance_upper_mm=0.13)
+        with pytest.raises(ValidationError, match="finished_hole_tolerance_source"):
+            ManufacturingRequirements(
+                finished_hole_tolerance_upper_mm=0.13, finished_hole_tolerance_source=" "
+            )
+
+    def test_negative_rejected(self):
+        """The sign convention is upper/positive; a negative value belongs to the lower bound."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        with pytest.raises(ValidationError):
+            ManufacturingRequirements(
+                finished_hole_tolerance_upper_mm=-0.08, finished_hole_tolerance_source="misread"
+            )
+
+    def test_unset_by_default(self):
+        from kicad_tools.spec.schema import BOMEntry, ManufacturingRequirements
+
+        mfg = ManufacturingRequirements()
+        assert mfg.finished_hole_tolerance_upper_mm is None
+        assert mfg.finished_hole_guarantees is None
+        assert BOMEntry(ref="C1", part="LGU2E471MELB").mounting_holes is None
+
+
+class TestMountingHoleDeclaration:
+    """A sourced mounting drawing on a BOM entry (Issue #10476)."""
+
+    def test_pads_limits_and_source_parse(self):
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        declaration = MountingHoleDeclaration(
+            pads=["1", "2"],
+            hole_diameter={"min_mm": 1.90, "max_mm": 2.10},
+            pitch={"min_mm": 9.90, "max_mm": 10.10},
+            source="Nichicon LGU drawing, p. 1",
+        )
+        assert declaration.pads == ["1", "2"]
+        assert declaration.hole_diameter.min_mm == pytest.approx(1.90)
+        assert declaration.hole_diameter.max_mm == pytest.approx(2.10)
+        assert declaration.pitch is not None
+        assert declaration.pitch.min_mm == pytest.approx(9.90)
+        assert declaration.pitch.max_mm == pytest.approx(10.10)
+        assert declaration.source == "Nichicon LGU drawing, p. 1"
+
+    def test_integer_pad_numbers_normalize(self):
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        declaration = MountingHoleDeclaration(
+            pads=[1, 2], hole_diameter={"min_mm": 1.9, "max_mm": 2.1}, source="drawing"
+        )
+        assert declaration.pads == ["1", "2"]
+
+    def test_requires_exactly_two_pads(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        limits = {"min_mm": 1.9, "max_mm": 2.1}
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(pads=["1"], hole_diameter=limits, source="drawing")
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(pads=["1", "2", "3"], hole_diameter=limits, source="drawing")
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(pads="1 2", hole_diameter=limits, source="drawing")
+
+    def test_requires_two_distinct_pads(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(
+                pads=["1", "1"], hole_diameter={"min_mm": 1.9, "max_mm": 2.1}, source="drawing"
+            )
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(
+                pads=["1", " "], hole_diameter={"min_mm": 1.9, "max_mm": 2.1}, source="drawing"
+            )
+
+    def test_requires_hole_diameter_limits(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(pads=["1", "2"], source="drawing")
+
+    def test_pitch_limits_are_optional(self):
+        """A drawing without a pitch tolerance declares only the hole diameter."""
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        declaration = MountingHoleDeclaration(
+            pads=["1", "2"], hole_diameter={"min_mm": 1.9, "max_mm": 2.1}, source="drawing"
+        )
+        assert declaration.pitch is None
+
+    def test_requires_source(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        limits = {"min_mm": 1.9, "max_mm": 2.1}
+        with pytest.raises(ValidationError, match="source"):
+            MountingHoleDeclaration(pads=["1", "2"], hole_diameter=limits)
+        with pytest.raises(ValidationError, match="source"):
+            MountingHoleDeclaration(pads=["1", "2"], hole_diameter=limits, source="   ")
+
+    def test_limits_must_be_ordered(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        with pytest.raises(ValidationError, match="min_mm <= max_mm"):
+            MountingHoleDeclaration(
+                pads=["1", "2"],
+                hole_diameter={"min_mm": 2.1, "max_mm": 1.9},
+                source="drawing",
+            )
+        with pytest.raises(ValidationError, match="min_mm <= max_mm"):
+            MountingHoleDeclaration(
+                pads=["1", "2"],
+                hole_diameter={"min_mm": 1.9, "max_mm": 2.1},
+                pitch={"min_mm": 10.1, "max_mm": 9.9},
+                source="drawing",
+            )
+
+    def test_limits_must_be_positive(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(
+                pads=["1", "2"], hole_diameter={"min_mm": 0, "max_mm": 2.1}, source="drawing"
+            )
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(
+                pads=["1", "2"],
+                hole_diameter={"min_mm": 1.9, "max_mm": 2.1},
+                pitch={"min_mm": 9.9, "max_mm": -10.1},
+                source="drawing",
+            )
+
+    def test_parses_from_spec(self, tmp_path):
+        from kicad_tools.spec.parser import load_spec
+
+        spec_file = tmp_path / "project.kct"
+        spec_file.write_text(
+            "kct_version: '1.0'\n"
+            "project:\n"
+            "  name: T\n"
+            "bom_entries:\n"
+            "  - ref: C1-C2\n"
+            "    part: LGU2E471MELB\n"
+            "    mounting_holes:\n"
+            "      pads: ['1', '2']\n"
+            "      hole_diameter: {min_mm: 1.90, max_mm: 2.10}\n"
+            "      pitch: {min_mm: 9.90, max_mm: 10.10}\n"
+            "      source: Nichicon LGU drawing, p. 1\n"
+        )
+        spec = load_spec(spec_file)
+        assert spec.bom_entries is not None
+        declaration = spec.bom_entries[0].mounting_holes
+        assert declaration is not None
+        assert declaration.pads == ["1", "2"]
+        assert declaration.hole_diameter.min_mm == pytest.approx(1.90)
+        assert declaration.pitch is not None
+        assert declaration.pitch.max_mm == pytest.approx(10.10)
+        assert declaration.source == "Nichicon LGU drawing, p. 1"
+        # A mounting declaration is independent of a lead profile.
+        assert spec.bom_entries[0].lead is None
+
+    def test_round_trip(self, tmp_path):
+        """save_spec -> load_spec preserves the mounting declaration verbatim."""
+        from kicad_tools.spec.parser import load_spec, save_spec
+        from kicad_tools.spec.schema import (
+            BOMEntry,
+            MountingHoleDeclaration,
+            ProjectMetadata,
+            ProjectSpec,
+        )
+
+        spec = ProjectSpec(
+            project=ProjectMetadata(name="T"),
+            bom_entries=[
+                BOMEntry(
+                    ref="C1",
+                    part="LGU2E471MELB",
+                    mounting_holes=MountingHoleDeclaration(
+                        pads=["1", "2"],
+                        hole_diameter={"min_mm": 1.9, "max_mm": 2.1},
+                        pitch={"min_mm": 9.9, "max_mm": 10.1},
+                        source="Nichicon LGU drawing, p. 1",
+                    ),
+                )
+            ],
+        )
+        path = tmp_path / "project.kct"
+        save_spec(spec, path)
+        loaded = load_spec(path)
+        assert loaded.bom_entries is not None
+        assert loaded.bom_entries[0].mounting_holes == spec.bom_entries[0].mounting_holes
+
+
+class TestFinishedHoleGuarantee:
+    """Order-specific finished-hole interval guaranteed for selected holes (Issue #10476)."""
+
+    def test_declared(self):
+        from kicad_tools.spec.schema import FinishedHoleGuarantee
+
+        guarantee = FinishedHoleGuarantee(
+            refs=["C1"],
+            min_mm=1.90,
+            max_mm=2.10,
+            source="JLCPCB order 48210 engineering confirmation",
+        )
+        assert guarantee.refs == ["C1"]
+        assert guarantee.min_mm == pytest.approx(1.90)
+        assert guarantee.max_mm == pytest.approx(2.10)
+
+    def test_single_reference_string_accepted(self):
+        from kicad_tools.spec.schema import FinishedHoleGuarantee
+
+        guarantee = FinishedHoleGuarantee(refs="C1", min_mm=1.9, max_mm=2.1, source="fab note")
+        assert guarantee.refs == ["C1"]
+
+    def test_requires_references(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import FinishedHoleGuarantee
+
+        with pytest.raises(ValidationError):
+            FinishedHoleGuarantee(refs=[], min_mm=1.9, max_mm=2.1, source="fab note")
+        with pytest.raises(ValidationError):
+            FinishedHoleGuarantee(refs=[""], min_mm=1.9, max_mm=2.1, source="fab note")
+
+    def test_requires_source(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import FinishedHoleGuarantee
+
+        with pytest.raises(ValidationError, match="source"):
+            FinishedHoleGuarantee(refs=["C1"], min_mm=1.9, max_mm=2.1)
+        with pytest.raises(ValidationError, match="source"):
+            FinishedHoleGuarantee(refs=["C1"], min_mm=1.9, max_mm=2.1, source="  ")
+
+    def test_interval_must_be_ordered_and_positive(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import FinishedHoleGuarantee
+
+        with pytest.raises(ValidationError, match="min_mm <= max_mm"):
+            FinishedHoleGuarantee(refs=["C1"], min_mm=2.1, max_mm=1.9, source="fab note")
+        with pytest.raises(ValidationError):
+            FinishedHoleGuarantee(refs=["C1"], min_mm=0, max_mm=2.1, source="fab note")
+
+    def test_parses_from_spec(self, tmp_path):
+        from kicad_tools.spec.parser import load_spec
+
+        spec_file = tmp_path / "project.kct"
+        spec_file.write_text(
+            "kct_version: '1.0'\n"
+            "project:\n"
+            "  name: T\n"
+            "requirements:\n"
+            "  manufacturing:\n"
+            "    finished_hole_tolerance_mm: -0.08\n"
+            "    finished_hole_tolerance_upper_mm: 0.13\n"
+            "    finished_hole_tolerance_source: JLCPCB capabilities, through-hole tolerances\n"
+            "    finished_hole_guarantees:\n"
+            "      - refs: [C1]\n"
+            "        min_mm: 1.90\n"
+            "        max_mm: 2.10\n"
+            "        source: JLCPCB order 48210 engineering confirmation\n"
+        )
+        spec = load_spec(spec_file)
+        assert spec.requirements is not None
+        assert spec.requirements.manufacturing is not None
+        mfg = spec.requirements.manufacturing
+        assert mfg.finished_hole_tolerance_upper_mm == pytest.approx(0.13)
+        assert mfg.finished_hole_guarantees is not None
+        (guarantee,) = mfg.finished_hole_guarantees
+        assert guarantee.refs == ["C1"]
+        assert guarantee.min_mm == pytest.approx(1.90)
+        assert guarantee.max_mm == pytest.approx(2.10)
+        assert guarantee.source == "JLCPCB order 48210 engineering confirmation"
+
+
 class TestWireTerminationDeclarations:
     """Soldered wire or ferrule landings declared without a component MPN (Issue #10473)."""
 
