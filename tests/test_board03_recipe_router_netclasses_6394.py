@@ -133,7 +133,12 @@ def test_usb_widths_survive_both_recipe_rule_writers(tmp_path: Path, existing_ro
         for net, width in expected.items():
             name = router_map[net]["name"]
             assert widths[net].source_class == name
-            assert classes[name] == {**original_usb, "name": name, "track_width": width}
+            assert classes[name] == {
+                **original_usb,
+                "name": name,
+                "track_width": width,
+                "diff_pair_width": width,
+            }
         for net in ("USB_CC1", "USB_CC2", "BTN1", "XTAL1", "VCC"):
             name = original["netclass_assignments"][net]
             assert settings["netclass_assignments"][net] == name
@@ -166,7 +171,20 @@ def test_usb_widths_survive_both_recipe_rule_writers(tmp_path: Path, existing_ro
     assert cycles[0] == cycles[1]
 
 
-@pytest.mark.parametrize("conflict", ["router width", "existing class"])
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        "router width",
+        "track_width",
+        "diff_pair_width",
+        "via_diameter",
+        "via_drill",
+        "diff_pair_gap",
+        "diff_pair_via_gap",
+        "microvia_diameter",
+        "microvia_drill",
+    ],
+)
 def test_staging_keeps_both_sidecars_on_conflict(tmp_path: Path, conflict: str) -> None:
     stage_usb_classes = _load_recipe("engineering/usb_project_rules.py").stage_usb_classes
     pcb = _stage(tmp_path)
@@ -178,11 +196,20 @@ def test_staging_keeps_both_sidecars_on_conflict(tmp_path: Path, conflict: str) 
         sidecar.write_text(json.dumps(mapping))
     else:
         data = json.loads(project.read_bytes())
-        data["net_settings"]["classes"].append(
-            {"name": "USBMCU", "track_width": 0.18, "clearance": 0.15}
+        classes = data["net_settings"]["classes"]
+        classes.append(
+            {
+                **classes[0],
+                "name": "USBMCU",
+                "track_width": 0.25,
+                "diff_pair_width": 0.25,
+                "clearance": 0.15,
+                conflict: 0.40,
+            }
         )
         project.write_text(json.dumps(data))
-    original = (project.read_bytes(), sidecar.read_bytes(), pcb.read_bytes())
+    files = (project, sidecar, pcb.with_suffix(".kicad_dru"), pcb)
+    original = [path.read_bytes() for path in files]
     with pytest.raises(ValueError, match="reviewed"):
         stage_usb_classes(pcb)
-    assert (project.read_bytes(), sidecar.read_bytes(), pcb.read_bytes()) == original
+    assert [path.read_bytes() for path in files] == original
