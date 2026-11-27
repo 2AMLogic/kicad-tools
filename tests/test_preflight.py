@@ -1443,6 +1443,132 @@ class TestPreflightLeadFit:
         if landing:
             assert _by_pad(result)[("J1", "2")]["status"] == "fail"
 
+    @pytest.mark.parametrize(
+        ("invalid_j1_pad3", "expected_error"),
+        [
+            (_wire_yaml(3, "-1"), "invalid diameter_mm"),
+            ("  - ref: J1\n    pad: 3\n    diameter_mm: 2.40\n", "invalid source"),
+        ],
+    )
+    def test_dropped_wire_row_before_invalid_row_keeps_error_indices_aligned(
+        self, tmp_path, invalid_j1_pad3, expected_error
+    ):
+        """Dropping an unattached row must renumber wire errors so later valid rows still fail."""
+        pcb = _wire_board(tmp_path)
+        _write_lead_spec(
+            tmp_path,
+            _CONTROL_YAML,
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=(
+                "  - diameter_mm: 2.40\n    source: forgot ref and pad\n"  # row 0 -> dropped
+                + invalid_j1_pad3  # row 1 -> errors.wires
+                + _wire_yaml(2, "3.10", _FERRULE_SOURCE)  # row 2 -> valid, must FAIL
+                + "  - ref: J1\n    diameter_mm: 2.40\n    source: forgot pad\n"  # row 3 -> dropped
+                + _wire_yaml(2, "0", ref="R5")  # row 4 -> errors.wires
+                + _wire_yaml(1, ref="R5")  # row 5 -> valid, must PASS
+            ),
+        )
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "FAIL"
+        assert "J1 pad 2" in result.message
+        by_pad = _by_pad(result)
+        ferrule = by_pad[("J1", "2")]
+        assert ferrule["status"] == "fail"
+        assert ferrule["wire"] == {
+            "diameter_mm": pytest.approx(3.1),
+            "source": _FERRULE_SOURCE,
+        }
+        assert ferrule["nominal_margin_mm"] == pytest.approx(-0.1)
+        assert ferrule["tolerance"]["minimum_margin_mm"] == pytest.approx(-0.18)
+
+        bad_j1 = by_pad[("J1", "3")]
+        assert bad_j1["status"] == "unassessed"
+        assert expected_error in bad_j1["reason"]
+
+        bad_r5 = by_pad[("R5", "2")]
+        assert bad_r5["status"] == "unassessed"
+        assert "invalid diameter_mm" in bad_r5["reason"]
+
+        assert by_pad[("R5", "1")]["status"] == "pass"
+
+        not_applied = result.data["wire_terminations_not_applied"]
+        assert len(not_applied) == 2
+        assert not_applied[0].startswith("wire_terminations[0]: ")
+        assert not_applied[1].startswith("wire_terminations[3]: ")
+
+    def test_unmatched_wire_declaration_reported_as_not_applied(self, tmp_path):
+        """A wire declaration targeting a nonexistent or non-plated pad is reported."""
+        pcb = _create_pcb_with_lead_pads(
+            tmp_path,
+            {"J1": [_tht_pad("1", _WIRE_HOLE_MM), _tht_pad("2", _WIRE_HOLE_MM)]},
+        )
+        # Only a typo'd reference declared: both real pads stay unassessed, and the typo is listed.
+        _write_lead_spec(
+            tmp_path,
+            "",
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=_wire_yaml(2, "3.10", _FERRULE_SOURCE, ref="J11"),
+        )
+        result = _run_lead_fit(pcb)
+        assert result.status == "WARN"
+        assert result.data["wire_terminations_not_applied"] == [
+            "J11 pad 2: no matching plated through-hole pad on PCB"
+        ]
+        assert "1 wire termination declaration(s) not applied" in result.message
+        assert (
+            "Wire termination declaration not applied: "
+            "J11 pad 2: no matching plated through-hole pad on PCB"
+        ) in result.details
+
+        # All real pads pass, plus an extra typo'd declaration -> WARN (not OK).
+        _write_lead_spec(
+            tmp_path,
+            "",
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=(_wire_yaml(1) + _wire_yaml(2) + _wire_yaml(9, "2.40", _WIRE_SOURCE, ref="J1")),
+        )
+        result = _run_lead_fit(pcb)
+        assert result.status == "WARN"
+        assert result.data["wire_terminations_not_applied"] == [
+            "J1 pad 9: no matching plated through-hole pad on PCB"
+        ]
+
+        # A real failure still fails while also reporting the unmatched declaration.
+        _write_lead_spec(
+            tmp_path,
+            "",
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=(
+                _wire_yaml(1)
+                + _wire_yaml(2, "3.10", _FERRULE_SOURCE)
+                + _wire_yaml(2, "2.40", _WIRE_SOURCE, ref="J11")
+            ),
+        )
+        result = _run_lead_fit(pcb)
+        assert result.status == "FAIL"
+        assert result.data["wire_terminations_not_applied"] == [
+            "J11 pad 2: no matching plated through-hole pad on PCB"
+        ]
+
+    def test_unmatched_wire_declaration_on_smd_only_board_warns(self, tmp_path):
+        """An all-SMD board with a wire declaration warns instead of silently reporting OK."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"R1": [_smd_pad("1"), _smd_pad("2")]})
+        _write_lead_spec(
+            tmp_path,
+            "",
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=_wire_yaml(1, "2.40", _WIRE_SOURCE, ref="J1"),
+        )
+        result = _run_lead_fit(pcb)
+        assert result.status == "WARN"
+        assert result.data["pads"] == []
+        assert result.data["wire_terminations_not_applied"] == [
+            "J1 pad 1: no matching plated through-hole pad on PCB"
+        ]
+        assert "1 wire termination declaration(s) not applied" in result.message
+
     def test_wire_pad_without_tolerance_reports_nominal_only(self, tmp_path):
         """An unknown hole tolerance leaves a wire pad a nominal result only."""
         pcb = _wire_board(tmp_path)

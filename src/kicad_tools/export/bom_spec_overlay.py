@@ -108,11 +108,16 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
             field = ".".join(map(str, loc[2:]))
             errors.profiles[row, pad] = f"invalid {field}: {error['msg']}"
         if dropped:
-            data["wire_terminations"] = [
-                declaration
-                for row, declaration in enumerate(data["wire_terminations"])
-                if row not in dropped
-            ]
+            kept: list[object] = []
+            remapped: dict[int, str] = {}
+            for row, declaration in enumerate(data["wire_terminations"]):
+                if row in dropped:
+                    continue
+                if row in errors.wires:
+                    remapped[len(kept)] = errors.wires[row]
+                kept.append(declaration)
+            data["wire_terminations"] = kept
+            errors.wires = remapped
     return ProjectSpec.model_validate(data), errors
 
 

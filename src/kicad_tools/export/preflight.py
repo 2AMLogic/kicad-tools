@@ -1437,6 +1437,7 @@ class PreflightChecker:
                 wires.setdefault((termination.ref, termination.pad), []).append((row, termination))
 
         findings: list[dict] = []
+        matched_wires: set[tuple[str, str]] = set()
         for fp in self._pcb.footprints:
             if fp.dnp:
                 continue
@@ -1451,6 +1452,7 @@ class PreflightChecker:
                 wire: WireTermination | None = None
                 declared = wires.get((fp.reference, pad.number))
                 if declared:
+                    matched_wires.add((fp.reference, pad.number))
                     # The prepared wire or ferrule end enters a declared pad,
                     # not its part's lead (Issue #10473).
                     row, wire = declared[0]
@@ -1496,7 +1498,12 @@ class PreflightChecker:
             for f in findings
             if f["status"] != "unassessed" and f["tolerance"]["status"] == "unassessed"
         ]
-        not_applied = spec_errors.unattached_wires
+        unmatched_wires = [
+            f"{ref} pad {pad}: no matching plated through-hole pad on PCB"
+            for (ref, pad) in wires
+            if (ref, pad) not in matched_wires
+        ]
+        not_applied = [*spec_errors.unattached_wires, *unmatched_wires]
         data: dict = {
             "pads": findings,
             "wire_terminations_not_applied": list(not_applied),
@@ -1510,7 +1517,7 @@ class PreflightChecker:
             },
         }
 
-        if not findings:
+        if not findings and not not_applied:
             return PreflightResult(
                 name=name,
                 status="OK",
