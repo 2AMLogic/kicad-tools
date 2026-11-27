@@ -647,22 +647,65 @@ def _uniform_pad_lands(fp: Any, pad: Any, layers: Collection[str]) -> dict[str, 
 
 
 def _approximated_pad_box(fp: Any, pad: Any, geom: Any) -> Any:
-    """Un-eroded, offset-aware size box for a pad the outline models only roughly.
+    """Offset-aware conservative land for a pad the outline models only roughly.
 
     ``pad_copper_outline`` erodes the box of chamfered ``roundrect`` and
     ``trapezoid`` pads by ``PAD_FALLBACK_ERODE`` per side; on top of the
     terminal inset that empties 0.26-0.28 mm wide pads on a 0.05 mm grid.  The
-    ordinary route keeps the historical un-eroded box (now at the pad's
-    ``(offset)`` centre); ``exact_pad_lands`` still marks it unmodelled.
+    un-eroded circumscribing box over-claims instead: a goal cell in a chamfered
+    corner is off the real copper.  So the land is an *inscribed* region at the
+    pad's ``(offset)`` centre: a chamfered ``roundrect`` is its box with each
+    corner cut (an uncut rounded corner is cut by its radius, a chord that
+    lies inside the arc), and a ``trapezoid`` is the rectangle inside it for
+    either sign of ``rect_delta``.  Anything else keeps ``geom``.
+    ``exact_pad_lands`` still marks the pad unmodelled.
     """
     from shapely.geometry import Polygon
 
-    from kicad_tools.geometry.copper import custom_pad_board_outline, pad_board_center
+    from kicad_tools.geometry.copper import (
+        _pad_has_chamfer,
+        custom_pad_board_outline,
+        pad_board_center,
+    )
 
     center = pad_board_center(pad, fp.position, fp.rotation)
     w, h = pad.size
     if custom_pad_board_outline(pad, center) is not None or w <= 0 or h <= 0:
         return geom
+    node = getattr(pad, "_sexp_node", None)
+    shape = (getattr(pad, "shape", "") or "").lower()
+    local: list[tuple[float, float]]
+    if shape == "roundrect" and _pad_has_chamfer(pad):
+        short = min(w, h)
+        ratio = node.find("chamfer_ratio").get_float(0) or 0.0
+        cut = max(0.0, min(0.5, ratio)) * short
+        selected = {c.value for c in node.find("chamfer").children}
+        round_ratio = getattr(pad, "roundrect_rratio", None)
+        rounded = max(0.0, min(0.5, 0.25 if round_ratio is None else round_ratio)) * short
+        local = []
+        # KiCad pad-local y grows downward, so "top" is -y.
+        for name, sx, sy in (
+            ("top_left", -1, -1),
+            ("top_right", 1, -1),
+            ("bottom_right", 1, 1),
+            ("bottom_left", -1, 1),
+        ):
+            r = cut if name in selected else rounded
+            cx, cy = sx * w / 2, sy * h / 2
+            if r <= 0:
+                local.append((cx, cy))
+            else:
+                local += [(cx - sx * r, cy), (cx, cy - sy * r)][:: -1 if sx * sy > 0 else 1]
+    elif shape == "trapezoid" and node is not None:
+        delta = node.find("rect_delta")
+        dx = (delta.get_float(0) if delta is not None else 0.0) or 0.0
+        dy = (delta.get_float(1) if delta is not None else 0.0) or 0.0
+        hw, hh = w / 2 - abs(dy) / 2, h / 2 - abs(dx) / 2
+        if not (math.isfinite(hw) and math.isfinite(hh)) or hw <= 0 or hh <= 0:
+            return geom
+        local = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+    else:
+        local = [(-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)]
     ox, oy = getattr(pad, "drill_offset", (0.0, 0.0)) or (0.0, 0.0)
     ang = math.radians(-(getattr(pad, "rotation", 0.0) or 0.0))
     ca, sa = math.cos(ang), math.sin(ang)
@@ -672,7 +715,7 @@ def _approximated_pad_box(fp: Any, pad: Any, geom: Any) -> Any:
                 center[0] + (lx + ox) * ca - (ly + oy) * sa,
                 center[1] + (lx + ox) * sa + (ly + oy) * ca,
             )
-            for lx, ly in ((-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2))
+            for lx, ly in local
         ]
     )
 

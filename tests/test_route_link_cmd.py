@@ -555,6 +555,58 @@ class TestCommit:
         destination_flash = box(11.5, 13.5, 12.5, 14.5)
         assert any(destination_flash.covers(p) for p in ends)
 
+    _DIAGONAL_PADS = {
+        "chamfered": (
+            '(pad "1" thru_hole roundrect (at 0 0) (size 2 2) (roundrect_rratio 0) '
+            "(chamfer_ratio 0.14) (chamfer top_left top_right bottom_left bottom_right) "
+            '(drill 0.4 (offset -0.3 -0.3)) (layers "*.Cu" "*.Mask") (net 1 "SENSE"))'
+        ),
+        "trapezoid": (
+            '(pad "1" thru_hole trapezoid (at 0 0) (size 2 2) (rect_delta 0 0.6) '
+            '(drill 0.4 (offset -0.3 -0.3)) (layers "*.Cu" "*.Mask") (net 1 "SENSE"))'
+        ),
+    }
+
+    def _diagonal_board(self, tmp_path, kind):
+        old = '(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "SENSE"))'
+        text = OFFSET_PAD_BOARD.format(angle=0, shape="rect", rounding="")
+        head, _, tail = text.partition(old)
+        # First (P1) pad stays as is; swap P2's pad for the approximated shape.
+        p2, _, rest = tail.partition(old)
+        board = tmp_path / "diagonal.kicad_pcb"
+        board.write_text(head + old + p2 + self._DIAGONAL_PADS[kind] + rest)
+        return board
+
+    def test_chamfered_pad_terminal_excludes_the_cut_corners(self, tmp_path):
+        from kicad_tools.router.link_router import terminal_for_pad
+
+        pcb = PCB.load(str(self._diagonal_board(tmp_path, "chamfered")))
+        land = terminal_for_pad(pcb, "P2", "1").layers["F.Cu"]
+        # 2 x 2 mm octagon, 0.14 * 2 = 0.28 mm cuts: 4 - 4 * 0.28**2 / 2.
+        assert land.area == pytest.approx(4 - 4 * 0.28**2 / 2, abs=1e-6)
+
+    @pytest.mark.parametrize("order", ["P3.1 P2.1", "P2.1 P3.1"])
+    @pytest.mark.parametrize("kind", ["chamfered", "trapezoid"])
+    def test_offset_approximated_pad_on_a_diagonal_link(self, tmp_path, capsys, kind, order):
+        board = self._diagonal_board(tmp_path, kind)
+        out = tmp_path / "saved.kicad_pcb"
+        args = (
+            str(board),
+            "--link",
+            f"SENSE {order}",
+            "--link-layers",
+            "F.Cu",
+            "--trace-width",
+            ".2",
+            "--clearance",
+            ".2",
+        )
+        rc, probe = _run(capsys, *args, "--probe")
+        assert rc == 0
+        rc, doc = _run(capsys, *args, "-o", str(out))
+        # A probe that claims a route must be one the write keeps.
+        assert probe["links"][0]["routable"] and doc["links"][0]["status"] == "committed"
+
     @pytest.mark.parametrize("width", [0.28, 0.265, 0.22])
     @pytest.mark.parametrize(
         "pad",
