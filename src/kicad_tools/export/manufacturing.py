@@ -3400,7 +3400,7 @@ class ManufacturingPackage:
             from ..report.generator import ReportGenerator
             from ..report.models import ReportData
             from ..report.net_class_map import resolve_committed_net_class_map
-            from ..report.utils import find_schematic
+            from ..report.utils import find_schematic, resolve_report_revision
         except ImportError as exc:
             # The optional ``report`` extra is missing.  Record a hard error
             # (not just a log line) so ``kct export`` exits non-zero instead
@@ -3460,7 +3460,10 @@ class ManufacturingPackage:
             project_name = self.pcb_path.stem
             data = ReportData(
                 project_name=project_name,
-                revision=data_kwargs.pop("revision", "1"),
+                revision=resolve_report_revision(
+                    self.pcb_path,
+                    data_kwargs.pop("revision", None),
+                ),
                 date=data_kwargs.pop(
                     "date",
                     _now_utc().strftime("%Y-%m-%d"),
@@ -3751,6 +3754,17 @@ class ManufacturingPackage:
                     result[key] = val
         else:
             result.pop("_narrative", None)
+
+        meta_path = data_dir / "metadata.json"
+        if meta_path.exists():
+            with open(meta_path, encoding="utf-8") as f:
+                meta = _json.load(f)
+                if "revision" in meta:
+                    result["revision"] = meta["revision"]
+                if "date" in meta:
+                    result["date"] = meta["date"]
+                if "git_hash" in meta:
+                    result["git_hash"] = meta["git_hash"]
 
         return result
 

@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10614** (closed): Readiness checks the sibling net-class map and approves an explicit map with ampacity errors
+- **PR #10617**: fix(readiness): check the selected net-class map
+- **PR #10607**: fix: gate aligned-pad bridges on 45-degree angle tolerance
+- **PR #10606**: fix(submission): verify bundled renders through the release manifest
+- **Issue #10603** (closed): Tapeout sign-off refuses receipt-bound manufacturing render files
+- **Issue #10601** (closed): Mask-copper aligned-pad bridge admits a candidate the angle census rejects (_BRIDGE_AXIS_TOLERANCE_MM vs ANGLE_TOL_DEG)
 - **Issue #10486** (closed): Route-link option to join an existing same-net branch outside a component pad
 - **PR #10519**: feat: add route-link --join-track to tee into a pad's track
 - **PR #10563**: fix(router): decline optimizer shortcuts that park a bend beside their own pad's mask opening
