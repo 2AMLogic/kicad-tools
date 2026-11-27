@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10555** (closed): route: a pre-existing net class wider than its router width keeps the wider value, so _write_netclasses_to_project cannot declare a narrower class
+- **PR #10558**: fix(route): lower kct-created net classes to the routed width
+- **Issue #10487** (closed): Schematic validation misses trailing-letter references that native KiCad BOM marks unannotated
+- **PR #10488**: Warn when native KiCad BOM export changes a component reference
+- **Issue #10531** (closed): Docker platform notice invalidates a successful native solder-mask export
+- **PR #10533**: Recognize the Docker platform notice during native solder-mask export
 - **Issue #10515** (closed): reference-coverage reports coverage: "none" on layers a net only passes through via
 - **PR #10534**: fix: report not_applicable for via-only layers in reference-coverage
 - **Issue #10416** (closed): Validate repeated circuit channels against expected pins, values and assembly parts
