@@ -48,6 +48,28 @@ class TestExportCmdParsing:
 class TestExportCmdIntegration:
     """Integration tests that mock the assembly pipeline."""
 
+    def test_project_root_reaches_manufacturing_package(self, tmp_path, monkeypatch, capsys):
+        from kicad_tools.export.manufacturing import ManufacturingPackage, ManufacturingResult
+
+        board = tmp_path / "assembly/kicad/board.kicad_pcb"
+        board.parent.mkdir(parents=True)
+        board.write_text("(kicad_pcb)")
+        seen = []
+
+        def dry_run(package, output_dir, dry_run):
+            seen.append(package.config.project_root)
+            return ManufacturingResult(output_dir=output_dir)
+
+        monkeypatch.setattr(ManufacturingPackage, "export", dry_run)
+        monkeypatch.chdir(tmp_path)
+        assert export_main([str(board), "--dry-run"]) == 0
+        assert export_main([str(board), "--project-root", "assembly", "--dry-run"]) == 0
+        unrelated = tmp_path / "elsewhere"
+        unrelated.mkdir()
+        assert export_main([str(board), "--project-root", str(unrelated), "--dry-run"]) == 1
+        assert "--project-root must be a directory containing" in capsys.readouterr().err
+        assert seen == [None, board.parents[1].resolve()]
+
     def test_full_export_with_mocked_assembly(self, tmp_path, monkeypatch):
         """Test full export pipeline with mocked assembly."""
         project_dir = tmp_path / "project"
@@ -1297,6 +1319,7 @@ _EXPORT_PASS_THROUGH_CASES = {
     "no_auto_lcsc": (["--no-auto-lcsc"], True),
     "no_spec": (["--no-spec"], True),
     "spec": (["--spec", "project.kct"], "project.kct"),
+    "project_root": (["--project-root", "assembly"], "assembly"),
     "no_merge_lcsc": (["--no-merge-lcsc"], True),
     "merge_lcsc_from": (["--merge-lcsc-from", "prev_bom.csv"], "prev_bom.csv"),
     "skip_preflight": (["--skip-preflight"], True),
