@@ -592,8 +592,9 @@ def is_wire_landing(footprint: str) -> bool:
     return footprint.split(":")[-1].casefold().startswith("solderwire")
 
 
-_PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
-_WATTS = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)(?:/(\d+))?\s*(m?W)(?![a-z])", re.I)
+_NUM = r"(?:\d+(?:\.\d*)?|\.\d+)"
+_PERCENT = re.compile(rf"(?<![\w.])({_NUM})\s*%")
+_WATTS = re.compile(rf"(?<![\w.])({_NUM})(?:\s*/\s*(\d+))?\s*(m?W)(?![a-z])", re.I)
 
 
 def _watts(text: str) -> float | None:
@@ -622,6 +623,12 @@ def stated_ratings(item: BOMItem) -> tuple[re.Match[str] | None, float | None]:
     return tolerance, (max(powers) if powers else None)
 
 
+# Catalogue measurements that are not the initial tolerance / rated power.
+_UNRELATED_MEASURE = re.compile(
+    r"pulse|surge|peak|overload|load[\s-]*life|resistance\s+change|drift|stability"
+    r"|temperature\s+coefficient|tcr|ppm",
+    re.I,
+)
 _RATED_POWER = re.compile(r"(?:rated\s+power|power\s+rating|rated)\s*[:=]?\s*", re.I)
 
 
@@ -634,7 +641,12 @@ def _candidate_tolerance(part: object) -> float | None:
     structured = _PERCENT.search(str(getattr(part, "tolerance", "") or ""))
     if structured:
         return float(structured[1])
-    found = {float(m[1]) for m in _PERCENT.finditer(getattr(part, "description", "") or "")}
+    description = getattr(part, "description", "") or ""
+    found = {
+        float(m[1])
+        for m in _PERCENT.finditer(description)
+        if not _UNRELATED_MEASURE.search(description[max(0, m.start() - 40) : m.end() + 40])
+    }
     return found.pop() if len(found) == 1 else None
 
 
@@ -653,8 +665,29 @@ def _candidate_power(part: object) -> float | None:
         match = _WATTS.match(description, rated.end())
         if match is not None:
             return _watts(match[0])
-    values = {w for m in _WATTS.finditer(description) if (w := _watts(m[0])) is not None}
+    values = {
+        w
+        for m in _WATTS.finditer(description)
+        if (w := _watts(m[0])) is not None
+        and not _UNRELATED_MEASURE.search(description[max(0, m.start() - 20) : m.end() + 20])
+    }
     return values.pop() if len(values) == 1 else None
+
+
+def _melf_evidence(part: object, body: str) -> str | None:
+    """A problem string unless the record positively establishes the MELF body."""
+    package = (getattr(part, "package", "") or "").strip()
+    texts = [package] if package else [
+        getattr(part, "description", "") or "",
+        getattr(part, "mfr_part", "") or "",
+    ]
+    token = re.compile(r"MELF" if body.casefold() == "melf" else re.escape(body), re.I)
+    generic = re.compile(r"MELF|MM[ABU]-\d{4}", re.I)
+    if package and generic.search(package) is None:
+        return f"catalogue package {package} is not the {body} body"
+    if not any(token.search(t) or (generic.search(t) and body.casefold() == "melf") for t in texts):
+        return f"catalogue does not establish the {body} body"
+    return None
 
 
 def sourcing_problem(
@@ -692,7 +725,17 @@ def sourcing_problem(
         )
         if found_package is None or found_package[0] != requested:
             return f"catalogue does not establish the {requested} package"
+    melf = _NON_CHIP_BODY_RE.search(item.footprint)
+    if melf is not None and requested not in CHIP_PACKAGES:
+        body = _melf_evidence(part, melf[0])
+        if body is not None:
+            return body
     tolerance, power = stated_ratings(item)
+    props = {k.casefold(): v for k, v in (getattr(item, "properties", None) or {}).items()}
+    if props.get("tolerance", "").strip() and tolerance is None:
+        return "stated tolerance is not readable"
+    if any(props.get(k, "").strip() for k in ("power", "wattage")) and power is None:
+        return "stated power rating is not readable"
     if part is None and not (tolerance or power is not None):
         return None
     if tolerance:

@@ -1433,3 +1433,51 @@ def test_ratings_come_from_the_catalogue_record():
     assert sourcing_problem(item, pulse)
     structured = _plain_1206_part(description="10kΩ 1206", tolerance="0.1%", power_rating="250 mW")
     assert sourcing_problem(item, structured) is None
+
+
+# --- Review round 4 (#10424): package evidence, measurement kind, numeric forms, wire landings ---
+
+
+def test_review4_numeric_forms_parse_completely():
+    from kicad_tools.export.lcsc_value_check import _watts, stated_ratings
+
+    assert _watts("1 / 8 W") == 0.125
+    assert _watts(".25 W") == 0.25
+    item = _make_item("R1", "10k", _CHIP_1206)
+    item.properties = {"Tolerance": ".1%", "Power": ".25 W"}
+    tol, power = stated_ratings(item)
+    assert float(tol[1]) == 0.1 and power == 0.25
+
+
+def test_review4_unrelated_measurements_do_not_establish_ratings():
+    from kicad_tools.export.lcsc_value_check import sourcing_problem
+
+    item = _precision_item("R1")
+    pulse = _plain_1206_part(description="10kΩ 1206 pulse power 1 W", package="1206")
+    drift = _plain_1206_part(description="10kΩ 1206 load-life resistance change ±0.1%")
+    assert sourcing_problem(item, pulse)
+    assert sourcing_problem(item, drift)
+    frac = _plain_1206_part(power_rating="1 / 8 W", tolerance="0.1%")
+    assert sourcing_problem(item, frac)
+
+
+def test_review4_melf_needs_positive_body_evidence():
+    from kicad_tools.export.lcsc_value_check import sourcing_problem
+    from kicad_tools.parts.models import Part
+
+    melf = _make_item("R1", "10k", "Resistor_SMD:R_MELF_MMB-0207")
+    axial = Part(lcsc_part="C1", mfr_part="X", description="10kΩ", package="Axial")
+    good = Part(lcsc_part="C2", mfr_part="X", description="10kΩ", package="MMB-0207")
+    assert sourcing_problem(melf, axial)
+    assert sourcing_problem(melf, None)
+    assert sourcing_problem(melf, good) is None
+
+
+def test_review4_explicit_wire_landing_code_not_shared():
+    from kicad_tools.export.bom_enrich import enrich_bom_lcsc
+
+    fp = "Connector_Wire:SolderWire_1x02"
+    r1, r2 = _make_item("R1", "10k", fp), _make_item("R2", "10k", fp)
+    r1.lcsc = "C123456"
+    enrich_bom_lcsc([r1, r2])
+    assert r1.lcsc == "C123456" and not r2.lcsc

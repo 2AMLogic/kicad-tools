@@ -425,6 +425,10 @@ def enrich_bom_lcsc(
                 for it in group_items:
                     if it.lcsc:
                         continue
+                    if is_wire_landing(footprint):
+                        # An explicit code on one wire landing is not shared.
+                        blocked.append((it, "wire landing for external assembly"))
+                        continue
                     # A sibling with the same stated requirements as the
                     # holder inherits the code; one with different ratings
                     # needs the catalogue record to establish them.
