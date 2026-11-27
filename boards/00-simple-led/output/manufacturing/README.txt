@@ -2,7 +2,7 @@ Manufacturing package for simple_led_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-11-26T18:58:00+00:00
+Generated        : 2026-11-27T19:00:00+00:00
 
 Assembly package: BOM and CPL are included.
 CPL rotations combine the KiCad angle with a catalog-part or footprint table offset.

@@ -43,15 +43,15 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "5fce972dd3044ab7a5ae90d15f8faf6fed1ebd159cefa0c364f2f6a11b623e50",
+      "sha256": "774462e2fd12d1e016c5258d164d5d4efd2322bb36f02b42757c69da1459a70f",
       "size": 2413
     },
     "assembly-back.pdf": {
-      "sha256": "e6d5494cb4607b2568b4104a1f147801ac7295e3bae28ba8c774cc38b778ef5f",
+      "sha256": "e697885c83467d9025f0c48b4da769c225a09c940993701fcdb57af91335f75d",
       "size": 7497
     },
     "assembly-front.pdf": {
-      "sha256": "98debe1105a2885c66a3124e4e7c1e7d47e90bd8bc0f84e484899dca7ba82fde",
+      "sha256": "cb04c91cd88ae5878fb43b5a1bbfd22946420e608d330318ba0794444e7bee06",
       "size": 17513
     },
     "bom_jlcpcb.csv": {
@@ -59,8 +59,8 @@
       "size": 194
     },
     "check-report.json": {
-      "sha256": "e2e98ab3337f483c0a996cf9135f4e4cf7b162bae9a9b83402c6cc09dd95bc10",
-      "size": 82700
+      "sha256": "2c24cbd382bb9fb0525616cc134b75ad8d9e94c5369542d3af026adbda7c681f",
+      "size": 82984
     },
     "cpl_jlcpcb.csv": {
       "sha256": "aae5fc27c33e43d1e058dab990fddd66a2092c4c9ada334c6f839e16a56cf811",
@@ -99,8 +99,8 @@
       "size": 117856
     },
     "kicad_project.zip": {
-      "sha256": "73adf1016eadc6f390d5bba3ec874acfb22e5e76596855d51dbd4724a882b25e",
-      "size": 15272
+      "sha256": "1087c9665db09fd14fcbe06f08df639dcd90f5f6121e5520ef4a745153f30c0d",
+      "size": 15677
     },
     "native-drc.json": {
       "sha256": "360a511bc1089cdfc823b5d3f881fffa32c4c9b4b90810aa8540cf2bb8eb6079",
@@ -111,19 +111,19 @@
       "size": 12096
     },
     "report.md": {
-      "sha256": "2168368af55fbffa21748cd6759d74f038d801c7aab140e9e37ba41b52f67b03",
+      "sha256": "f2dcb96b2cbef540b707475245f9be18af1088ee2298255e48a9edd9213e40f8",
       "size": 2528
     },
     "report.pdf": {
-      "sha256": "38887fcbd71763217dbd30b3f6ac96769266b5f347e230480d3cf5c39d8e35ed",
-      "size": 969991
+      "sha256": "32e3a0b67f7798c52fafc7d607218283c75dd382e2a2cbadb40e06499391f09c",
+      "size": 970036
     },
     "schematic.pdf": {
-      "sha256": "e2ea8fe88ee17e0f0c189aa594ff2b959363b94c3949daaa9a10084c714140fe",
+      "sha256": "23c844fcd881718a3117aab77f53b040eb11b34a76fda867ebb6c6919b957142",
       "size": 47252
     }
   },
-  "generated_at": "2026-11-26T18:58:00+00:00",
+  "generated_at": "2026-11-27T19:00:00+00:00",
   "kicad_tools_version": "0.29.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -197,7 +197,8 @@
             "pad": "1",
             "reason": "no verified lead dimensions declared for pad 1 of 333-2SURD/S530-A3",
             "reference": "D1",
-            "status": "unassessed"
+            "status": "unassessed",
+            "wire": null
           },
           {
             "hole": {
@@ -209,7 +210,8 @@
             "pad": "2",
             "reason": "no verified lead dimensions declared for pad 2 of 333-2SURD/S530-A3",
             "reference": "D1",
-            "status": "unassessed"
+            "status": "unassessed",
+            "wire": null
           },
           {
             "hole": {
@@ -221,7 +223,8 @@
             "pad": "1",
             "reason": "no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ",
             "reference": "J1",
-            "status": "unassessed"
+            "status": "unassessed",
+            "wire": null
           },
           {
             "hole": {
@@ -233,7 +236,8 @@
             "pad": "2",
             "reason": "no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ",
             "reference": "J1",
-            "status": "unassessed"
+            "status": "unassessed",
+            "wire": null
           }
         ],
         "summary": {
@@ -243,12 +247,79 @@
           "pads": 4,
           "tolerance_unassessed": 0,
           "unassessed": 4
-        }
+        },
+        "wire_terminations_not_applied": []
       },
       "details": "D1 pad 1 [333-2SURD/S530-A3]: unassessed: no verified lead dimensions declared for pad 1 of 333-2SURD/S530-A3\nD1 pad 2 [333-2SURD/S530-A3]: unassessed: no verified lead dimensions declared for pad 2 of 333-2SURD/S530-A3\nJ1 pad 1 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ\nJ1 pad 2 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ\nAssessment covers centred geometric fit only (not lead pitch or placement tolerances).",
-      "message": "Through-hole lead fit unverified: 4 pad(s) unassessed (no verified lead dimensions or unsupported geometry); no failures",
+      "message": "Through-hole lead fit unverified: 4 pad(s) unassessed (no verified lead or prepared wire dimensions, or unsupported geometry); no failures",
       "name": "assembly_lead_fit",
       "status": "WARN"
+    },
+    {
+      "data": {
+        "components": [
+          {
+            "expected": null,
+            "footprint": "Resistor_SMD:R_0805_2012Metric",
+            "measured": {
+              "outer_span_mm": 3.0,
+              "pads": [
+                {
+                  "depth_mm": 1.0,
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "width_mm": 1.3
+                },
+                {
+                  "depth_mm": 1.0,
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0
+            },
+            "mismatched_fields": [],
+            "mpn": "0805W8F3300T5E",
+            "reason": "no verified SMD land pattern declared for MPN 0805W8F3300T5E",
+            "reference": "R1",
+            "source": null,
+            "status": "unassessed"
+          }
+        ],
+        "summary": {
+          "components": 1,
+          "failed": 0,
+          "passed": 0,
+          "unassessed": 1
+        },
+        "tolerance_mm": 0.001
+      },
+      "details": "R1 [0805W8F3300T5E]: unassessed: no verified SMD land pattern declared for MPN 0805W8F3300T5E (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nDimensional comparison tolerance: +/-0.001 mm (two-terminal SMD copper pads; placement rotation and mirroring undone).",
+      "message": "SMD land pattern unverified: 1 two-terminal SMD component(s) unassessed (missing MPN, source, or usable geometry); no failures",
+      "name": "assembly_smd_land_pattern",
+      "status": "WARN"
+    },
+    {
+      "data": {
+        "diameters": [],
+        "invalid_declarations": [],
+        "pitch": [],
+        "summary": {
+          "failed": 0,
+          "finished_hole_tolerance_mm": null,
+          "finished_hole_tolerance_source": null,
+          "finished_hole_tolerance_upper_mm": null,
+          "holes": 0,
+          "invalid_declarations": 0,
+          "order_unassessed": 0,
+          "pitch_pairs": 0,
+          "unassessed": 0
+        }
+      },
+      "message": "No placed references with a mounting-hole declaration; mounting-hole fit not applicable",
+      "name": "assembly_mounting_hole_fit",
+      "status": "OK"
     },
     {
       "message": "No usable stackup copper to reconcile; profile default copper applies",
