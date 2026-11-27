@@ -1626,6 +1626,30 @@ class PurchasingEntry(SpecModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _terminal_landings_are_declared_refs(self) -> PurchasingEntry:
+        """Keep a mapped landing within the designators the row declares (Issue #10582).
+
+        A nonempty ``refs`` is the buyer's declaration of the designators the
+        row belongs to, wire lands included, so a terminal wired to another
+        footprint must have that footprint listed too. Without this a ``ref``
+        typo that names a different real footprint passes the PCB check at
+        export and is frozen under the wrong part. An omitted or empty ``refs``
+        declares nothing to compare against and keeps its optional behaviour.
+        """
+        if not self.refs or not self.terminals:
+            return self
+        for assignment in self.terminals:
+            landing = assignment.landing
+            if landing is None or landing[0] in self.refs:
+                continue
+            raise ValueError(
+                f"terminal '{assignment.terminal}' maps to {landing[0]}, which is not among "
+                f"the row's declared refs ({', '.join(self.refs)}); correct the terminal's ref "
+                f"or add {landing[0]} to refs"
+            )
+        return self
+
 
 class Suggestions(SpecModel):
     """Design suggestions and preferences (SHOULD, not MUST)."""

@@ -571,8 +571,18 @@ Four identifiers stay distinct, and nothing is inferred from the part number:
 - `ref` and `pad` name a landing on the board.
 - `net` is the net that landing is expected to carry.
 
-Each terminal appears once. An `unused` terminal names no landing. The map
-belongs to a selected row: a `pending` row has no part to number the terminals
+Each terminal appears once. An `unused` terminal names no landing.
+
+When the row lists `refs`, every mapped `ref` must be one of them. A part that
+bridges two footprints, such as one wired across two wire lands, lists both
+designators on the same row with `quantity: 1`; it needs no extra row, and a
+listed reference with no terminal on it is fine. A `ref` that is not in the
+row's `refs` is a spec error, even when the board has that footprint and its pad
+carries the declared net, because the landing would be frozen under the wrong
+part. An omitted or empty `refs` declares nothing to compare against, so only the
+PCB check below applies.
+
+The map belongs to a selected row: a `pending` row has no part to number the terminals
 of, and must not declare one.
 
 `kct export` checks the board side of every mapped assignment against the PCB
