@@ -167,6 +167,8 @@ def render_pdf(html_content: str, output_path: Path | str) -> None:
     weasyprint.HTML(string=html_content).write_pdf(str(output_path))
 
 
+_JSON_QUOTED_FRONT_MATTER_KEYS = frozenset({"title", "subtitle", "author", "date"})
+
 # Pattern pandoc prints to stderr (exit 0) when it cannot resolve a
 # referenced image/resource. Each occurrence names one dropped figure, e.g.
 #   [WARNING] Could not fetch resource images/pcb_front.png: replacing ...
@@ -361,9 +363,6 @@ def pdf_renderer_available() -> str | None:
     if _pandoc_available():
         return "pandoc"
     return None
-
-
-_JSON_QUOTED_FRONT_MATTER_KEYS = frozenset({"title", "subtitle", "author", "date"})
 
 
 def _strip_yaml_front_matter(content: str) -> tuple[str, dict]:
