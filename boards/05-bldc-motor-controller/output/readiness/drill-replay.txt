@@ -1,3 +1,1 @@
-Issue #5012: all SMT drill overlaps, including partial land overlaps, repaired with the ordinary JLCPCB process.
-Fresh source replay in /tmp/kct-demo-readiness/05-bldc-motor-controller/drill-source-replay passed native refill/DRC0,ERC0,LVS0,kct0errors/0warnings.
-No pad assignments changed and no POFV capability switch or DRC waiver. Entire relocated via annuli lie outside SMT copper.
+Board 05 revision B passed the JLCPCB via-in-pad and silk-over-hole checks on the saved routed PCB. The manufacturer report has zero errors, warnings and waivers. The six revised U2 thermal barrels are included in the 149-pad copper LVS and refilled native DRC results.

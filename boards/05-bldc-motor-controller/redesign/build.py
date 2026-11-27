@@ -12,6 +12,9 @@ from pathlib import Path
 from hardware import ROOT, generate
 from routing import apply_routing
 
+from kicad_tools.cli.place_silk_refs_cmd import main as place_silk_refs
+from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+from kicad_tools.drc.report_binding import stamp_report_hash
 from kicad_tools.manufacturers.attach_zone_dru import PAD_ZONE_CLEARANCES_META_KEY
 from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
 from kicad_tools.validate.known_warnings import unaccepted_report_warnings
@@ -496,6 +499,12 @@ def build(output):
     complete_power_connections(routed, evidence_dir=stitch_evidence)
     shutil.copytree(stitch_evidence, evidence / "stitch")
     print(f"Copper cleanup (dedupe + verified prune): {cleanup_copper(routed)}")
+    silk = run_default_silk_pass(routed, mfr="jlcpcb")
+    if silk is None or not silk["applied"]:
+        raise RuntimeError(f"Board 05 silkscreen repair failed before verification: {silk}")
+    # Board 05 also keeps reference text clear of via drills.
+    if place_silk_refs([str(routed), "--over-holes", "--mfr", "jlcpcb", "--layers", "4"]) != 0:
+        raise RuntimeError("Could not place Board 05 reference text clear of drilled holes")
     subprocess.run(
         [
             "kicad-cli",
@@ -546,6 +555,12 @@ def build(output):
     if any(sheet["violations"] for sheet in erc["sheets"]):
         print(json.dumps(erc, indent=2), file=sys.stderr)
         raise RuntimeError("Fresh native schematic ERC failed")
+    if not stamp_report_hash(evidence / "native-drc.json", routed, "pcb_sha256"):
+        raise RuntimeError("Could not bind the native DRC report to the refilled Board 05 PCB")
+    if not stamp_report_hash(
+        evidence / "native-erc.json", output / "bldc_controller.kicad_sch", "schematic_sha256"
+    ):
+        raise RuntimeError("Could not bind the native ERC report to the Board 05 schematic")
     from kicad_tools.lvs import write_lvs_report
 
     write_lvs_report(output / "bldc_controller.kicad_sch", routed, output, require_clean=True)
