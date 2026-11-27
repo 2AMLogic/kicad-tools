@@ -66,11 +66,19 @@ segment with at least one authored end strictly inside the pad gets that
 allowance (issue #9261) -- or, when its copper already covers the whole
 perimeter band, the allowance is that band itself: a bar wider than the pad
 leaves the pad's own perimeter under mask, not a second trace, so round and
-square pads agree (issue #9750). So a track that straddles, runs along or
-passes through the pad, a shallower entry, an arc, a via or pour touching the
-pad (ring copper beside the opening), a positive expansion ring wider than
-``u``, solder-mask-defined, padstack and chamfered pads, pads with no net,
-and any different-net copper all keep their measured verdict.
+square pads agree (issue #9750). Where the author split a straight entry
+makes no difference (issue #10645): an outer piece divided out exactly on
+the pad edge has no end inside, so it is read through its authored
+continuation -- the one other same-net straight segment at the joint, same
+width and layer, collinear, unbranched at every joint followed -- and gets
+the same allowance when that chain ends inside the pad, its band still
+measured on its own copper. An edge-ending piece with no continuation, a
+bend, a change of width or layer and a branch at the joint are not that
+entry. So a track that straddles, runs along or passes through the pad, a
+shallower entry, an arc, a via or pour touching the pad (ring copper beside
+the opening), a positive expansion ring wider than ``u``, solder-mask-defined,
+padstack and chamfered pads, pads with no net, and any different-net copper
+all keep their measured verdict.
 ``exposed_beyond_owner_mm2`` and ``beside_owner_excess_mm2`` record the two
 measured quantities, and ``within_own_pad_failed_condition`` names the
 ``_within_own_pad`` docstring condition (1-5) that kept a same-net,
@@ -611,6 +619,104 @@ _ENTRY_CROSSING_FACTOR = 1.45
 _AREA_EPSILON_MM2 = 1e-9
 
 
+def _straight_segments_at(conductors, index, net, point, tolerance):
+    """Same-net straight segments on this layer with an authored end at *point*.
+
+    Within *tolerance* of it, so a joint the author did not land on the same
+    nanometre twice still joins. Each entry is ``(identity, item)``.
+    """
+    from shapely.geometry import box
+
+    x, y = point
+    found = []
+    for position in index.query(box(x - tolerance, y - tolerance, x + tolerance, y + tolerance)):
+        identity, item, _ = conductors[position]
+        if item["kind"] != "segment" or item.get("net") != net or not item.get("width_mm"):
+            continue
+        ends = item.get("endpoints_mm")
+        if ends and any(math.hypot(e[0] - x, e[1] - y) <= tolerance for e in ends):
+            found.append((identity, item))
+    return found
+
+
+def _continuation_end(identity, item, core, conductors, index, tolerance):
+    """``(outer end, inside end)`` when the segment's authored continuation reaches the pad.
+
+    The walk of issue #10645. From each end of the straight segment in turn,
+    the joint is followed to the other same-net straight segment ending there
+    -- only when the two are the only ones at that joint, so a branch stops
+    the walk -- which must be of the same width, lie on the segment's own line
+    within *tolerance* and run forward of the joint, never back. A far end
+    strictly inside ``core`` (the pad shrunk by the construction budget) ends
+    the walk with that end; any other is the next joint. The walk is finite:
+    every step moves strictly forward along the one line, and a segment is
+    never entered twice. ``None`` when no chain reaches the pad.
+    """
+    from shapely.geometry import Point
+
+    ends = item["endpoints_mm"]
+    width = item["width_mm"]
+    net = item["net"]
+    for joint_index, first in enumerate(ends):
+        outer = ends[1 - joint_index]
+        heading = (first[0] - outer[0], first[1] - outer[1])
+        norm = math.hypot(*heading)
+        if not norm:
+            return None
+        joint, current, visited = first, identity, {identity}
+        while True:
+            joined = _straight_segments_at(conductors, index, net, joint, tolerance)
+            if len(joined) != 2:
+                break
+            following_identity, following = joined[0] if joined[0][0] != current else joined[1]
+            if following_identity in visited:
+                break
+            far = max(
+                following["endpoints_mm"],
+                key=lambda e: (e[0] - joint[0]) ** 2 + (e[1] - joint[1]) ** 2,
+            )
+            off_line = abs(heading[0] * (far[1] - outer[1]) - heading[1] * (far[0] - outer[0]))
+            if (
+                abs(following["width_mm"] - width) > tolerance
+                or off_line > tolerance * norm
+                or (far[0] - joint[0]) * heading[0] + (far[1] - joint[1]) * heading[1] <= 0
+            ):
+                break
+            if core.contains(Point(far)):
+                return (outer, far)
+            visited.add(following_identity)
+            current, joint = following_identity, far
+    return None
+
+
+def _entry_item(identity, item, owner_copper, conductors, index, uncertainty):
+    """The conductor as the within-own-pad class reads its authored ends (issue #10645).
+
+    A straight segment with an authored end strictly inside the pad is
+    returned as it is. One with none -- the outer piece of a straight entry
+    the author split exactly on the pad edge -- is read through its *authored
+    continuation* (``_continuation_end``): when that chain reaches an authored
+    end strictly inside the pad, the result is the segment with its ends
+    replaced by ``(outer end, inside end)``, so the one-crossing allowance
+    applies as it would to the unsplit entry while ``_within_own_pad`` still
+    measures the piece's own copper. No chain, and the segment is returned
+    unchanged and keeps its measured verdict; so is every other conductor
+    kind. The joint and collinearity tolerance is the construction budget
+    ``u``: a gap or bend past it is not one straight entry.
+    """
+    from shapely.geometry import Point
+
+    if item["kind"] != "segment" or not item.get("width_mm") or not item.get("endpoints_mm"):
+        return item
+    core = owner_copper.buffer(-uncertainty)
+    if any(core.contains(Point(p)) for p in item["endpoints_mm"]):
+        return item
+    reached = _continuation_end(identity, item, core, conductors, index, uncertainty)
+    if reached is None:
+        return item
+    return {**item, "endpoints_mm": reached}
+
+
 def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearance, uncertainty):
     """``(qualifies, beside_excess_mm2, failed_condition)`` for the within-own-pad class.
 
@@ -643,6 +749,11 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
        numerically zero. So a track that straddles, runs along or passes
        through the pad, an entry shallower than about 45 degrees, a via or
        pour with ring copper beside the pad, and arcs all keep their verdict.
+       ``endpoints_mm`` are the entry's authored ends as the caller reads
+       them: the segment's own, or -- for the outer piece of an entry split on
+       the pad edge -- its outer end and the inside end its unbranched
+       collinear continuation reaches (``_entry_item``, issue #10645). ``B`` is
+       always the piece's own copper, whichever ends are passed.
     5. For a via, its authored drill lies wholly outside the opening.
 
     ``failed_condition`` is the docstring number (1-5) of the first condition
@@ -1774,7 +1885,7 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                         copper,
                         owner_copper,
                         owner_items[0],
-                        item,
+                        _entry_item(identity, item, owner_copper, conductors, index, uncertainty),
                         margin,
                         policy.clearance_mm,
                         uncertainty,
