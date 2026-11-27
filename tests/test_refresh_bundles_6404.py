@@ -852,15 +852,17 @@ def test_board04_published_drc_preflight_matches_the_final_report(mod):
 
 
 def test_board04_bundle_recognizes_the_delivered_project_names(mod, tmp_path):
-    from kicad_tools.export.manufacturing import _create_project_zip
+    from kicad_tools.export.manufacturing import ManufacturingPackage, ManufacturingResult
 
     board = tmp_path / "04-stm32-devboard"
     shutil.copytree(REPO / "boards" / board.name, board)
     cfg = mod.rr.BOARDS[board.name]
     routed = board / cfg.routed_pcb
-    _create_project_zip(
-        routed, routed.parent / "manufacturing", schematic_path=board / cfg.schematic
-    )
+    package = ManufacturingPackage(routed, board / cfg.schematic, manufacturer=cfg.tier)
+    output = routed.parent / "manufacturing"
+    result = ManufacturingResult(output_dir=output)
+    package._generate_project_zip(output, result)
+    assert result.project_zip_path == output / "kicad_project.zip", result.errors
     assert not mod.bundle_is_stale(board, cfg)
     routed.write_bytes(routed.read_bytes() + b"\n")
     assert mod.bundle_is_stale(board, cfg)

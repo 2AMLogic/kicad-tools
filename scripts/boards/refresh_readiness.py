@@ -387,24 +387,39 @@ def delivered_project_members(
     export`` and ``kct readiness`` deliver the board, its rules and the project
     file under the root sheet's basename when the checked names differ, and
     record the renaming in a ``VERSION.md`` member beside them (Issue #10108).
-    A board whose names already agree yields ``({}, frozenset())``.
+    The delivered map takes its bytes from the explicitly selected readiness
+    input or the sidecar discovered for the checked board.
     """
+    from kicad_tools.cli.readiness_cmd import _find_net_class_map
     from kicad_tools.export.project_identity import (
         archived_member,
         project_identity,
         version_record,
     )
+    from kicad_tools.sidecars import net_class_map_sidecar_names
 
     project = pcb.with_suffix(".kicad_pro")
     identity = project_identity(pcb, project if project.is_file() else None, schematic)
-    if not identity.renamed:
-        return {}, frozenset()
     record = version_record(identity) or b""
     derived = {
         delivered: archived_member(source, source.read_bytes(), identity, record)
         for source, delivered in identity.renamed
     }
-    derived["VERSION.md"] = record
+    if identity.renamed:
+        derived["VERSION.md"] = record
+
+    # Registered boards keep the checked PCB and readiness receipt in output/.
+    receipt = pcb.parent / "readiness.json"
+    selected = (
+        json.loads(receipt.read_text()).get("selected_net_class_map") if receipt.is_file() else None
+    )
+    board = pcb.parent.parent.resolve()
+    source = board / selected if selected is not None else _find_net_class_map(pcb)
+    if source is not None:
+        source = source.resolve()
+        if not source.is_relative_to(board) or not source.is_file():
+            raise GateFailure(f"Invalid net-class map source for {pcb.name}: {source}")
+        derived[net_class_map_sidecar_names(identity.name)[0]] = source.read_bytes()
     return derived, frozenset(source.name for source, _ in identity.renamed)
 
 

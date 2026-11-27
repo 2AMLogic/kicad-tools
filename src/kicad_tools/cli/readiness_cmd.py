@@ -459,6 +459,7 @@ def _run_export(
     inventory_covered: frozenset[str] | None = None,
     schematic: Path | None = None,
     project_root: Path | None = None,
+    net_class_map: Path | None = None,
 ) -> EngineRun:
     """Generate a generic bundle without changing the already-checked project rules.
 
@@ -474,6 +475,7 @@ def _run_export(
             include_bom=assembly,
             include_pnp=assembly,
             emit_drc_constraints=False,
+            net_class_map_path=net_class_map,
             project_root=project_root,
             merge_lcsc_from=merge_lcsc_from,
             gerber_source_date_epoch=_readiness_gerber_epoch(),
@@ -1051,7 +1053,7 @@ class ReadinessOptions:
     # Receipt and archive paths remain relative to the directory containing
     # the output declaration when an explicit --project-root narrows source access.
     declared_project_root: Path | None = None
-    # An implicit map is available to the HV gate, but kct check does its own discovery.
+    # The checker discovers implicit maps itself. Record a path only for an explicit selection.
     net_class_map_implicit: bool = False
 
     @property
@@ -3084,6 +3086,10 @@ def _normalize_project_archive(options: ReadinessOptions) -> None:
         if delivered not in rebuilt:
             rebuilt[delivered] = source.read_bytes()
         rebuilt[delivered] = layout.member_bytes(source, rebuilt[delivered])
+    # Engines may supply just the KiCad files. Carry the selected rule input
+    # beside the delivered board without changing the root of the project ZIP.
+    if options.net_class_map is not None and layout.net_class_map_member not in rebuilt:
+        rebuilt[layout.net_class_map_member] = options.net_class_map.read_bytes()
     if layout.record is not None:
         rebuilt[layout.record_name] = layout.record
     else:
@@ -3132,6 +3138,8 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     project-local library member missing from the zip, one extra line says the
     bundle predates the exporter writing them (#8749). Pass/fail is unchanged.
     """
+    from kicad_tools.sidecars import net_class_map_sidecar_candidates
+
     archive = options.output_dir / "kicad_project.zip"
     problems: list[str] = []
     missing_members: list[str] = []
@@ -3145,6 +3153,27 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
             names = [info.filename for info in zf.infolist() if not info.is_dir()]
             if len(names) != len(set(names)):
                 problems.append("duplicate file identities in kicad_project.zip")
+            # Check the file an extracted board actually loads, including in
+            # a legacy archive that retains the checked PCB basename.
+            pcb = options.pcb.resolve()
+            board_member = layout.names[pcb] if layout.names[pcb] in names else layout.checked(pcb)
+            member = next(
+                (
+                    path.as_posix()
+                    for path in net_class_map_sidecar_candidates(board_member)
+                    if path.as_posix() in names
+                ),
+                None,
+            )
+            if options.net_class_map is None:
+                if member is not None:
+                    problems.append(f"{member} inside kicad_project.zip has no checked source")
+            elif member is None:
+                problems.append(f"No net-class map for {board_member} in kicad_project.zip")
+            elif zf.read(member) != options.net_class_map.read_bytes():
+                problems.append(
+                    f"{member} inside kicad_project.zip differs from the checked source"
+                )
             delivered_layout = False
             checked_layout: list[str] = []
             for source in sorted(sources):
@@ -3655,6 +3684,8 @@ def _gate_artifacts(
         export_kwargs["schematic"] = options.schematic
     if options.root != options.pcb.parent.resolve():
         export_kwargs["project_root"] = options.root
+    if options.net_class_map is not None:
+        export_kwargs["net_class_map"] = options.net_class_map
     run = engines.export(*export_args, **export_kwargs)
     if not run.ok:
         return CheckOutcome(
@@ -4583,6 +4614,9 @@ def build_report(
         _rel(options, path): readiness_input_hash(_rel(options, path), path.read_bytes())
         for path in sorted(hashed)
     }
+    if options.net_class_map is not None and not options.net_class_map_implicit:
+        # Board refresh must preserve the explicit selection across staging.
+        report["selected_net_class_map"] = os.path.relpath(options.net_class_map, options.board_dir)
     # Issue #7277: record which source bytes each report readiness itself
     # produced was computed from, so report binding can tell "produced for
     # this PCB" from merely "pinned beside it".

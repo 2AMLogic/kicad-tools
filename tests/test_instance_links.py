@@ -466,7 +466,13 @@ def test_project_zip_step_runs_the_link_check(tmp_path: Path, monkeypatch) -> No
     pkg = ManufacturingPackage(pcb_path=pcb, schematic_path=sch)
 
     def _fake_zip(
-        pcb_path, out_dir, zip_name="kicad_project.zip", schematic_path=None, *, project_root=None
+        pcb_path,
+        out_dir,
+        zip_name="kicad_project.zip",
+        schematic_path=None,
+        *,
+        project_root=None,
+        net_class_map=None,
     ):
         out_dir.mkdir(parents=True, exist_ok=True)
         target = out_dir / zip_name
