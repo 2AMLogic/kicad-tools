@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1364,9 +1365,10 @@ def test_cache_fallback_checks_each_receiver_in_both_orders(
 
 
 @pytest.mark.parametrize("precision_first", [True, False])
+@pytest.mark.parametrize("same_power", [True, False])
 @patch("kicad_tools.export.bom_enrich.PartSuggester")
 def test_explicit_code_does_not_reach_incompatible_sibling(
-    MockSuggester, precision_first, tmp_path
+    MockSuggester, precision_first, same_power, tmp_path
 ):
     cache = PartsCache(db_path=tmp_path / "parts.db")
     cache.put(_plain_1206_part())
@@ -1374,18 +1376,25 @@ def test_explicit_code_does_not_reach_incompatible_sibling(
     _make_suggester_mock(mock)
     mock._get_client.return_value.cache = cache
     r1, r2 = _make_item("R1", "10k", _CHIP_1206), _precision_item("R2")
+    if same_power:
+        r1.properties = r2.properties = {"Power": "250 mW"}
     r1.lcsc = "C17902"
     enrich_bom_lcsc([r2, r1] if precision_first else [r1, r2])
     assert r1.lcsc == "C17902" and not r2.lcsc
 
 
 @pytest.mark.parametrize("precision_first", [True, False])
-def test_previous_csv_checks_each_receiver_in_both_orders(precision_first, tmp_path):
+@pytest.mark.parametrize("unreadable_power", [True, False])
+def test_previous_csv_checks_each_receiver_in_both_orders(
+    precision_first, unreadable_power, tmp_path
+):
     from kicad_tools.export.bom_formats import apply_existing_lcsc_assignments
 
     cache = PartsCache(db_path=tmp_path / "parts.db")
     cache.put(_plain_1206_part())
     r1, r2 = _make_item("R1", "10k", _CHIP_1206), _precision_item("R2")
+    if unreadable_power:
+        r2.properties = {"Power": "0.25 watts"}
     apply_existing_lcsc_assignments(
         [r2, r1] if precision_first else [r1, r2],
         {("10k", _CHIP_1206): "C17902"},
@@ -1471,6 +1480,35 @@ def test_review4_melf_needs_positive_body_evidence():
     assert sourcing_problem(melf, axial)
     assert sourcing_problem(melf, None)
     assert sourcing_problem(melf, good) is None
+
+
+@pytest.mark.parametrize(
+    ("footprint", "package", "compatible"),
+    [
+        ("R_MELF_MMB-0207", "MMA-0204", False),
+        ("R_MELF_MMB-0207", "MELF", False),
+        ("R_MELF_MMB-0207", "MMB-0207", True),
+        ("R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal", "1206", False),
+        ("R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal", "Axial DIN0207", True),
+    ],
+)
+def test_sourcing_requires_requested_body_size(footprint, package, compatible):
+    from kicad_tools.export.lcsc_value_check import sourcing_problem
+
+    row = _make_item("R1", "10k", footprint)
+    assert (sourcing_problem(row, _plain_1206_part(package=package)) is None) == compatible
+
+
+@pytest.mark.parametrize(("code", "power"), [("C98220", "100 mW"), ("C511023", "1 W")])
+def test_captured_ratings_alongside_temperature_coefficient(code, power):
+    from kicad_tools.export.lcsc_value_check import sourcing_problem
+    from kicad_tools.parts.models import Part
+
+    path = Path(__file__).parent / "fixtures/lcsc_fleet_packages_7166.json"
+    part = Part(lcsc_part=code, **json.loads(path.read_text())["parts"][code])
+    row = _make_item("R1", "10k" if code == "C98220" else "500mΩ", f"R_{part.package}")
+    row.properties = {"Tolerance": "1%", "Power": power}
+    assert sourcing_problem(row, part) is None
 
 
 def test_review4_explicit_wire_landing_code_not_shared():

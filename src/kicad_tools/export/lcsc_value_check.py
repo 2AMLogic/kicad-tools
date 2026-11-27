@@ -161,7 +161,7 @@ CHIP_PACKAGES = frozenset(
 )
 
 # Cylindrical MELF bodies: never interchangeable with a rectangular chip.
-_NON_CHIP_BODY_RE = re.compile(r"MELF|MM[ABU]-\d{4}", re.I)
+_NON_CHIP_BODY_RE = re.compile(r"MELF|MM[ABU]-?\d{4}", re.I)
 
 # A chip-size token in free text ("16V 100nF X7R ±10% 0402 MLCC").
 # The lookarounds reject tokens embedded in part numbers like
@@ -624,11 +624,29 @@ def stated_ratings(item: BOMItem) -> tuple[re.Match[str] | None, float | None]:
 
 
 # Catalogue measurements that are not the initial tolerance / rated power.
-_UNRELATED_MEASURE = re.compile(
-    r"pulse|surge|peak|overload|load[\s-]*life|resistance\s+change|drift|stability"
-    r"|temperature\s+coefficient|tcr|ppm",
-    re.I,
+_QUALIFIER = (
+    r"(?:pulse|surge|peak|overload|load[\s-]*life|resistance\s+change|drift|stability"
+    r"|temperature\s+coefficient|tcr)"
 )
+_QUALIFIED_PREFIX = re.compile(
+    _QUALIFIER + r"(?:\s+(?:power|rating|resistance|change|of|is))*[\s:=±+/-]*$", re.I
+)
+_QUALIFIED_SUFFIX = re.compile(r"\s*[/(-]?\s*" + _QUALIFIER + r"\b", re.I)
+
+
+def _is_rating(match: re.Match[str]) -> bool:
+    text = match.string
+    if re.match(r"\s*/\s*(?:[℃℉]|°\s*[CFK]|kelvin)", text[match.end() :], re.I):
+        return False
+    if _QUALIFIED_PREFIX.search(text[: match.start()]):
+        return False
+    suffix = _QUALIFIED_SUFFIX.match(text, match.end())
+    if suffix is None:
+        return True
+    # A following qualifier can introduce a separate measurement ("1% pulse power 1 W").
+    return bool(re.match(r"(?:\s+(?:power|rating|of))*[\s:=±+/-]*\d", text[suffix.end() :], re.I))
+
+
 _RATED_POWER = re.compile(r"(?:rated\s+power|power\s+rating|rated)\s*[:=]?\s*", re.I)
 
 
@@ -642,11 +660,7 @@ def _candidate_tolerance(part: object) -> float | None:
     if structured:
         return float(structured[1])
     description = getattr(part, "description", "") or ""
-    found = {
-        float(m[1])
-        for m in _PERCENT.finditer(description)
-        if not _UNRELATED_MEASURE.search(description[max(0, m.start() - 40) : m.end() + 40])
-    }
+    found = {float(m[1]) for m in _PERCENT.finditer(description) if _is_rating(m)}
     return found.pop() if len(found) == 1 else None
 
 
@@ -663,35 +677,56 @@ def _candidate_power(part: object) -> float | None:
     description = getattr(part, "description", "") or ""
     for rated in _RATED_POWER.finditer(description):
         match = _WATTS.match(description, rated.end())
-        if match is not None:
+        if (
+            match is not None
+            and _is_rating(match)
+            and not _QUALIFIED_PREFIX.search(description[: rated.start()])
+        ):
             return _watts(match[0])
     values = {
-        w
-        for m in _WATTS.finditer(description)
-        if (w := _watts(m[0])) is not None
-        and not _UNRELATED_MEASURE.search(description[max(0, m.start() - 20) : m.end() + 20])
+        w for m in _WATTS.finditer(description) if (w := _watts(m[0])) is not None and _is_rating(m)
     }
     return values.pop() if len(values) == 1 else None
 
 
-def _melf_evidence(part: object, body: str) -> str | None:
-    """A problem string unless the record positively establishes the MELF body."""
-    package = (getattr(part, "package", "") or "").strip()
+_MELF_SIZE = re.compile(r"MM[ABU]-?\d{4}(?!\d)", re.I)
+_DIN_SIZE = re.compile(r"DIN[- ]?\d{4}(?!\d)", re.I)
+
+
+def _body_problem(footprint: str, part: object) -> str | None:
+    """Require the requested axial or MELF body, including a specified size."""
+    if "axial" in footprint.casefold():
+        family = re.compile(r"axial|DIN[- ]?\d{4}", re.I)
+        pattern = _DIN_SIZE
+        body = "axial"
+    elif _NON_CHIP_BODY_RE.search(footprint):
+        family = _NON_CHIP_BODY_RE
+        pattern = _MELF_SIZE
+        body = "MELF"
+    else:
+        return None
+
+    package = getattr(part, "package", "") or ""
     texts = (
         [package]
-        if package
+        if package.strip()
         else [
             getattr(part, "description", "") or "",
             getattr(part, "mfr_part", "") or "",
         ]
     )
-    token = re.compile(r"MELF" if body.casefold() == "melf" else re.escape(body), re.I)
-    generic = re.compile(r"MELF|MM[ABU]-\d{4}", re.I)
-    if package and generic.search(package) is None:
-        return f"catalogue package {package} is not the {body} body"
-    if not any(token.search(t) or (generic.search(t) and body.casefold() == "melf") for t in texts):
-        return f"catalogue does not establish the {body} body"
-    return None
+    if size := pattern.search(footprint):
+        body = size[0]
+        expected = re.sub(r"[- ]", "", body).upper()
+        if any(
+            re.sub(r"[- ]", "", m[0]).upper() == expected
+            for t in texts
+            for m in pattern.finditer(t)
+        ):
+            return None
+    elif any(family.search(t) for t in texts):
+        return None
+    return f"catalogue does not establish the {body} body"
 
 
 def sourcing_problem(item: BOMItem, part: SuggestedPart | Part | None) -> str | None:
@@ -725,11 +760,9 @@ def sourcing_problem(item: BOMItem, part: SuggestedPart | Part | None) -> str | 
         )
         if found_package is None or found_package[0] != requested:
             return f"catalogue does not establish the {requested} package"
-    melf = _NON_CHIP_BODY_RE.search(item.footprint)
-    if melf is not None and requested not in CHIP_PACKAGES:
-        body = _melf_evidence(part, melf[0])
-        if body is not None:
-            return body
+    body_problem = _body_problem(item.footprint, part)
+    if body_problem:
+        return body_problem
     tolerance, power = stated_ratings(item)
     props = {k.casefold(): v for k, v in (getattr(item, "properties", None) or {}).items()}
     if props.get("tolerance", "").strip() and tolerance is None:

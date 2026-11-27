@@ -461,19 +461,16 @@ def apply_existing_lcsc_assignments(
         check_lcsc_against_cache,
         is_wire_landing,
         sourcing_problem,
-        stated_ratings,
     )
 
     merged_count = 0
     merged_refs: set[str] = set()
-    rejected: set[tuple[str, ...]] = set()
 
     for item in items:
         if getattr(item, "lcsc", "") or getattr(item, "dnp", False):
             continue
         key = (item.value, item.footprint)
-        sourcing_key = (*key, getattr(item, "mpn", ""), *(str(r) for r in stated_ratings(item)))
-        if sourcing_key in rejected or is_wire_landing(item.footprint):
+        if is_wire_landing(item.footprint):
             continue
         lcsc = existing.get(key)
         if not lcsc:
@@ -485,11 +482,11 @@ def apply_existing_lcsc_assignments(
         part = parts_cache.get(lcsc, ignore_expiry=True) if parts_cache else None
         problem = mismatch.describe() if mismatch else sourcing_problem(item, part)
         if problem:
-            rejected.add(sourcing_key)
             logger.warning(
                 "Dropping LCSC assignment %s read back from existing BOM "
-                "for %s [%s]: %s -- leaving row unassigned",
+                "for %s %s [%s]: %s -- leaving row unassigned",
                 lcsc,
+                item.reference,
                 item.value,
                 item.footprint,
                 problem,

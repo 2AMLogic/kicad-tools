@@ -27,7 +27,6 @@ from .lcsc_value_check import (
     find_value_mismatch,
     is_wire_landing,
     sourcing_problem,
-    stated_ratings,
 )
 
 if TYPE_CHECKING:
@@ -140,12 +139,6 @@ class EnrichmentReport:
                 refs = ", ".join(entry.references)
                 lines.append(f"  {entry.value} [{entry.footprint}] ({refs})")
         return lines
-
-
-def _requirements(item: BOMItem) -> tuple[str | None, float | None]:
-    """The stated rating requirements an LCSC code must satisfy for ``item``."""
-    tolerance, power = stated_ratings(item)
-    return (tolerance[0] if tolerance else None, power)
 
 
 def _partition_receivers(
@@ -419,8 +412,11 @@ def enrich_bom_lcsc(
 
             existing_lcsc = next((it.lcsc for it in group_items if it.lcsc), "")
             if existing_lcsc:
-                holder = next(it for it in group_items if it.lcsc)
-                sibling_part = None
+                sibling_part = (
+                    cache.get(existing_lcsc, ignore_expiry=True)
+                    if cache is not None and any(not it.lcsc for it in group_items)
+                    else None
+                )
                 blocked: list[tuple[BOMItem, str]] = []
                 for it in group_items:
                     if it.lcsc:
@@ -429,16 +425,10 @@ def enrich_bom_lcsc(
                         # An explicit code on one wire landing is not shared.
                         blocked.append((it, "wire landing for external assembly"))
                         continue
-                    # A sibling with the same stated requirements as the
-                    # holder inherits the code; one with different ratings
-                    # needs the catalogue record to establish them.
-                    if _requirements(it) != _requirements(holder):
-                        if sibling_part is None and cache is not None:
-                            sibling_part = cache.get(existing_lcsc, ignore_expiry=True)
-                        reason = sourcing_problem(it, sibling_part)
-                        if reason:
-                            blocked.append((it, reason))
-                            continue
+                    reason = sourcing_problem(it, sibling_part)
+                    if reason:
+                        blocked.append((it, reason))
+                        continue
                     it.lcsc = existing_lcsc
                 if blocked:
                     report.entries.extend(
