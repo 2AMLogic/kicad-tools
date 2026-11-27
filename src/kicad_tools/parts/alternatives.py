@@ -154,6 +154,19 @@ def _temperature_ranges(part: Part) -> set[tuple[Fraction, Fraction]]:
 
 _DEC = r"(?:\d+(?:\.\d+)?|\.\d+)"
 _NOMINALS = {
+    "ind": (
+        "Inductance",
+        re.compile(rf"(?<![\w./+-])({_DEC})\s*([pnuµμm]?)H(?!\w)"),
+        {
+            "": Fraction(1),
+            "m": Fraction(1, 1000),
+            "u": Fraction(1, 10**6),
+            "µ": Fraction(1, 10**6),
+            "μ": Fraction(1, 10**6),
+            "n": Fraction(1, 10**9),
+            "p": Fraction(1, 10**12),
+        },
+    ),
     "cap": (
         "Capacitance",
         re.compile(rf"(?<![\w./+-])({_DEC})\s*([pnuµμm]?)[Ff](?!\w)"),
@@ -202,10 +215,12 @@ _OTHER_FAMILY = re.compile(
 
 
 def _kind(part: Part) -> str | None:
-    """``"cap"`` or ``"res"`` when the part is recognisably one chip passive."""
+    """Identify a discrete chip passive from its catalog description."""
     if _OTHER_FAMILY.search(part.description) or _OTHER_FAMILY.search(part.specs.get("Type", "")):
         return None
     description = part.description.casefold()
+    if "inductors (smd)" in description:
+        return "ind"
     if _RES_FAMILY in description:
         return "res"
     if _CAP_FAMILY in description:
@@ -367,14 +382,17 @@ def _device_voltages(part: Part) -> set[tuple[str | None, _Voltage, _Voltage]]:
     return found
 
 
-def _passive_voltages(part: Part) -> dict[str, set[Fraction]]:
+def _passive_voltages(part: Part, resistor: bool) -> dict[str, set[Fraction]]:
     """Return the published voltages of a passive, grouped as ac / dc."""
     groups: dict[str, set[Fraction]] = {}
     for match in _VOLTAGE.finditer(part.description):
         value, kind = _signed_voltage(match)
         groups.setdefault(kind, set()).add(value)
-    if "Voltage Rating" in part.specs:
-        structured = _VOLTAGE.fullmatch(part.specs["Voltage Rating"])
+    keys = ("Voltage Rating", "Voltage-Supply(Max)") if resistor else ("Voltage Rating",)
+    for key in keys:
+        if key not in part.specs:
+            continue
+        structured = _VOLTAGE.fullmatch(part.specs[key])
         if not structured:
             raise ValueError("Unrecognized catalog rating")
         value, kind = _signed_voltage(structured)
@@ -382,11 +400,13 @@ def _passive_voltages(part: Part) -> dict[str, set[Fraction]]:
     return groups
 
 
-def _voltage_covered(source: Part, candidate: Part, mandatory: tuple[str, ...]) -> bool:
-    required = _passive_voltages(source)
+def _voltage_covered(
+    source: Part, candidate: Part, mandatory: tuple[str, ...], resistor: bool
+) -> bool:
+    required = _passive_voltages(source, resistor)
     if not required:
         return "Voltage Rating" not in mandatory
-    offered = _passive_voltages(candidate)
+    offered = _passive_voltages(candidate, resistor)
     for kind, values in required.items():
         have = offered.get(kind, set())
         if len(values) != 1 or len(have) != 1 or next(iter(have)) < next(iter(values)):
@@ -413,7 +433,7 @@ def _covers_ratings(
             left, right = _device_voltages(source), _device_voltages(candidate)
             if left and right and left != right:
                 return False
-        elif not _voltage_covered(source, candidate, mandatory):
+        elif not _voltage_covered(source, candidate, mandatory, passive == "res"):
             return False
         power = _rating_values(source, "Power(Watts)", _POWER)
         if power:
@@ -434,6 +454,29 @@ def _covers_ratings(
     except ValueError:
         # The catalog published a rating we could not establish.
         return False
+
+
+_CURRENT = _quantity("A")
+
+
+def _inductor_ratings_match(source: Part, candidate: Part, same_device: bool) -> bool:
+    try:
+        required = _rating_values(source, "Rated Current", _CURRENT)
+        offered = _rating_values(candidate, "Rated Current", _CURRENT)
+    except ValueError:
+        return False
+    if required or not same_device:
+        if len(required) != 1 or len(offered) != 1 or offered.pop() < required.pop():
+            return False
+
+    # Preserve construction, DCR, self-resonance and Q at its test frequency.
+    def remaining_ratings(part: Part) -> str:
+        text = part.description
+        for pattern in (_NOMINALS["ind"][1], _CURRENT, _PERCENT_TOL):
+            text = pattern.sub(" ", text)
+        return " ".join(text.split())
+
+    return remaining_ratings(source) == remaining_ratings(candidate)
 
 
 def _compatible(source: Part, candidate: Part) -> bool:
@@ -506,7 +549,14 @@ def _compatible(source: Part, candidate: Part) -> bool:
                 if _CAP_FAMILY in source.description.casefold():
                     mandatory += ("Tolerance",)
             skip.add("Temperature Coefficient")
+        elif passive == "ind":
+            if not _inductor_ratings_match(source, candidate, same_device):
+                return False
+            skip.add("Rated Current")
+            if not same_device:
+                mandatory = ("Tolerance",)
         else:
+            skip.add("Voltage-Supply(Max)")
             required_types = _resistor_types(source)
             offered_types = _resistor_types(candidate)
             if len(required_types | offered_types) > 1 or (required_types and not offered_types):

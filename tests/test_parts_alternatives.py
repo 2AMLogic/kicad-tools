@@ -683,3 +683,61 @@ def test_asymmetric_tolerance(
             (description.format("-?%~+1%"),),
         )
     assert _alternatives(capsys, "C800") == []
+
+
+def test_resistor_catalog_maximum_voltage(catalog_db, capsys):
+    attrs = _attributes("16kΩ 1% 1206")[1]
+    with sqlite3.connect(catalog_db) as db:
+        for code, stated, rated in (
+            (4436, "150V", "150V"),
+            (25829, "200V", "200V"),
+            (801, "", "100V"),
+            (802, "150V", "200V"),
+            (803, "200V", "unknown voltage"),
+        ):
+            _insert(
+                db,
+                code,
+                str(code),
+                "1206",
+                "extended" if code == 4436 else "basic",
+                f"{RES_FAMILY} {stated}",
+                attrs | {"Voltage-Supply(Max)": rated},
+            )
+    assert _alternatives(capsys, "C4436") == ["C25829"]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_discrete_inductor_ratings(catalog_db, capsys, legacy):
+    description = "1uH 400mΩ 45@10MHz 50mA 75MHz Multilayer inductor ±10% 0805 Inductors (SMD) ROHS"
+    attrs = {
+        "Inductance": "1uH",
+        "Rated Current": "50mA",
+        "DC Resistance": "400mΩ",
+        "Type": "Multilayer inductor",
+        "Q @ Frequency": "45@10MHz",
+        "Frequency - Self Resonant": "75MHz",
+        "Tolerance": "±10%",
+    }
+    with sqlite3.connect(catalog_db) as db:
+        _insert(db, 281088, "SOURCE", "0805", "extended", description, attrs)
+        _insert(db, 1042, "SUB", "0805", "preferred", description, attrs)
+        for code, (old, new, key) in enumerate(
+            (
+                ("50mA", "30mA", "Rated Current"),
+                ("1uH", "10uH", "Inductance"),
+                ("400mΩ", "800mΩ", "DC Resistance"),
+                ("45@10MHz", "", "Q @ Frequency"),
+                ("75MHz", "55MHz", "Frequency - Self Resonant"),
+            ),
+            800,
+        ):
+            changed = attrs.copy()
+            if new:
+                changed[key] = new
+            else:
+                del changed[key]
+            _insert(db, code, str(code), "0805", "basic", description.replace(old, new), changed)
+        if legacy:
+            db.execute("ALTER TABLE jlc_components DROP COLUMN attributes")
+    assert _alternatives(capsys, "C281088") == ["C1042"]
