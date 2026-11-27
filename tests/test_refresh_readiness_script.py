@@ -338,6 +338,34 @@ def test_board05_rejects_an_incomplete_or_mixed_recipe_zip(mod, tmp_path, member
     assert archive.read_bytes() == raw
 
 
+@pytest.mark.parametrize("selection", ["bare", "stem", "explicit"])
+def test_refresh_uses_selected_map_for_delivered_board(mod, tmp_path, selection):
+    out = tmp_path / "output"
+    out.mkdir()
+    pcb = out / "board_routed.kicad_pcb"
+    schematic = out / "board.kicad_sch"
+    pcb.touch()
+    schematic.touch()
+    bare = out / "net_class_map.json"
+    bare.write_bytes(b"bare")
+    if selection != "bare":
+        (out / "board_routed.net_class_map.json").write_bytes(b"stem")
+    if selection == "explicit":
+        (tmp_path / "chosen.json").write_bytes(b"explicit")
+        (out / "readiness.json").write_text('{"selected_net_class_map":"chosen.json"}')
+    derived, replaces = mod.delivered_project_members(pcb, schematic)
+    archive = out / "kicad_project.zip"
+    member = "board.net_class_map.json"
+    mod.write_deterministic_zip(archive, {member: b"old"})
+    assert mod.rebuild_archive(archive, [out], derived=derived, replaces=replaces) == [member]
+    with zipfile.ZipFile(archive) as z:
+        assert z.read(member) == selection.encode()
+    mod.write_deterministic_zip(archive, {schematic.name: b""})
+    before = archive.read_bytes()
+    assert mod.rebuild_archive(archive, [out], derived=derived, replaces=replaces) == []
+    assert archive.read_bytes() == before
+
+
 def test_rebuild_archive_refreshes_the_delivered_project_members(mod, tmp_path):
     """A package filed under the root sheet's basename refreshes from the routed board (#10108)."""
     out = tmp_path / "output"

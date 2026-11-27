@@ -23,6 +23,7 @@ from contextlib import contextmanager, nullcontext
 from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -157,6 +158,9 @@ class ManufacturingConfig(AssemblyConfig):
     # then run on a private working copy: the checked-out board, project and
     # rule files keep their bytes whether the export publishes or withholds.
     verify_reviewed_copper: bool = False
+
+    # Readiness can supply its explicitly selected map.
+    net_class_map_path: Path | None = None
 
 
 @dataclass
@@ -809,6 +813,7 @@ def _create_project_zip(
     schematic_path: Path | None = None,
     *,
     project_root: Path | None = None,
+    net_class_map: bytes | None = None,
 ) -> Path:
     """Create a ZIP containing the KiCad project files.
 
@@ -943,6 +948,8 @@ def _create_project_zip(
                 zf.write(source, member)
         for alias in aliases:
             zf.write(alias, layout.names[alias])
+        if net_class_map is not None:
+            zf.writestr(layout.net_class_map_member, net_class_map)
         if layout.record is not None:
             zf.writestr(layout.record_name, layout.record)
 
@@ -1526,6 +1533,8 @@ class ManufacturingPackage:
         """
         out_dir = Path(output_dir) if output_dir else self.config.output_dir
         result = ManufacturingResult(output_dir=out_dir)
+        # A reused writer takes a fresh snapshot for each export.
+        self.__dict__.pop("_net_class_map_input", None)
 
         if self.config.verify_reviewed_copper and not self._reviewed_copper_request(result):
             return result
@@ -3056,6 +3065,28 @@ class ManufacturingPackage:
             logger.debug("Could not read stackup copper for DRU: %s", e)
             return rules
 
+    @cached_property
+    def _net_class_map_input(self) -> tuple[Path, bytes] | None:
+        """Read once so rule generation and the editable ZIP use identical bytes."""
+        from ..cli.check_cmd import _discover_net_class_map_sidecar
+
+        config = self._reviewed.live_config if self._reviewed is not None else self.config
+        pcb = self._lookup_pcb_path
+        board_dir = pcb.parent.resolve()
+        path = config.net_class_map_path or _discover_net_class_map_sidecar(board_dir / pcb.name)
+        if path is None:
+            return None
+        boundary = (config.project_root or board_dir).resolve()
+        if config.project_root is None and config.net_class_map_path is None:
+            # Discovery also supports a sibling output directory. Keep the
+            # literal directory as the boundary so a symlink cannot move it.
+            if path.parent == board_dir.parent / "output":
+                boundary = board_dir.parent / "output"
+        resolved = path.resolve()
+        if not resolved.is_relative_to(boundary):
+            raise PermissionError(f"Net-class map {path} resolves outside {boundary}")
+        return resolved, resolved.read_bytes()
+
     def _load_net_classes(self, result: ManufacturingResult) -> list | None:
         """Load the board's net-class-map sidecar as deduped classes (#8393).
 
@@ -3064,20 +3095,24 @@ class ManufacturingPackage:
         ``track_width`` floors that build-time DRC checked.  Returns
         ``None`` when there is no sidecar or it is malformed (warned).
         """
-        from ..cli.check_cmd import (
-            _discover_net_class_map_sidecar,
-            resolve_net_class_map_for_board,
-        )
+        from ..cli.check_cmd import resolve_net_class_map_for_board
         from ..manufacturers.project_generator import dedupe_net_classes
 
-        ncm_path = _discover_net_class_map_sidecar(Path(self._lookup_pcb_path))
-        if ncm_path is None:
+        try:
+            selected = self._net_class_map_input
+        except OSError as exc:
+            result.warnings.append(f"Could not read net-class-map sidecar: {exc}")
             return None
+        if selected is None:
+            return None
+        ncm_path, data = selected
         try:
             from ..router.rules import net_class_map_from_path
             from ..schema.pcb import PCB
 
-            net_class_map = net_class_map_from_path(ncm_path, pcb_path=self._lookup_pcb_path)
+            net_class_map = net_class_map_from_path(
+                ncm_path, pcb_path=self._lookup_pcb_path, source_bytes=data
+            )
             net_class_map, _ = resolve_net_class_map_for_board(
                 net_class_map, PCB.load(str(self.pcb_path))
             )
@@ -4116,12 +4151,14 @@ class ManufacturingPackage:
     def _generate_project_zip(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Create ZIP of KiCad project files."""
         try:
+            selected = self._net_class_map_input
             result.project_zip_path = _create_project_zip(
                 self.pcb_path,
                 out_dir,
                 self.config.project_zip_name,
                 schematic_path=self.schematic_path,
                 project_root=self.config.project_root,
+                net_class_map=selected[1] if selected is not None else None,
             )
         except Exception as e:
             result.errors.append(f"Project ZIP creation failed: {e}")

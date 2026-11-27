@@ -77,6 +77,14 @@ class ArchiveLayout:
     record: bytes | None
     record_name: str
 
+    @property
+    def net_class_map_member(self) -> str:
+        """The preferred map name beside the delivered (possibly renamed) board."""
+        from kicad_tools.sidecars import net_class_map_sidecar_names
+
+        pcb = PurePosixPath(self.names[self.identity.pcb])
+        return str(pcb.with_name(net_class_map_sidecar_names(pcb.stem)[0]))
+
     def checked(self, source: Path) -> str:
         """The member name *source* has when it is archived under its own name."""
         return str(PurePosixPath(self.directories[source]) / source.name)
