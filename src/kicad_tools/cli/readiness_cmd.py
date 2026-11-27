@@ -976,6 +976,7 @@ class ReadinessOptions:
     include_tht: bool = False
     archive: bool = True
     net_class_map: Path | None = None
+    net_class_map_explicit: bool = False
     hv_net_class: str = "HV"
     hv_min: float | None = None
     hv_standard: str | None = None
@@ -1378,6 +1379,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             include_tht=bool(args.include_tht),
             archive=not args.no_archive,
             net_class_map=net_class_map,
+            net_class_map_explicit=bool(args.net_class_map),
             hv_net_class=args.hv_net_class,
             hv_min=args.hv_min,
             hv_standard=args.hv_standard,
@@ -3144,27 +3146,27 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
             names = [info.filename for info in zf.infolist() if not info.is_dir()]
             if len(names) != len(set(names)):
                 problems.append("duplicate file identities in kicad_project.zip")
-            if options.net_class_map is not None:
-                # Check the file an extracted board actually loads, including in
-                # a legacy archive that retains the checked PCB basename.
-                pcb = options.pcb.resolve()
-                board_member = (
-                    layout.names[pcb] if layout.names[pcb] in names else layout.checked(pcb)
+            # Check the file an extracted board actually loads, including in
+            # a legacy archive that retains the checked PCB basename.
+            pcb = options.pcb.resolve()
+            board_member = layout.names[pcb] if layout.names[pcb] in names else layout.checked(pcb)
+            member = next(
+                (
+                    path.as_posix()
+                    for path in net_class_map_sidecar_candidates(board_member)
+                    if path.as_posix() in names
+                ),
+                None,
+            )
+            if options.net_class_map is None:
+                if member is not None:
+                    problems.append(f"{member} inside kicad_project.zip has no checked source")
+            elif member is None:
+                problems.append(f"No net-class map for {board_member} in kicad_project.zip")
+            elif zf.read(member) != options.net_class_map.read_bytes():
+                problems.append(
+                    f"{member} inside kicad_project.zip differs from the checked source"
                 )
-                member = next(
-                    (
-                        path.as_posix()
-                        for path in net_class_map_sidecar_candidates(board_member)
-                        if path.as_posix() in names
-                    ),
-                    None,
-                )
-                if member is None:
-                    problems.append(f"No net-class map for {board_member} in kicad_project.zip")
-                elif zf.read(member) != options.net_class_map.read_bytes():
-                    problems.append(
-                        f"{member} inside kicad_project.zip differs from the checked source"
-                    )
             delivered_layout = False
             checked_layout: list[str] = []
             for source in sorted(sources):
@@ -4605,6 +4607,9 @@ def build_report(
         _rel(options, path): readiness_input_hash(_rel(options, path), path.read_bytes())
         for path in sorted(hashed)
     }
+    if options.net_class_map_explicit and options.net_class_map is not None:
+        # Board refresh must preserve the explicit selection across staging.
+        report["selected_net_class_map"] = os.path.relpath(options.net_class_map, options.board_dir)
     # Issue #7277: record which source bytes each report readiness itself
     # produced was computed from, so report binding can tell "produced for
     # this PCB" from merely "pinned beside it".

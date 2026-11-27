@@ -3070,10 +3070,22 @@ class ManufacturingPackage:
         """Read once so rule generation and the editable ZIP use identical bytes."""
         from ..cli.check_cmd import _discover_net_class_map_sidecar
 
-        path = self.config.net_class_map_path or _discover_net_class_map_sidecar(
-            self._lookup_pcb_path
-        )
-        return (path, path.read_bytes()) if path is not None else None
+        config = self._reviewed.live_config if self._reviewed is not None else self.config
+        pcb = self._lookup_pcb_path
+        board_dir = pcb.parent.resolve()
+        path = config.net_class_map_path or _discover_net_class_map_sidecar(board_dir / pcb.name)
+        if path is None:
+            return None
+        boundary = (config.project_root or board_dir).resolve()
+        if config.project_root is None and config.net_class_map_path is None:
+            # Discovery also supports a sibling output directory. Keep the
+            # literal directory as the boundary so a symlink cannot move it.
+            if path.parent == board_dir.parent / "output":
+                boundary = board_dir.parent / "output"
+        resolved = path.resolve()
+        if not resolved.is_relative_to(boundary):
+            raise PermissionError(f"Net-class map {path} resolves outside {boundary}")
+        return resolved, resolved.read_bytes()
 
     def _load_net_classes(self, result: ManufacturingResult) -> list | None:
         """Load the board's net-class-map sidecar as deduped classes (#8393).

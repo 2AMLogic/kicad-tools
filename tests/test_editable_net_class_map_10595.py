@@ -109,9 +109,58 @@ def test_readiness_binds_packaged_map_to_selected_input(tmp_path, explicit, monk
         report["inputs"][selected.relative_to(board).as_posix()]
         == hashlib.sha256(members[member]).hexdigest()
     )
+    if explicit:
+        assert report["selected_net_class_map"] == "reviewed-classes.json"
     options = options_for(board, *args)
     assert report["engine"]["rules_digest"] == readiness_cmd._rules_digest(
         [options.project, selected, *design.glob("*.kicad_dru")]
     )
     reseal(options, lambda contents: contents.update({member: b"{}"}))
     assert any(member in p for p in readiness_cmd._verify_project_provenance(options))
+
+    for path in {selected, keyed, design / BARE}:
+        path.unlink()
+    options = options_for(board, "--sch", str(design / "board.kicad_sch"))
+    assert any("no checked source" in p for p in readiness_cmd._verify_project_provenance(options))
+    reseal(options, lambda contents: contents.pop(member))
+    assert readiness_cmd._verify_project_provenance(options) == []
+
+
+def test_export_checks_map_boundary_before_packaging(tmp_path):
+    from kicad_tools.export.manufacturing import (
+        ManufacturingConfig,
+        ManufacturingPackage,
+        ManufacturingResult,
+    )
+
+    board = tmp_path / "board"
+    board.mkdir()
+    pcb = board / "board.kicad_pcb"
+    pcb.touch()
+    sidecar = board / BARE
+    target = tmp_path / "selected.json"
+    target.write_bytes(b"{}")
+    sidecar.symlink_to(target)
+    package = ManufacturingPackage(pcb)
+    result = ManufacturingResult(output_dir=board)
+    package._generate_project_zip(board, result)
+    assert any("resolves outside" in error for error in result.errors)
+    assert not (board / "kicad_project.zip").exists()
+
+    config = ManufacturingConfig(project_root=tmp_path)
+    assert ManufacturingPackage(pcb, config=config)._net_class_map_input == (target, b"{}")
+
+
+def test_export_finds_map_in_sibling_output(tmp_path):
+    from kicad_tools.export.manufacturing import ManufacturingPackage
+
+    design = tmp_path / "design"
+    design.mkdir()
+    output = tmp_path / "output"
+    output.mkdir()
+    selected = output / BARE
+    selected.write_bytes(b"{}")
+    assert ManufacturingPackage(design / "board.kicad_pcb")._net_class_map_input == (
+        selected,
+        b"{}",
+    )
