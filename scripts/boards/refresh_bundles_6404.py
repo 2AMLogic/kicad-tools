@@ -151,6 +151,8 @@ class BundleConfig:
     #: When set, the re-plot swaps just these ``gerbers/gerbers.zip`` members for
     #: a fresh plot, instead of a whole ``kct export`` (board 04, Issue #7357).
     gerber_members: tuple[re.Pattern[str], ...] = ()
+    #: Board recipe hook (module:function) to finalize artwork before refill and DRC.
+    finalize_artwork: str | None = None
     #: Board-relative recipe whose ``run_drc(routed_pcb)`` writes
     #: ``output/drc_report.json`` against the final bundle (board 04).
     recipe_drc: str | None = None
@@ -195,6 +197,7 @@ BUNDLES: dict[str, BundleConfig] = {
             "output/manufacturing/check-report.json",
         ),
         gerber_members=(COPPER_MEMBER, SILK_MEMBER),
+        finalize_artwork="generate_design.py:finalize_silkscreen",
         recipe_drc="generate_design.py",
         recipe_manufacturing="generate_design.py",
     ),
@@ -265,11 +268,25 @@ def without_zones(text: str) -> str:
     return "".join(pieces)
 
 
-def archive_is_current(archive: Path, search: list[Path]) -> bool:
-    """True when every member of ``archive`` equals its current file."""
+def archive_is_current(
+    archive: Path,
+    search: list[Path],
+    *,
+    derived: dict[str, bytes] | None = None,
+    replaces: frozenset[str] = frozenset(),
+) -> bool:
+    """Compare the delivered project or its older, source-named layout."""
     with zipfile.ZipFile(archive) as existing:
-        for name in existing.namelist():
-            if name.endswith("/"):
+        names = existing.namelist()
+        if replaces.isdisjoint(names) and derived:
+            if any(
+                name not in names or existing.read(name) != data for name, data in derived.items()
+            ):
+                return False
+        else:
+            derived = {}
+        for name in names:
+            if name in derived or name.endswith("/"):
                 continue
             for base in search:
                 candidate = base / name
@@ -624,7 +641,12 @@ def _project_archive(cfg: rr.BoardConfig) -> tuple[str, tuple[str, ...]]:
 
 def bundle_is_stale(staged: Path, cfg: rr.BoardConfig) -> bool:
     archive, search = _project_archive(cfg)
-    return not archive_is_current(staged / archive, [staged / s for s in search])
+    derived, replaces = rr.delivered_project_members(
+        staged / cfg.routed_pcb, staged / cfg.schematic
+    )
+    return not archive_is_current(
+        staged / archive, [staged / s for s in search], derived=derived, replaces=replaces
+    )
 
 
 def check_recipe_drc_preflight(staged: Path, cfg: rr.BoardConfig, *, refresh: bool = False) -> bool:
@@ -979,6 +1001,10 @@ def refresh_bundle(
 
         if bundle.evidence is not None:
             EVIDENCE_STAGES[bundle.evidence](staged, cfg, build_dir)
+        if bundle.finalize_artwork:
+            finalize = rr.load_refresher(staged, bundle.finalize_artwork)
+            if not finalize(staged / cfg.routed_pcb):
+                raise GateFailure("Could not finalize the routed PCB artwork")
         refill = stage_refill(staged, cfg)
         if bundle.evidence_pcb is not None and (
             (staged / bundle.evidence_pcb).read_bytes() != (staged / cfg.routed_pcb).read_bytes()
