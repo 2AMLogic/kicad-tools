@@ -154,6 +154,9 @@ class BoardConfig:
             ("output/manufacturing/design-source.zip", (".", "output")),
         )
     )
+    # Board 05's recipe ZIP prefixes every member with manufacturing/. Its
+    # distributed ZIP puts the same complete manifest inventory at the root.
+    publish_flat_recipe_bundle: bool = False
 
 
 BOARDS: dict[str, BoardConfig] = {
@@ -232,6 +235,10 @@ BOARDS: dict[str, BoardConfig] = {
             ),
         ),
         manifest_refresher="redesign/package.py:refresh_manifest",
+        publish_flat_recipe_bundle=True,
+        additional_design_sources=(
+            "redesign/board05_revB.pretty/TI_DGN0008C_Lands1.4x0.45_EP1.57x1.89_ThermalVias.kicad_mod",
+        ),
     ),
     "06-diffpair-test": BoardConfig(
         routed_pcb="output/diffpair_test_routed.kicad_pcb",
@@ -339,6 +346,7 @@ def rebuild_archive(
     additional_members: tuple[str, ...] = (),
     derived: dict[str, bytes] | None = None,
     replaces: frozenset[str] = frozenset(),
+    flat_bundle_members: set[str] | None = None,
 ) -> list[str]:
     """Refresh existing and explicitly requested members from current files.
 
@@ -355,13 +363,23 @@ def rebuild_archive(
     while none of *replaces* -- the checked file names those members displaced
     -- is still archived under its own name: such a bundle was written before
     the renaming and keeps refreshing member by member.
+
+    With ``flat_bundle_members``, accept the exact manifest inventory in either
+    its published layout or the recipe's enclosing directory. Publish flat.
     """
     with zipfile.ZipFile(archive) as existing:
-        old = {name: existing.read(name) for name in existing.namelist() if not name.endswith("/")}
+        entries = [entry for entry in existing.infolist() if not entry.is_dir()]
+        old = {entry.filename: existing.read(entry) for entry in entries}
+    names = set(old)
+    if flat_bundle_members is not None:
+        prefixed = {f"{search[0].name}/{name}" for name in flat_bundle_members}
+        if len(entries) != len(old) or names not in (flat_bundle_members, prefixed):
+            raise GateFailure(f"{archive.name}: archive inventory differs from the manifest")
+        names = flat_bundle_members
     if replaces & old.keys():
         derived = None
     members: dict[str, bytes] = {}
-    for name in sorted(old.keys() | set(additional_members)):
+    for name in sorted(names | set(additional_members)):
         if derived and name in derived:
             members[name] = derived[name]
             continue
@@ -914,6 +932,9 @@ def repin_staged(
         out / "manufacturing.zip",
         bundle_roots,
         additional_members=tuple(p.relative_to(bundle_roots[0]).as_posix() for p in bundle_files),
+        flat_bundle_members=(
+            set(after["files"]) | {"manifest.json"} if cfg.publish_flat_recipe_bundle else None
+        ),
     )
     log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
 

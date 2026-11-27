@@ -80,7 +80,8 @@ def test_export_without_sidecar_unchanged(tmp_path: Path) -> None:
     pcb = _stage(tmp_path, sidecar=False)
     dru = _export_dru(pcb)
     assert "Ampacity Min Width" not in dru
-    assert "Motor power" not in dru
+    # The KiCad project itself supplies this class's clearance.
+    assert '(rule "Reviewed clearance - Motor power"' in dru
 
 
 def test_dedupe_net_classes_one_per_name() -> None:
