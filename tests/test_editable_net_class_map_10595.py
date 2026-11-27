@@ -111,6 +111,8 @@ def test_readiness_binds_packaged_map_to_selected_input(tmp_path, explicit, monk
     )
     if explicit:
         assert report["selected_net_class_map"] == "reviewed-classes.json"
+    else:
+        assert "selected_net_class_map" not in report
     options = options_for(board, *args)
     assert report["engine"]["rules_digest"] == readiness_cmd._rules_digest(
         [options.project, selected, *design.glob("*.kicad_dru")]
