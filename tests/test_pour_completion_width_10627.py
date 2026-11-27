@@ -307,3 +307,54 @@ class TestWeldReachUsesPourWidth:
 
         assert clearance(0.2) == pytest.approx(0.2)
         assert clearance(1.0) == pytest.approx(0.5)
+
+
+class TestWidthFitsPadLand:
+    """A land narrower than the class width keeps the board width (mask-to-copper)."""
+
+    def test_fitted_width(self):
+        c = _closer(0.2, _classes(A=0.5))
+        assert c.fitted_width("A", 0.30) == 0.2  # Board 07: 0.30 mm land, 0.50 mm class
+        assert c.fitted_width("A", 0.50) == 0.5
+        assert c.fitted_width("A", 1.00) == 0.5
+        assert c.fitted_width("A", None) == 0.5  # unknown land: class width
+        assert c.fitted_width("B", 0.30) == 0.2  # classless net
+
+    def test_land_minor(self):
+        from shapely.geometry import box
+
+        term = SimpleNamespace(lands={"F.Cu": box(0, 0, 0.7, 0.3)})
+        assert PourLinkCloser.land_minor_mm(term) == pytest.approx(0.3)
+        assert PourLinkCloser.land_minor_mm(None) is None
+
+    def test_weld_splits_narrow_pad_to_board_width(self, tmp_path, monkeypatch):
+        from shapely.geometry import box
+
+        from kicad_tools.cli import stitch_cmd
+        from kicad_tools.router import link_router
+
+        lands = {"U1.1": 0.3, "C1.1": 1.0}
+        monkeypatch.setattr(
+            link_router,
+            "terminal_for_pad",
+            lambda pcb, ref, num: SimpleNamespace(
+                lands={"F.Cu": box(0, 0, 2.0, lands[f"{ref}.{num}"])}
+            ),
+        )
+        calls = []
+
+        def fake(pcb_path, nets, **kw):
+            calls.append({"nets": list(nets), **kw})
+            return SimpleNamespace(
+                vias_added=[], already_connected=0, pads_skipped=[], traces_added=[]
+            )
+
+        monkeypatch.setattr(stitch_cmd, "run_stitch", fake)
+        board = tmp_path / "b.kicad_pcb"
+        shutil.copy(WELD_FIXTURE, board)
+        _closer(0.2, _classes(VCC=0.5))._weld_pads(
+            board, {"VCC": {"U1.1", "C1.1"}}, ClosureAttempt()
+        )
+        by_width = {c["trace_width"]: c["only_pads"] for c in calls}
+        assert by_width[0.5] == frozenset({"C1.1"})
+        assert by_width[0.2] == frozenset({"U1.1"})

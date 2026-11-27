@@ -1483,6 +1483,37 @@ class PourLinkCloser:
             return float(value)
         return self.trace_width
 
+    @staticmethod
+    def land_minor_mm(terminal: Any) -> float | None:
+        """Narrowest land dimension of a pad terminal (mm), ``None`` if unknown."""
+        lands = getattr(terminal, "lands", None) or {}
+        best: float | None = None
+        for geom in lands.values():
+            try:
+                rect = geom.minimum_rotated_rectangle
+                xs, ys = rect.exterior.coords.xy
+                sides = [
+                    ((xs[i + 1] - xs[i]) ** 2 + (ys[i + 1] - ys[i]) ** 2) ** 0.5 for i in range(2)
+                ]
+            except Exception:  # degenerate / non-polygon land: no verdict
+                continue
+            minor = min(sides)
+            best = minor if best is None else min(best, minor)
+        return best
+
+    def fitted_width(self, net_name: str | None, minor_mm: float | None) -> float:
+        """``pour_width`` limited to what a pad land of ``minor_mm`` can host.
+
+        A stub wider than the land it leaves exposes copper beside the pad's
+        mask opening (``mask_to_copper``, Board 07: 0.50 mm stubs on 0.30 mm
+        lands).  Such a pad keeps the board width instead of the wider class
+        width.  Unknown land size keeps the class width.
+        """
+        width = self.pour_width(net_name)
+        if width > self.trace_width and minor_mm is not None and minor_mm < width - 1e-6:
+            return self.trace_width
+        return width
+
     def pair_clearance(self, pour_net: str, other_net: str | None) -> float:
         """``c(P, N)``: the clearance copper on ``pour_net`` keeps from ``other_net``."""
         base = max(self.class_clearance(pour_net), self.class_clearance(other_net))
@@ -1931,16 +1962,29 @@ class PourLinkCloser:
         # Issue #10627: ``run_stitch`` takes one scalar width, so weld each
         # width group on its own (groups in first-net order).  A classless-only
         # input is a single group: the same one call sequence as before.
-        groups: dict[float, tuple[float, list[str]]] = {}
+        # A pad whose land is narrower than its class width welds at the board
+        # width (mask-to-copper, see ``fitted_width``), so groups are per pad.
+        pcb = None
+        if any(self.pour_width(n) > self.trace_width for n in pads_by_net):
+            from kicad_tools.router.link_router import terminal_for_pad
+            from kicad_tools.schema.pcb import PCB
+
+            pcb = PCB.load(str(pcb_path))
+        groups: dict[float, tuple[float, dict[str, set[str]]]] = {}
         for net in sorted(pads_by_net):
-            width = self.pour_width(net)
-            groups.setdefault(round(width, 6), (width, []))[1].append(net)
+            for key in sorted(pads_by_net[net]):
+                minor = None
+                if pcb is not None and self.pour_width(net) > self.trace_width:
+                    ref, _, number = key.partition(".")
+                    minor = self.land_minor_mm(terminal_for_pad(pcb, ref, number))
+                width = self.fitted_width(net, minor)
+                groups.setdefault(round(width, 6), (width, {}))[1].setdefault(net, set()).add(key)
 
         every = frozenset(k for keys in pads_by_net.values() for k in keys)
         welded: set[str] = set()
         exhausted: set[str] = set()
-        for width, nets in groups.values():
-            group_pads = {net: pads_by_net[net] for net in nets}
+        for width, group_pads in groups.values():
+            nets = list(group_pads)
             welded |= self._weld_group(pcb_path, nets, group_pads, width, attempt, avoid, exhausted)
         self.exhausted_stitch_pads.difference_update(every)
         self.exhausted_stitch_pads.update(exhausted)
@@ -2155,6 +2199,15 @@ class PourLinkCloser:
                 if net_number is None:
                     continue
                 rules = rules_for(lk.net)
+                if rules.trace_width > self.trace_width:
+                    # Pad lands narrower than the class width keep the board
+                    # width (mask-to-copper; see ``fitted_width``).
+                    for end in (lk.a, lk.b):
+                        if end.kind == "pad" and end.ref and end.pad:
+                            minor = self.land_minor_mm(terminal_for_pad(pcb, end.ref, end.pad))
+                            if minor is not None and minor < rules.trace_width - 1e-6:
+                                rules = replace(rules, trace_width=self.trace_width)
+                                break
                 route_key = _route_key(lk)
                 if route_key in banned:
                     # A withdrawn DIRECT route still withdraws the whole link
