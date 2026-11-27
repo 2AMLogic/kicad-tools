@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10527** (closed): Check simulated analog pin ranges across the driven waveform and supply states
+- **PR #10536**: feat: check simulated analog pin voltages against supply-state limits
+- **Issue #10564** (closed): Cover the untested branches of assembly_smd_land_pattern
+- **PR #10573**: test: cover remaining branches of the SMD land-pattern check
+- **Issue #10428** (closed): Preserve native schematic instance links on the footprints placed by create-pcb
+- **PR #10429**: Write native symbol links when creating a PCB from a schematic
 - **Issue #10565** (closed): ci: keep shared Slow Tests fixtures on one worker with the pinned pytest toolchain
 - **PR #10572**: ci: schedule Slow Tests with --dist loadscope so scoped fixtures build once
 - **Issue #10559** (closed): Reinforcement sidecar consumers raise raw TypeError on a malformed nested coordinate point

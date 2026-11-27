@@ -14,5 +14,5 @@ step "Build C++ router backend"
 uv run kct build-native
 
 step "Run ci_extended tests"
-uv run pytest -n auto -rfEsx -o addopts= --benchmark-disable --timeout=60 \
+uv run pytest -n auto --dist loadgroup -rfEsx -o addopts= --benchmark-disable --timeout=60 \
   -m "ci_extended and not slow" "$@"

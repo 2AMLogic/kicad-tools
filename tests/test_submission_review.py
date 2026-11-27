@@ -527,4 +527,142 @@ def test_hand_edited_purchasing_rows_refuse_to_render(plan_inputs, tmp_path):
 
     with pytest.raises(sr.ReviewError, match="purchasing"):
         sr.render_review_page(forged, destination=tmp_path / "page")
+
+
+def exported_switch_list():
+    """The switch example as ``kct export`` marks it: rows plus their checksum (Issue #10514)."""
+    from tests.test_manufacturing_package import SWITCH_PER_BOARD
+
+    return {
+        **SWITCH_PER_BOARD,
+        "kct_export_sha256": sp.purchasing_export_digest(SWITCH_PER_BOARD),
+    }
+
+
+def switch_associations():
+    """The terminal map rows, each naming its source in the column headers."""
+    switch = "| Panel toggle switch for the arm position | Example Switch Co SYN-TOGGLE-1 |"
+    return (
+        "| Description | Part | Terminal (declared in project) | Board landing (checked on the PCB) "
+        "| Net (checked on the PCB) | Disposition |",
+        f"{switch} 3 | SW1 pad 1 | VDD_CTRL | mapped |",
+        f"{switch} 2 | SW1 pad 2 | ARMED_3V3 | mapped |",
+        f"{switch} 1 | (none) | (none) | unused |",
+    )
+
+
+def test_review_page_shows_terminal_maps_as_project_declarations(plan_inputs, tmp_path):
+    """Each association names its source: the terminal is declared, the landing checked.
+
+    Rows without a map render as before beside the mapped one, and the board
+    quantity scales the purchase, never the assignments.
+    """
+    from tests.test_manufacturing_package import SWITCH_ITEM
+
+    with_purchasing(plan_inputs, exported_switch_list())
+    one = sr.render_review_page(
+        sp.prepare_submission(**(plan_inputs | {"destination": tmp_path / "handoff-one"})),
+        destination=tmp_path / "page-one",
+    )
+    two = sr.render_review_page(
+        sp.prepare_submission(
+            **(plan_inputs | {"destination": tmp_path / "handoff-two", "board_quantity": 2})
+        ),
+        destination=tmp_path / "page-two",
+    )
+
+    section = purchasing_section(two)
+    for association in switch_associations():
+        assert association in section
+        assert association in purchasing_section(one)
+    assert "Terminal numbers are the project's declaration" in section
+    assert (
+        "| Snap-on cover for the 5 x 20 mm fuse holder | 3 | 6 | F1, F2, F3 | "
+        "Example Fuse Co SYN-COVER-1 |"
+    ) in section
+    assert "| Panel toggle switch for the arm position | 1 | 2 | SW1 |" in section
+
+    for page, required in ((one, 1), (two, 2)):
+        data = (page.directory / "purchasing.json").read_bytes()
+        assert json.loads(data)["items"][-1] == SWITCH_ITEM | {"required": required}
+        assert json.loads(page.manifest_bytes)["files"]["purchasing.json"] == {
+            "sha256": digest(data),
+            "size": len(data),
+        }
+
+
+@pytest.mark.parametrize(
+    "terminals",
+    [
+        [{"terminal": "3", "ref": "SW1", "pad": "1", "net": "VDD_CTRL", "unused": True}],
+        [{"terminal": "3", "ref": "SW1", "pad": "1"}, {"terminal": "1", "unused": True}],
+        [
+            {"terminal": "3", "ref": "SW1", "pad": "1", "net": "VDD_CTRL"},
+            {"terminal": "3", "unused": True},
+        ],
+        [{"terminal": "3", "ref": "SW1", "pad": "1", "net": "VDD_CTRL", "colour": "red"}],
+        [{"terminal": "1", "unused": "yes"}],
+        [{"terminal": " ", "ref": "SW1", "pad": "1", "net": "VDD_CTRL"}],
+        [{"terminal": 3, "ref": "SW1", "pad": "1", "net": "VDD_CTRL"}],
+        [],
+        "SW1 pad 1",
+    ],
+    ids=[
+        "mapped-and-unused",
+        "landing-without-net",
+        "terminal-declared-twice",
+        "unknown-terminal-key",
+        "unused-not-true",
+        "blank-terminal",
+        "numeric-terminal",
+        "empty-map",
+        "not-a-list",
+    ],
+)
+def test_hand_edited_terminal_map_refuses_to_render(plan_inputs, tmp_path, terminals):
+    with_purchasing(plan_inputs, exported_switch_list())
+    plan = sp.prepare_submission(**plan_inputs)
+    core = json.loads(plan.plan_bytes)
+    core["purchasing"]["items"][-1]["terminals"] = terminals
+    forged = sp.SubmissionPlan(plan.directory, sp._json(core))
+
+    with pytest.raises(sr.ReviewError, match="purchasing"):
+        sr.render_review_page(forged, destination=tmp_path / "page")
     assert not (tmp_path / "page").exists()
+
+
+def test_pending_row_cannot_carry_a_terminal_map(plan_inputs):
+    """The reader agrees with the spec: a part that is not selected has no terminals to map."""
+    from copy import deepcopy
+
+    from tests.test_manufacturing_package import FUSE_PER_BOARD
+
+    document = deepcopy(FUSE_PER_BOARD)
+    document["items"][2]["terminals"] = [{"terminal": "1", "unused": True}]
+    with_purchasing(plan_inputs, document)
+
+    with pytest.raises(sp.SubmissionError, match="pending row must not declare terminals"):
+        sp.prepare_submission(**plan_inputs)
+    assert not plan_inputs["destination"].exists()
+
+
+def test_edited_terminal_in_the_exported_list_fails_its_checksum(plan_inputs):
+    """The terminal numbers are the project's declaration: only the checksum binds them.
+
+    A bundle manifest that agrees with the edited bytes still cannot pass the
+    list off as the one the export froze.
+    """
+    target = with_purchasing(plan_inputs, exported_switch_list())
+    accepted = plan_inputs["bundle_root"].parent / "accepted"
+    sp.prepare_submission(**(plan_inputs | {"destination": accepted}))
+    assert accepted.is_dir()
+
+    target.write_bytes(target.read_bytes().replace(b'"terminal":"3"', b'"terminal":"4"'))
+    with pytest.raises(sp.SubmissionError):
+        sp.prepare_submission(**plan_inputs)
+
+    refresh_manifest(plan_inputs)
+
+    with pytest.raises(sp.SubmissionError, match="differs from its exported contents"):
+        sp.prepare_submission(**plan_inputs)
+    assert not plan_inputs["destination"].exists()
