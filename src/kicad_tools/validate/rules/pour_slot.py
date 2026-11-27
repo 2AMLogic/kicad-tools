@@ -154,6 +154,21 @@ def iter_pour_slot_pairs(
     return PourSlotRule(netclass_clearances).iter_pairs(pcb)
 
 
+def _board_material(pcb: PCB) -> BaseGeometry | None:
+    """Return the board-relative material polygon, or None if unavailable."""
+    from kicad_tools.pcb.board_geometry import BoardGeometry
+
+    if getattr(pcb, "_sexp", None) is None:
+        return None  # not a parsed board: no Edge.Cuts to clip against
+    try:
+        polygon = BoardGeometry.from_pcb(pcb).polygon
+    except (ImportError, ValueError):
+        return None
+    if polygon is None or polygon.is_empty:
+        return None
+    return polygon if polygon.is_valid else polygon.buffer(0)
+
+
 class PourSlotRule(DRCRule):
     """Report parallel different-net track pairs that leave a slot in a pour."""
 
@@ -299,6 +314,20 @@ class PourSlotRule(DRCRule):
         zones = {layer: pours for layer, pours in zones.items() if pours}
         if not zones:
             return
+        # A pour fills only board material, so a strip over a milled opening
+        # (internal Edge.Cuts) cannot be a slot (Issue #10121 review). Without
+        # a usable outline keep the unclipped contour.
+        material = _board_material(pcb)
+        if material is not None:
+            clipped: dict[str, list[_Pour]] = {}
+            for layer, pours in zones.items():
+                kept = [replace(p, outline=p.outline.intersection(material)) for p in pours]
+                kept = [p for p in kept if not p.outline.is_empty]
+                if kept:
+                    clipped[layer] = kept
+            zones = clipped
+            if not zones:
+                return
 
         # Exact duplicate copies of a segment (same net, layer, width and
         # unordered endpoints) are already reported by
