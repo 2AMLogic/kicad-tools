@@ -276,6 +276,22 @@ def test_equivalent_pad_geometry(single_pad_board, fields, loader):
     assert (pad.shape, pad.pin, pad.through_hole) == ("rect", "1", True)
 
 
+@pytest.mark.parametrize("header", ["(pad ", "( pad ", "(pad\n", "(\tpad\t"])
+def test_pad_header_whitespace_in_both_loaders(single_pad_board, header):
+    path = single_pad_board(
+        '(descr "Drawing calls the spare ( pad 9 smd rect (at 2 3) (size 5 5))")\n'
+        f'{header}"1" thru_hole oval (at 1 2 30) (size 1 1.5) (drill 0.4) (layers "*.Cu"))'
+    )
+    router, _ = load_pcb_for_routing(str(path), validate_drc=False)
+    (routed,) = router.pads.values()
+    (analyzed,) = load_pads_for_analysis(path)
+    for pad in (routed, analyzed):
+        assert (pad.ref, pad.pin, pad.shape, pad.through_hole) == ("U1", "1", "oval", True)
+        assert (pad.x, pad.y, pad.rotation, pad.width, pad.height, pad.drill) == pytest.approx(
+            (5, 6, 30, 1, 1.5, 0.4)
+        )
+
+
 @pytest.mark.parametrize("pin,expected", [('""', ""), ("001", "001")])
 def test_pad_identity_and_oval_drill(single_pad_board, pin, expected):
     path = single_pad_board(

@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.core.geometry import rotate_pad_offset
-from kicad_tools.sexp.scan import find_unquoted, iter_unquoted
+from kicad_tools.sexp.scan import iter_unquoted
 
 logger = logging.getLogger(__name__)
 
@@ -5287,16 +5287,11 @@ def _extract_pad_blocks(section: str) -> list[str]:
     """
     pad_blocks: list[str] = []
 
-    # Find all positions where "(pad " starts *outside* a quoted string.
-    # A plain ``str.find`` would also match text such as
-    # ``(descr "Heatsink pins (pad 4, net HS) ...")`` (Issues #6740, #6873).
-    # Each scan resumes just past a completed block, which is always outside
-    # a string, as :func:`find_unquoted` requires.
+    # Match the whole pad tag with the same whitespace the parser accepts.
+    # Start each search outside strings so pad-like text in a descr is ignored.
     start_pos = 0
-    while True:
-        pad_start = find_unquoted(section, "(pad ", start_pos)
-        if pad_start == -1:
-            break
+    while match := next(iter_unquoted(section, r"\([ \t\r\n]*pad[ \t\r\n]", start_pos), None):
+        pad_start = match.start()
 
         # Count parentheses to find the matching closing paren
         depth = 0
