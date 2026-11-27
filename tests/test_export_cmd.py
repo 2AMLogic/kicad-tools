@@ -49,9 +49,7 @@ class TestExportCmdIntegration:
     """Integration tests that mock the assembly pipeline."""
 
     def test_project_root_reaches_manufacturing_package(self, tmp_path, monkeypatch, capsys):
-        from types import SimpleNamespace
-
-        from kicad_tools.export.manufacturing import ManufacturingPackage
+        from kicad_tools.export.manufacturing import ManufacturingPackage, ManufacturingResult
 
         board = tmp_path / "assembly/kicad/board.kicad_pcb"
         board.parent.mkdir(parents=True)
@@ -60,7 +58,7 @@ class TestExportCmdIntegration:
 
         def dry_run(package, output_dir, dry_run):
             seen.append(package.config.project_root)
-            return SimpleNamespace(output_dir=output_dir, all_files=[])
+            return ManufacturingResult(output_dir=output_dir)
 
         monkeypatch.setattr(ManufacturingPackage, "export", dry_run)
         monkeypatch.chdir(tmp_path)
