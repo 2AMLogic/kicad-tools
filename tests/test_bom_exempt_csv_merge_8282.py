@@ -6,6 +6,7 @@ import pytest
 
 from kicad_tools.export.preflight import PreflightChecker, PreflightConfig
 from kicad_tools.parts.cache import PartsCache
+from kicad_tools.parts.models import Part
 from kicad_tools.schema.bom import BOM, BOMItem
 
 _KCT = """kct_version: '1.0'
@@ -31,11 +32,13 @@ def _items_after_merge(tmp_path):
     (tmp_path / "bom_jlcpcb.csv").write_text(
         "Comment,Designator,Footprint,LCSC Part #\n10k,R1,R_0402,C1234\n"
     )
+    cache = PartsCache(db_path=tmp_path / "c.db")
+    cache.put(Part(lcsc_part="C1234", value="10kΩ", package="0402"))
     checker = PreflightChecker(
         pcb_path=tmp_path / "b.kicad_pcb",
         schematic_path=None,
         config=PreflightConfig(),
-        parts_cache=PartsCache(db_path=tmp_path / "c.db"),
+        parts_cache=cache,
         output_dir=tmp_path,
     )
     items = [
@@ -69,13 +72,16 @@ def _export_board06_with_exempt_r1(tmp_path, auto_lcsc, *, filter_export=True):
     source = tmp_path / "merge_source.csv"
     shutil.copy(BOARD06 / "output" / "manufacturing" / "bom_jlcpcb.csv", source)
 
+    cache = PartsCache(db_path=tmp_path / "parts.db")
+    cache.put(Part(lcsc_part="C22775", value="100Ω", package="0603"))
+    cache.put(Part(lcsc_part="C25803", value="100kΩ", package="0603"))
     mock = MagicMock()
     mock.__enter__.return_value = mock
     mock._get_client.return_value = None
     mock.suggest_for_component.side_effect = AssertionError("No catalog calls expected")
     with (
         patch("kicad_tools.export.bom_enrich.PartSuggester", return_value=mock),
-        patch("kicad_tools.parts.cache.PartsCache", return_value=None),
+        patch("kicad_tools.parts.cache.PartsCache", return_value=cache),
     ):
         config = AssemblyConfig(
             include_bom=True,
