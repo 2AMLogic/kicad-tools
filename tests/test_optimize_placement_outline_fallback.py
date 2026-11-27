@@ -196,3 +196,94 @@ def test_line_outline_beats_cutout(tmp_path, cutout, cutout_first) -> None:
     body = cutout + "\n" + OUTER_LINES if cutout_first else OUTER_LINES + "\n" + cutout
     b = _bbox(extract_board_outline(_pcb(tmp_path, body)))
     assert b == pytest.approx((0, 0, 100, 80))
+
+
+def _large_cutout_pcb_text(cutout_left: int, *, cutout_first: bool) -> str:
+    outer = (
+        "(gr_rect (start 0 0) (end 50 40) (stroke (width 0.05) (type default))"
+        ' (fill none) (layer "Edge.Cuts") (uuid "00000000-0000-0000-0000-000000000001"))'
+    )
+    cutout = (
+        f"(gr_rect (start {cutout_left} 1) (end 49 39) (stroke (width 0.05) (type default))"
+        ' (fill none) (layer "Edge.Cuts") (uuid "00000000-0000-0000-0000-000000000002"))'
+    )
+    rects = f"{cutout} {outer}" if cutout_first else f"{outer} {cutout}"
+    return (
+        '(kicad_pcb (version 20241229) (generator "kicad_tools")\n'
+        '  (general (thickness 1.6)) (paper "A4")\n'
+        '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (39 "F.Mask" user)'
+        ' (44 "Edge.Cuts" user) (49 "F.Fab" user))\n'
+        '  (setup (pad_to_mask_clearance 0)) (net 0 "")\n'
+        f"  {rects}\n"
+        '  (footprint "Test:Pad" (layer "F.Cu")'
+        ' (uuid "00000000-0000-0000-0000-000000000003") (at 10 20)\n'
+        '    (property "Reference" "TP1" (at 0 0) (layer "F.Fab"))\n'
+        '    (pad "1" smd circle (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask")'
+        ' (uuid "00000000-0000-0000-0000-000000000004")))\n'
+        ")\n"
+    )
+
+
+@pytest.mark.parametrize("cutout_left", [23, 22])
+@pytest.mark.parametrize("cutout_first", [False, True])
+def test_optimize_placement_cli_large_cutout_keeps_exterior(
+    tmp_path: Path, capsys, cutout_left: int, cutout_first: bool
+) -> None:
+    """Both 26x38 and 27x38 cutouts report 50x40 exterior and accept on-material pad (#10590)."""
+    import json
+
+    from kicad_tools.cli import main as kct_main
+
+    src = tmp_path / f"cutout_{cutout_left}_{int(cutout_first)}.kicad_pcb"
+    src.write_text(_large_cutout_pcb_text(cutout_left, cutout_first=cutout_first))
+
+    rc_eval = kct_main(
+        ["optimize-placement", str(src), "--dry-run", "--require-outline", "--format", "json"]
+    )
+    eval_payload = json.loads(capsys.readouterr().out)
+    assert rc_eval == 0
+    assert eval_payload["board"]["width_mm"] == pytest.approx(50.0)
+    assert eval_payload["board"]["height_mm"] == pytest.approx(40.0)
+    assert eval_payload["feasible"] is True
+    assert eval_payload["scores"]["current"]["breakdown"]["boundary"] == pytest.approx(0.0)
+
+    out = tmp_path / f"checked_{cutout_left}_{int(cutout_first)}.kicad_pcb"
+    rc_save = kct_main(
+        [
+            "optimize-placement",
+            str(src),
+            "--require-outline",
+            "--seed",
+            "current",
+            "--max-iterations",
+            "0",
+            "--format",
+            "json",
+            "-o",
+            str(out),
+        ]
+    )
+    save_payload = json.loads(capsys.readouterr().out)
+    assert rc_save == 0
+    assert save_payload["board"]["width_mm"] == pytest.approx(50.0)
+    assert save_payload["board"]["height_mm"] == pytest.approx(40.0)
+    assert save_payload["feasible"] is True
+    assert save_payload["saved"] is True
+    assert save_payload["scores"]["final"]["breakdown"]["boundary"] == pytest.approx(0.0)
+    assert _saved_positions(out)["TP1"] == pytest.approx((10.0, 20.0))
+
+
+def test_placement_optimizer_retains_large_cutout_as_hole(tmp_path: Path) -> None:
+    """PlacementOptimizer keeps the 50x40 exterior and 27x38 interior cutout (#10590)."""
+    pytest.importorskip("shapely")
+    from kicad_tools.optim.geometry import Vector2D
+    from kicad_tools.optim.placement import PlacementOptimizer
+
+    src = tmp_path / "large.kicad_pcb"
+    src.write_text(_large_cutout_pcb_text(22, cutout_first=False))
+    optimizer = PlacementOptimizer.from_pcb(PCB.load(str(src)), enable_clustering=False)
+
+    assert _bbox(optimizer.board_outline) == pytest.approx((0.0, 0.0, 50.0, 40.0))
+    assert len(optimizer.board_holes) == 1
+    assert optimizer.board_holes[0].contains_point(Vector2D(35.0, 20.0)) is True
+    assert optimizer.board_holes[0].contains_point(Vector2D(10.0, 20.0)) is False
