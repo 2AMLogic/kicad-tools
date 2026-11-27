@@ -488,6 +488,49 @@ def _via_xy(pcb_text: str) -> tuple[float, float]:
     return float(m.group(1)), float(m.group(2))
 
 
+def _put(record: dict, path: str, value) -> None:
+    """Damage the value of ``record`` at dotted ``path`` (``copy_segments.0.end.y``)."""
+    keys = [int(key) if key.isdigit() else key for key in path.split(".")]
+    node = record
+    for key in keys[:-1]:
+        node = node[key]
+    node[keys[-1]] = value
+
+
+_MALFORMED_POINTS = [
+    pytest.param(
+        0,
+        ("anchors.0", "not-a-point"),
+        ".anchors[0] is a string, expected an object with numeric 'x' and 'y'",
+        id="anchor",
+    ),
+    pytest.param(
+        0, ("leg_end.y", True), ".leg_end.y is a boolean, expected a number", id="leg-end"
+    ),
+    pytest.param(
+        1, ("polyline.1", {"y": 101.0}), ".polyline[1] has no 'x', expected a number", id="polyline"
+    ),
+    pytest.param(
+        1,
+        ("stitch_vias", {"x": 101.5, "y": 102.0}),
+        ".stitch_vias is an object, expected an array of points",
+        id="stitch-vias",
+    ),
+    pytest.param(
+        1,
+        ("copy_segments.0.start", 7),
+        ".copy_segments[0].start is a number, expected an object with numeric 'x' and 'y'",
+        id="segment-start",
+    ),
+    pytest.param(
+        1,
+        ("copy_segments.0.end.y", "102.0"),
+        ".copy_segments[0].end.y is a string, expected a number",
+        id="segment-end",
+    ),
+]
+
+
 class TestReinforcementSidecar:
     @pytest.mark.parametrize(
         ("bad", "kind"),
@@ -508,6 +551,71 @@ class TestReinforcementSidecar:
         assert str(error.value) == f"{record}: wires[1] is {kind}, not a JSON object"
         assert pcb.read_bytes() == original_pcb
         assert record.read_bytes() == original_record
+
+    @pytest.mark.parametrize("dry_run", [False, True], ids=["save", "dry-run"])
+    @pytest.mark.parametrize(("index", "damage", "diagnostic"), _MALFORMED_POINTS)
+    def test_refuses_a_malformed_point_before_translating(
+        self, tmp_path: Path, dry_run, index, damage, diagnostic
+    ):
+        """Each case damages one coordinate field a translation moves, as
+        ``(record index in the file, dotted path, end of the diagnostic)``: it
+        is refused before anything is written, on a dry run too, and the
+        publication lock is released (Issue #10559)."""
+        pcb = _write_reinforced(tmp_path)
+        record = sidecar_path(pcb)
+        data = json.loads(record.read_bytes())
+        _put(data["wires"][index], *damage)
+        record.write_text(json.dumps(data))
+        original_pcb = pcb.read_bytes()
+        original_record = record.read_bytes()
+
+        with pytest.raises(ValueError) as error:
+            center_on_sheet(pcb, dry_run=dry_run)
+
+        assert str(error.value) == f"{record}: wires[{index}]{diagnostic}"
+        assert pcb.read_bytes() == original_pcb
+        assert record.read_bytes() == original_record
+        assert sorted(p.name for p in tmp_path.iterdir()) == [pcb.name, record.name]
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_cli_refuses_a_malformed_point_before_translating(self, tmp_path: Path, capsys, fmt):
+        """The CLI reports the field instead of the raw TypeError and exits 1."""
+        from kicad_tools.cli import main
+
+        pcb = _write_reinforced(tmp_path)
+        record = sidecar_path(pcb)
+        data = json.loads(record.read_bytes())
+        _put(data["wires"][1], "copy_segments.0.end.y", "102.0")
+        record.write_text(json.dumps(data))
+        original = (pcb.read_bytes(), record.read_bytes())
+
+        assert main(["pcb", "center-on-sheet", str(pcb), "--format", fmt]) == 1
+
+        captured = capsys.readouterr()
+        expected = f"{record}: wires[1].copy_segments[0].end.y is a string, expected a number"
+        if fmt == "json":
+            assert json.loads(captured.out) == {"error": expected}
+            assert captured.err == ""
+        else:
+            assert captured.out == "" and f"Error: {expected}" in captured.err
+        assert "Traceback" not in captured.err
+        assert (pcb.read_bytes(), record.read_bytes()) == original
+        assert sorted(p.name for p in tmp_path.iterdir()) == [pcb.name, record.name]
+
+    def test_already_centered_copy_keeps_a_malformed_record_verbatim(self, tmp_path: Path):
+        """No move, no arithmetic: an already-centered pair is copied as it stands."""
+        pcb = _write_reinforced(tmp_path)
+        center_on_sheet(pcb)
+        record = sidecar_path(pcb)
+        data = json.loads(record.read_bytes())
+        data["wires"][0]["anchors"][0] = "not-a-point"
+        record.write_text(json.dumps(data))
+        out = tmp_path / "copy.kicad_pcb"
+
+        report = center_on_sheet(pcb, output_path=out)
+
+        assert not report.changed and report.sidecar == sidecar_path(out)
+        assert sidecar_path(out).read_bytes() == record.read_bytes()
 
     def test_anchor_matches_moved_via(self, tmp_path: Path):
         pcb = _write_reinforced(tmp_path)

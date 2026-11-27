@@ -11,12 +11,12 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#10253**: fix: translate reinforcement sidecar with pcb center-on-sheet
 - **#10474**: feat(export): report revision-bound simulation limits and fault-case evidence
 - **#10497**: ci: retry the pinned actionlint download on a transient 504
 - **#10520**: fix(route-link): resolve the non-plated hole clearance through the board's rules
 - **#10526**: chore(loom): resync installed Loom to v0.20.37
 - **#10532**: Expand BOM reference intervals with matching designator suffixes
+- **#10544**: perf(router): prove a timed-out connection from its goal side before repeating its search
 
 ## Very Important
 
@@ -47,31 +47,24 @@ Issues currently being built (`loom:building`).
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410)
 - **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill
 - **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film
-- **#10250**: pcb center-on-sheet moves wire anchors but leaves reinforcement coordinates at their old positions
 - **#10261**: Fill the routed board before optional power-plane stitching on mixed-signal layouts
-- **#10416**: Validate repeated circuit channels against expected pins, values and assembly parts
 - **#10424**: BOM enrichment assigns incompatible packages, tolerance and wattage despite explicit schematic intent
-- **#10448**: Reconcile LED_ANODE and mask clearances so Board 00 readiness can be re-pinned
 - **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes
 - **#10468**: Manufacturing review: include revision-bound simulation limits and fault-case evidence
-- **#10473**: Assembly preflight: validate soldered wire or ferrule fit without assigning the wire land a component MPN
 - **#10476**: Assembly preflight: check snap-in mounting-hole limits against both finished-hole tolerances
 - **#10485**: CI flake: Install pinned actionlint download returned HTTP 504 in Test
 - **#10486**: Route-link option to join an existing same-net branch outside a component pad
 - **#10492**: Offer an export mode that verifies reviewed copper before publishing manufacturing artwork
 - **#10504**: route-link: non-plated-hole clearance ignores the board's hole_clearance rule
-- **#10505**: Request an MPN-specific SMD land-pattern check in assembly preflight
 - **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313
 - **#10514**: Manufacturing handoff: map PCB wire landings to the purchased panel part’s terminals
-- **#10515**: reference-coverage reports coverage: "none" on layers a net only passes through via
-- **#10525**: Test flake in test_escape_budget_expires_returns_early on CI
 - **#10527**: Check simulated analog pin ranges across the driven waveform and supply states
-- **#10543**: test_drc_constraints_export::test_subspec_standard_via_fires_under_kicad_cli fails on main: board 04 via not found at the derived position
-- **#10552**: Pin the unverified-shortfall + unresolved-code row of the #10523 stock table
-- **#10555**: route: a pre-existing net class wider than its router width keeps the wider value, so _write_netclasses_to_project cannot declare a narrower class
 - **#10556**: tests: board05 staged fixture is module-scoped under xdist --dist load, so it rebuilds per worker and its cost lands on a 60s-capped test
 - **#10559**: Reinforcement sidecar consumers raise raw TypeError on a malformed nested coordinate point
 - **#10561**: Board 03 USB common-run measurement depends on where an unchanged track is split
+- **#10564**: Cover the untested branches of assembly_smd_land_pattern
+- **#10565**: ci: keep shared Slow Tests fixtures on one worker with the pinned pytest toolchain
+- **#10566**: Reissue Board 00’s three placed Datasheet fields and its matching project archive
 
 ## PRs Awaiting Review
 
@@ -82,41 +75,34 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#10262**: fix(route): stitch power planes after the routed copper is refilled
 - **#10427**: Reject incompatible automatic parts in assembly BOM exports
 - **#10429**: Write native symbol links when creating a PCB from a schematic
-- **#10459**: fix(boards): align board 00's LED_ANODE net class and fiducial pours
 - **#10472**: fix: carry a pad-edge escape end into the pad along its own line
-- **#10488**: Warn when native KiCad BOM export changes a component reference
-- **#10491**: feat: assess declared wire and ferrule landings in the lead-fit preflight check
-- **#10496**: Include project-local 3D libraries in manufacturing archives
 - **#10498**: feat: check declared mounting holes against their drawing and finished-hole interval
 - **#10502**: Check electrical compatibility and identify catalog inventory in parts alternatives
-- **#10503**: Wire authorized distributor stock lookup through kct parts
 - **#10507**: fix(boards): declare Board 07's reviewed class widths and re-pin its SDRAM evidence
-- **#10513**: feat: verify MPN-specific two-terminal SMD land patterns in preflight
 - **#10518**: Reject simulation results with undeclared measured inputs
 - **#10519**: feat: add route-link --join-track to tee into a pad's track
-- **#10533**: Recognize the Docker platform notice during native solder-mask export
-- **#10534**: fix: report not_applicable for via-only layers in reference-coverage
 - **#10536**: feat: check simulated analog pin voltages against supply-state limits
 - **#10537**: feat: carry purchasing-row terminal maps into the assembly handoff
-- **#10544**: perf(router): prove a timed-out connection from its goal side before repeating its search
 - **#10545**: feat: add kct export --verify-reviewed-copper to publish only reviewed copper
-- **#10546**: test: check the edited Board 04 via in native DRC
-- **#10554**: test: cover stock shortages alongside unresolved BOM items
-- **#10558**: fix(route): lower kct-created net classes to the routed width
 - **#10560**: ci: group Board 05 recipe staging on one worker
+- **#10563**: fix(router): decline optimizer shortcuts that park a bend beside their own pad's mask opening
+- **#10567**: fix(boards): refresh the Board 00 schematic and its matching package
+- **#10569**: fix: validate nested wire-record coordinates in the sidecar guard
+- **#10571**: fix(board03): clip the USB common run to its window before measuring coupling
+- **#10572**: ci: schedule Slow Tests with --dist loadscope so scoped fixtures build once
+- **#10573**: test: cover remaining branches of the SMD land-pattern check
+- **#10576**: fix(board03): stage the two USB project widths for the coordinated reissue
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#10253**: fix: translate reinforcement sidecar with pcb center-on-sheet
-- **#10435**: feat: validate repeated circuit channels against explicit design intent
 - **#10474**: feat(export): report revision-bound simulation limits and fault-case evidence
 - **#10497**: ci: retry the pinned actionlint download on a transient 504
 - **#10520**: fix(route-link): resolve the non-plated hole clearance through the board's rules
 - **#10526**: chore(loom): resync installed Loom to v0.20.37
-- **#10528**: test: make escape-budget expiration deterministic under load
 - **#10532**: Expand BOM reference intervals with matching designator suffixes
+- **#10544**: perf(router): prove a timed-out connection from its goal side before repeating its search
 
 ## Proposed
 
@@ -146,38 +132,29 @@ Issues carrying `loom:curated`.
 - **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill *(curated)*
 - **#10105**: Support a repository layout with editable KiCad sources and a sibling generated-output directory *(curated)*
 - **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film *(curated)*
-- **#10250**: pcb center-on-sheet moves wire anchors but leaves reinforcement coordinates at their old positions *(curated)*
 - **#10261**: Fill the routed board before optional power-plane stitching on mixed-signal layouts *(curated)*
 - **#10385**: Refresh maintained board schematics after the instance Datasheet fix *(curated)*
-- **#10416**: Validate repeated circuit channels against expected pins, values and assembly parts *(curated)*
 - **#10424**: BOM enrichment assigns incompatible packages, tolerance and wattage despite explicit schematic intent *(curated)*
 - **#10428**: Preserve native schematic instance links on the footprints placed by create-pcb *(curated)*
-- **#10448**: Reconcile LED_ANODE and mask clearances so Board 00 readiness can be re-pinned *(curated)*
 - **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes *(curated)*
 - **#10468**: Manufacturing review: include revision-bound simulation limits and fault-case evidence *(curated)*
-- **#10473**: Assembly preflight: validate soldered wire or ferrule fit without assigning the wire land a component MPN *(curated)*
 - **#10476**: Assembly preflight: check snap-in mounting-hole limits against both finished-hole tolerances *(curated)*
 - **#10485**: CI flake: Install pinned actionlint download returned HTTP 504 in Test *(curated)*
 - **#10486**: Route-link option to join an existing same-net branch outside a component pad *(curated)*
 - **#10492**: Offer an export mode that verifies reviewed copper before publishing manufacturing artwork *(curated)*
-- **#10495**: Export and readiness omit project-local .3dshapes libraries from the KiCad project archive *(curated)*
 - **#10499**: parts alternatives offers a 30 Ω resistor for 4.7 kΩ and adjustable regulators for a fixed 3.3 V part *(curated)*
-- **#10501**: Public kct parts stock command is unreachable from the root parser and dispatch *(curated)*
 - **#10504**: route-link: non-plated-hole clearance ignores the board's hole_clearance rule *(curated)*
-- **#10505**: Request an MPN-specific SMD land-pattern check in assembly preflight *(curated)*
 - **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313 *(curated)*
 - **#10514**: Manufacturing handoff: map PCB wire landings to the purchased panel part’s terminals *(curated)*
-- **#10515**: reference-coverage reports coverage: "none" on layers a net only passes through via *(curated)*
-- **#10525**: Test flake in test_escape_budget_expires_returns_early on CI *(curated)*
 - **#10527**: Check simulated analog pin ranges across the driven waveform and supply states *(curated)*
 - **#10530**: Expand BOM numeric reference ranges with a shared suffix such as Q1A-Q4A *(curated)*
-- **#10531**: Docker platform notice invalidates a successful native solder-mask export *(curated)*
-- **#10543**: test_drc_constraints_export::test_subspec_standard_via_fires_under_kicad_cli fails on main: board 04 via not found at the derived position *(curated)*
-- **#10552**: Pin the unverified-shortfall + unresolved-code row of the #10523 stock table *(curated)*
-- **#10555**: route: a pre-existing net class wider than its router width keeps the wider value, so _write_netclasses_to_project cannot declare a narrower class *(curated)*
 - **#10556**: tests: board05 staged fixture is module-scoped under xdist --dist load, so it rebuilds per worker and its cost lands on a 60s-capped test *(curated)*
 - **#10559**: Reinforcement sidecar consumers raise raw TypeError on a malformed nested coordinate point *(curated)*
 - **#10561**: Board 03 USB common-run measurement depends on where an unchanged track is split *(curated)*
+- **#10564**: Cover the untested branches of assembly_smd_land_pattern *(curated)*
+- **#10565**: ci: keep shared Slow Tests fixtures on one worker with the pinned pytest toolchain *(curated)*
+- **#10566**: Reissue Board 00’s three placed Datasheet fields and its matching project archive *(curated)*
+- **#10575**: Preserve Board 03’s connector and MCU USB widths in the routed KiCad project *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -198,10 +175,10 @@ _None._
 | Very important | 1 |
 | Important | 3 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 30 |
-| PRs awaiting review | 27 |
-| Approved PRs awaiting merge | 8 |
-| Curated | 56 |
+| In Progress (`loom:building`) | 23 |
+| PRs awaiting review | 22 |
+| Approved PRs awaiting merge | 6 |
+| Curated | 47 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
