@@ -50,6 +50,7 @@ design_rules:
     min_copper_to_vscore_mm: 0.4  # JLC pcb-capabilities 'V-Cut', verified 2026-10-07
     min_hole_to_edge_mm: 0.5
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    silk_to_hole_danger_mm: 0.0    # Component drill overlap is an error; via drill overlap is informational (#9033).
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
@@ -88,6 +89,7 @@ design_rules:
     min_copper_to_vscore_mm: 0.4  # JLC pcb-capabilities 'V-Cut', verified 2026-10-07
     min_hole_to_edge_mm: 0.5
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    silk_to_hole_danger_mm: 0.0    # Component drill overlap is an error; via drill overlap is informational (#9033).
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
@@ -126,6 +128,7 @@ design_rules:
     min_copper_to_vscore_mm: 0.4  # JLC pcb-capabilities 'V-Cut', verified 2026-10-07
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    silk_to_hole_danger_mm: 0.0    # Component drill overlap is an error; via drill overlap is informational (#9033).
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
@@ -163,6 +166,7 @@ design_rules:
     min_copper_to_vscore_mm: 0.4  # JLC pcb-capabilities 'V-Cut', verified 2026-10-07
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    silk_to_hole_danger_mm: 0.0    # Component drill overlap is an error; via drill overlap is informational (#9033).
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
@@ -200,6 +204,7 @@ design_rules:
     min_copper_to_vscore_mm: 0.4  # JLC pcb-capabilities 'V-Cut', verified 2026-10-07
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    silk_to_hole_danger_mm: 0.0    # Component drill overlap is an error; via drill overlap is informational (#9033).
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
@@ -237,6 +242,7 @@ design_rules:
     min_copper_to_vscore_mm: 0.4  # JLC pcb-capabilities 'V-Cut', verified 2026-10-07
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    silk_to_hole_danger_mm: 0.0    # Component drill overlap is an error; via drill overlap is informational (#9033).
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
