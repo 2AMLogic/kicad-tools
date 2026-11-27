@@ -12426,7 +12426,6 @@ def _sub_floor_net_class_widths(net_class_map, floor: float) -> list[tuple[str, 
 
 
 _MASK_MARGIN_OVERRIDE = "(solder_mask_margin"
-_BOARD_MASK_MARGIN = re.compile(r"\(pad_to_mask_clearance\s+(-?\d+(?:\.\d+)?)\s*\)")
 
 
 def _uniform_board_mask_margin(pcb_path) -> float | None:
@@ -12440,6 +12439,9 @@ def _uniform_board_mask_margin(pcb_path) -> float | None:
     that declares no ``pad_to_mask_clearance`` has no expansion (0.0).
     """
     import json
+
+    from kicad_tools.sexp import parse_string
+    from kicad_tools.validate.mask_geometry import board_mask_margin_from_sexp
 
     try:
         text = Path(pcb_path).read_text(errors="replace")
@@ -12460,13 +12462,10 @@ def _uniform_board_mask_margin(pcb_path) -> float | None:
         rules = Path(pcb_path).with_suffix(".kicad_dru")
         if rules.is_file() and "solder_mask" in rules.read_text(errors="replace"):
             return None
+        margin, _ = board_mask_margin_from_sexp(parse_string(text))
+        return margin
     except (OSError, ValueError, AttributeError):
         return None
-    match = _BOARD_MASK_MARGIN.search(text)
-    if match is None:
-        return 0.0
-    margin = float(match.group(1))
-    return margin if math.isfinite(margin) else None
 
 
 def _resolve_route_mask_guard(manufacturer, pcb_path) -> tuple[float, float] | None:

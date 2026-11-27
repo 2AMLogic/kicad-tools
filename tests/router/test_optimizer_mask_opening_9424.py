@@ -260,16 +260,18 @@ def test_mask_margin_grows_the_opening():
 
 def test_board_mask_margin_resolution(tmp_path):
     plain = tmp_path / "plain.kicad_pcb"
-    plain.write_text("(setup (pad_to_mask_clearance 0.05))")
+    plain.write_text("(kicad_pcb (setup (pad_to_mask_clearance 0.05)))")
     assert _uniform_board_mask_margin(plain) == 0.05
     undeclared = tmp_path / "undeclared.kicad_pcb"
-    undeclared.write_text("(setup)")
+    undeclared.write_text("(kicad_pcb (setup))")
     assert _uniform_board_mask_margin(undeclared) == 0.0
     overridden = tmp_path / "overridden.kicad_pcb"
-    overridden.write_text("(setup (pad_to_mask_clearance 0)) (pad (solder_mask_margin 0.2))")
+    overridden.write_text(
+        "(kicad_pcb (setup (pad_to_mask_clearance 0)) (pad (solder_mask_margin 0.2)))"
+    )
     assert _uniform_board_mask_margin(overridden) is None
     ruled = tmp_path / "ruled.kicad_pcb"
-    ruled.write_text("(setup)")
+    ruled.write_text("(kicad_pcb (setup))")
     (tmp_path / "ruled.kicad_dru").write_text("(constraint solder_mask_margin 0.1)")
     assert _uniform_board_mask_margin(ruled) is None
     assert _uniform_board_mask_margin(tmp_path / "missing.kicad_pcb") is None
@@ -277,11 +279,11 @@ def test_board_mask_margin_resolution(tmp_path):
 
 def test_route_mask_guard_resolution(tmp_path):
     board = tmp_path / "board.kicad_pcb"
-    board.write_text("(setup (pad_to_mask_clearance 0))")
+    board.write_text("(kicad_pcb (setup (pad_to_mask_clearance 0)))")
     assert _resolve_route_mask_guard(None, board) is None
     assert _resolve_route_mask_guard("seeed", board) is None
     assert _resolve_route_mask_guard("jlcpcb", board) == GUARD
-    board.write_text("(pad (solder_mask_margin 0.1))")
+    board.write_text("(kicad_pcb (pad (solder_mask_margin 0.1)))")
     assert _resolve_route_mask_guard("jlcpcb", board) is None
 
 
@@ -336,10 +338,36 @@ def test_mask_web_merging_disables_guard_in_board_or_project(tmp_path, minimum):
 
     board = tmp_path / "board.kicad_pcb"
     expected = GUARD if minimum == 0 else None
-    board.write_text(f"(setup (solder_mask_min_width {minimum}))")
+    board.write_text(f"(kicad_pcb (setup (solder_mask_min_width {minimum})))")
     assert _resolve_route_mask_guard("jlcpcb", board) == expected
-    board.write_text("(setup)")
+    board.write_text("(kicad_pcb (setup))")
     board.with_suffix(".kicad_pro").write_text(
         json.dumps({"board": {"design_settings": {"rules": {"solder_mask_min_width": minimum}}}})
     )
     assert _resolve_route_mask_guard("jlcpcb", board) == expected
+
+
+@pytest.mark.parametrize("ratio", [None, 0.25])
+def test_roundrect_mask_shortcuts_use_plotted_radius(ratio):
+    pad = {"x": 100, "y": 100, "width": 2, "height": 2, "shape": "roundrect"}
+    if ratio is not None:
+        pad["roundrect_rratio"] = ratio
+    grid = _router((92, 92), [("R1", pad)], [], 1, "N1").grid
+    check = mask_opening_check(grid, JLCPCB_MASK_CLEARANCE)
+    for points, allowed in [
+        ([(98.85, 103), (99.85, 104), (104, 99.85), (103, 98.85)], False),
+        ([(102, 102), (100.67, 100.67), (100.57, 100.77), (100.79, 100.79)], True),
+    ]:
+        before = [
+            Segment(*a, *b, 0.10, Layer.F_CU, 1, "N1")
+            for a, b in zip(points, points[1:], strict=False)
+        ]
+        shortcut = Segment(*points[0], *points[-1], 0.10, Layer.F_CU, 1, "N1")
+        assert check(before, [shortcut], []) == allowed
+
+
+@pytest.mark.parametrize("token", [".2", "0.2", "2e-1"])
+def test_equivalent_mask_margins_resolve_to_same_guard(tmp_path, token):
+    board = tmp_path / "margin.kicad_pcb"
+    board.write_text(f"(kicad_pcb (setup (pad_to_mask_clearance {token})))")
+    assert _resolve_route_mask_guard("jlcpcb", board) == (JLCPCB_MASK_CLEARANCE, 0.2)

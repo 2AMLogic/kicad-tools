@@ -569,6 +569,8 @@ chain carries as many (the SPEED exit at RV1/2), so no shortcut is traded
 for a worse path. A board whose mask margin is not uniform, or a route
 without a cited mask policy, keeps the previous behaviour.
 
+### Historical Linux measurements through `9b3d17c`
+
 | Seed | Route wall (s) | Vias | Nightly errors / warnings | Full-mask errors / warnings / infos |
 | --- | ---: | ---: | ---: | ---: |
 | 42 | 287.6 | 124 | 0 / 98 | 14 / 103 / 255 |
@@ -581,8 +583,7 @@ The saved boards are byte-identical (SHA-256
 `6c50088c0656a808c019fee1f9bb13c4831eacef40a858d75ad16d4374875357`), and no
 route log carries a `per-net wall clock bound` or `stage deadline fired`
 line. `kct check` took 12.6 s with the mask pass skipped and 43.2 to 48.3 s
-with it. The three seeds were routed again on the merged head (`0a3c4eb6c`
-plus this change): the same board bytes and counts, walls 384.7, 293.3 and
+with it. The three seeds were routed again at `9b3d17c` (base `0a3c4eb6c`): the same board bytes and counts, walls 384.7, 293.3 and
 270.8 s.
 
 Those runs predate the review fix that keys the guard's openings off each
@@ -592,7 +593,6 @@ through `board_05_unattended.py` at `65db53069` (the head with that fix):
 wall 265.4 s, 37/37 nets, 143/143 connections, 124 vias, kicad-cli DRC
 0 / 0 / 0, ERC 0, both LVS checks clean, 0 errors / 98 warnings in the
 `kct check` pass, and the same SHA-256 (`6c50088c...`) for the saved board.
-The seeds were byte-identical, so the table above carries over to this head.
 Only seed 42 was re-run at `65db53069`.
 
 Against the seed-42 baseline four errors are gone: HALL_A at J3/3, nFAULT
@@ -611,3 +611,17 @@ segment errors and the three vias are the router's own geometry, which a
 rewrite-relative guard cannot reach: the pathfinder has to keep its bends
 and vias clear of the openings of the pads they connect, or a repair has to
 move them. `--skip mask_to_copper` stays in the gate.
+
+### Board 05 manufacturing measurements at `5f92e7fe8`
+
+The reviewer ran the unattended script with native router build 79 and pinned KiCad 10.0.6. Each row grades the prepared `seed-<seed>/bldc_controller_routed.kicad_pcb` with the `bldc_controller_routed.kicad_pro` sibling written by that revision in the same seed directory. The PCB column gives the SHA-256 prefix.
+
+| Revision | Host | Seed | PCB | Route (s) | Vias | Nightly errors / warnings | Full JLCPCB errors / warnings / infos |
+| --- | --- | ---: | --- | ---: | ---: | --- | --- |
+| `5f92e7fe8` | Linux x86_64, emulated | 42 | `75b33310` | 378.8 | 124 | 0 / 90 | 14 / 95 / 255 |
+| `5f92e7fe8` | macOS arm64 | 42 | `bc26856c` | 528.2 | 120 | 0 / 80 | 10 / 85 / 261 |
+| `5f92e7fe8` | macOS arm64 | 7 | `bc26856c` | 463.3 | 120 | 0 / 80 | 10 / 85 / 261 |
+| `5f92e7fe8` | macOS arm64 | 1337 | `bc26856c` | 279.4 | 120 | 0 / 80 | 10 / 85 / 261 |
+| `8351670c5` (base) | macOS arm64 | 42 | `0de87784` | 454.9 | 120 | 0 / 79 | 14 / 83 / 258 |
+
+All rows completed 37/37 nets and 143/143 connections with clean native DRC, ERC and LVS. On macOS the same-host seed-42 comparison confirmed the four mask error removals. The strict nightly gate still failed on warnings. On the same Linux PCB, changing just the Differential width in the sibling project from 0.15 mm to the historical 0.20 mm raised netclass warnings from 3 to 11, accounting for the eight-warning difference from the historical Linux counts. Full PCB hashes and native verification details are in the [reviewer's measurement record](https://github.com/2AMLogic/kicad-tools/pull/10563#issuecomment-7214132170).

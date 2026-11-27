@@ -586,7 +586,8 @@ def mask_opening_check(
         ]
         if not layers:
             continue
-        copper = _contact_outline(pad)
+        # KiCad plots an omitted roundrect ratio as 0.25.
+        copper = _contact_outline(pad, default_roundrect_ratio=0.25)
         if copper is None or copper.is_empty:
             continue
         opening = copper.buffer(mask_margin, quad_segs=64) if mask_margin else copper
