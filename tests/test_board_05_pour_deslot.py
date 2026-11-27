@@ -1,4 +1,4 @@
-"""Board 05's U2/U3 escapes: the pour-slot recipe state and its physical criterion (Issue #9921).
+"""Board 05's U2/U3 escapes: the pour-slot recipe state and its physical criterion (Issues #9921, #10121).
 
 The ``pour_slot`` advisory originally reported 20 witnesses -- nineteen U2
 lead-escape pairs and the U3 GND/RESET pair -- from adjacent pad-row escapes
@@ -10,14 +10,19 @@ copper only (no off-angle exemption: the fleet 45-degree criterion stays
 intact).  Five signal escapes are widened/repacked so their copper-to-copper
 gap drops below the 0.400 mm lower edge of the band the front GND pour cannot
 fill, and the two redundant GND escapes the attaching pour replaces are
-removed.  **Nine advisories remain by design**: seven involve the
-power/GND_SENSE bank or its IREF neighbour, and two (IREF/SENSE_IN,
-EN_A/PWM_A) lie wholly within the stock U2 lead length, where the pad edges
-set the gap and need a ground-plane or pad-edge criterion before they count as
-repaired.  These tests pin that state -- exactly those nine pairs, and the
-0.001 mm cross-section criterion across the specified channel windows --
-rather than a quiet detector or a global minimum distance that a partially
-reopened window can still satisfy.
+removed.  The nine remaining advisories (seven power/GND_SENSE bank pairs and
+the IREF/SENSE_IN and EN_A/PWM_A in-row pairs) were measured against the
+native copper film on pinned KiCad 10.0.6 (Issue #10121): every pair is
+packed (0.250/0.275/0.395 mm gaps <= 2 x 0.200 mm clearance), so no fillable
+strip ever existed between the keep-outs and ``min_thickness`` had no island
+to drop -- the channels are the unavoidable clearance voids of the 0.650 mm
+pad-row stack, blind pockets sealed by pad copper and escape via lands, with
+the front pour one connected region around the whole bank.  ``PourSlotRule``
+therefore no longer reports packed pairs, and these tests pin that state --
+zero ``pour_slot`` findings on the replayed copper -- together with the
+0.001 mm cross-section criterion across the specified channel windows, which
+still guards against a partially reopened window a global minimum distance
+can satisfy.
 """
 
 from __future__ import annotations
@@ -126,22 +131,13 @@ def replayed_pcb(tmp_path_factory: pytest.TempPathFactory) -> PCB:
     return PCB.load(_replayed_board(tmp_path_factory.mktemp("board05_deslot")))
 
 
-#: The nine pour-slot advisories that remain open by design (module docstring):
-#: sorted (net, net) pairs.  A change here is a recipe change -- update the
-#: docstring and the #9921 evidence with it.
-BOARD05_OPEN_POUR_SLOT_PAIRS = sorted(
-    [
-        ("EN_A", "PWM_A"),
-        ("PHASE_A", "VM"),
-        ("GND_SENSE", "PHASE_A"),
-        ("GND_SENSE", "PHASE_B"),
-        ("GND_SENSE", "PHASE_C"),
-        ("PHASE_B", "PHASE_C"),
-        ("GND_SENSE", "VM"),
-        ("IREF", "SENSE_IN"),
-        ("IREF", "VM"),
-    ]
-)
+#: Issue #10121: the nine historical advisories (six 0.250 mm pairs, the
+#: 0.275 mm VM/IREF pair and the 0.395 mm IREF/SENSE_IN and EN_A/PWM_A
+#: in-row pairs) are all packed below the 2 x 0.200 mm clearance keep-outs,
+#: so none is a pour slot and the replayed copper must report no pair.  A
+#: pair reappearing here means the recipe widened a channel back into the
+#: dropped-island band -- update the docstring and the #9921 evidence with it.
+BOARD05_OPEN_POUR_SLOT_PAIRS: list[tuple[str, str]] = []
 
 
 def _y_interval_circle(cx: float, cy: float, radius: float, x: float) -> tuple[float, float] | None:
@@ -324,8 +320,8 @@ def test_replayed_copper_pins_the_open_pour_slot_pairs(replayed_pcb: PCB) -> Non
     pairs = list(iter_pour_slot_pairs(replayed_pcb))
     found = sorted(tuple(sorted((p.first.net_name, p.second.net_name))) for p in pairs)
     assert found == BOARD05_OPEN_POUR_SLOT_PAIRS, (
-        "Board 05's pour-slot advisory set changed: expected the nine open"
-        " pairs documented for #9921, got " + repr(found)
+        "Board 05's pour-slot advisory set changed: expected no open pair"
+        " after the #10121 packed-pair measurement, got " + repr(found)
     )
 
 
@@ -381,6 +377,8 @@ def test_witness_channel_guard_rejects_partially_reopened_window(tmp_path: Path)
         tuple(sorted((p.first.net_name, p.second.net_name)))
         for p in iter_pour_slot_pairs(pwm_b_pcb)
     )
+    # Narrowing a track only packs its channel further below the 0.400 mm
+    # lower band edge, so no pour-slot pair may (re)appear (#10121).
     assert found_pairs == BOARD05_OPEN_POUR_SLOT_PAIRS
     assert not segment_angle_census(pwm_b_ctrl)[1]
 
