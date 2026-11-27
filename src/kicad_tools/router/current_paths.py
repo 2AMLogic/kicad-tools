@@ -4281,6 +4281,19 @@ def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float])
     return len(pads) == 1 and _physical_pad_covers(fp, pads[0], point)
 
 
+def _corner_chamfer_ratio(pad: Pad, x: float, y: float) -> float | None:
+    """Cut ratio for the corner in this pad-local quadrant, if selected."""
+    node = pad._sexp_node
+    if node is None or (corners := node.find_child("chamfer")) is None:
+        return None
+    corner = ("top" if y < 0 else "bottom") + ("_left" if x < 0 else "_right")
+    if not any(item.value == corner for item in corners.children):
+        return None
+    ratio_node = node.find_child("chamfer_ratio")
+    ratio = ratio_node.get_float(0) if ratio_node is not None else None
+    return min(ratio, 0.5) if ratio is not None and math.isfinite(ratio) and ratio > 0 else None
+
+
 def _physical_pad_covers(fp: Footprint, pad: Pad, point: tuple[float, float]) -> bool:
     """True if ``point`` lies on the named pad's copper.
 
@@ -4311,6 +4324,9 @@ def _physical_pad_covers(fp: Footprint, pad: Pad, point: tuple[float, float]) ->
     dy = point[1] - center[1]
     # Inverse of the forward KiCad pad rotation (board -> pad-local frame).
     local_x, local_y = rotate_pad_offset(dx, dy, -float(getattr(pad, "rotation", 0.0) or 0.0))
+    # The drill is at the anchor. The copper is displaced in pad-local axes.
+    local_x -= pad.drill_offset[0]
+    local_y -= pad.drill_offset[1]
 
     if pad.shape == "circle":
         radius = min(half_w, half_h)
@@ -4324,9 +4340,17 @@ def _physical_pad_covers(fp: Footprint, pad: Pad, point: tuple[float, float]) ->
     if pad.shape == "rect":
         return abs(local_x) <= half_w + _PAD_EPS and abs(local_y) <= half_h + _PAD_EPS
     if pad.shape == "roundrect":
+        edge_x, edge_y = half_w - abs(local_x), half_h - abs(local_y)
+        if min(edge_x, edge_y) < -_PAD_EPS:
+            return False
         ratio = pad.roundrect_rratio
         if not 0 <= ratio <= 0.5:
             return False
+        cut_ratio = _corner_chamfer_ratio(pad, local_x, local_y)
+        if cut_ratio is not None:
+            # A straight cut joins two points this distance along the edges.
+            cut = 2 * min(half_w, half_h) * cut_ratio
+            return edge_x + edge_y >= cut - _PAD_EPS
         radius = 2 * min(half_w, half_h) * ratio
         dx = max(abs(local_x) - (half_w - radius), 0.0)
         dy = max(abs(local_y) - (half_h - radius), 0.0)
