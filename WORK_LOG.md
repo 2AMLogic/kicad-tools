@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **PR #10618**: fix(drc): relocate disjoint vias by sliding blocking foreign-net jogs
+- **Issue #9939** (closed): Repair the five remaining Board 03 mask-to-copper findings after verified refill
 - **PR #10628**: fix: measure fine-pitch escape-fence pitch across unassigned pins
 - **PR #10626**: fix: JSON-quote report front-matter title, subtitle and author
 - **Issue #10624** (closed): Report front matter: title/subtitle/author scalars are unescaped, so a quote in the PCB filename breaks strict YAML
