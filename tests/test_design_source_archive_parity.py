@@ -32,7 +32,21 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # "<board-dir>/<archive filename>" relative to the boards directory.  Each
 # entry cites the issue that owns the refresh; remove the entry when that
 # lands (strict xfail turns an unexpected pass into a failure).
-EXPECTED_STALE: dict[str, str] = {}
+EXPECTED_STALE: dict[str, str] = {
+    # Board 03's live ``routing_plan.py`` moved in #10561 (usb_geometry()
+    # measures the copper inside its window instead of dropping tracks that
+    # cross an edge) ahead of the archived copy.  The archived copy is a
+    # hash-bound bundle member, and the board 03 operator ruling of 2026-11-18
+    # forbids hand-edited hashes: the producer-run reissue that refreshes the
+    # archive, the manifest and the package together is owned by #8900 (same
+    # staleness as board 03's EXPECTED_STALE entry in
+    # test_board_readiness_committed_hashes.py).  Remove when #8900 lands.
+    "03-usb-joystick/routing_plan.py": (
+        "Issue #8900: board 03's routing_plan.py moved in #10561 ahead of the "
+        "archived design-source copy; the producer-managed reissue that "
+        "refreshes the archive and its manifest hashes is owned by #8900."
+    ),
+}
 
 # Live recipes deliberately left out of the archive, keyed by
 # "<board-dir>/<live filename>" relative to the boards directory.  Each entry

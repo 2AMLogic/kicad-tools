@@ -6,6 +6,7 @@ success claim. Every replay still needs native zone refill, DRC and copper LVS.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import math
@@ -314,12 +315,153 @@ def fingerprint(path):
     return hashlib.sha256(json.dumps(physical_contract(path), sort_keys=True).encode()).hexdigest()
 
 
+# Issue #10561: KiCad stores copper on a 1 nm grid, so a track split anywhere
+# on its centerline and saved puts the two pieces back to back to within float
+# noise.  10 nm is far above that noise and far below any real break or bend.
+_COPPER_TOL_MM = 1e-5
+# Widths on both sides of a split read the same decimal text.
+_WIDTH_TOL_MM = 1e-9
+
+
+def _clip_to_window(start, end, window):
+    """Clip the centerline ``start``-``end`` to the ``(x0, x1, y0, y1)`` rectangle.
+
+    Returns the clipped ``(a, b)``, or ``None`` when the centerline lies
+    outside the rectangle.
+    """
+    x0, x1, y0, y1 = window
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    t_low, t_high = 0.0, 1.0
+    for p, q in (
+        (-dx, start[0] - x0),
+        (dx, x1 - start[0]),
+        (-dy, start[1] - y0),
+        (dy, y1 - start[1]),
+    ):
+        if p == 0.0:
+            if q < 0.0:
+                return None
+            continue
+        t = q / p
+        if p < 0.0:
+            t_low = max(t_low, t)
+        else:
+            t_high = min(t_high, t)
+    if t_low > t_high:
+        return None
+    return (
+        (start[0] + t_low * dx, start[1] + t_low * dy),
+        (start[0] + t_high * dx, start[1] + t_high * dy),
+    )
+
+
+def _join_collinear(pieces):
+    """Merge contiguous collinear pieces of equal width (issue #10561).
+
+    ``pieces`` is a list of ``(a, b, width, track)`` centerlines forming
+    connected runs; ``track`` is the segment a piece was clipped from and is
+    carried through so the result keeps its net and layer.  Two pieces that
+    meet endpoint to endpoint, carry the same width and continue along one
+    line become one piece, however often a track was split there; a real
+    bend, a break or a width change keeps the pieces apart.
+    """
+    merged = True
+    while merged:
+        merged = False
+        for i, (a1, b1, w1, track) in enumerate(pieces):
+            for j in range(i + 1, len(pieces)):
+                a2, b2, w2, _ = pieces[j]
+                if abs(w1 - w2) > _WIDTH_TOL_MM:
+                    continue
+                # Each piece contributes the endpoint it shares and its far end.
+                # Exactly one such pairing means the pieces touch; more is a
+                # duplicate piece, which is left alone.
+                shared = [
+                    (joint, far1, far2)
+                    for joint, far1 in ((a1, b1), (b1, a1))
+                    for q, far2 in ((a2, b2), (b2, a2))
+                    if math.dist(joint, q) < _COPPER_TOL_MM
+                ]
+                if len(shared) != 1:
+                    continue
+                joint, far1, far2 = shared[0]
+                long_far, short_far = sorted((far1, far2), key=lambda far: -math.dist(joint, far))
+                long_len = math.dist(joint, long_far)
+                ux, uy = long_far[0] - joint[0], long_far[1] - joint[1]
+                off_line = abs(ux * (short_far[1] - joint[1]) - uy * (short_far[0] - joint[0]))
+                if off_line > _COPPER_TOL_MM * long_len:
+                    continue
+                # A piece that doubles back on its neighbour is collinear too;
+                # only a continuation adds up to the joined length.
+                if (
+                    abs(math.dist(far1, far2) - long_len - math.dist(joint, short_far))
+                    > _COPPER_TOL_MM
+                ):
+                    continue
+                # Endpoints in a fixed order, so the result does not depend on
+                # the order the tracks were listed in.
+                a, b = sorted((far1, far2))
+                pieces = pieces[:i] + pieces[i + 1 : j] + pieces[j + 1 :] + [(a, b, w1, track)]
+                merged = True
+                break
+            if merged:
+                break
+    return pieces
+
+
+def usb_common_run(tracks, window, name):
+    """The In2.Cu copper of ``tracks`` inside ``window``, as coupling-rule input.
+
+    Each centerline is clipped to the rectangle first (issue #10561), so the
+    measurement does not depend on where a track was split, and a track that
+    only touches a window corner contributes no length.  The clipped pieces
+    must form one endpoint-connected run.
+    """
+    pieces = []
+    for track in tracks:
+        if track.layer != "In2.Cu":
+            continue
+        clipped = _clip_to_window(track.start, track.end, window)
+        if clipped is None or math.dist(*clipped) <= _COPPER_TOL_MM:
+            continue
+        pieces.append((*clipped, track.width, track))
+    if not pieces:
+        raise ValueError(f"Missing USB common run: {name}")
+    reached = {0}
+    while True:
+        added = {
+            i
+            for i, (a, b, _w, _t) in enumerate(pieces)
+            if any(
+                math.dist(x, y) < _COPPER_TOL_MM
+                for j in reached
+                for x in (a, b)
+                for y in pieces[j][:2]
+            )
+        }
+        if added <= reached:
+            break
+        reached |= added
+    if len(reached) != len(pieces):
+        raise ValueError(f"Disconnected USB common run: {name}")
+    return [
+        dataclasses.replace(
+            CopperElement.from_segment(track), geometry=(a[0], a[1], b[0], b[1], width)
+        )
+        for a, b, width, track in _join_collinear(pieces)
+    ]
+
+
 def usb_geometry(path):
     """Circuit-specific bounds complement the generic branched-net percentage.
 
     The common run must be physically connected and paired on In2.Cu. The
     surrounding USB-C orientation contacts and 1.9 mm ESD lands are launches.
     These engineering bounds are not limits from the USB specification.
+
+    The common run is the copper inside the measurement window, however KiCad
+    partitions the tracks that carry it (issue #10561); branch length and
+    skew are measured over the whole tracks.
     """
     pcb = PCB.load(path)
     tracks = defaultdict(list)
@@ -330,35 +472,9 @@ def usb_geometry(path):
         for n in ["USB_D+", "USB_D-", "USB_MCU_D+", "USB_MCU_D-"]
     }
     x0, x1, y0, y1 = usb_common_run_window(pcb)
-    common = {}
-    for name in ["USB_D+", "USB_D-"]:
-        # Board-relative rectangle around the common ESD-to-termination run.
-        common[name] = [
-            CopperElement.from_segment(s)
-            for s in tracks[name]
-            if s.layer == "In2.Cu"
-            and all(x0 <= x <= x1 and y0 <= y <= y1 for x, y in [s.start, s.end])
-        ]
-        segments = common[name]
-        if not segments:
-            raise ValueError(f"Missing USB common run: {name}")
-        reached = {0}
-        while True:
-            added = {
-                i
-                for i, s in enumerate(segments)
-                if any(
-                    math.dist(a, b) < 1e-5
-                    for j in reached
-                    for a in [s.geometry[:2], s.geometry[2:4]]
-                    for b in [segments[j].geometry[:2], segments[j].geometry[2:4]]
-                )
-            }
-            if added <= reached:
-                break
-            reached |= added
-        if len(reached) != len(segments):
-            raise ValueError(f"Disconnected USB common run: {name}")
+    common = {
+        name: usb_common_run(tracks[name], (x0, x1, y0, y1), name) for name in ("USB_D+", "USB_D-")
+    }
     rule = DiffPairRoutingContinuityRule(engaged_pairs=set())
     coupled = min(
         rule._coupled_length(common[a], common[b])
