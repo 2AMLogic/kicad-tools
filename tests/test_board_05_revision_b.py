@@ -1,7 +1,11 @@
 """Real revision-B component pinout, procurement and copper provenance guards."""
 
 import importlib.util
+import shutil
+import subprocess
 import sys
+import xml.etree.ElementTree as ET
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -100,20 +104,115 @@ def test_all_parts_have_exact_procurement_and_physical_pins(hardware, tmp_path):
     assert pcb.get_footprint("C1").name.endswith("CP_Elec_8x10.5_PolarityMark")
 
 
+@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="native schematic netlist required")
+def test_generated_board_matches_native_schematic_before_and_after_replay(tmp_path, hardware):
+    from kicad_tools.cli.pcb_sync_netlist import _copper_net_usage
+
+    hardware.generate(tmp_path)
+    board = tmp_path / "bldc_controller.kicad_pcb"
+    xml = tmp_path / "native.xml"
+    subprocess.run(
+        [
+            "kicad-cli",
+            "sch",
+            "export",
+            "netlist",
+            board.with_suffix(".kicad_sch"),
+            "--format",
+            "kicadxml",
+            "-o",
+            xml,
+        ],
+        check=True,
+    )
+    native = ET.parse(xml)
+    components = native.findall("./components/comp")
+    assert len(components) == 42
+    assert len({c.findtext("./fields/field[@name='LCSC']") for c in components}) == 22
+    unused = {}
+    connected = {}
+    for net in native.findall("./nets/net"):
+        nodes = net.findall("node")
+        for node in nodes:
+            pin = (node.attrib["ref"], node.attrib["pin"])
+            if "no_connect" in node.attrib["pintype"]:
+                assert len(nodes) == 1
+                unused[pin] = net.attrib["name"].replace("/", "{slash}")
+            else:
+                connected[pin] = net.attrib["name"]
+    assert len(connected) == 149
+    assert set(unused) == {
+        ("U1", "7"),
+        ("U1", "8"),
+        ("U1", "19"),
+        ("U1", "22"),
+        ("U1", "27"),
+        ("U1", "31"),
+        ("U2", "21"),
+        ("U3", "2"),
+        ("U3", "6"),
+    }
+    assert len(set(unused.values())) == 9
+    routed = tmp_path / "routed.kicad_pcb"
+    shutil.copyfile(board, routed)
+    load("routing").apply_routing(routed)
+    for path in (board, routed):
+        pcb = PCB.load(path)
+        net_pads = Counter(pad.net_name for fp in pcb.footprints for pad in fp.pads)
+        assert not _copper_net_usage(pcb).keys() & set(unused.values())
+        for c in components:
+            ref = c.attrib["ref"]
+            fp = pcb.get_footprint(ref)
+            for field in ("LCSC", "MPN"):
+                assert fp.properties[field] == c.findtext(f"./fields/field[@name='{field}']")
+            assert fp.properties["Datasheet"] == c.findtext("datasheet", "")
+            for pad in fp.pads:
+                if not pad.number:
+                    continue
+                pin = (ref, pad.number)
+                if pin in unused:
+                    assert pad.net_name == unused[pin] and net_pads[pad.net_name] == 1
+                    assert "no_connect" in pad.pintype
+                else:
+                    assert pad.net_name == connected[pin]
+
+
+@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="native schematic parity required")
+def test_editable_parity_rejects_missing_schematic(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(SOURCE))
+    board = tmp_path / "missing.kicad_pcb"
+    shutil.copyfile(SOURCE.parent / "output/bldc_controller_routed.kicad_pcb", board)
+    with pytest.raises(RuntimeError, match="could not load the matching schematic"):
+        load("package").verify_editable_project(board)
+
+
 def test_reference_copper_rejects_a_changed_real_net(tmp_path, hardware):
     routing = load("routing")
-    path = tmp_path / "board.kicad_pcb"
-    hardware.build_pcb().save(path)
+    hardware.generate(tmp_path)
+    path = tmp_path / "bldc_controller.kicad_pcb"
     original = routing.geometry_fingerprint(path)
     routing.apply_routing(path)
     assert routing.geometry_fingerprint(path) == original
+    from kicad_tools.sexp import parse_file, serialize_sexp
+
+    def copper(board):
+        return [
+            serialize_sexp(node)
+            for node in parse_file(board).children
+            if node.name in {"segment", "via", "zone"}
+        ]
+
+    published = tmp_path / "published.kicad_pcb"
+    shutil.copyfile(SOURCE.parent / "output/bldc_controller.kicad_pcb", published)
+    routing.apply_routing(published)
+    assert copper(path) == copper(published)
     assert PCB.load(path).segments
     from kicad_tools.router.quantize import segment_angle_census
 
     assert not segment_angle_census(path)[1], (
         "Reviewed copper must preserve the fleet 45-degree policy"
     )
-    hardware.build_pcb().save(path)
+    hardware.generate(tmp_path)
     changed = PCB.load(path)
     changed.assign_net_to_footprint_pad("U2", "12", "GND")
     changed.save(path)

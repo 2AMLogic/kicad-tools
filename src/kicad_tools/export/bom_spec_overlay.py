@@ -25,10 +25,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AssemblySpecErrors:
+    """Optional declarations a malformed spec lost; everything else stays usable."""
+
     profiles: dict[tuple[int, str | None], str] = field(default_factory=dict)
     pad_containers: dict[int, str] = field(default_factory=dict)
     land_patterns: dict[int, str] = field(default_factory=dict)
     tolerance: str | None = None
+    tolerance_upper: str | None = None
+    mounting: dict[int, str] = field(default_factory=dict)
+    guarantees: dict[str, str] = field(default_factory=dict)
     wires: dict[int, str] = field(default_factory=dict)
     """Invalid prepared diameter or source, keyed by the wire declaration's row (Issue #10473)."""
     unattached_wires: list[str] = field(default_factory=list)
@@ -36,12 +41,14 @@ class AssemblySpecErrors:
 
 
 def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
-    """Keep BOM assignments usable when lead, land-pattern, wire or tolerance declarations are invalid.
+    """Keep BOM assignments usable when an optional assembly declaration is invalid.
 
-    Profile errors identify the BOM row and pad (None for the part-level lead);
-    land-pattern errors identify the BOM row; wire errors identify the
-    ``wire_terminations`` row.  Other schema errors retain the regular spec
-    loader's strict behavior.
+    Profile errors identify the BOM row and pad (None for the part-level lead).
+    Land-pattern errors identify the BOM row. Wire errors identify the termination row.
+    A malformed mounting declaration, upper finished-hole tolerance or
+    finished-hole guarantee (Issue #10476) is dropped alone, so the valid
+    declarations beside it keep their effect.  Other schema errors retain
+    the regular spec loader's strict behavior.
     """
     from pydantic import ValidationError
 
@@ -53,17 +60,37 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
     try:
         return ProjectSpec.model_validate(data), errors
     except ValidationError as exc:
+        dropped_guarantees: set[int] = set()
         dropped: set[int] = set()
         for error in exc.errors():
             loc = error["loc"]
-            if loc in (
-                ("requirements", "manufacturing", "finished_hole_tolerance_mm"),
-                ("requirements", "manufacturing", "finished_hole_tolerance_source"),
-            ):
+            if loc == ("requirements", "manufacturing", "finished_hole_tolerance_mm"):
+                data["requirements"]["manufacturing"].pop("finished_hole_tolerance_mm", None)
+                errors.tolerance = f"invalid {loc[-1]}: {error['msg']}"
+                continue
+            if loc == ("requirements", "manufacturing", "finished_hole_tolerance_source"):
                 manufacturing = data["requirements"]["manufacturing"]
                 manufacturing.pop("finished_hole_tolerance_mm", None)
                 manufacturing.pop("finished_hole_tolerance_source", None)
+                manufacturing.pop("finished_hole_tolerance_upper_mm", None)
                 errors.tolerance = f"invalid {loc[-1]}: {error['msg']}"
+                continue
+            if loc == ("requirements", "manufacturing", "finished_hole_tolerance_upper_mm"):
+                data["requirements"]["manufacturing"].pop("finished_hole_tolerance_upper_mm", None)
+                errors.tolerance_upper = f"invalid {loc[-1]}: {error['msg']}"
+                continue
+            if loc[:3] == ("requirements", "manufacturing", "finished_hole_guarantees"):
+                manufacturing = data["requirements"]["manufacturing"]
+                if len(loc) == 3 or not isinstance(loc[3], int):
+                    manufacturing.pop("finished_hole_guarantees", None)
+                    errors.guarantees.setdefault(
+                        "finished_hole_guarantees",
+                        f"invalid finished_hole_guarantees: {error['msg']}",
+                    )
+                else:
+                    dropped_guarantees.add(loc[3])
+                    where = f"finished_hole_guarantees[{loc[3]}]"
+                    errors.guarantees.setdefault(where, f"invalid {where}: {error['msg']}")
                 continue
             if loc and loc[0] == "wire_terminations":
                 if len(loc) < 2 or not isinstance(loc[1], int):
@@ -114,10 +141,27 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
                 data["bom_entries"][row].pop("pad_leads", None)
                 errors.pad_containers[row] = f"invalid pad_leads: {error['msg']}"
                 continue
+            elif loc[2] == "mounting_holes":
+                data["bom_entries"][row].pop("mounting_holes", None)
+                errors.mounting[row] = f"invalid mounting_holes: {error['msg']}"
+                continue
             else:
                 raise
             field_path = ".".join(map(str, loc[2:]))
             errors.profiles[row, pad] = f"invalid {field_path}: {error['msg']}"
+        if dropped_guarantees:
+            manufacturing = data["requirements"]["manufacturing"]
+            kept_guarantees = [
+                guarantee
+                for index, guarantee in enumerate(
+                    manufacturing.get("finished_hole_guarantees") or []
+                )
+                if index not in dropped_guarantees
+            ]
+            if kept_guarantees:
+                manufacturing["finished_hole_guarantees"] = kept_guarantees
+            else:
+                manufacturing.pop("finished_hole_guarantees", None)
         if dropped:
             kept: list[object] = []
             remapped: dict[int, str] = {}

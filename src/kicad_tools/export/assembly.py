@@ -931,6 +931,26 @@ def plot_use_aux_origin(fab_family: str, config: AssemblyConfig) -> bool:
     return (config.gerber_config or GerberConfig()).use_aux_origin
 
 
+def resolve_gerber_config(fab_family: str, config: AssemblyConfig) -> GerberConfig:
+    """The Gerber options :meth:`AssemblyPackage._generate_gerbers` plots a package with.
+
+    A manufacturer preset owns the options; only an explicit V-score layer
+    opt-in (Issue #6193) and a caller's plot time (Issue #10174) apply on top
+    of it. Anything else plots with the caller's ``gerber_config`` or the
+    defaults. A second plot that must match the package's -- the reviewed
+    copper reference of Issue #10492 -- is made with the same options.
+    """
+    if fab_family in MANUFACTURER_PRESETS:
+        resolved = MANUFACTURER_PRESETS[fab_family].config
+        if config.gerber_config is not None and config.gerber_config.vscore_layers:
+            resolved = replace(resolved, vscore_layers=list(config.gerber_config.vscore_layers))
+    else:
+        resolved = config.gerber_config or GerberConfig()
+    if config.gerber_source_date_epoch is not None:
+        resolved = replace(resolved, source_date_epoch=config.gerber_source_date_epoch)
+    return resolved
+
+
 def resolve_pnp_config(
     fab_family: str,
     pnp_config: PnPExportConfig | None,

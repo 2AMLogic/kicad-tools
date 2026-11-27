@@ -4127,15 +4127,19 @@ def _gate_bom(
 
 
 def _build_archive(options: ReadinessOptions) -> Path | None:
-    """Zip the whole manufacturing directory OUTSIDE it (no checksum cycle)."""
-    archive = options.output_dir.parent / _ARCHIVE_NAME
+    return write_manufacturing_archive(options.output_dir)
+
+
+def write_manufacturing_archive(output_dir: Path) -> Path:
+    """Zip the whole manufacturing directory outside it, without a checksum cycle."""
+    archive = output_dir.parent / _ARCHIVE_NAME
     if archive.exists():
         archive.unlink()
     # Deterministic bytes (Issue #6076): sorted members, fixed timestamp and
     # permissions, so identical bundle contents always yield an identical archive.
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path in _bundle_files(options.output_dir):
-            name = (Path(options.output_dir.name) / path.relative_to(options.output_dir)).as_posix()
+        for path in _bundle_files(output_dir):
+            name = (Path(output_dir.name) / path.relative_to(output_dir)).as_posix()
             info = zipfile.ZipInfo(name, date_time=_ZIP_EPOCH)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16

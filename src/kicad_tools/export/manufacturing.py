@@ -45,6 +45,7 @@ from .preflight import (
     PreflightResult,
     report_source_mismatch,
 )
+from .reviewed_copper import ReviewedCopperExport
 from .rotation_overrides import placement_preview_instructions
 
 if TYPE_CHECKING:
@@ -67,6 +68,13 @@ class ManufacturingConfig(AssemblyConfig):
     ``via_land_overlap`` opts the export into the ``via_land_overlap`` preflight
     measurement of the shipped archive (``kct export --via-land-overlap``, Issue
     #10357); it is off by default.
+
+    ``verify_reviewed_copper`` opts the export into publishing only when every
+    copper layer of the staged Gerber archive equals a native plot of the saved
+    board (``kct export --verify-reviewed-copper``, Issue #10492); it is off by
+    default. An export of that kind prepares rules, refill and silk on a
+    private working copy, so the checked-out board and its siblings are never
+    written, and it needs ``include_gerbers`` and ``emit_drc_constraints``.
     """
 
     # Report settings
@@ -142,6 +150,14 @@ class ManufacturingConfig(AssemblyConfig):
 
     via_land_overlap: bool = False
 
+    # When True (``kct export --verify-reviewed-copper``, Issue #10492), the
+    # package is published only when the copper of the staged Gerber archive
+    # equals a native plot of the saved board on every layer, taken before any
+    # rule was written or any zone refilled.  Rules, refill and the silk pass
+    # then run on a private working copy: the checked-out board, project and
+    # rule files keep their bytes whether the export publishes or withholds.
+    verify_reviewed_copper: bool = False
+
 
 @dataclass
 class ManufacturingResult:
@@ -198,6 +214,11 @@ class ManufacturingResult:
     purchasing_path: Path | None = None
     # Descriptions of the purchasing rows whose part is not selected yet.
     purchasing_pending: list[str] = field(default_factory=list)
+    # Issue #10492: the reviewed-copper comparison of a ``verify_reviewed_copper``
+    # export (:func:`kicad_tools.export.reviewed_copper.reviewed_copper_record`),
+    # or ``None`` for any other export.  Bound into ``manifest.json`` when the
+    # package is published; on a refusal the diagnostic report is written from it.
+    reviewed_copper: dict | None = None
 
     @property
     def success(self) -> bool:
@@ -985,6 +1006,11 @@ def _build_manifest(
     if result.ordered_copper is not None:
         manifest["ordered_copper"] = result.ordered_copper
 
+    # Issue #10492: name the exact board whose saved copper was verified, and
+    # the reference plot each copper layer was compared with.
+    if result.reviewed_copper is not None:
+        manifest["reviewed_copper"] = result.reviewed_copper
+
     return manifest
 
 
@@ -1425,6 +1451,20 @@ class _StagedSource:
             raise
 
 
+@dataclass
+class _ReviewedCopper:
+    """What a ``verify_reviewed_copper`` export borrows while it runs (Issue #10492)."""
+
+    workspace: ReviewedCopperExport
+    #: Copper layers both plots must carry, in plot order.
+    layers: list[str]
+    #: The package is always built as a candidate, never written to the destination first.
+    layout: _PackageOutputs
+    live_pcb: Path
+    live_schematic: Path | None
+    live_config: ManufacturingConfig
+
+
 class ManufacturingPackage:
     """
     Generate a complete manufacturing package for PCB production.
@@ -1453,6 +1493,8 @@ class ManufacturingPackage:
         # Live board path while ``pcb_path`` points at a staged copy (#10091).
         self._live_pcb_path: Path | None = None
         self._pending_mutation_notices: list[tuple[int, str]] = []
+        # Set while a ``verify_reviewed_copper`` export runs (Issue #10492).
+        self._reviewed: _ReviewedCopper | None = None
         self.schematic_path = Path(schematic_path) if schematic_path else None
         self.manufacturer = manufacturer.lower()
         self.config = config or ManufacturingConfig()
@@ -1484,6 +1526,9 @@ class ManufacturingPackage:
         """
         out_dir = Path(output_dir) if output_dir else self.config.output_dir
         result = ManufacturingResult(output_dir=out_dir)
+
+        if self.config.verify_reviewed_copper and not self._reviewed_copper_request(result):
+            return result
 
         selected_stackup_source_hash: str | None = None
         if self.config.stackup_id:
@@ -1553,6 +1598,25 @@ class ManufacturingPackage:
             logger.error(f"Assembly generation failed: {e}")
             return result
 
+        # Issue #10492: a reviewed-copper export prepares everything below on
+        # a private working copy, so none of it reaches the checkout.
+        if self.config.verify_reviewed_copper and not self._open_reviewed_copper(result, out_dir):
+            return result
+        if self._reviewed is not None:
+            layout = self._reviewed.layout
+        try:
+            return self._export_prepared(out_dir, result, selected_stackup_source_hash, layout)
+        finally:
+            self._close_reviewed_copper(result)
+
+    def _export_prepared(
+        self,
+        out_dir: Path,
+        result: ManufacturingResult,
+        selected_stackup_source_hash: str | None,
+        layout: _PackageOutputs | None,
+    ) -> ManufacturingResult:
+        """Steps 0a-4, on ``self.pcb_path``: the checked-out board or a staged copy."""
         # Steps 0a-0c.  A named-stackup export with the default silk repair
         # runs them on a scratch copy and publishes only on success, so a
         # refused repair leaves the board and its siblings untouched (#10091).
@@ -1560,7 +1624,8 @@ class ManufacturingPackage:
         self._pending_mutation_notices = []
         live_pcb = self.pcb_path
         if (
-            self.config.emit_drc_constraints
+            self._reviewed is None
+            and self.config.emit_drc_constraints
             and self.config.stackup_id
             and self.config.silk_fix
             and self.manufacturer != "generic"
@@ -1581,8 +1646,9 @@ class ManufacturingPackage:
                 staged.close()
             raise
         finally:
-            self.pcb_path = live_pcb
-            self._live_pcb_path = None
+            if self._reviewed is None:
+                self.pcb_path = live_pcb
+                self._live_pcb_path = None
         if staged is not None:
             try:
                 if proceed:
@@ -1680,6 +1746,15 @@ class ManufacturingPackage:
                 writer.config = layout.config
                 result.output_dir = work_bundle
                 writer._write_package(work_bundle, result, source_hash)
+                if result.success and writer._reviewed is not None:
+                    # Issue #10492: the manifest names the reviewed bytes, so
+                    # publish only while they are still what is saved.
+                    if not writer._reviewed.workspace.source_unchanged():
+                        result.errors.append(
+                            f"{writer._reviewed.live_pcb.name} changed during manufacturing "
+                            "export; the reviewed-copper package was not published. Export "
+                            "again from the saved board."
+                        )
                 if result.success:
                     layout.publish(candidate, existing, before)
         except (OSError, RuntimeError) as exc:
@@ -1732,6 +1807,15 @@ class ManufacturingPackage:
         # package on disk.
         assembly_ok = self._generate_assembly(out_dir, result)
         if not assembly_ok:
+            return result
+
+        # Issue #10492: from here on the package is only staged, and nothing
+        # of it may be published unless the staged copper equals the saved board.
+        if (
+            self._reviewed is not None
+            and result.success
+            and not self._check_reviewed_copper(result)
+        ):
             return result
 
         # Step 1.5: Reconcile the recorded ``bom_fields`` preflight result
@@ -1937,6 +2021,161 @@ class ManufacturingPackage:
             result.errors.append(f"Stackup ordering validation failed: {exc}")
             return None
 
+    def _reviewed_copper_request(self, result: ManufacturingResult) -> bool:
+        """Refuse a reviewed-copper export that could not verify anything (Issue #10492)."""
+        if not self.config.include_gerbers:
+            result.errors.append(
+                "Reviewed-copper verification compares the package's Gerber copper with "
+                "the saved board, so it cannot be combined with --no-gerbers"
+            )
+            return False
+        if not self.config.emit_drc_constraints:
+            result.errors.append(
+                "Reviewed-copper verification keeps the manufacturer rule generation "
+                "(emit_drc_constraints), so the two cannot be combined"
+            )
+            return False
+        return True
+
+    def _open_reviewed_copper(self, result: ManufacturingResult, out_dir: Path) -> bool:
+        """Stage the working copy and plot the reviewed reference (Issue #10492).
+
+        On success ``self.pcb_path`` is the working copy until
+        :meth:`_close_reviewed_copper`.  On failure nothing stays staged and
+        the reason is recorded on *result*.
+        """
+        from ..manufacturers import get_fab_family
+        from .assembly import resolve_gerber_config
+        from .gerber import GerberExporter, _pcb_copper_layers
+
+        live = self.pcb_path
+        try:
+            workspace = ReviewedCopperExport(
+                live,
+                project_root=self.config.project_root,
+                output_dir=out_dir,
+                schematic_path=self.schematic_path,
+            )
+        except (OSError, ValueError) as exc:
+            result.errors.append(f"Could not stage a working copy of {live.name}: {exc}")
+            return False
+        try:
+            # The reference shows the saved copper under the plot options the
+            # candidate will have, taken before any rule or refill.
+            layers = _pcb_copper_layers(workspace.snapshot)
+            GerberExporter(workspace.snapshot).plot_saved(
+                resolve_gerber_config(get_fab_family(self.manufacturer), self.config),
+                workspace.reference_dir,
+            )
+            config = copy(self.config)
+            config.project_root = workspace.dir
+            # Always staged: with --no-project-zip the ordinary path writes the
+            # destination directly, which a verification must never do first.
+            layout = _PackageOutputs(
+                out_dir,
+                config,
+                self.manufacturer,
+                purchasing=bool(self._purchasing or self._prior_purchasing_digest),
+            )
+        except (KiCadToolsError, OSError, ValueError) as exc:
+            workspace.close()
+            result.errors.append(
+                f"The saved copper of {live.name} could not be plotted for review: {exc}"
+            )
+            return False
+        logger.info(
+            "Reviewed-copper export: %s is prepared in a private working copy; the "
+            "checked-out board is not modified",
+            live.name,
+        )
+        self._reviewed = _ReviewedCopper(
+            workspace=workspace,
+            layers=layers,
+            layout=layout,
+            live_pcb=live,
+            live_schematic=self.schematic_path,
+            live_config=self.config,
+        )
+        self.pcb_path = workspace.pcb
+        self._live_pcb_path = live
+        self.schematic_path = workspace.rebase(self.schematic_path)
+        self.config = config
+        return True
+
+    def _close_reviewed_copper(self, result: ManufacturingResult) -> None:
+        """Return to the checked-out board and remove the scratch (Issue #10492)."""
+        reviewed = self._reviewed
+        if reviewed is None:
+            return
+        self._reviewed = None
+        self.pcb_path = reviewed.live_pcb
+        self.schematic_path = reviewed.live_schematic
+        self.config = reviewed.live_config
+        self._live_pcb_path = None
+        reviewed.workspace.close()
+        if result.success and self._pending_mutation_notices:
+            # Held back because nothing was written to the checkout; the notes
+            # still describe the prepared sources the package was made from.
+            result.warnings.append(
+                "The checked-out sources were not modified; these export notes describe "
+                "the scratch copy the package was prepared from:"
+            )
+            for level, message in self._pending_mutation_notices:
+                logger.log(level, message)
+                result.warnings.append(message)
+
+    def _check_reviewed_copper(self, result: ManufacturingResult) -> bool:
+        """Compare the staged Gerber archive with the reviewed reference (Issue #10492).
+
+        Returns whether the package may proceed.  The comparison is recorded
+        on *result* either way; on anything but identical copper the evidence
+        is copied out of scratch and an error withholds the package.
+        """
+        from .reviewed_copper import (
+            compare_copper,
+            load_copper,
+            preflight_result,
+            refusal_message,
+            reviewed_copper_record,
+            unreadable_record,
+        )
+
+        reviewed = self._reviewed
+        if reviewed is None:  # the caller checks this only for a reviewed-copper export
+            return True
+        workspace = reviewed.workspace
+        archive = result.assembly_result.gerber_path if result.assembly_result is not None else None
+        reference: dict | None = None
+        try:
+            reference = load_copper(workspace.reference_dir, reviewed.layers)
+            if archive is None:
+                raise OSError("the export produced no Gerber archive")
+            candidate = load_copper(Path(archive), reviewed.layers)
+            record: dict = reviewed_copper_record(
+                reviewed_pcb=workspace.identity, records=compare_copper(reference, candidate)
+            )
+        except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile) as exc:
+            record = unreadable_record(
+                reviewed_pcb=workspace.identity,
+                layers=reviewed.layers,
+                side="reference plot" if reference is None else "candidate archive",
+                reason=str(exc),
+            )
+        result.reviewed_copper = record
+        result.preflight_results.append(preflight_result(record))
+        if record["status"] == "identical":
+            return True
+        diagnostics = None
+        if archive is not None:
+            try:
+                diagnostics = workspace.write_diagnostics(record, Path(archive))
+            except OSError as exc:
+                result.warnings.append(
+                    f"The reviewed-copper diagnostic report could not be written: {exc}"
+                )
+        result.errors.append(refusal_message(record, diagnostics))
+        return False
+
     def _refresh_zone_fill(
         self,
         result: ManufacturingResult,
@@ -2036,7 +2275,19 @@ class ManufacturingPackage:
                     _restore_board(self.pcb_path, original)
                 cannot_refresh(str(exc))
                 return None
-            note = f"Export refilled the zone fills in {self.pcb_path.name} to match the generated DRC rules."
+            if self._reviewed is not None:
+                # Issue #10492: only the working copy was refilled; the saved
+                # board keeps the copper that was reviewed.
+                note = (
+                    f"The zone fills in the working copy of {self.pcb_path.name} were "
+                    "refilled to match the generated DRC rules; the checked-out board "
+                    "keeps its saved fill (--verify-reviewed-copper)"
+                )
+            else:
+                note = (
+                    f"Export refilled the zone fills in {self.pcb_path.name} to match "
+                    "the generated DRC rules."
+                )
             result.warnings.append(note)
             logger.info(note)
 
@@ -3831,6 +4082,16 @@ class ManufacturingPackage:
                 "Distances and artwork digests: manifest.json, preflight entry "
                 "reinforcement_clearance."
             )
+            lines.append("")
+
+        # Issue #10492: only a reviewed-copper export carries this block.
+        if result.reviewed_copper:
+            from .reviewed_copper import summary_lines as reviewed_copper_lines
+
+            title = "Reviewed copper (verified before this package was published):"
+            lines.append(title)
+            lines.append("-" * len(title))
+            lines.extend(reviewed_copper_lines(result.reviewed_copper)[1:])
             lines.append("")
 
         readme_path = out_dir / "README.txt"

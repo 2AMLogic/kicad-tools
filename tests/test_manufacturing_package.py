@@ -3268,9 +3268,11 @@ class TestPurchasingList:
         self, tmp_path, monkeypatch, local_symbol_project, landing, fault
     ):
         """One reference, pad or net at a time, each fault names row, terminal and landing."""
+        # List the landing's reference on the row so the fault is the board's, not the row's.
+        row = SWITCH_ROW.replace("refs: [SW1]", "refs: [SW1, SW9]")
         self._land_project(
             local_symbol_project,
-            "purchasing:\n" + SWITCH_ROW + "    terminals:\n      - " + landing,
+            "purchasing:\n" + row + "    terminals:\n      - " + landing,
         )
         out = tmp_path / "out"
         _, result = self._export(monkeypatch, local_symbol_project, out)
@@ -3556,6 +3558,68 @@ class TestPurchasingList:
         assert not refused.success
         assert "R1 pad 1 carries VCC on the board, not GND" in str(refused.errors)
         assert not (tmp_path / "refused").exists()
+
+    def test_landing_on_a_footprint_the_row_does_not_declare_keeps_the_previous_bundle(
+        self, tmp_path
+    ):
+        """R1 and R2 both have pad 1 on VCC, so only the row can tell them apart (Issue #10582)."""
+        design = tmp_path / "board" / "output"
+        shutil.copytree(Path(__file__).parent / "fixtures" / "project_archive_10108", design)
+        spec = design.parent / "project.kct"
+
+        def row(refs):
+            return (
+                "purchasing:\n"
+                "  - description: Chassis network wired to two landings\n"
+                "    quantity: 1\n"
+                f"    refs: {refs}\n"
+                "    manufacturer: Example\n"
+                "    mpn: SYN-NETWORK-1\n"
+                "    terminals:\n"
+                "      - {terminal: 3, ref: R1, pad: 1, net: VCC}\n"
+                "      - {terminal: 1, ref: R2, pad: 1, net: VCC}\n"
+                "      - {terminal: 2, unused: true}\n"
+            )
+
+        def export(purchasing, out_dir):
+            spec.write_text("kct_version: '1.0'\nproject:\n  name: t\n" + purchasing)
+            config = ManufacturingConfig(
+                output_dir=out_dir,
+                include_gerbers=False,
+                include_report=False,
+                silk_fix=False,
+                emit_drc_constraints=False,
+                auto_lcsc=False,
+                preflight=PreflightConfig(skip_all=True),
+            )
+            return ManufacturingPackage(
+                design / "board_v07.kicad_pcb", design / "board.kicad_sch", config=config
+            ).export()
+
+        bundle = tmp_path / "bundle"
+        valid = export(row("[R2, R1]"), bundle)
+        assert valid.success, valid.errors
+        (item,) = self._read_exported_list(valid.purchasing_path)["items"]
+        assert item["refs"] == ["R2", "R1"] and item["per_board"] == 1
+        assert {"terminal": "3", "ref": "R1", "pad": "1", "net": "VCC"} in item["terminals"]
+        before = {p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+
+        refused = export(row("[R2]"), bundle)
+
+        assert not refused.success
+        [error] = refused.errors
+        assert (
+            "purchasing row 1 (Chassis network wired to two landings): "
+            "terminal '3' maps to R1, which is not among the row's declared refs (R2)"
+        ) in error
+        assert {
+            p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()
+        } == before
+        assert verify_manifest(bundle / "manifest.json") == []
+
+        # An omitted refs list declares nothing to compare, so the PCB check alone decides.
+        undeclared = export(row("[]").replace("    refs: []\n", ""), tmp_path / "undeclared")
+        assert undeclared.success, undeclared.errors
 
     @pytest.mark.parametrize(
         ("layers", "net_clause", "fault"),

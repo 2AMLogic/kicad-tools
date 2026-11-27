@@ -47,7 +47,6 @@ Issues currently being built (`loom:building`).
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410)
 - **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill
 - **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film
-- **#10261**: Fill the routed board before optional power-plane stitching on mixed-signal layouts
 - **#10424**: BOM enrichment assigns incompatible packages, tolerance and wattage despite explicit schematic intent
 - **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes
 - **#10468**: Manufacturing review: include revision-bound simulation limits and fault-case evidence
@@ -57,29 +56,25 @@ Issues currently being built (`loom:building`).
 - **#10492**: Offer an export mode that verifies reviewed copper before publishing manufacturing artwork
 - **#10504**: route-link: non-plated-hole clearance ignores the board's hole_clearance rule
 - **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313
-- **#10514**: Manufacturing handoff: map PCB wire landings to the purchased panel part’s terminals
-- **#10556**: tests: board05 staged fixture is module-scoped under xdist --dist load, so it rebuilds per worker and its cost lands on a 60s-capped test
 - **#10561**: Board 03 USB common-run measurement depends on where an unchanged track is split
-- **#10577**: Preserve Board 05 sourcing fields and no-connect identities in the editable KiCad project
+- **#10582**: Reject terminal landings outside a purchasing row’s declared references
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
-- **#10262**: fix(route): stitch power planes after the routed copper is refilled
+- **#10128**: fix(validate): stop pour_slot reporting packed parallel track pairs
 - **#10427**: Reject incompatible automatic parts in assembly BOM exports
 - **#10472**: fix: carry a pad-edge escape end into the pad along its own line
+- **#10498**: feat: check declared mounting holes against their drawing and finished-hole interval
 - **#10502**: Check electrical compatibility and identify catalog inventory in parts alternatives
 - **#10507**: fix(boards): declare Board 07's reviewed class widths and re-pin its SDRAM evidence
-- **#10518**: Reject simulation results with undeclared measured inputs
 - **#10519**: feat: add route-link --join-track to tee into a pad's track
-- **#10537**: feat: carry purchasing-row terminal maps into the assembly handoff
 - **#10545**: feat: add kct export --verify-reviewed-copper to publish only reviewed copper
-- **#10560**: ci: group Board 05 recipe staging on one worker
 - **#10563**: fix(router): decline optimizer shortcuts that park a bend beside their own pad's mask opening
-- **#10576**: fix(board03): stage the two USB project widths for the coordinated reissue
-- **#10580**: fix(board05): preserve sourcing and unused pad identities in the editable project
+- **#10571**: fix(board03): clip the USB common run to its window before measuring coupling
+- **#10583**: fix: reject purchasing terminal landings outside the row's declared refs
 
 ## Approved (Awaiting Merge)
 
@@ -87,6 +82,7 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#10474**: feat(export): report revision-bound simulation limits and fault-case evidence
 - **#10497**: ci: retry the pinned actionlint download on a transient 504
+- **#10518**: Reject simulation results with undeclared measured inputs
 - **#10520**: fix(route-link): resolve the non-plated hole clearance through the board's rules
 - **#10526**: chore(loom): resync installed Loom to v0.20.37
 - **#10532**: Expand BOM reference intervals with matching designator suffixes
@@ -120,7 +116,6 @@ Issues carrying `loom:curated`.
 - **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill *(curated)*
 - **#10105**: Support a repository layout with editable KiCad sources and a sibling generated-output directory *(curated)*
 - **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film *(curated)*
-- **#10261**: Fill the routed board before optional power-plane stitching on mixed-signal layouts *(curated)*
 - **#10385**: Refresh maintained board schematics after the instance Datasheet fix *(curated)*
 - **#10424**: BOM enrichment assigns incompatible packages, tolerance and wattage despite explicit schematic intent *(curated)*
 - **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes *(curated)*
@@ -132,12 +127,10 @@ Issues carrying `loom:curated`.
 - **#10499**: parts alternatives offers a 30 Ω resistor for 4.7 kΩ and adjustable regulators for a fixed 3.3 V part *(curated)*
 - **#10504**: route-link: non-plated-hole clearance ignores the board's hole_clearance rule *(curated)*
 - **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313 *(curated)*
-- **#10514**: Manufacturing handoff: map PCB wire landings to the purchased panel part’s terminals *(curated)*
 - **#10530**: Expand BOM numeric reference ranges with a shared suffix such as Q1A-Q4A *(curated)*
-- **#10556**: tests: board05 staged fixture is module-scoped under xdist --dist load, so it rebuilds per worker and its cost lands on a 60s-capped test *(curated)*
 - **#10561**: Board 03 USB common-run measurement depends on where an unchanged track is split *(curated)*
 - **#10575**: Preserve Board 03’s connector and MCU USB widths in the routed KiCad project *(curated)*
-- **#10577**: Preserve Board 05 sourcing fields and no-connect identities in the editable KiCad project *(curated)*
+- **#10582**: Reject terminal landings outside a purchasing row’s declared references *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -158,10 +151,10 @@ _None._
 | Very important | 1 |
 | Important | 3 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 19 |
-| PRs awaiting review | 14 |
-| Approved PRs awaiting merge | 6 |
-| Curated | 42 |
+| In Progress (`loom:building`) | 16 |
+| PRs awaiting review | 12 |
+| Approved PRs awaiting merge | 7 |
+| Curated | 39 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
