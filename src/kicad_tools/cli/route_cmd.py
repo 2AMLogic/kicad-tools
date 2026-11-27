@@ -4841,11 +4841,15 @@ _FALLBACK_RECEIPT_KEYS = (
     "python_fallback_stage_budget_s",
     "python_fallback_stage_spent_s",
     "python_fallback_stage_budget_skips",
+    # Issue #8486: goal-side probes of requests that hit the per-net wall clock.
+    "native_reverse_probes",
+    "native_reverse_proofs",
+    "native_reverse_seconds_saved",
 )
 
 
 def _fallback_receipt_fields(router: Any) -> dict[str, Any]:
-    """Small fallback diagnostics for the timeout receipt (issues #8370, #8413, #8485).
+    """Small fallback diagnostics for the timeout receipt (issues #8370, #8413, #8485, #8486).
 
     Always returns every key in ``_FALLBACK_RECEIPT_KEYS``; a value is ``None``
     when the stats are unavailable (no router, Python backend, or an error), so
