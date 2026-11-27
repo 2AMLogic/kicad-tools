@@ -117,7 +117,7 @@ def collect_symbol_instances(schematic_path: str | Path) -> SymbolInstanceIndex:
 
     Walks the hierarchy with :func:`kicad_tools.schema.hierarchy.build_hierarchy`
     (one node per sheet *placement*, each carrying its KiCad instance path)
-    and records ``"/<root uuid>[/<sheet uuid>...]/<symbol uuid>"`` per placed
+    and records a root-relative sheet path followed by the symbol UUID per placed
     symbol -- the same token KiCad writes into a footprint's ``(path ...)``.
     Per-placement designators come from the symbol's ``(instances ...)``
     block when the sheet file is placed more than once (issue #5815).
@@ -153,7 +153,8 @@ def collect_symbol_instances(schematic_path: str | Path) -> SymbolInstanceIndex:
             if not sym.on_board:
                 index.excluded_references.add(reference)
                 continue
-            instance_path = f"{node.instance_path.rstrip('/')}/{sym.uuid}"
+            sheet_path = node.instance_path.removeprefix(root.instance_path).rstrip("/")
+            instance_path = f"{sheet_path}/{sym.uuid}"
             index.paths_by_reference.setdefault(reference, set()).add(instance_path)
             index.reference_by_path[instance_path] = reference
             # Every unit of a multi-unit part shares the footprint field;
