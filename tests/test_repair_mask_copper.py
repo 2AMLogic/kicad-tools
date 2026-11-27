@@ -5790,3 +5790,61 @@ def test_fix_drc_attributes_foreign_net_disconnection_to_joint_via_action(
     ]
     assert _saved_copper(board, "via-j")[1] == before_via
     assert _segments(board) == before_segs
+
+
+def test_bridge_is_declined_early_when_pad_centres_exceed_angle_tolerance(tmp_path):
+    from kicad_tools.router.quantize import segment_angle_census
+
+    # 0.0008 mm over 3 mm pad spacing is inside _BRIDGE_AXIS_TOLERANCE_MM (1 um)
+    # but 0.0153 deg off vertical (> ANGLE_TOL_DEG = 0.01 deg).
+    board = _board2(tmp_path, BRIDGE_COPPER, "100.0008 97")
+    before = _segments(board)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_bridge_finding()], max_displacement=1.0)
+    assert result.repaired == 0
+    assert not result.actions
+    assert not repairer.modified
+    assert [u.reason for u in result.unrepaired] == ["pad_centres_not_aligned"]
+    assert "R1/1" in result.unrepaired[0].detail
+    assert "R2/1" in result.unrepaired[0].detail
+    assert not repairer.off_angle_tracks()
+    repairer.save(board)
+    assert _segments(board) == before
+    assert segment_angle_census(board)[1] == []
+
+
+def test_bridge_misaligned_pad_centres_declined_before_clearance_check(tmp_path):
+    crowd = _seg("crowd", (100.3, 98.5), (102.0, 98.5), net=2)
+    board = _board2(tmp_path, BRIDGE_COPPER + "\n" + crowd, "100.0008 97")
+    result = MaskCopperRepairer(board).repair(
+        [_bridge_finding()], max_displacement=1.0, clearance_mm=0.15
+    )
+    assert result.repaired == 0
+    assert [u.reason for u in result.unrepaired] == ["pad_centres_not_aligned"]
+
+
+@pytest.mark.parametrize("r2_at", ["100 97", "100.0004 97"])
+def test_bridge_repairs_pad_centres_within_angle_census_tolerance(tmp_path, r2_at):
+    from kicad_tools.router.quantize import segment_angle_census
+
+    board = _board2(tmp_path, BRIDGE_COPPER, r2_at)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_bridge_finding()], max_displacement=1.0)
+    assert result.repaired == 1 and not result.unrepaired
+    assert not repairer.off_angle_tracks()
+    repairer.save(board)
+    assert segment_angle_census(board)[1] == []
+
+
+def test_fix_drc_bridge_reports_pad_centres_not_aligned_without_bending(
+    tmp_path, monkeypatch, capsys
+):
+    board = _board2(tmp_path, BRIDGE_COPPER, "100.0008 97")
+    before = _segments(board)
+    still = _report(_bridge_finding())
+    code = _run(monkeypatch, board, [still, still, still])
+    out = capsys.readouterr().out
+    assert code != 0
+    assert _segments(board) == before
+    assert "pad_centres_not_aligned" in out
+    assert "would_bend_trace" not in out
