@@ -16,6 +16,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10521** (closed): Offer direct-pad layer validation in PCB.add_trace when a named SMD pad cannot reach the requested layer
+- **PR #10522**: Check direct pad layer access when authoring traces
+- **Issue #10445** (closed): Board 01's committed routed PCB is behind its recipe: a fresh regen moves the board-ID silkscreen and rewrites fiducial attributes and segment UUIDs
+- **PR #10550**: fix(board01): regenerate the front silkscreen and manufacturing package
+- **Issue #10511** (closed): Offset via contacts can bypass a routed bend and split a verified four-barrel transfer
+- **PR #10512**: Preserve a routed bend when its end already reaches the via
+- **Issue #10336** (closed): Request an explicit routing corridor on an inner layer with a partial plane
+- **PR #10375**: feat: route links through bounded inner-plane corridors
+- **Issue #10541** (closed): test flake: test_board_cutout_cannot_hide_a_required_stitch[refilled] times out in CI
+- **PR #10548**: test: report phase timings for the cutout stitching regression
 - **PR #10551**: fix(boards): refresh STM32 and LVDS datasheets in manufacturing bundles
 - **Issue #10265** (closed): Board 03 tier-1 USB_D+ route exceeds its 16 mm branch length limit
 - **PR #10272**: fix(router): shorten aligned differential-pair pad hops
