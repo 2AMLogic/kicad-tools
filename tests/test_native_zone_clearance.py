@@ -40,7 +40,9 @@ def test_native_clearance_precedes_fill_and_preserves_factory_rules(tmp_path, mo
     # "used"), but ``_kicad_drc_supports_refill(Path("native"))`` genuinely probes
     # a non-existent binary and returns False, so the caller cannot assert the
     # fill above already refilled+saved via ``--refill-zones --save-board``.
-    remediation.assert_called_once_with(pcb, Path("native"), settle=None, skip_first_refill=False)
+    remediation.assert_called_once_with(
+        pcb, Path("native"), settle=None, skip_first_refill=False, saved_fill_stale=[False]
+    )
     first = dru.read_bytes()
     runner.run_fill_zones(pcb, kicad_cli=Path("native"), native_clearance=True)
     assert dru.read_bytes() == first

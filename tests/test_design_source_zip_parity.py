@@ -45,25 +45,26 @@ EXPECTED_STALE: dict[str, str] = {
         "design-source.zip until the five via-only warnings (#9112/#9033) "
         "clear and the package can be re-issued."
     ),
-    # Zip last refreshed in 99122e5a1; the live recipe has moved since, and
-    # ``refresh_readiness.py`` cannot re-emit the zip while the strict gate
-    # refuses on the unaccepted warning flood (#8399 stalemate).
+}
+
+# Until the Board 05 reissue (#9921), accept only these published/live pairs.
+# Remove the pins with the reissue. Updated archive members use ordinary parity.
+BOARD05_PENDING_REISSUE = {
     "05-bldc-motor-controller/redesign/build.py": (
-        "Issue #9068: #9057/#8532 added the wedge fix and the global "
-        "fiducials + board-ID silk to redesign/build.py after the archive was "
-        "last refreshed; the gate-pass rebuild + re-pin (blocked by the #8399 "
-        "warning-flood stalemate) re-emits the zip."
+        "76f8818fc218d1fd6282230f58e936eecd17a1d71fe67b32590f9f21665b02cc",
+        "88c2331bf50d421a6c09abb2a0e1ee334fb4e87fa5474cf2f800997a866197c0",
     ),
     "05-bldc-motor-controller/redesign/hardware.py": (
-        "Issue #9068: #9071's silk_hole_overlap fixes (reference-field offsets, "
-        "SILK_STROKE_EDITS) landed in redesign/hardware.py after the archive "
-        "was last refreshed; the gate-pass rebuild + re-pin (blocked by the "
-        "#8399 warning-flood stalemate) re-emits the zip."
+        "ffb9ef695e98be35a2794e3836af783b4c21a43ae40f55b3cc5434752dc12cd1",
+        "ea8c6c6b03815433f3225532ee73a076e1ff4e277647bda215d9de2c2abbc9c6",
+    ),
+    "05-bldc-motor-controller/redesign/package.py": (
+        "3691b3992c2d6687e668d0bd08947d41cb987b3b608253aa5192fe67a0df6d79",
+        "13aca58cb6e23656f4c49d2536f08f48bdbc08dac875299df1e3a2d44f6936d0",
     ),
     "05-bldc-motor-controller/redesign/routing.py": (
-        "Issue #9921: the published Board 05 archive uses the previous U2 footprint. "
-        "The live recipe also accepts the grounded pad-29 footprint. Remove this entry "
-        "when the manufacturing rebuild publishes the matching source archive."
+        "7bd3033cbe6268efee57e3e7c2cc06ffd46d7c655c7cbec6c65675d4b142c4df",
+        "f3ee1f358f528eb55fb1f64011cd6f364124614d8bec1670f7e0d5e4c5882f27",
     ),
 }
 
@@ -130,6 +131,10 @@ def test_design_source_zip_member_matches_live_recipe(
     # sequence diff that trips pytest-timeout and hides this message (Issue #9481).
     archived_digest = hashlib.sha256(archived).hexdigest()
     live_digest = hashlib.sha256(live.read_bytes()).hexdigest()
+    pending = BOARD05_PENDING_REISSUE.get(key)
+    if pending and archived_digest == pending[0]:
+        assert live_digest == pending[1], f"{key}: live recipe differs from the #9921 pin"
+        return
     assert archived_digest == live_digest, (
         f"{key}: archived design-source.zip member drifted from the live "
         f"recipe ({live}; sha256 archive={archived_digest[:12]} "
@@ -156,5 +161,5 @@ def test_every_zip_board_is_collected() -> None:
 def test_expected_stale_entries_name_real_members() -> None:
     """A renamed or removed member must not leave a dead escape-hatch entry."""
     keys = {member_key(m) for m in ZIP_MEMBERS}
-    dead = sorted(set(EXPECTED_STALE) - keys)
-    assert not dead, f"EXPECTED_STALE entries match no archived .py member: {dead}"
+    dead = sorted((EXPECTED_STALE.keys() | BOARD05_PENDING_REISSUE.keys()) - keys)
+    assert not dead, f"Recipe parity entries match no archived .py member: {dead}"

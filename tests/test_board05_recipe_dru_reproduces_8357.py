@@ -52,6 +52,7 @@ def _assert_u3_pour_clearance(text: str) -> None:
     marker = '(rule "Zone clearance at U3 pads - GND (F.Cu)"'
     assert text.count(marker) == 1
     assert text.count('(rule "kct attach zone - ') == 42
+    assert "unconnected-(" not in text
     assert reviewed_clearances(text) == REVIEWED_CLEARANCES
     assert text.count('(rule "Zone clearance - ') == 4
     assert text.count('(rule "Ampacity Min Width') == 2
@@ -99,6 +100,7 @@ def reviewed_clearances(dru: str) -> dict[str, str]:
 # several times slower (~8 s on main -> ~40 s, measured on an 8-core host, one
 # run). The global 60 s cap is too tight for the 2-vCPU CI runner, so this gets
 # explicit headroom; follow-up profiling should cut the cost further.
+@pytest.mark.xdist_group("board05_recipe_staged")
 @pytest.mark.timeout(180)
 def test_recipe_reproduces_reviewed_dru(staged, tmp_path):
     routed = _copy_stage(staged, tmp_path / "export")
@@ -321,6 +323,8 @@ def _extend_phase_a_leg(board: Path, leg) -> None:
     _edit_copper(board, edit)
 
 
+@pytest.mark.xdist_group("board05_recipe_staged")
+@pytest.mark.timeout(180)
 def test_recipe_declares_reviewed_classes_widths_and_necks(staged):
     build = _load_build()
     assert (staged.parent / "net_class_map.json").read_bytes() == (
@@ -328,7 +332,12 @@ def test_recipe_declares_reviewed_classes_widths_and_necks(staged):
     ).read_bytes()
     sidecar = _sidecar(staged)
     pcb = PCB.load(str(staged))
-    assert set(sidecar) == {net.name for net in pcb.nets.values() if net.name}
+    assert set(sidecar) == {net.name for net in pcb.nets.values() if net.name} - {
+        pad.net_name
+        for fp in pcb.footprints
+        for pad in fp.pads
+        if "no_connect" in (pad.pintype or "")
+    }
     assert tuple(sorted(REVIEWED_CLEARANCES)) == build.ROUTER_NETCLASSES
 
     resolved = _resolved(staged)
@@ -370,6 +379,8 @@ def test_recipe_declares_reviewed_classes_widths_and_necks(staged):
     assert math.dist(run.end, (44.6, 32.6375)) < 1e-3
 
 
+@pytest.mark.xdist_group("board05_recipe_staged")
+@pytest.mark.timeout(180)
 def test_incomplete_map_refused_before_writing_sidecars(staged, tmp_path):
     board = _copy_stage(staged, tmp_path / "partial-map")
     map_file = board.parent / "net_class_map.json"
@@ -384,6 +395,8 @@ def test_incomplete_map_refused_before_writing_sidecars(staged, tmp_path):
     assert [path.read_bytes() for path in sidecars] == original
 
 
+@pytest.mark.xdist_group("board05_recipe_staged")
+@pytest.mark.timeout(180)
 def test_loaded_board_map_preserves_routing_policy(staged):
     from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
     from kicad_tools.router.io import load_pcb_for_routing
@@ -397,15 +410,17 @@ def test_loaded_board_map_preserves_routing_policy(staged):
     differential = {"DRIVER_SLEEP", "RUN", "VCP", "nTRIP"}
     costs = {"+5V": 0.8, "V3P3": 0.8, "SCK": 0.9, "RESET": 1.2}
     costs.update(dict.fromkeys(differential, 0.85))
-    for net in router.net_names.values():
-        if net:
-            settings = router.net_class_map[net]
-            assert settings.cost_multiplier == costs.get(net, 1.0), net
-            assert settings.length_critical == (net == "SCK" or net in differential), net
-            assert settings.noise_sensitive == (net == "SENSE_IN"), net
-            assert not settings.coupled_routing, net
+    for net in _sidecar(staged):
+        assert net in router.net_names.values()
+        settings = router.net_class_map[net]
+        assert settings.cost_multiplier == costs.get(net, 1.0), net
+        assert settings.length_critical == (net == "SCK" or net in differential), net
+        assert settings.noise_sensitive == (net == "SENSE_IN"), net
+        assert not settings.coupled_routing, net
 
 
+@pytest.mark.xdist_group("board05_recipe_staged")
+@pytest.mark.timeout(180)
 def test_retained_motor_neck_is_the_u2_pad_escape(staged):
     pcb = PCB.load(str(staged))
     leg, pad, centre = _phase_a_leg(pcb)
@@ -425,6 +440,8 @@ def test_retained_motor_neck_is_the_u2_pad_escape(staged):
     )
 
 
+@pytest.mark.xdist_group("board05_recipe_staged")
+@pytest.mark.timeout(180)
 def test_narrow_copper_that_is_not_the_pad_escape_still_warns(staged, tmp_path):
     from kicad_tools.validate.rules.netclass_agreement import (
         RULE_TRACK_WIDTH_MISMATCH,
@@ -462,6 +479,8 @@ def test_narrow_copper_that_is_not_the_pad_escape_still_warns(staged, tmp_path):
     assert "narrowest 0.400mm" in findings[0].message
 
 
+@pytest.mark.xdist_group("board05_recipe_staged")
+@pytest.mark.timeout(180)
 def test_recipe_refuses_copper_or_project_outside_the_reviewed_account(staged, tmp_path):
     build = _load_build()
 

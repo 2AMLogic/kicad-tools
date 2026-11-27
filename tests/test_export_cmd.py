@@ -1339,6 +1339,7 @@ _EXPORT_PASS_THROUGH_CASES = {
     ),
     "include_tht": (["--include-tht"], True),
     "via_land_overlap": (["--via-land-overlap"], True),
+    "verify_reviewed_copper": (["--verify-reviewed-copper"], True),
     "output_format": (["--format", "json"], "json"),
 }
 

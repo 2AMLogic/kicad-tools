@@ -818,3 +818,85 @@ def test_purchasing_list_flows_from_export_to_the_review_page(env, tmp_path, mon
 
     assert "Outstanding selections: none" in section and "PENDING" not in section
     assert "| 5 x 20 mm cartridge, DC | 2 | 4 | F2, F3 | Example Fuse Co SYN-CART-DC |" in section
+
+
+def test_terminal_map_flows_from_the_project_to_the_review_page(env, tmp_path, monkeypatch):
+    """A declared terminal map reaches the assembler's page from a real export (Issue #10514).
+
+    A terminal edited after the export is refused even when the bundle manifest
+    agrees with the edited bytes, and the board quantity scales only the
+    purchase.
+    """
+    from kicad_tools.export import assembly
+    from kicad_tools.export import submission_plan as sp
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightConfig
+    from tests.test_manufacturing_package import (
+        SWITCH_ITEM,
+        SWITCH_LAND,
+        SWITCH_MAP,
+        SWITCH_ROW,
+        _fuse_assembly_export,
+    )
+    from tests.test_submission_review import switch_associations
+
+    src, bundle = env["src"], env["bundle"]
+    for name in ("bom.csv", "cpl.csv"):
+        (bundle / name).unlink()
+    (src / "b.kicad_pcb").write_text(SWITCH_LAND)
+    (src / "project.kct").write_text(
+        "kct_version: '1.0'\nproject:\n  name: Fuse bench controller\n"
+        "purchasing:\n" + SWITCH_ROW + SWITCH_MAP
+    )
+    monkeypatch.setattr(assembly.AssemblyPackage, "export", _fuse_assembly_export)
+    exported = ManufacturingPackage(
+        pcb_path=src / "b.kicad_pcb",
+        schematic_path=src / "b.kicad_sch",
+        manufacturer="jlcpcb",
+        config=ManufacturingConfig(
+            output_dir=bundle,
+            include_project_zip=False,
+            include_report=False,
+            include_gerbers=False,
+            silk_fix=False,
+            emit_drc_constraints=False,
+            auto_lcsc=False,
+            preflight=PreflightConfig(skip_all=True),
+        ),
+    ).export()
+    assert exported.success, exported.errors
+    write_manifest(env)
+    frozen = (bundle / "purchasing.json").read_bytes()
+    assert json.loads(frozen)["items"] == [SWITCH_ITEM]
+
+    def submit(label):
+        env["out"] = tmp_path / f"out-{label}"
+        result = run(env, AskingSource({"C7000001": 500, "C7000002": 500}), quantity=2)
+        assert not result.stock.blocked
+        return result
+
+    (bundle / "purchasing.json").write_bytes(frozen.replace(b'"terminal": "3"', b'"terminal": "4"'))
+    write_manifest(env)
+    with pytest.raises(sp.SubmissionError, match="exported contents"):
+        submit("edited")
+    assert not (tmp_path / "out-edited" / "handoff").exists()
+    (bundle / "purchasing.json").write_bytes(frozen)
+    write_manifest(env)
+
+    reviewed = submit("reviewed")
+    section = (reviewed.page.directory / "index.md").read_text().split("## Purchasing list", 1)[1]
+    for association in switch_associations():
+        assert association in section
+    scaled = [SWITCH_ITEM | {"required": 2}]
+    assert json.loads((reviewed.page.directory / "purchasing.json").read_bytes())["items"] == scaled
+    assert json.loads(reviewed.plan.plan_bytes)["purchasing"]["items"] == scaled
+
+    # A manifest-listed map without the export checksum is the buyer's own
+    # claim, never the exporter's PCB check: refuse it before any handoff.
+    unmarked = json.loads(frozen)
+    unmarked.pop("kct_export_sha256")
+    (bundle / "purchasing.json").write_text(json.dumps(unmarked, indent=2) + "\n")
+    write_manifest(env)
+    with pytest.raises(sp.SubmissionError, match="requires the export checksum"):
+        submit("unmarked")
+    assert not (tmp_path / "out-unmarked" / "handoff").exists()
