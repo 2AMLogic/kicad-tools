@@ -735,8 +735,8 @@ def test_stale_schematic_hash_reports_no_rows(board):
 def test_schematic_mutation_during_analysis_is_reported(board, monkeypatch):
     extract = netlist_module.build_netlist_from_schematic
 
-    def extract_then_touch(path):
-        netlist = extract(path)
+    def extract_then_touch(path, **kwargs):
+        netlist = extract(path, **kwargs)
         Path(path).write_text(Path(path).read_text() + "\n")
         return netlist
 
@@ -818,6 +818,44 @@ def test_missing_device_supply_leaves_pins_unassessed(board, state):
     for entry in report["pins"]:
         assert entry["outcome"] == "unassessed"
         assert "no rail evidence for a supply net" in " ".join(entry["reasons"])
+
+
+@pytest.mark.parametrize("state", ["powered", "unpowered"])
+def test_signal_pin_cannot_supply_rail_evidence(board, capsys, state):
+    case = powered("biased", BIASED) if state == "powered" else unpowered()
+    case["rails"]["VDD"]["net"] = "BUF_OUT"
+    board.policy["cases"] = [case]
+    code, report = board.run(capsys)
+    assert code == 2
+    for entry in report["pins"]:
+        assert entry["outcome"] == "unassessed"
+        assert "+3V3" in " ".join(entry["reasons"])
+
+
+@pytest.mark.parametrize("net", ["+3V3", "GND"])
+def test_conflicting_voltages_on_one_physical_net(board, capsys, net):
+    case = powered("biased", BIASED)
+    case["rails"]["second"] = {
+        "net": net,
+        "voltage_v": 0.0 if net == "+3V3" else 3.3,
+        "source": "second fixture declaration",
+    }
+    board.policy["cases"] = [case]
+    code, report = board.run(capsys)
+    assert code == 2
+    for entry in report["pins"]:
+        assert entry["outcome"] == "unassessed"
+        assert any(net in r and "0.0" in r and "3.3" in r for r in entry["reasons"])
+
+
+def test_consistent_aliases_and_unrelated_conflicts_allow_assessment(board):
+    case = powered("biased", BIASED)
+    rails = case["rails"]
+    rails["alias"] = dict(rails["VDD"])
+    rails["other1"] = dict(rails["VDD"], net="BUF_OUT")
+    rails["other2"] = dict(rails["other1"], voltage_v=0)
+    board.policy["cases"] = [case]
+    assert [entry["outcome"] for entry in board.report()["pins"]] == ["pass", "pass"]
 
 
 def test_supply_voltage_must_match_the_declared_state(board):

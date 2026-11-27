@@ -52,6 +52,7 @@ class _Scope:
     window: tuple[float, float] | None = None
     reference_net: str | None = None
     rails: dict[str, Any] | None = None
+    rail_voltages: dict[str, set[float]] = field(default_factory=dict)
     samples: str | None = None
     model: dict[str, Any] | None = None
     label: str | None = None
@@ -73,6 +74,7 @@ class _Binding:
     references: set[str]
     nets: set[str]
     pin_nets: dict[tuple[str, str], set[str]]
+    supply_nets: dict[str, set[str]]
     base: Path
     entries: dict[str, Any]
     loaded: dict[str, tuple[_Samples | None, list[str], str | None]] = field(default_factory=dict)
@@ -281,6 +283,9 @@ def _scope(case: dict[str, Any], binding: _Binding) -> tuple[_Scope, list[str]]:
     else:
         scope.reference_net = net
     scope.rails = _rails(case.get("rails"), scope.state, binding, name, problems)
+    if scope.rails:
+        for rail in scope.rails.values():
+            scope.rail_voltages.setdefault(rail["net"], set()).add(rail["voltage_v"])
     sample_set = case.get("samples")
     if _text(sample_set):
         scope.samples = sample_set
@@ -315,21 +320,25 @@ def _supply(
     """Require evidence for the device's own supply, not only the shared reference."""
     if scope.rails is None or scope.state is None:
         return
-    device_nets = {
-        net for (ref, _pin), nets in binding.pin_nets.items() if ref == reference for net in nets
-    }
-    supplies = [
-        rail
-        for rail in scope.rails.values()
-        if rail["net"] in device_nets and rail["net"] != scope.reference_net
-    ]
-    if not supplies:
+    supply_nets = binding.supply_nets.get(reference, set())
+    required = {net for net in supply_nets if net != scope.reference_net}
+    missing = required.difference(scope.rail_voltages)
+    if not required or missing:
+        detail = f" ({', '.join(sorted(missing))})" if missing else ""
         problems.append(
-            f"{who}: no rail evidence for a supply net of {reference} other than the "
+            f"{who}: no rail evidence for a supply net of {reference}{detail} other than the "
             f"reference net, so the {scope.state} state is not established"
         )
+    relevant = required.copy()
+    if scope.reference_net is not None:
+        relevant.add(scope.reference_net)
+    conflicts = sorted(net for net in relevant if len(scope.rail_voltages.get(net, ())) > 1)
+    for net in conflicts:
+        values = ", ".join(f"{v} V" for v in sorted(scope.rail_voltages[net]))
+        problems.append(f"{who}: conflicting rail voltages for {net}: {values}")
+    if not required or missing or conflicts:
         return
-    volts = [rail["voltage_v"] for rail in supplies]
+    volts = [v for net in required for v in scope.rail_voltages[net]]
     if scope.state == "powered" and not any(v != 0.0 for v in volts):
         problems.append(f"{who}: every supply rail of {reference} is 0 V in a powered case")
     elif scope.state == "unpowered" and any(v != 0.0 for v in volts):
@@ -539,11 +548,21 @@ def analyze_pin_ranges(schematic: str | Path, sidecar: str | Path) -> dict[str, 
     if Schematic.load(path).sheets:
         issues.append("Hierarchical schematic binding is not supported; no partial hierarchy pass")
         return report
-    netlist = build_netlist_from_schematic(path)
+    netlist = build_netlist_from_schematic(path, include_symbol_pins=True)
+    supply_pins = {
+        (component.reference, pin.number)
+        for component in netlist.components
+        for pin in component.pins
+        if pin.pin_type == "power_in"
+    }
+    supply_nets: dict[str, set[str]] = {}
     pin_nets: dict[tuple[str, str], set[str]] = {}
     for net in netlist.nets:
         for node in net.nodes:
-            pin_nets.setdefault((node.reference, node.pin), set()).add(net.name)
+            key = (node.reference, node.pin)
+            pin_nets.setdefault(key, set()).add(net.name)
+            if key in supply_pins:
+                supply_nets.setdefault(node.reference, set()).add(net.name)
     entries = policy.get("samples")
     if not isinstance(entries, dict):
         issues.append("Sample sets must be an object")
@@ -552,6 +571,7 @@ def analyze_pin_ranges(schematic: str | Path, sidecar: str | Path) -> dict[str, 
         references={component.reference for component in netlist.components},
         nets={net.name for net in netlist.nets},
         pin_nets=pin_nets,
+        supply_nets=supply_nets,
         base=assertions.parent,
         entries=entries,
     )

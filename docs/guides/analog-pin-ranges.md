@@ -314,6 +314,10 @@ A pin is unassessed, with a reason, when:
   the lower limit exceeds the upper one, or the limits have no source;
 - rail evidence is absent, a rail's net is not in the schematic, or a rail has
   no source;
+- the schematic does not identify a non-reference supply net on a device power
+  input, or any such net lacks a declared voltage for this case;
+- rail entries give conflicting voltages for the same device supply or voltage
+  reference net, even when the entries have different names;
 - the model assumptions or the input-protection declaration are missing;
 - the voltage reference net is absent or not in the schematic.
 
