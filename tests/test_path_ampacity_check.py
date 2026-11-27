@@ -476,6 +476,34 @@ class TestSeriesVersusParallelVias:
         assert change.count == 4
         assert 14 < change.current_capacity_a() < 15
 
+    @pytest.mark.parametrize("split_at", [None, 39.45, 35.0], ids=["whole", "near-bend", "mid"])
+    def test_offset_landing_keeps_short_entry_into_a_packed_row(self, split_at):
+        from kicad_tools.router.current_paths import audit_current_paths, resolve_current_path
+
+        pcb = PCB.create(layers=4)
+        source, bend, entry, sink = (30, 49.55), (39.55, 49.55), (40, 50), (47, 50)
+        _add_pad_footprint(pcb, ref="J1", x=source[0], y=source[1], net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=sink[0], y=sink[1], net="NET1")
+        # Splitting the feeder at a vertex must not expose that vertex as a
+        # second landing that bypasses the routed bend.
+        vertices = [source, bend] if split_at is None else [source, (split_at, 49.55), bend]
+        for a, b in zip(vertices, vertices[1:], strict=False):
+            pcb.add_trace(a, b, width=5.5, layer="F.Cu", net="NET1")
+        pcb.add_trace(bend, entry, width=5.5, layer="F.Cu", net="NET1")
+        for layer in ("F.Cu", "B.Cu"):
+            pcb.add_trace(entry, sink, width=3.75, layer=layer, net="NET1")
+        for x in (40, 41.53, 43.06, 44.59):
+            pcb.add_via(x, 50, size=1.65, drill=0.95, net="NET1")
+
+        result = resolve_current_path(pcb, _trunk_spec())
+        assert result.ok
+        assert any(seg.start == bend and seg.end == entry for seg in result.segments)
+        (transfer,) = result.series_layer_changes
+        assert transfer.count == 4
+        assert 14 < transfer.current_capacity_a() < 15
+        audit = audit_current_paths(pcb, [_trunk_spec()])
+        assert not audit.uncovered
+
     def test_same_direction_tracks_do_not_prove_an_entry_to_a_row(self):
         from kicad_tools.router.current_paths import _layer_changes
 

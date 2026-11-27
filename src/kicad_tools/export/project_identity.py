@@ -232,8 +232,13 @@ def archive_layout(
     identity: ProjectIdentity,
     sources: Iterable[Path],
     directory_of: Callable[[Path], str],
+    aliases: Iterable[Path] = (),
 ) -> ArchiveLayout:
     """Map every checked source to its archive member name.
+
+    *aliases* are in-project symlinked library members.  They are keyed by
+    their own (unresolved) path, so each keeps the library-relative name it was
+    discovered under instead of collapsing onto its target.
 
     *directory_of* gives the archive directory a source is delivered in, as a
     POSIX path. The ``VERSION.md`` record lands beside the delivered project
@@ -258,6 +263,17 @@ def archive_layout(
             )
         directories[real] = directory
         names[real] = member
+    for alias in sorted({Path(a) for a in aliases}):
+        directory = directory_of(alias)
+        member = str(PurePosixPath(directory) / alias.name)
+        previous = holders.setdefault(member, alias)
+        if previous != alias:
+            raise ProjectIdentityError(
+                f"kicad_project.zip cannot hold {previous.name} and {alias.name}: "
+                f"both would be archived as {member}"
+            )
+        directories[alias] = directory
+        names[alias] = member
     return ArchiveLayout(
         identity,
         directories,

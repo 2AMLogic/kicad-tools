@@ -731,6 +731,11 @@ def _project_symbol_files(project_dir: Path) -> list[Path]:
     return files
 
 
+def is_project_library_directory(name: str) -> bool:
+    """Recognize project-local KiCad footprint, symbol and 3D library directories."""
+    return name in {"footprints", "symbols"} or name.endswith((".pretty", ".3dshapes"))
+
+
 def project_library_members(directory: Path, boundary: Path) -> list[Path]:
     """Files under a library directory that stay inside *boundary* (#8763).
 
@@ -763,7 +768,7 @@ def project_library_members(directory: Path, boundary: Path) -> list[Path]:
 def _project_footprint_files(project_dir: Path) -> list[Path]:
     """Project-local footprint library inventory (#8727).
 
-    ``fp-lib-table``, ``*.pretty`` / ``footprints`` / ``symbols`` directories and
+    ``fp-lib-table``, local footprint, symbol and 3D library directories, and
     the in-project ``${KIPRJMOD}`` (or relative) libraries the table references.
     This mirrors the footprint half of ``kct readiness``'s dependency inventory
     so ``kct export`` writes every file readiness requires of
@@ -777,9 +782,7 @@ def _project_footprint_files(project_dir: Path) -> list[Path]:
     if table.is_file():
         files.add(table)
     for directory in project_dir.iterdir():
-        if directory.is_dir() and (
-            directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
-        ):
+        if directory.is_dir() and is_project_library_directory(directory.name):
             files.update(project_library_members(directory, root))
     if table.is_file():
         for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text(errors="replace")):
@@ -905,8 +908,11 @@ def _create_project_zip(
     if not project_files:
         raise FileNotFoundError(f"No KiCad project files found in {project_dir}")
 
-    project_files.extend(_project_symbol_files(project_dir))
-    project_files.extend(_project_footprint_files(project_dir))
+    library_files = [*_project_symbol_files(project_dir), *_project_footprint_files(project_dir)]
+    # In-project symlinked library members keep the library path they were found
+    # under; the archive layout is keyed by real path for everything else.
+    aliases = sorted({f for f in library_files if f != f.resolve()})
+    project_files.extend(f for f in library_files if f not in aliases)
     project_files = sorted(set(project_files))
 
     project_file = pcb_path.with_suffix(".kicad_pro")
@@ -922,7 +928,10 @@ def _create_project_zip(
         else boundary
     )
     layout = archive_layout(
-        identity, project_files, lambda source: source.parent.relative_to(archive_base).as_posix()
+        identity,
+        project_files,
+        lambda source: source.parent.relative_to(archive_base).as_posix(),
+        aliases,
     )
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for source in project_files:
@@ -932,10 +941,12 @@ def _create_project_zip(
                 zf.writestr(member, layout.member_bytes(real, real.read_bytes()))
             else:
                 zf.write(source, member)
+        for alias in aliases:
+            zf.write(alias, layout.names[alias])
         if layout.record is not None:
             zf.writestr(layout.record_name, layout.record)
 
-    logger.info(f"Created project ZIP: {zip_path} ({len(project_files)} files)")
+    logger.info(f"Created project ZIP: {zip_path} ({len(project_files) + len(aliases)} files)")
     return zip_path
 
 

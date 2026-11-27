@@ -1,28 +1,33 @@
 {
   "file": "output/simple_led_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "57d51f0532438e9563f97fa20df9e4a0b1f4f20591330e1612417fc1076b9272",
+  "pcb_sha256": "3cccde58c75cd3df1334e7af01c19491ebd6ed9da77deb750a4fca0e8f7aa44d",
   "layers": 2,
   "summary": {
     "errors": 0,
     "warnings": 0,
-    "infos": 1,
+    "infos": 10,
     "waived": 0,
-    "rules_checked": 71,
+    "rules_checked": 87,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
       "track_dangling": 1,
       "via_dangling": 1,
+      "plane_split": 1,
       "pour_slot": 1,
       "redundant_copper_duplicate": 1,
       "redundant_copper_fragments": 1,
       "redundant_copper_detour": 1,
       "redundant_copper_via_offcentre": 1,
       "redundant_copper_covered": 1,
+      "redundant_copper_staircase": 1,
+      "redundant_copper_pour_stub": 0,
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
+      "netclass_sidecar_mismatch": 1,
+      "netclass_track_width_mismatch": 1,
       "netclass_clearance_copper": 1,
       "netclass_clearance_unsupported": 1,
       "netclass_track_width": 1,
@@ -38,14 +43,19 @@
       "spec_conformance_min_trace": 1,
       "spec_conformance_min_via": 1,
       "spec_conformance_min_drill": 1,
-      "spec_conformance_target_fab": 1
+      "spec_conformance_target_fab": 1,
+      "mask_to_copper": 1,
+      "mask_negative_expansion": 1,
+      "mask_multi_segment": 1
     },
     "passed": true,
     "stale_waivers": 0,
     "orphan_waivers": 0,
-    "coverage_checked": 39,
+    "coverage_checked": 47,
     "coverage_skipped": 6,
     "coverage_unknown": [
+      "mask_multi_segment",
+      "mask_negative_expansion",
       "model_coverage",
       "spec_conformance"
     ],
@@ -53,6 +63,61 @@
     "attach_zone_exemption": "not_applicable"
   },
   "violations": [
+    {
+      "rule_id": "physical_copper_gap",
+      "type": "physical_copper_gap",
+      "severity": "info",
+      "message": "Zone-fill clearance gap 0.0581mm; closest boundaries (156.071646, 87.527293) and (156.072476, 87.469222); zone-fill (pour) copper is not judged by JLCDFM (issue #8938)",
+      "location": [
+        156.072,
+        87.498
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.05807671092996003,
+      "required_value": null,
+      "items": [
+        "d8d8efe2-a45a-5150-91bd-d377cd5e0752"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "same_net": true,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "physical_copper_gap|d8d8efe2-a45a-5150-91bd-d377cd5e0752|GND|B.Cu",
+      "evidence_hash": "ev4:243e0a66138ff6fb",
+      "closest_locations": [
+        [
+          156.072,
+          87.527
+        ],
+        [
+          156.072,
+          87.469
+        ]
+      ]
+    },
+    {
+      "rule_id": "physical_copper_gap_incomplete",
+      "type": "physical_copper_gap_incomplete",
+      "severity": "info",
+      "message": "Pad mask-bridge check incomplete: copper weight unknown (declare a stackup copper weight or pass --copper)",
+      "location": null,
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [],
+      "nets": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "physical_copper_gap_incomplete|||",
+      "evidence_hash": "ev4:8ed38c7fe94a3d86"
+    },
     {
       "rule_id": "connector_edge_distance",
       "type": "unknown",
@@ -69,15 +134,1417 @@
         "J1"
       ],
       "nets": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
       "status": "info",
       "waived": false,
       "key": "connector_edge_distance|J1||F.Cu",
-      "evidence_hash": "ev3:e474f9a88cdb95e5"
+      "evidence_hash": "ev4:1a71188aa03c0196"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.6 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 0; opening pad:R1/1; exposed copper zone (net VCC); same-net; 4 thermal spokes (declared spoke 0.3 mm, relief gap 0.2 mm)",
+      "location": [
+        147.5,
+        85.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "aa479e34-ce43-51e3-854b-c6853fc7e7c8",
+        "183805f5-c666-5727-b289-c2245fa1ea13"
+      ],
+      "nets": [
+        "VCC"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|183805f5-c666-5727-b289-c2245fa1ea13,aa479e34-ce43-51e3-854b-c6853fc7e7c8|VCC|F.Cu",
+      "evidence_hash": "ev4:a69e97ba835d2748"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.0698337009 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 1; opening pad:R1/2; exposed copper segment (net LED_ANODE); same-net own-pad entry",
+      "location": [
+        149.7182505,
+        85.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "44d6ac9f-90ee-5bb7-beeb-dc9efbb91ae6",
+        "059ab049-f201-5c1f-954f-2849bf8ab35f"
+      ],
+      "nets": [
+        "LED_ANODE"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|059ab049-f201-5c1f-954f-2849bf8ab35f,44d6ac9f-90ee-5bb7-beeb-dc9efbb91ae6|LED_ANODE|F.Cu",
+      "evidence_hash": "ev4:73a3352c98a2bfed"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.120537999 mm\u00b2; beyond owner pad copper 1.03017656e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 2; opening pad:D1/2; exposed copper segment (net LED_ANODE); same-net own-pad entry",
+      "location": [
+        156.95259515419087,
+        87.18259515419086
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "a0ca3eb3-a60b-5458-9531-e7b0a329e7d2",
+        "fc966178-7785-5b64-83d8-60bda08b022f"
+      ],
+      "nets": [
+        "LED_ANODE"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|a0ca3eb3-a60b-5458-9531-e7b0a329e7d2,fc966178-7785-5b64-83d8-60bda08b022f|LED_ANODE|F.Cu",
+      "evidence_hash": "ev4:ccad5f9d3d06e2b3"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.579356351 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 3; opening pad:J1/1; exposed copper zone (net VCC); same-net; 4 thermal spokes (declared spoke 0.4 mm, relief gap 0.3 mm)",
+      "location": [
+        141.0,
+        85.555
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "32052f3c-489e-539f-968f-5ca4a5852de5",
+        "183805f5-c666-5727-b289-c2245fa1ea13"
+      ],
+      "nets": [
+        "VCC"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|183805f5-c666-5727-b289-c2245fa1ea13,32052f3c-489e-539f-968f-5ca4a5852de5|VCC|F.Cu",
+      "evidence_hash": "ev4:d619bf5b2f386a97"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.556568451 mm\u00b2; beyond owner pad copper 1.13686838e-14 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 4; opening pad:D1/1; exposed copper zone (net GND); same-net; 3 thermal spokes (declared spoke 0.4 mm, relief gap 0.3 mm)",
+      "location": [
+        154.055,
+        87.5
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "64fc289f-9d09-5741-886f-9dab05a0ae7e",
+        "d8d8efe2-a45a-5150-91bd-d377cd5e0752"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|64fc289f-9d09-5741-886f-9dab05a0ae7e,d8d8efe2-a45a-5150-91bd-d377cd5e0752|GND|B.Cu",
+      "evidence_hash": "ev4:69780f98470bee54"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.566699927 mm\u00b2; beyond owner pad copper 3.99884127e-07 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 5; opening pad:J1/2; exposed copper zone (net GND); same-net; 4 thermal spokes (declared spoke 0.4 mm, relief gap 0.3 mm)",
+      "location": [
+        141.0,
+        88.10693271104515
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "c69021ac-3c65-52e4-a948-48dce109d60d",
+        "d8d8efe2-a45a-5150-91bd-d377cd5e0752"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|c69021ac-3c65-52e4-a948-48dce109d60d,d8d8efe2-a45a-5150-91bd-d377cd5e0752|GND|B.Cu",
+      "evidence_hash": "ev4:fee6c7f767a7b5a3"
+    },
+    {
+      "rule_id": "mask_to_copper_openings",
+      "type": "unknown",
+      "severity": "info",
+      "message": "Mask-to-copper: 6 findings across 6 mask openings; per-opening: pad:J1/1 x1, pad:R1/2 x1, pad:D1/1 x1, pad:D1/2 x1, pad:R1/1 x1 (+1 more openings)",
+      "location": null,
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [],
+      "nets": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper_openings|||",
+      "evidence_hash": "ev4:b7f9218269c690b5"
     }
   ],
-  "mask_copper_assessments": [],
+  "mask_copper_assessments": [
+    {
+      "schema": "kct.mask-copper-assessment.v1",
+      "coverage": "complete",
+      "passed": true,
+      "reasons": [],
+      "policy": {
+        "clearance_mm": 0.09,
+        "source": "JLCDFM mask-opening-exposing-trace observation (epic #8838)",
+        "process": "jlcpcb",
+        "revision": "interim-2026-11-12",
+        "warning_clearance_mm": 0.15
+      },
+      "binding": {
+        "source_sha256": "3cccde58c75cd3df1334e7af01c19491ebd6ed9da77deb750a4fca0e8f7aa44d",
+        "project_sha256": "53d8f23774031e1bb024cfc201c2fb0ae800afd2f4bb554b46a4359b8834b4f8",
+        "rules_sha256": "b1be95e9fb56ff826f5ca6d9ee9b5c085987f1257ec1cd0e8d41c23e0f396f81",
+        "export_profile_sha256": "57db09bbad1eda3521ef20a55d5cf22331fa68405bfda4774536271d58f38dc2"
+      },
+      "measurements": [
+        {
+          "opening_uuids": [
+            "aa479e34-ce43-51e3-854b-c6853fc7e7c8"
+          ],
+          "conductor_uuid": "183805f5-c666-5727-b289-c2245fa1ea13",
+          "mask_side": "F.Mask",
+          "copper_layer": "F.Cu",
+          "location_mm": [
+            147.5,
+            85.5
+          ],
+          "clearance_mm": 0.0,
+          "exposed_area_mm2": 0.6000000000000227,
+          "relation": "overlap",
+          "disposition": "own_pour_thermal",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:roundrect",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "VCC",
+          "conductor_net": "VCC",
+          "conductor_kind": "zone",
+          "same_net": true,
+          "own_pad_entry": null,
+          "owner_ref": "R1/1",
+          "exposed_beyond_owner_mm2": 0.0,
+          "beside_owner_excess_mm2": 0.0,
+          "owner_run": null,
+          "pour_spokes": 4,
+          "pour_relief_gap_mm": 0.2,
+          "pour_spoke_width_mm": 0.3,
+          "owner_nets": [
+            "VCC"
+          ],
+          "within_own_pad_failed_condition": 4
+        },
+        {
+          "opening_uuids": [
+            "44d6ac9f-90ee-5bb7-beeb-dc9efbb91ae6"
+          ],
+          "conductor_uuid": "059ab049-f201-5c1f-954f-2849bf8ab35f",
+          "mask_side": "F.Mask",
+          "copper_layer": "F.Cu",
+          "location_mm": [
+            149.7182505,
+            85.5
+          ],
+          "clearance_mm": 0.0,
+          "exposed_area_mm2": 0.06983370091100465,
+          "relation": "overlap",
+          "disposition": "within_own_pad",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:roundrect",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "LED_ANODE",
+          "conductor_net": "LED_ANODE",
+          "conductor_kind": "segment",
+          "same_net": true,
+          "own_pad_entry": true,
+          "owner_ref": "R1/2",
+          "exposed_beyond_owner_mm2": 0.0,
+          "beside_owner_excess_mm2": 0.0,
+          "owner_run": null,
+          "pour_spokes": null,
+          "pour_relief_gap_mm": null,
+          "pour_spoke_width_mm": null,
+          "owner_nets": [
+            "LED_ANODE"
+          ],
+          "within_own_pad_failed_condition": null
+        },
+        {
+          "opening_uuids": [
+            "a0ca3eb3-a60b-5458-9531-e7b0a329e7d2"
+          ],
+          "conductor_uuid": "fc966178-7785-5b64-83d8-60bda08b022f",
+          "mask_side": "F.Mask",
+          "copper_layer": "F.Cu",
+          "location_mm": [
+            156.95259515419087,
+            87.18259515419086
+          ],
+          "clearance_mm": 0.0,
+          "exposed_area_mm2": 0.1205379994762966,
+          "relation": "overlap",
+          "disposition": "within_own_pad",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:circle",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "LED_ANODE",
+          "conductor_net": "LED_ANODE",
+          "conductor_kind": "segment",
+          "same_net": true,
+          "own_pad_entry": true,
+          "owner_ref": "D1/2",
+          "exposed_beyond_owner_mm2": 1.030176562670029e-08,
+          "beside_owner_excess_mm2": 0.0,
+          "owner_run": null,
+          "pour_spokes": null,
+          "pour_relief_gap_mm": null,
+          "pour_spoke_width_mm": null,
+          "owner_nets": [
+            "LED_ANODE"
+          ],
+          "within_own_pad_failed_condition": null
+        },
+        {
+          "opening_uuids": [
+            "32052f3c-489e-539f-968f-5ca4a5852de5"
+          ],
+          "conductor_uuid": "183805f5-c666-5727-b289-c2245fa1ea13",
+          "mask_side": "F.Mask",
+          "copper_layer": "F.Cu",
+          "location_mm": [
+            141.0,
+            85.555
+          ],
+          "clearance_mm": 0.0,
+          "exposed_area_mm2": 0.579356350566979,
+          "relation": "overlap",
+          "disposition": "own_pour_thermal",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:rect",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "VCC",
+          "conductor_net": "VCC",
+          "conductor_kind": "zone",
+          "same_net": true,
+          "own_pad_entry": null,
+          "owner_ref": "J1/1",
+          "exposed_beyond_owner_mm2": 0.0,
+          "beside_owner_excess_mm2": 0.0,
+          "owner_run": null,
+          "pour_spokes": 4,
+          "pour_relief_gap_mm": 0.3,
+          "pour_spoke_width_mm": 0.4,
+          "owner_nets": [
+            "VCC"
+          ],
+          "within_own_pad_failed_condition": 4
+        },
+        {
+          "opening_uuids": [
+            "64fc289f-9d09-5741-886f-9dab05a0ae7e"
+          ],
+          "conductor_uuid": "d8d8efe2-a45a-5150-91bd-d377cd5e0752",
+          "mask_side": "B.Mask",
+          "copper_layer": "B.Cu",
+          "location_mm": [
+            154.055,
+            87.5
+          ],
+          "clearance_mm": 0.0,
+          "exposed_area_mm2": 0.5565684513400193,
+          "relation": "overlap",
+          "disposition": "own_pour_thermal",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:rect",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "GND",
+          "conductor_net": "GND",
+          "conductor_kind": "zone",
+          "same_net": true,
+          "own_pad_entry": null,
+          "owner_ref": "D1/1",
+          "exposed_beyond_owner_mm2": 1.1368683772161765e-14,
+          "beside_owner_excess_mm2": 0.0,
+          "owner_run": null,
+          "pour_spokes": 3,
+          "pour_relief_gap_mm": 0.3,
+          "pour_spoke_width_mm": 0.4,
+          "owner_nets": [
+            "GND"
+          ],
+          "within_own_pad_failed_condition": 4
+        },
+        {
+          "opening_uuids": [
+            "c69021ac-3c65-52e4-a948-48dce109d60d"
+          ],
+          "conductor_uuid": "d8d8efe2-a45a-5150-91bd-d377cd5e0752",
+          "mask_side": "B.Mask",
+          "copper_layer": "B.Cu",
+          "location_mm": [
+            141.0,
+            88.10693271104515
+          ],
+          "clearance_mm": 0.0,
+          "exposed_area_mm2": 0.5666999266779169,
+          "relation": "overlap",
+          "disposition": "own_pour_thermal",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:oval",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "GND",
+          "conductor_net": "GND",
+          "conductor_kind": "zone",
+          "same_net": true,
+          "own_pad_entry": null,
+          "owner_ref": "J1/2",
+          "exposed_beyond_owner_mm2": 3.9988412679703883e-07,
+          "beside_owner_excess_mm2": 0.0,
+          "owner_run": null,
+          "pour_spokes": 4,
+          "pour_relief_gap_mm": 0.3,
+          "pour_spoke_width_mm": 0.4,
+          "owner_nets": [
+            "GND"
+          ],
+          "within_own_pad_failed_condition": 4
+        }
+      ],
+      "intent_audit": [],
+      "geometry_provenance": {
+        "export": {
+          "source_sha256": "3cccde58c75cd3df1334e7af01c19491ebd6ed9da77deb750a4fca0e8f7aa44d",
+          "project_sha256": "53d8f23774031e1bb024cfc201c2fb0ae800afd2f4bb554b46a4359b8834b4f8",
+          "rules_sha256": "b1be95e9fb56ff826f5ca6d9ee9b5c085987f1257ec1cd0e8d41c23e0f396f81",
+          "native_version": "10.0.6",
+          "export_identity": {
+            "command": [
+              "docker",
+              "run",
+              "kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec",
+              "kicad-cli"
+            ],
+            "arguments": [
+              "pcb",
+              "export",
+              "gerbers",
+              "--layers",
+              "F.Mask,B.Mask,F.Cu,B.Cu",
+              "--disable-aperture-macros",
+              "--no-protel-ext",
+              "--precision",
+              "6"
+            ],
+            "profile": "macro-free-native-gerber",
+            "board_plot_params": false,
+            "variables": [],
+            "plot_profile_source_sha256": "3cccde58c75cd3df1334e7af01c19491ebd6ed9da77deb750a4fca0e8f7aa44d",
+            "stdout": "Plotted to '<scratch>/gerbers/simple_led_routed-F_Cu.gbr'.\nPlotted to '<scratch>/gerbers/simple_led_routed-B_Cu.gbr'.\nPlotted to '<scratch>/gerbers/simple_led_routed-F_Mask.gbr'.\nPlotted to '<scratch>/gerbers/simple_led_routed-B_Mask.gbr'.\n",
+            "stderr": ""
+          },
+          "features": [
+            {
+              "source_uuid": "059ab049-f201-5c1f-954f-2849bf8ab35f",
+              "parent_uuid": "",
+              "kind": "segment",
+              "layers": [
+                "F.Cu"
+              ],
+              "authored_at": null,
+              "position_frame": "board",
+              "angle_frame": null,
+              "parent_placement": null
+            },
+            {
+              "source_uuid": "183805f5-c666-5727-b289-c2245fa1ea13",
+              "parent_uuid": "",
+              "kind": "zone",
+              "layers": [
+                "F.Cu"
+              ],
+              "authored_at": null,
+              "position_frame": "board",
+              "angle_frame": null,
+              "parent_placement": null
+            },
+            {
+              "source_uuid": "23366775-459f-5612-9089-8735f5971f09",
+              "parent_uuid": "611d1524-dac3-5dee-9a33-5d1d34ba1f06",
+              "kind": "pad:circle",
+              "layers": [
+                "F.Cu",
+                "F.Mask"
+              ],
+              "authored_at": [
+                0,
+                0
+              ],
+              "position_frame": "footprint-local",
+              "angle_frame": "board",
+              "parent_placement": {
+                "at": [
+                  139.5,
+                  94
+                ],
+                "layer": "F.Cu",
+                "coordinate_frame": "board"
+              }
+            },
+            {
+              "source_uuid": "32052f3c-489e-539f-968f-5ca4a5852de5",
+              "parent_uuid": "b2281a9a-5484-5f92-b7c3-38e5a4261e90",
+              "kind": "pad:rect",
+              "layers": [
+                "*.Cu",
+                "*.Mask"
+              ],
+              "authored_at": [
+                0,
+                -1.27
+              ],
+              "position_frame": "footprint-local",
+              "angle_frame": "board",
+              "parent_placement": {
+                "at": [
+                  141,
+                  87.5
+                ],
+                "layer": "F.Cu",
+                "coordinate_frame": "board"
+              }
+            },
+            {
+              "source_uuid": "44d6ac9f-90ee-5bb7-beeb-dc9efbb91ae6",
+              "parent_uuid": "2cb404b0-3620-5d5f-865b-6219e2a40052",
+              "kind": "pad:roundrect",
+              "layers": [
+                "F.Cu",
+                "F.Mask",
+                "F.Paste"
+              ],
+              "authored_at": [
+                1,
+                0
+              ],
+              "position_frame": "footprint-local",
+              "angle_frame": "board",
+              "parent_placement": {
+                "at": [
+                  148.5,
+                  85.5
+                ],
+                "layer": "F.Cu",
+                "coordinate_frame": "board"
+              }
+            },
+            {
+              "source_uuid": "64fc289f-9d09-5741-886f-9dab05a0ae7e",
+              "parent_uuid": "43ca53bd-9665-50b3-b3df-e1fe375c580e",
+              "kind": "pad:rect",
+              "layers": [
+                "*.Cu",
+                "*.Mask"
+              ],
+              "authored_at": [
+                -1.27,
+                0
+              ],
+              "position_frame": "footprint-local",
+              "angle_frame": "board",
+              "parent_placement": {
+                "at": [
+                  156,
+                  87.5
+                ],
+                "layer": "F.Cu",
+                "coordinate_frame": "board"
+              }
+            },
+            {
+              "source_uuid": "89b97481-3eb8-52a0-8726-cde8a2383d65",
+              "parent_uuid": "44caaa58-f808-5d18-809a-75befd8b566d",
+              "kind": "pad:circle",
+              "layers": [
+                "F.Cu",
+                "F.Mask"
+              ],
+              "authored_at": [
+                0,
+                0
+              ],
+              "position_frame": "footprint-local",
+              "angle_frame": "board",
+              "parent_placement": {
+                "at": [
+                  157.5,
+                  94
+                ],
+                "layer": "F.Cu",
+                "coordinate_frame": "board"
+              }
+            },
+            {
+              "source_uuid": "a0ca3eb3-a60b-5458-9531-e7b0a329e7d2",
+              "parent_uuid": "43ca53bd-9665-50b3-b3df-e1fe375c580e",
+              "kind": "pad:circle",
+              "layers": [
+                "*.Cu",
+                "*.Mask"
+              ],
+              "authored_at": [
+                1.27,
+                0
+              ],
+              "position_frame": "footprint-local",
+              "angle_frame": "board",
+              "parent_placement": {
+                "at": [
+                  156,
+                  87.5
+                ],
+                "layer": "F.Cu",
+                "coordinate_frame": "board"
+              }
+            },
+            {
+              "source_uuid": "aa245eaf-e77f-56b7-8f74-63a677fe720a",
+              "parent_uuid": "7ba426b6-aa17-54c2-ac47-66ce6bf54279",
+              "kind": "pad:circle",
+              "layers": [
+                "F.Cu",
+                "F.Mask"
+              ],
+              "authored_at": [
+                0,
+                0
+              ],
+              "position_frame": "footprint-local",
+              "angle_frame": "board",
+              "parent_placement": {
+                "at": [
+                  139.5,
+                  81
+                ],
+                "layer": "F.Cu",
+                "coordinate_frame": "board"
+              }
+            },
+            {
+              "source_uuid": "aa479e34-ce43-51e3-854b-c6853fc7e7c8",
+              "parent_uuid": "2cb404b0-3620-5d5f-865b-6219e2a40052",
+              "kind": "pad:roundrect",
+              "layers": [
+                "F.Cu",
+                "F.Mask",
+                "F.Paste"
+              ],
+              "authored_at": [
+                -1,
+                0
+              ],
+              "position_frame": "footprint-local",
+              "angle_frame": "board",
+              "parent_placement": {
+                "at": [
+                  148.5,
+                  85.5
+                ],
+                "layer": "F.Cu",
+                "coordinate_frame": "board"
+              }
+            },
+            {
+              "source_uuid": "c69021ac-3c65-52e4-a948-48dce109d60d",
+              "parent_uuid": "b2281a9a-5484-5f92-b7c3-38e5a4261e90",
+              "kind": "pad:oval",
+              "layers": [
+                "*.Cu",
+                "*.Mask"
+              ],
+              "authored_at": [
+                0,
+                1.27
+              ],
+              "position_frame": "footprint-local",
+              "angle_frame": "board",
+              "parent_placement": {
+                "at": [
+                  141,
+                  87.5
+                ],
+                "layer": "F.Cu",
+                "coordinate_frame": "board"
+              }
+            },
+            {
+              "source_uuid": "d8d8efe2-a45a-5150-91bd-d377cd5e0752",
+              "parent_uuid": "",
+              "kind": "zone",
+              "layers": [
+                "B.Cu"
+              ],
+              "authored_at": null,
+              "position_frame": "board",
+              "angle_frame": null,
+              "parent_placement": null
+            },
+            {
+              "source_uuid": "fc966178-7785-5b64-83d8-60bda08b022f",
+              "parent_uuid": "",
+              "kind": "segment",
+              "layers": [
+                "F.Cu"
+              ],
+              "authored_at": null,
+              "position_frame": "board",
+              "angle_frame": null,
+              "parent_placement": null
+            }
+          ],
+          "coverage": "complete",
+          "scope": "native exported mask and copper; no clearance or exposure verdict",
+          "coordinate_frame": "native plot coordinates in mm, y down",
+          "curve_error_mm_per_construction": 1e-06,
+          "layers_wkt": {
+            "B.Cu": {
+              "sha256": "78cfd8fac800d6bdb6d362c3d4bd427099e25b95f878ae32f2384b6e5a0ff6e5",
+              "bytes": 138141
+            },
+            "B.Mask": {
+              "sha256": "a2064d235edcb5a12c142082e8fa16aa067b0dc11401129968520b8205363ec9",
+              "bytes": 156117
+            },
+            "F.Cu": {
+              "sha256": "1bbbea897eab4691e0b54438fe48217508029f28fccc59882b560e83fd5dadc4",
+              "bytes": 429138
+            },
+            "F.Mask": {
+              "sha256": "2f44e914bd8f66338c39450cf6910f8f4bcce5b6843ccbe60a43072152ff981c",
+              "bytes": 489863
+            }
+          },
+          "gerber_sha256": {
+            "F.Mask": "245ae0c306db33d77583472f59e729d8386ab48e5dc3e9b6399fb65a639dd29a",
+            "B.Mask": "482331b6e1e3feb35dcd29e764e53b5eb02059083fb1d39f4e444131b42e8369",
+            "F.Cu": "88469a146e5af79d2a481fb771f13e1ba607dc2ee21ca0b55c014aadb5a93b21",
+            "B.Cu": "cbfa69d6701a70edec89bc22567f39937aa9c8529c00bb70899ec8722d0de7b6"
+          },
+          "unsupported": [],
+          "source_geometries": {}
+        },
+        "objects": {
+          "worker_sha256": "72d5a5841144a1cbab758c8f1db27823ac13792f22af7b43a00350097e1778bb",
+          "native_python_command": [
+            "docker",
+            "run",
+            "kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec",
+            "python3"
+          ],
+          "native_version": "10.0.6",
+          "objects_sha256": "5786433b29d1771f29ecd117e7585793918447e0fd0db33707a42a9e30a42aea",
+          "max_error_mm_per_construction": 0.005,
+          "attribution": "native full-board object UUID; no neighbor removal"
+        },
+        "source_objects": {
+          "aa479e34-ce43-51e3-854b-c6853fc7e7c8": {
+            "kind": "pad:roundrect",
+            "net": "VCC",
+            "margin_mm": {
+              "F.Mask": 0.0
+            },
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "216220e5918526f7d4c74eb238cb2f0e8396660128705062862db6630fca97ed",
+                "bytes": 24260
+              },
+              "F.Mask": {
+                "sha256": "216220e5918526f7d4c74eb238cb2f0e8396660128705062862db6630fca97ed",
+                "bytes": 24260
+              }
+            }
+          },
+          "44d6ac9f-90ee-5bb7-beeb-dc9efbb91ae6": {
+            "kind": "pad:roundrect",
+            "net": "LED_ANODE",
+            "margin_mm": {
+              "F.Mask": 0.0
+            },
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "b0ddb40a1009850fdef383a38759cc9db8c0d02a02302c8f68f85adced623b3d",
+                "bytes": 24260
+              },
+              "F.Mask": {
+                "sha256": "b0ddb40a1009850fdef383a38759cc9db8c0d02a02302c8f68f85adced623b3d",
+                "bytes": 24260
+              }
+            }
+          },
+          "64fc289f-9d09-5741-886f-9dab05a0ae7e": {
+            "kind": "pad:rect",
+            "net": "GND",
+            "margin_mm": {
+              "F.Mask": 0.0,
+              "B.Mask": 0.0
+            },
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "9b998254129dda07730be2a2704ae267264aca0eb9b3190ab32c27bde4051c8e",
+                "bytes": 75
+              },
+              "B.Cu": {
+                "sha256": "9b998254129dda07730be2a2704ae267264aca0eb9b3190ab32c27bde4051c8e",
+                "bytes": 75
+              },
+              "F.Mask": {
+                "sha256": "9b998254129dda07730be2a2704ae267264aca0eb9b3190ab32c27bde4051c8e",
+                "bytes": 75
+              },
+              "B.Mask": {
+                "sha256": "9b998254129dda07730be2a2704ae267264aca0eb9b3190ab32c27bde4051c8e",
+                "bytes": 75
+              }
+            }
+          },
+          "a0ca3eb3-a60b-5458-9531-e7b0a329e7d2": {
+            "kind": "pad:circle",
+            "net": "LED_ANODE",
+            "margin_mm": {
+              "F.Mask": 0.0,
+              "B.Mask": 0.0
+            },
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "c4b0e64201059f2ae7a74b70ffa34ab930036c44a03bbec05b68d64bd098127c",
+                "bytes": 46072
+              },
+              "B.Cu": {
+                "sha256": "c4b0e64201059f2ae7a74b70ffa34ab930036c44a03bbec05b68d64bd098127c",
+                "bytes": 46072
+              },
+              "F.Mask": {
+                "sha256": "c4b0e64201059f2ae7a74b70ffa34ab930036c44a03bbec05b68d64bd098127c",
+                "bytes": 46072
+              },
+              "B.Mask": {
+                "sha256": "c4b0e64201059f2ae7a74b70ffa34ab930036c44a03bbec05b68d64bd098127c",
+                "bytes": 46072
+              }
+            }
+          },
+          "89b97481-3eb8-52a0-8726-cde8a2383d65": {
+            "kind": "pad:circle",
+            "net": "",
+            "margin_mm": {
+              "F.Mask": 0.5
+            },
+            "margin_source": "object:89b97481-3eb8-52a0-8726-cde8a2383d65:solder_mask_margin=0.5",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "c6f90e2ee16d250d366dd9dcaab12c5ca82627c26d62c2a11b8861678fa1e50f",
+                "bytes": 34304
+              },
+              "F.Mask": {
+                "sha256": "1998e0aeb4823a5abcf1207323398bbb8906caca23b67b31d2456db515784a7f",
+                "bytes": 48320
+              }
+            }
+          },
+          "23366775-459f-5612-9089-8735f5971f09": {
+            "kind": "pad:circle",
+            "net": "",
+            "margin_mm": {
+              "F.Mask": 0.5
+            },
+            "margin_source": "object:23366775-459f-5612-9089-8735f5971f09:solder_mask_margin=0.5",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "610e63cc39cf086fbe7226b04014f1d2fbb349dc8dbd72f0ffbec1eb37338fb8",
+                "bytes": 34304
+              },
+              "F.Mask": {
+                "sha256": "c5efbe54a576492754fbed08f9850c1803660aa14940c04cdc4554a61e66c289",
+                "bytes": 48320
+              }
+            }
+          },
+          "aa245eaf-e77f-56b7-8f74-63a677fe720a": {
+            "kind": "pad:circle",
+            "net": "",
+            "margin_mm": {
+              "F.Mask": 0.5
+            },
+            "margin_source": "object:aa245eaf-e77f-56b7-8f74-63a677fe720a:solder_mask_margin=0.5",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "89aff43542ebc50800a651a8214e8c88769f4d44f5ad27ec6eb522e414ec448d",
+                "bytes": 34304
+              },
+              "F.Mask": {
+                "sha256": "4abcaea632c181bc663d680937d72615a7789af6085c949c3e98509b3b8ea658",
+                "bytes": 48320
+              }
+            }
+          },
+          "32052f3c-489e-539f-968f-5ca4a5852de5": {
+            "kind": "pad:rect",
+            "net": "VCC",
+            "margin_mm": {
+              "F.Mask": 0.0,
+              "B.Mask": 0.0
+            },
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "32bc2c5e82b5eee018830bc1bf4254b418778b1a2d1b018cb609745c5b010699",
+                "bytes": 80
+              },
+              "B.Cu": {
+                "sha256": "32bc2c5e82b5eee018830bc1bf4254b418778b1a2d1b018cb609745c5b010699",
+                "bytes": 80
+              },
+              "F.Mask": {
+                "sha256": "32bc2c5e82b5eee018830bc1bf4254b418778b1a2d1b018cb609745c5b010699",
+                "bytes": 80
+              },
+              "B.Mask": {
+                "sha256": "32bc2c5e82b5eee018830bc1bf4254b418778b1a2d1b018cb609745c5b010699",
+                "bytes": 80
+              }
+            }
+          },
+          "c69021ac-3c65-52e4-a948-48dce109d60d": {
+            "kind": "pad:oval",
+            "net": "GND",
+            "margin_mm": {
+              "F.Mask": 0.0,
+              "B.Mask": 0.0
+            },
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "2ce3e3215a3ab10e2537019995c909c89bc1ffcd0177f9ba178053eaae21938e",
+                "bytes": 44600
+              },
+              "B.Cu": {
+                "sha256": "2ce3e3215a3ab10e2537019995c909c89bc1ffcd0177f9ba178053eaae21938e",
+                "bytes": 44600
+              },
+              "F.Mask": {
+                "sha256": "2ce3e3215a3ab10e2537019995c909c89bc1ffcd0177f9ba178053eaae21938e",
+                "bytes": 44600
+              },
+              "B.Mask": {
+                "sha256": "2ce3e3215a3ab10e2537019995c909c89bc1ffcd0177f9ba178053eaae21938e",
+                "bytes": 44600
+              }
+            }
+          },
+          "059ab049-f201-5c1f-954f-2849bf8ab35f": {
+            "kind": "segment",
+            "net": "LED_ANODE",
+            "margin_mm": {},
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "1975456e255d9ef09275268a26d9fba4a76a5efdcb2341ad78607fcb09067a0b",
+                "bytes": 12326
+              }
+            }
+          },
+          "fc966178-7785-5b64-83d8-60bda08b022f": {
+            "kind": "segment",
+            "net": "LED_ANODE",
+            "margin_mm": {},
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "4b9284ff6abda1d646ca523e17079631278246e51bc2361a60bf0a4bd66ea21e",
+                "bytes": 12344
+              }
+            }
+          },
+          "183805f5-c666-5727-b289-c2245fa1ea13": {
+            "kind": "zone",
+            "net": "VCC",
+            "margin_mm": {},
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "9d94698be62f751613dd411f7a024c7097caccfcb83ed324627b50290303b19c",
+                "bytes": 12090
+              }
+            }
+          },
+          "d8d8efe2-a45a-5150-91bd-d377cd5e0752": {
+            "kind": "zone",
+            "net": "GND",
+            "margin_mm": {},
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "B.Cu": {
+                "sha256": "c8e26b8a532da9cd63cd61aa7c842d573674592f9f2f1bbab146e38cb313a176",
+                "bytes": 5618
+              }
+            }
+          }
+        }
+      },
+      "evaluated_pairs": 115,
+      "nominal_exposure": {
+        "artwork_source": "internal_replot",
+        "status": "complete",
+        "nominal_area_threshold_mm2": 0.0,
+        "construction_uncertainty_mm": 0.010004,
+        "opening_counts": {
+          "plotted": 13,
+          "matched": 10,
+          "unresolved": 0,
+          "excluded": 3
+        },
+        "measured_opening_counts": {
+          "evaluated": 10,
+          "foreign_net": 0,
+          "same_net_beyond_land": 3
+        },
+        "finding_counts": {
+          "foreign_net": 0,
+          "same_net_beyond_land": 3,
+          "registration_or_near_pad_only": 0,
+          "no_nominal_exposure": 3,
+          "unevaluated": 0,
+          "excluded": 0
+        },
+        "faces": {
+          "F.Mask": {
+            "status": "complete",
+            "missing_layers": [],
+            "gerber_sha256": {
+              "F.Mask": "245ae0c306db33d77583472f59e729d8386ab48e5dc3e9b6399fb65a639dd29a",
+              "F.Cu": "88469a146e5af79d2a481fb771f13e1ba607dc2ee21ca0b55c014aadb5a93b21"
+            },
+            "openings": [
+              {
+                "opening_uuids": [
+                  "23366775-459f-5612-9089-8735f5971f09"
+                ],
+                "bounds_mm": [
+                  138.5,
+                  93.0,
+                  140.5,
+                  95.0
+                ],
+                "status": "excluded",
+                "reason": "unnetted_fiducial",
+                "owner_ref": null,
+                "owner_net": null,
+                "footprint_ref": "FID3",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "89b97481-3eb8-52a0-8726-cde8a2383d65"
+                ],
+                "bounds_mm": [
+                  156.5,
+                  93.0,
+                  158.5,
+                  95.0
+                ],
+                "status": "excluded",
+                "reason": "unnetted_fiducial",
+                "owner_ref": null,
+                "owner_net": null,
+                "footprint_ref": "FID2",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "c69021ac-3c65-52e4-a948-48dce109d60d"
+                ],
+                "bounds_mm": [
+                  140.15,
+                  87.92,
+                  141.85,
+                  89.61999999999999
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J1/2",
+                "owner_net": "GND",
+                "footprint_ref": "J1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "64fc289f-9d09-5741-886f-9dab05a0ae7e"
+                ],
+                "bounds_mm": [
+                  153.82999999999998,
+                  86.6,
+                  155.63,
+                  88.4
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D1/1",
+                "owner_net": "GND",
+                "footprint_ref": "D1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "a0ca3eb3-a60b-5458-9531-e7b0a329e7d2"
+                ],
+                "bounds_mm": [
+                  156.37,
+                  86.6,
+                  158.17000000000002,
+                  88.4
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D1/2",
+                "owner_net": "LED_ANODE",
+                "footprint_ref": "D1",
+                "measurement_indices": [
+                  2
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "32052f3c-489e-539f-968f-5ca4a5852de5"
+                ],
+                "bounds_mm": [
+                  140.15,
+                  85.38000000000001,
+                  141.85,
+                  87.08
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J1/1",
+                "owner_net": "VCC",
+                "footprint_ref": "J1",
+                "measurement_indices": [
+                  3
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "aa479e34-ce43-51e3-854b-c6853fc7e7c8"
+                ],
+                "bounds_mm": [
+                  147.0,
+                  84.85,
+                  148.0,
+                  86.15
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "R1/1",
+                "owner_net": "VCC",
+                "footprint_ref": "R1",
+                "measurement_indices": [
+                  0
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "44d6ac9f-90ee-5bb7-beeb-dc9efbb91ae6"
+                ],
+                "bounds_mm": [
+                  149.0,
+                  84.85,
+                  150.0,
+                  86.15
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "R1/2",
+                "owner_net": "LED_ANODE",
+                "footprint_ref": "R1",
+                "measurement_indices": [
+                  1
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "aa245eaf-e77f-56b7-8f74-63a677fe720a"
+                ],
+                "bounds_mm": [
+                  138.5,
+                  80.0,
+                  140.5,
+                  82.0
+                ],
+                "status": "excluded",
+                "reason": "unnetted_fiducial",
+                "owner_ref": null,
+                "owner_net": null,
+                "footprint_ref": "FID1",
+                "measurement_indices": []
+              }
+            ],
+            "opening_counts": {
+              "plotted": 9,
+              "matched": 6,
+              "unresolved": 0,
+              "excluded": 3
+            },
+            "measured_opening_counts": {
+              "evaluated": 6,
+              "foreign_net": 0,
+              "same_net_beyond_land": 1
+            },
+            "exclusions_by_reason": {
+              "unnetted_fiducial": 3
+            },
+            "measurement_indices": {
+              "foreign_net": [],
+              "same_net_beyond_land": [
+                2
+              ],
+              "registration_or_near_pad_only": [],
+              "no_nominal_exposure": [
+                0,
+                1,
+                3
+              ],
+              "unevaluated": [],
+              "excluded": []
+            },
+            "finding_counts": {
+              "foreign_net": 0,
+              "same_net_beyond_land": 1,
+              "registration_or_near_pad_only": 0,
+              "no_nominal_exposure": 3,
+              "unevaluated": 0,
+              "excluded": 0
+            }
+          },
+          "B.Mask": {
+            "status": "complete",
+            "missing_layers": [],
+            "gerber_sha256": {
+              "B.Mask": "482331b6e1e3feb35dcd29e764e53b5eb02059083fb1d39f4e444131b42e8369",
+              "B.Cu": "cbfa69d6701a70edec89bc22567f39937aa9c8529c00bb70899ec8722d0de7b6"
+            },
+            "openings": [
+              {
+                "opening_uuids": [
+                  "c69021ac-3c65-52e4-a948-48dce109d60d"
+                ],
+                "bounds_mm": [
+                  140.15,
+                  87.92,
+                  141.85,
+                  89.61999999999999
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J1/2",
+                "owner_net": "GND",
+                "footprint_ref": "J1",
+                "measurement_indices": [
+                  5
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "64fc289f-9d09-5741-886f-9dab05a0ae7e"
+                ],
+                "bounds_mm": [
+                  153.82999999999998,
+                  86.6,
+                  155.63,
+                  88.4
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D1/1",
+                "owner_net": "GND",
+                "footprint_ref": "D1",
+                "measurement_indices": [
+                  4
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "a0ca3eb3-a60b-5458-9531-e7b0a329e7d2"
+                ],
+                "bounds_mm": [
+                  156.37,
+                  86.6,
+                  158.17000000000002,
+                  88.4
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D1/2",
+                "owner_net": "LED_ANODE",
+                "footprint_ref": "D1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "32052f3c-489e-539f-968f-5ca4a5852de5"
+                ],
+                "bounds_mm": [
+                  140.15,
+                  85.38000000000001,
+                  141.85,
+                  87.08
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J1/1",
+                "owner_net": "VCC",
+                "footprint_ref": "J1",
+                "measurement_indices": []
+              }
+            ],
+            "opening_counts": {
+              "plotted": 4,
+              "matched": 4,
+              "unresolved": 0,
+              "excluded": 0
+            },
+            "measured_opening_counts": {
+              "evaluated": 4,
+              "foreign_net": 0,
+              "same_net_beyond_land": 2
+            },
+            "exclusions_by_reason": {},
+            "measurement_indices": {
+              "foreign_net": [],
+              "same_net_beyond_land": [
+                4,
+                5
+              ],
+              "registration_or_near_pad_only": [],
+              "no_nominal_exposure": [],
+              "unevaluated": [],
+              "excluded": []
+            },
+            "finding_counts": {
+              "foreign_net": 0,
+              "same_net_beyond_land": 2,
+              "registration_or_near_pad_only": 0,
+              "no_nominal_exposure": 0,
+              "unevaluated": 0,
+              "excluded": 0
+            }
+          }
+        }
+      }
+    }
+  ],
   "schema_version": 1,
   "findings": [
+    {
+      "schema_version": 1,
+      "rule_id": "physical_copper_gap",
+      "severity": "info",
+      "message": "Zone-fill clearance gap 0.0581mm; closest boundaries (156.071646, 87.527293) and (156.072476, 87.469222); zone-fill (pour) copper is not judged by JLCDFM (issue #8938)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "GND"
+      ],
+      "point": [
+        156.072,
+        87.498
+      ],
+      "bbox": [
+        156.072,
+        87.469,
+        156.072,
+        87.527
+      ],
+      "layer": "B.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "physical_copper_gap_incomplete",
+      "severity": "info",
+      "message": "Pad mask-bridge check incomplete: copper weight unknown (declare a stackup copper weight or pass --copper)",
+      "refs": [],
+      "pads": [],
+      "nets": [],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
     {
       "schema_version": 1,
       "rule_id": "connector_edge_distance",
@@ -95,12 +1562,200 @@
       "bbox": null,
       "layer": "F.Cu",
       "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.6 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 0; opening pad:R1/1; exposed copper zone (net VCC); same-net; 4 thermal spokes (declared spoke 0.3 mm, relief gap 0.2 mm)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "VCC"
+      ],
+      "point": [
+        147.5,
+        85.5
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.0698337009 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 1; opening pad:R1/2; exposed copper segment (net LED_ANODE); same-net own-pad entry",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "LED_ANODE"
+      ],
+      "point": [
+        149.7182505,
+        85.5
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.120537999 mm\u00b2; beyond owner pad copper 1.03017656e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 2; opening pad:D1/2; exposed copper segment (net LED_ANODE); same-net own-pad entry",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "LED_ANODE"
+      ],
+      "point": [
+        156.95259515419087,
+        87.18259515419086
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.579356351 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 3; opening pad:J1/1; exposed copper zone (net VCC); same-net; 4 thermal spokes (declared spoke 0.4 mm, relief gap 0.3 mm)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "VCC"
+      ],
+      "point": [
+        141.0,
+        85.555
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.556568451 mm\u00b2; beyond owner pad copper 1.13686838e-14 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 4; opening pad:D1/1; exposed copper zone (net GND); same-net; 3 thermal spokes (declared spoke 0.4 mm, relief gap 0.3 mm)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "GND"
+      ],
+      "point": [
+        154.055,
+        87.5
+      ],
+      "bbox": null,
+      "layer": "B.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.566699927 mm\u00b2; beyond owner pad copper 3.99884127e-07 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 5; opening pad:J1/2; exposed copper zone (net GND); same-net; 4 thermal spokes (declared spoke 0.4 mm, relief gap 0.3 mm)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "GND"
+      ],
+      "point": [
+        141.0,
+        88.10693271104515
+      ],
+      "bbox": null,
+      "layer": "B.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper_openings",
+      "severity": "info",
+      "message": "Mask-to-copper: 6 findings across 6 mask openings; per-opening: pad:J1/1 x1, pad:R1/2 x1, pad:D1/1 x1, pad:D1/2 x1, pad:R1/1 x1 (+1 more openings)",
+      "refs": [],
+      "pads": [],
+      "nets": [],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
     }
   ],
+  "copper_weights": {
+    "outer": {
+      "oz": null,
+      "source": "profile"
+    },
+    "inner": {
+      "oz": null,
+      "source": "profile"
+    },
+    "flag_overrides_stackup": false,
+    "floors_outer_oz": 1.0,
+    "dfm_table": {
+      "version": 4,
+      "stackup": "2-layer, 1oz outer / 0oz inner (assumed: no stackup/--copper weight declared)",
+      "entry": "2layer_1oz",
+      "thresholds": {
+        "trace_spacing": {
+          "danger_mm": 0.127,
+          "warning_mm": null,
+          "warning_basis": null,
+          "basis": "capability_page",
+          "source_url": "https://jlcpcb.com/capabilities/pcb-capabilities",
+          "retrieved": "2026-01-16"
+        },
+        "pad_spacing": {
+          "danger_mm": 0.15,
+          "warning_mm": null,
+          "warning_basis": null,
+          "basis": "capability_page",
+          "source_url": "https://jlcpcb.com/capabilities/pcb-capabilities",
+          "retrieved": "2026-09-10"
+        },
+        "annular_ring_via": {
+          "danger_mm": 0.15,
+          "warning_mm": null,
+          "warning_basis": null,
+          "basis": "capability_page",
+          "source_url": "https://jlcpcb.com/capabilities/pcb-capabilities",
+          "retrieved": "2026-01-16"
+        },
+        "annular_ring_pth": {
+          "danger_mm": 0.18,
+          "warning_mm": null,
+          "warning_basis": null,
+          "basis": "capability_page",
+          "source_url": "https://jlcpcb.com/capabilities/pcb-capabilities",
+          "retrieved": "2026-09-09"
+        },
+        "mask_bridge": {
+          "danger_mm": 0.1,
+          "warning_mm": null,
+          "warning_basis": null,
+          "basis": "capability_page",
+          "source_url": "https://jlcpcb.com/capabilities/pcb-capabilities",
+          "retrieved": "2026-01-16"
+        },
+        "tht_smd_spacing": {
+          "danger_mm": 2.032,
+          "warning_mm": 3.05,
+          "warning_basis": "observed_jlcdfm",
+          "basis": "observed_jlcdfm",
+          "source_url": "https://github.com/2AMLogic/kicad-tools/issues/9421",
+          "retrieved": "2026-11-18"
+        }
+      }
+    }
+  },
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "71 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "87 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -120,7 +1775,12 @@
       "detail": "no manufacturing bundle; run `kct export` first"
     },
     "overall": "INCOMPLETE",
-    "schematic_missing": false
+    "schematic_missing": false,
+    "incomplete_categories": [],
+    "schematic": {
+      "path": "output/simple_led.kicad_sch",
+      "source": "--schematic"
+    }
   },
   "routing_quality": {
     "total_segments": 2,
@@ -134,7 +1794,11 @@
     "diagonal_45_count": 1,
     "off_axis_count": 0,
     "staircase_step_count": 0,
-    "staircase_fraction": 0.0
+    "staircase_fraction": 0.0,
+    "off_axis_length_fraction": 0.0,
+    "off_axis_length_fraction_by_layer": {
+      "F.Cu": 0.0
+    }
   },
   "coverage": {
     "ampacity": {
@@ -144,6 +1808,12 @@
       "blocking": true
     },
     "board_id": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "bypass_distance": {
       "status": "checked",
       "state": "checked",
       "reason": null,
@@ -245,10 +1915,22 @@
       "reason": null,
       "blocking": false
     },
+    "mask_multi_segment": {
+      "status": "unknown:incomplete:mask_geometry (custom-rules)",
+      "state": "unknown",
+      "reason": "incomplete:mask_geometry (custom-rules)",
+      "blocking": false
+    },
+    "mask_negative_expansion": {
+      "status": "unknown:incomplete:mask_geometry (custom-rules)",
+      "state": "unknown",
+      "reason": "incomplete:mask_geometry (custom-rules)",
+      "blocking": false
+    },
     "mask_to_copper": {
-      "status": "skipped:opt_in:--mask-copper-config",
-      "state": "skipped",
-      "reason": "opt_in:--mask-copper-config",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "match_group_length_skew": {
@@ -257,10 +1939,22 @@
       "reason": null,
       "blocking": true
     },
+    "missing_plated_hole": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
     "model_coverage": {
       "status": "unknown:host_library_refs (3 footprint(s); per-host detail: kct pcb model-audit)",
       "state": "unknown",
       "reason": "host_library_refs (3 footprint(s); per-host detail: kct pcb model-audit)",
+      "blocking": false
+    },
+    "netclass_agreement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": false
     },
     "netclass_clearance_copper": {
@@ -294,9 +1988,9 @@
       "blocking": true
     },
     "physical_copper_gap": {
-      "status": "skipped:opt_in:--physical-copper-gap",
-      "state": "skipped",
-      "reason": "opt_in:--physical-copper-gap",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "pin1_marker": {
@@ -306,6 +2000,12 @@
       "blocking": false
     },
     "placement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "plane_split": {
       "status": "checked",
       "state": "checked",
       "reason": null,
@@ -329,6 +2029,12 @@
       "reason": "no_reinforcement_eligible_paths",
       "blocking": true
     },
+    "removed_pad_scan": {
+      "status": "skipped:no_footprint_swaps",
+      "state": "skipped",
+      "reason": "no_footprint_swaps",
+      "blocking": true
+    },
     "routing_policy": {
       "status": "skipped:no_declared_policies",
       "state": "skipped",
@@ -346,6 +2052,12 @@
       "state": "checked",
       "reason": null,
       "blocking": true
+    },
+    "sharp_trace_corner": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
     },
     "silkscreen": {
       "status": "checked",
@@ -372,6 +2084,12 @@
       "blocking": false
     },
     "thermal_asymmetry": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "tht_smd_spacing": {
       "status": "checked",
       "state": "checked",
       "reason": null,
@@ -407,6 +2125,12 @@
       "reason": "opt_in:--only",
       "blocking": false
     },
+    "wire_run_courtyard_overlap": {
+      "status": "skipped:no_reinforcement_eligible_paths",
+      "state": "skipped",
+      "reason": "no_reinforcement_eligible_paths",
+      "blocking": true
+    },
     "zero_length_segment": {
       "status": "checked",
       "state": "checked",
@@ -419,6 +2143,150 @@
       "reason": null,
       "blocking": true
     }
+  },
+  "fab_dfm_parity": {
+    "table_version": "7d99c827",
+    "source": "https://github.com/2AMLogic/kicad-tools/issues/8838",
+    "retrieved": "2026-11-12",
+    "manufacturer": "jlcpcb",
+    "rows": [
+      {
+        "category": "trace_spacing",
+        "kct_rules": [
+          "clearance",
+          "physical_copper_gap"
+        ],
+        "status": "partial",
+        "danger_capable": true,
+        "note": "net-aware `clearance` always; the net-agnostic fab-view pass (`physical_copper_gap`, #8843) adds same-net copper but runs only when the effective --mfr is exactly `jlcpcb` -- a `jlcpcb-tier*` profile gets `clearance` alone. Observed 2 danger (0.08 mm). Since #8938 the pass judges gaps with no pad and no zone fill on either side at trace_spacing's recorded bands from the resolved stackup's dfm_thresholds entry (previously hardcoded 0.10/0.15 mm constants): below the danger edge is an error; with no recorded warning_mm there is no warning band, and gaps at or above the danger edge are not reported (the fab recorded 0 danger / 0 warning for trace_spacing on the 4-layer 1 oz #8938 board). Since #8972 those trace-band findings count toward this row, not `pad_spacing`."
+      },
+      {
+        "category": "pad_spacing",
+        "kct_rules": [
+          "clearance",
+          "physical_copper_gap"
+        ],
+        "status": "partial",
+        "danger_capable": true,
+        "note": "as `trace_spacing`, plus the 2 oz pad mask-bridge check inside `physical_copper_gap`; that check runs on outer layers only (#8913) and judges a declared 2 oz outer weight only, otherwise reporting `physical_copper_gap_incomplete` at info. Observed 8 danger. Since #8938: gaps with a pad on either side (no zone fill) are judged at pad_spacing's recorded bands, and a same-net gap below the danger edge is an ERROR -- the fab cannot see nets and flags it regardless (the 4-layer 1 oz board's 6 danger are same-net via/track at 0.065-0.099 mm from a pad edge); the finding is labelled `same_net` so the class can be waived deliberately. Reported, not reproduced (#9034): on one further 4-layer board (not committed) kct reported 19 errors against the fab's 6 danger + 1 warning; the surplus cause is unmeasured, but kct emits at most one finding per copper-source pair per layer (closest measurement wins -- measured on the #9034 fixture), so it cannot come from per-edge inflation within a pair. No fab-sourced edge justifies a threshold change, so the stricter same-net error stays (#8938). One narrow exception (#9420): two pads of the SAME footprint on one identical non-empty net in the 2 oz pad mask-bridge check report at info (still listed). Located fab evidence on the consumer board: the fab measured the two 0.19 mm pad pairs (round 0.81 mm pads of RF_Module:ESP32-C3-WROOM-02's ground array) and rated them Good under pad spacing, and its Soldermask bridge row was empty for the whole board (2026-11-18). Different footprints, different nets and every other pair keep the error. Zone-fill (pour) gaps are kct's own advisory only and report at info, not tiered: JLCDFM does not judge pour clearance -- 1,516 pour-to-pad gaps at 0.10-0.13 mm went unflagged on the #8938 board -- so kct's warning count for this category exceeds the fab's by that population by design."
+      },
+      {
+        "category": "solder_mask_opening_exposing_trace",
+        "kct_rules": [
+          "mask_to_copper"
+        ],
+        "status": "partial",
+        "danger_capable": true,
+        "note": "`mask_to_copper` is default-on for an explicit --mfr `jlcpcb*` since #8842 (interim 0.09 mm danger / 0.15 mm warning); a bare `kct check` with no --mfr does not engage it, and the native path needs an unmodified saved source. Observed 5 danger, all same-net: a track running beside, along, or leaving and jogging beside its own pad at 0-0.08 mm (#8914); those shapes stay errors at the 0.09 mm band. Since #8858 one shape is `within_own_pad` at info: a straight track entering its own pad (plain, or custom since #9750) once, at 45 degrees or steeper, exposing nothing beyond the pad and leaving no more copper under mask beside the opening than that one crossing (or a track lying wholly on the pad). The fab did not flag plain entries (#8914; 655 entries on the consumer board, 0 flagged). On boards 00-07 (0 mm expansion) that was 963 of 1,542 errors. Pass-through, along-edge and straddling tracks, shallow entries, arcs, vias and pours touching the pad, expansion rings wider than the construction budget, and different-net copper keep their verdict. Since #9284 a second shape is `own_pour_thermal` at info: a plain pad tied to its own same-net pour by thermal spokes, as pcbnew declares and the fill shows, at 0 mm expansion with nothing beyond the pad, and within the 0.15 mm examined band only 1-4 spoke crossings (pour body farther out). JLCDFM listed no item for the four such pads on board 01 (relief gaps 0.2 and 0.3 mm; #8858, 2026-11-17); same-net pairs were absent, not rated Good. Unconnected same-net pour, a pour body inside 0.15 mm, and pour exposed by a positive expansion keep their verdict. Since #9436 a further shape is `own_pour_solid` at info: a plain pad whose effective zone connection is solid and whose fill shows the join, at 0 mm expansion with nothing beyond the pad. The consumer board had 13 such pads solid in their own-net pour; JLCDFM (`--mfr jlcpcb`, 2026-11-18) reported 0 danger / 0 warning for them. Since #9420 another shape is `within_own_footprint` at info: a single plain-pad opening (not a merged region) overlapping only the same-net pad(s) of its own footprint, every owner and the exposed pad on one identical non-empty net. JLCDFM located by position at that pad array (#9420, 2026-11-18, one board, one export setting): the two 0.19 mm pad pairs are Good under Pad spacing (Danger 0.1 mm, Warning 0.15 mm); Soldermask bridge is empty board-wide (0 danger / 0 warning / 0 good); none of the 6 Solder mask opening exposing trace warnings is at the pads (nearest about 35 mm away); and the 19 Soldermask opening with multiple segments warnings are reinforce-wire objects (8 of the 15 top-side items located by position, 40 mm or more away; the other 11 by object type only). So the fab lists no soldermask item at those pads, but it cannot see footprints or nets: this is a presentation-only downgrade (finding kept, distance intact), not a fab-confirmed pass. Different-net pour on that board agrees with the fab: R2.1 at 0.1275 mm is a kct warning (fab: warning, 0.13 mm); R1.1 and R1.2 at 0.2 mm get no finding (fab: good). Since #9750 `within_own_pad` also covers a bar wider than its own pad whose copper covers the whole perimeter band (the pad's own perimeter is the allowance, so round and square pads agree) and a track entering a bare custom pad measured through its real copper outline; padstack and chamfered pads, and the own-pour class, keep their verdict. Since #8914 an assessment that could not complete reports `mask_to_copper_incomplete` at info, so zero findings no longer read as a clean board."
+      },
+      {
+        "category": "tht_to_smd",
+        "kct_rules": [
+          "tht_smd_spacing"
+        ],
+        "status": "partial",
+        "danger_capable": true,
+        "note": "`tht_smd_spacing` (#8843) judges plated through-hole component pads plus, since #8914, vias whose drill is at least 1.0 mm (the fab classes a hole by size: the three top-side dangers kct missed on the #8914 board were all 1.3-1.42 mm wire-anchor vias). Since #8925 an anchor via is also judged against any exposed (untented) via annulus -- the fab's `smd` side counts a small exposed via pad (#8914 item 5); THT component pads are not paired with via annuli, and tented annuli are skipped (the fab's exact tenting test is unverified). Since #9325 a same-net pair of anchor-sized vias is exempt (the fab counted none of the `kct pcb reinforce` anchor pairs on the #9325 board -- one-board evidence, not a general fab-rule confirmation); a pair colliding on net 0 is not exempt (net 0 is the no-net sentinel every unconnected hole resolves to, not a shared net). Still skipped: same-footprint pad pairs and sub-1.0 mm fan-out vias as the hole side. A pad shape the rule cannot measure now reports `tht_smd_spacing_incomplete` at info instead of vanishing. Fab-view gated -- runs only when the effective --mfr is exactly `jlcpcb`. Observed 5 danger. Thresholds are 2.032 mm error / 3.05 mm warning since #9421 (were 2.0 / 2.7): the fab rated two pairs at 2.00 and 2.025 mm danger that the 2.0 mm floor passed. 2.032 mm (80 mil) is the likely real limit; the fab's \"2.03\" display fits either, so this is one-board evidence, not confirmed. Source: jlcdfm.com Alert value panel, read 2026-11-17/18, 4-layer, 2 oz outer copper. Same-panel values kct does not gate: via-to-pad 0.1 / 0.15 mm (danger / warning) is **not gated, observed** -- a single-board observation, and the `via_at_pad_edge` advisory already warns on that geometry, so no new rule or flag was added; pad-to-line 0.1 / 0.15 mm and mask-opening-exposing-trace 0.08 / 0.15 mm are recorded here only. Gerber export: toggling aperture macros changes how the fab reads pads; `kct export` writes macros off (detail in the #8858 comment 6970004546)."
+      },
+      {
+        "category": "silkscreen_to_pad",
+        "kct_rules": [
+          "silkscreen"
+        ],
+        "status": "partial",
+        "danger_capable": true,
+        "note": "silk_over_copper reported 3 warnings where JLCDFM reported 54 danger."
+      },
+      {
+        "category": "silkscreen_to_hole",
+        "kct_rules": [
+          "silk_hole_overlap"
+        ],
+        "status": "partial",
+        "danger_capable": true,
+        "note": "`silk_hole_overlap` (#8844) flags silk that *overlaps* a via/PTH/NPTH drill circle, tented vias included -- a rule id under the `silkscreen` category. Threshold is 0 mm, so a silk-to-hole gap narrower than JLCDFM's clearance but not touching is still unchecked, and text is tested as its bounding box rather than glyph outlines. Observed 75 danger, not reproduced against the live tool. Fab thresholds read 2026-11-17/18 (jlcdfm.com Alert value panel, 4-layer, 2 oz outer copper): danger 0.13 mm / warning 0.18 mm silk-to-hole, against kct's overlap-only threshold of 0 -- 27 kct warnings vs 50 fab danger on that board. `SILK_HOLE_CLEARANCE_MM` is shared with the silkscreen repair tool, so it is deliberately unchanged (#9421)."
+      },
+      {
+        "category": "annular_ring",
+        "kct_rules": [],
+        "status": "not_covered",
+        "danger_capable": false,
+        "note": "no rule: no copper-weight-aware annular-ring floor exists yet. Observed 100 warnings."
+      },
+      {
+        "category": "negative_soldermask_expansion",
+        "kct_rules": [
+          "mask_negative_expansion"
+        ],
+        "status": "covered",
+        "danger_capable": false,
+        "note": "`mask_negative_expansion` (#8847) warns on every opening whose effective margin is < 0 mm; default-on pure geometry read from the saved source, so an unsaved or edited board reports coverage unknown rather than a pass. The recorded 4 warnings were not re-measured."
+      },
+      {
+        "category": "soldermask_opening_multiple_segments",
+        "kct_rules": [
+          "mask_multi_segment"
+        ],
+        "status": "covered",
+        "danger_capable": false,
+        "note": "`mask_multi_segment` (#8847) warns on every opening whose geometry is more than one disjoint piece; same default-on saved-source snapshot as `mask_negative_expansion`. The recorded 21 warnings were not re-measured."
+      },
+      {
+        "category": "unconnected_trace_end",
+        "kct_rules": [
+          "dangling_copper"
+        ],
+        "status": "covered",
+        "danger_capable": false,
+        "note": "parity with the observed 5 warnings."
+      },
+      {
+        "category": "sharp_trace_corner",
+        "kct_rules": [
+          "sharp_trace_corner"
+        ],
+        "status": "covered",
+        "danger_capable": false,
+        "note": "`sharp_trace_corner` (#8840) reports all 3 observed vertices (pinned in its tests). Only its two-segment open-air bend population maps to JLCDFM's category (``#bend``): the fab flagged 3 of the 8 bends on that board, and no criterion separates the other 5 (leg length and width do not), so they are recorded as unexplained, not covered (#9037). The rule's junction findings (3+ segments at the vertex) are kct-only over-reporting -- 39 on that board, 0 flagged -- carried as warnings under the #8848 operator ruling, separable since #9037 via ``corner_class='junction'`` and not attributed here. A vertex inside same-net pad copper is not reported since #8848 (the board's 5 in-pad findings should be gone; pinned by tests, not re-measured on the board)."
+      },
+      {
+        "category": "missing_plated_through_hole",
+        "kct_rules": [
+          "missing_plated_hole"
+        ],
+        "status": "partial",
+        "danger_capable": false,
+        "note": "`missing_plated_hole` (#8840) flags same-net top/bottom SMD pads whose centres coincide (0.05 mm) with no same-net plated hole inside both; overlapping pads with offset centres are not checked. The observed 2 warnings were not re-measured."
+      },
+      {
+        "category": "silkscreen_line_width",
+        "kct_rules": [
+          "silkscreen"
+        ],
+        "status": "partial",
+        "danger_capable": false,
+        "note": "`silkscreen_line_width` (every silk graphic primitive) and `silkscreen_text_thickness` (text) enforce JLCPCB's published >= 0.15 mm. Not covered: JLCDFM flags silk that meets that floor (#8844: 63 warnings on gerbers with no silk stroke below 0.150 mm). How JLCDFM selects the items it flags is unknown (#8943). Text height is a separate floor: JLCPCB publishes 1.0 mm (40 mil) minimum character height (pcb-capabilities, verified 2026-11-18) and `silkscreen_text_height` enforces it; a project may declare a smaller reference-designator height (`silkscreen_min_reference_height_mm`, >= 0.8 mm, #9448) which relaxes that floor for designators only and is reported by `kct readiness` as a declared deviation -- the fab's own limit is unchanged."
+      },
+      {
+        "category": "fiducial",
+        "kct_rules": [
+          "fiducials"
+        ],
+        "status": "covered",
+        "danger_capable": false,
+        "note": "checked; no finding on the board."
+      },
+      {
+        "category": "trace_width",
+        "kct_rules": [
+          "dimension_trace_width"
+        ],
+        "status": "partial",
+        "danger_capable": true,
+        "note": "JLCDFM rated 0.1016 mm outer-layer tracks Danger (listed as 0.1 mm) and 0.1524 mm Good on one 4-layer board (#10173; the Danger count was not recorded, so no recorded-board fixture carries this row). The published capability still allows 0.1016 mm, so the `dimension_trace_width` ERROR floor is unchanged; kct adds a WARNING for outer-layer tracks below the stackup's optional `trace_width` dfm_thresholds `warning_mm` (0.1524 mm on 4layer_1oz only). Stackups without that entry, and inner layers, get no warning. Partial because the fab's Danger edge between the two observed widths is unknown and only one stackup has evidence."
+      }
+    ],
+    "incomplete_categories": []
   },
   "verdict": "incomplete",
   "exit_code": 2
