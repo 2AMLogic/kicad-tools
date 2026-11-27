@@ -21,6 +21,6 @@ Fresh native DRC/refill:0 violations/0opens; native ERC:0; label/copper LVS:0.
 Manufacturer checks:0 errors/0warnings. No DRC waivers.
 gerbers/gerbers.zip: fabrication; bom_jlcpcb.csv: procurement; cpl_jlcpcb.csv: SMT+THT.
 kicad_project.zip includes the PCB, schematic, design rules and local libraries.
-Keep the enclosed net_class_map.json beside the PCB when re-exporting its current limits.
+Keep the enclosed bldc_controller.net_class_map.json beside the PCB when re-exporting its current limits.
 schematic.pdf and assembly-front/back.pdf are production drawings.
 HARDWARE.md, firmware/, check reports and manifest.json complete the package.
