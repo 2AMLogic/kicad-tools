@@ -33,7 +33,7 @@ def test_published_front_mask_clears_the_rerouted_conductors(ref, pin):
     pcb = PCB.load(output / "stm32_devboard_routed.kicad_pcb")
     with zipfile.ZipFile(output / "manufacturing.zip") as bundle:
         with zipfile.ZipFile(io.BytesIO(bundle.read("kicad_project.zip"))) as project:
-            assert project.read(pcb.path.name) == pcb.path.read_bytes()
+            assert project.read("stm32_devboard.kicad_pcb") == pcb.path.read_bytes()
         with zipfile.ZipFile(io.BytesIO(bundle.read("gerbers/gerbers.zip"))) as artwork:
             mask = artwork.read("stm32_devboard_routed-F_Mask.gts").decode()
     openings = parse_gerber_geometry(mask).geometry

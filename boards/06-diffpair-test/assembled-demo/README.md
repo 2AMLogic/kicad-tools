@@ -82,6 +82,12 @@ The generator pre-routes symmetric differential links and explicit plane vias.
 The router completes the eight LVTTL nets. A generated file or successful route
 command alone does not establish manufacturing readiness.
 
+The source project declares the routing map's classes from the same reviewed
+geometry as the copper: `LVTTL` 0.200 mm, `LVDS` 0.260 mm and `Power` 0.300 mm
+wide, each with 0.600/0.300 mm vias. `kct route` keeps those authored
+declarations, so the routed project, the net-class sidecar and the copper agree
+under `kct check --mfr jlcpcb-tier1`.
+
 The sidecar explicitly excludes both inner reference layers from auxiliary
 routing. The finalizer applies four reviewed off-land via moves and rejects
 any signal track on a reference plane, non-through via span, or drill overlap

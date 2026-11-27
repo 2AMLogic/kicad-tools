@@ -27,6 +27,17 @@ URIs before exporting. Libraries supplied by KiCad's global installation
 are not copied; footprint libraries and 3D models are outside this symbol
 packaging support.
 
+For a board under `kicad/`, select the assembly directory as the root when
+the export needs project-relative inputs elsewhere in that assembly.
+
+```sh
+kct export kicad/board.kicad_pcb --project-root . -o manufacturing/
+```
+
+The named directory must contain the selected board. Omitting the option uses
+the board directory. An explicitly supplied `--spec` selects BOM information
+independently of that choice.
+
 ## The Editable Project: One Basename, One Working Revision
 
 KiCad opens a project through one basename: `board.kicad_pro` pairs with
