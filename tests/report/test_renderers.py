@@ -6,6 +6,7 @@ CSS integration, PDF rendering guards, and edge cases.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -543,6 +544,244 @@ class TestCountPdfImages:
         pdf = tmp_path / "s.pdf"
         pdf.write_bytes(b"<< /Subtype /Image >>")
         assert count_pdf_images(str(pdf)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Pandoc cover scalar tests (issue #10641: front matter parsed as Markdown)
+# ---------------------------------------------------------------------------
+
+
+def _cover_argument(tex: str, key: str) -> str:
+    """Return the argument of the ``\\key{...}`` cover macro in pandoc's LaTeX.
+
+    pandoc wraps its LaTeX output at 72 columns, so the macro can span several
+    lines; the whitespace that leaves behind is collapsed.
+    """
+    import re
+
+    opening = re.search(rf"^\\{key}\{{", tex, re.MULTILINE)
+    assert opening, f"no \\{key}{{...}} in the LaTeX output"
+    depth = 0
+    for position in range(opening.end() - 1, len(tex)):
+        if tex[position] == "{":
+            depth += 1
+        elif tex[position] == "}":
+            depth -= 1
+            if depth == 0:
+                return " ".join(tex[opening.end() : position].split())
+    raise AssertionError(f"unterminated \\{key}{{...}} in the LaTeX output")
+
+
+def _is_literal_latex(argument: str, literal: str) -> bool:
+    """Whether *argument* is the LaTeX pandoc writes for *literal* metadata text.
+
+    pandoc terminates an escape such as ``\\textless`` with ``{}`` or with a
+    space, depending on the character that follows, so both are accepted.
+    """
+    import re
+
+    escapes = {
+        "<": r"\\textless(?: |\{\})?",
+        ">": r"\\textgreater(?: |\{\})?",
+        "|": r"\\textbar(?: |\{\})?",
+        "&": r"\\&",
+        "_": r"\\_",
+    }
+    pattern = "".join(escapes.get(char) or re.escape(char) for char in literal)
+    return re.fullmatch(pattern, argument) is not None
+
+
+class TestPandocCoverScalarsLiteral:
+    """Pandoc must take the cover scalars as literal text, not as Markdown.
+
+    Pandoc parses the string values of a YAML metadata block as Markdown, so a
+    project name such as ``R&D <b>x</b> *i* _j_`` reached the PDF cover with its
+    tags dropped and its asterisks turned into ``\\emph{}`` (Issue #10641).
+    ``render_pdf_pandoc`` therefore re-supplies the JSON-quoted cover scalars as
+    ``--metadata`` values, which pandoc treats as literal text.
+    """
+
+    COVER_MARKDOWN = (
+        "---\n"
+        'title: "R&D <b>x</b> *i* _j_"\n'
+        'subtitle: "Design <i>Report</i> & Co"\n'
+        'author: "kicad-tools *0.29.0* <dev>"\n'
+        'date: "Rev C.2 <bench> | 2026-04-12 | jlcpcb"\n'
+        'geometry: "margin=1in"\n'
+        "fontsize: 11pt\n"
+        "header-includes:\n"
+        "  - \\usepackage{longtable}\n"
+        "---\n\n"
+        "# Body\n"
+    )
+
+    def _metadata_args(self, md_path: Path, tmp_path: Path) -> list[str]:
+        """Return the ``--metadata`` arguments render_pdf_pandoc hands pandoc."""
+        from kicad_tools.report import renderers
+
+        captured: dict = {}
+
+        def fake_run(cmd, capture_output, text):  # noqa: ANN001, ANN202
+            captured["cmd"] = cmd
+            return _FakeCompletedProcess(returncode=0, stderr="")
+
+        with patch.object(renderers.subprocess, "run", side_effect=fake_run):
+            renderers.render_pdf_pandoc(md_path, tmp_path / "report.pdf")
+        return [arg for arg in captured["cmd"] if arg.startswith("--metadata=")]
+
+    def _metadata_args_for(self, markdown: str, tmp_path: Path) -> list[str]:
+        md_path = tmp_path / "report.md"
+        md_path.write_text(markdown, encoding="utf-8")
+        return self._metadata_args(md_path, tmp_path)
+
+    def _latex(self, md_path: Path, tmp_path: Path) -> str:
+        """Return the LaTeX the real pandoc writes for *md_path*.
+
+        pandoc infers the output format from the file extension, so a ``.tex``
+        destination runs the real command without a TeX installation.
+        """
+        from kicad_tools.report import renderers
+
+        tex_path = tmp_path / "report.tex"
+        renderers.render_pdf_pandoc(md_path, tex_path)
+        return tex_path.read_text(encoding="utf-8")
+
+    def _generated_report(self, tmp_path: Path, project_name: str) -> Path:
+        """Write a report through the real generator; return its Markdown path."""
+        from kicad_tools.report.generator import ReportGenerator
+        from kicad_tools.report.models import ReportData
+
+        data = ReportData(
+            project_name=project_name,
+            revision="C.2 <bench>",
+            date="2026-04-12",
+            manufacturer="jlcpcb",
+        )
+        return ReportGenerator().generate(data, tmp_path / "reports")
+
+    def test_cover_scalars_passed_as_literal_metadata(self, tmp_path: Path) -> None:
+        """Every JSON-quoted cover scalar is decoded and re-supplied as --metadata."""
+        assert self._metadata_args_for(self.COVER_MARKDOWN, tmp_path) == [
+            "--metadata=title:R&D <b>x</b> *i* _j_",
+            "--metadata=subtitle:Design <i>Report</i> & Co",
+            "--metadata=author:kicad-tools *0.29.0* <dev>",
+            "--metadata=date:Rev C.2 <bench> | 2026-04-12 | jlcpcb",
+        ]
+
+    def test_date_need_not_carry_a_rev_prefix(self, tmp_path: Path) -> None:
+        """A date that does not start with ``Rev `` is overridden like the rest."""
+        markdown = '---\ndate: "2026-04-12"\nauthor: "kicad-tools 0.29.0"\n---\n# Body\n'
+
+        assert self._metadata_args_for(markdown, tmp_path) == [
+            "--metadata=date:2026-04-12",
+            "--metadata=author:kicad-tools 0.29.0",
+        ]
+
+    @pytest.mark.parametrize("closing", ["---", "..."])
+    def test_only_the_front_matter_block_is_scanned(self, tmp_path: Path, closing: str) -> None:
+        """A cover-shaped line after the closing delimiter is body text."""
+        markdown = f'---\nauthor: "a"\n{closing}\ntitle: "not front matter"\n'
+
+        assert self._metadata_args_for(markdown, tmp_path) == ["--metadata=author:a"]
+
+    def test_malformed_json_scalar_is_left_to_pandoc(self, tmp_path: Path) -> None:
+        """A value that is not valid JSON is skipped without failing the render."""
+        markdown = '---\ntitle: "unterminated\nauthor: "kicad-tools 0.29.0"\n---\n# Body\n'
+
+        assert self._metadata_args_for(markdown, tmp_path) == [
+            "--metadata=author:kicad-tools 0.29.0"
+        ]
+
+    @pytest.mark.parametrize(
+        "markdown",
+        [
+            "# Heading\n\nNo front matter at all.\n",
+            (
+                "---\n"
+                'geometry: "margin=1in"\n'
+                "fontsize: 11pt\n"
+                "header-includes:\n"
+                "  - \\usepackage{longtable}\n"
+                "---\n# Body\n"
+            ),
+            "---\ntitle: Plain name\nsubtitle: 'single quoted'\ndate: 2026-04-12\n---\n# Body\n",
+        ],
+        ids=["no-front-matter", "non-cover-keys", "unquoted-scalars"],
+    )
+    def test_nothing_is_overridden_without_a_json_quoted_cover_scalar(
+        self, tmp_path: Path, markdown: str
+    ) -> None:
+        """Documents without a JSON-quoted cover scalar get no --metadata at all."""
+        assert self._metadata_args_for(markdown, tmp_path) == []
+
+    @pytest.mark.parametrize("scalar", ["true", "True", "TRUE", "false", "False", "FALSE", ""])
+    def test_yaml_boolean_or_empty_scalar_keeps_front_matter_value(
+        self, tmp_path: Path, scalar: str
+    ) -> None:
+        """pandoc reads ``--metadata=title:False`` as the boolean false.
+
+        A boolean false, like an empty value, suppresses the title altogether,
+        so those spellings are left to the front matter block, where the
+        template already quotes them.
+        """
+        markdown = f'---\ntitle: "{scalar}"\nauthor: "kicad-tools 0.29.0"\n---\n# Body\n'
+
+        assert self._metadata_args_for(markdown, tmp_path) == [
+            "--metadata=author:kicad-tools 0.29.0"
+        ]
+
+    @pytest.mark.parametrize("project_name", ["A: B", "x=y", 'ctl "bench"', "it's", "Panel A\\B"])
+    def test_generated_report_cover_scalars_are_passed_verbatim(
+        self, tmp_path: Path, project_name: str
+    ) -> None:
+        """A report written by ReportGenerator round-trips its cover to pandoc.
+
+        The generator JSON-quotes the scalars; each is decoded back to the
+        exact project name, whatever punctuation it holds.
+        """
+        args = self._metadata_args(self._generated_report(tmp_path, project_name), tmp_path)
+
+        assert f"--metadata=title:{project_name}" in args
+        assert "--metadata=subtitle:Design Report" in args
+        assert "--metadata=date:Rev C.2 <bench> | 2026-04-12 | jlcpcb" in args
+        assert any(arg.startswith("--metadata=author:kicad-tools ") for arg in args)
+
+    @pytest.mark.skipif(shutil.which("pandoc") is None, reason="Pandoc is unavailable")
+    @pytest.mark.parametrize(
+        ("key", "literal"),
+        [
+            ("title", "R&D <b>x</b> *i* _j_"),
+            ("subtitle", "Design <i>Report</i> & Co"),
+            ("author", "kicad-tools *0.29.0* <dev>"),
+            ("date", "Rev C.2 <bench> | 2026-04-12 | jlcpcb"),
+        ],
+        ids=["title", "subtitle", "author", "date"],
+    )
+    def test_cover_markup_reaches_latex_literally(
+        self, tmp_path: Path, key: str, literal: str
+    ) -> None:
+        """Tags, emphasis markers, ``&``, ``_`` and ``|`` survive as literal LaTeX."""
+        md_path = tmp_path / "report.md"
+        md_path.write_text(self.COVER_MARKDOWN, encoding="utf-8")
+
+        argument = _cover_argument(self._latex(md_path, tmp_path), key)
+
+        assert _is_literal_latex(argument, literal), argument
+
+    @pytest.mark.skipif(shutil.which("pandoc") is None, reason="Pandoc is unavailable")
+    def test_generated_report_title_and_revision_reach_latex_literally(
+        self, tmp_path: Path
+    ) -> None:
+        """A report for the issue's project name keeps its title and revision."""
+        md_path = self._generated_report(tmp_path, "R&D <b>x</b> *i* _j_")
+
+        tex = self._latex(md_path, tmp_path)
+
+        title = _cover_argument(tex, "title")
+        date = _cover_argument(tex, "date")
+
+        assert _is_literal_latex(title, "R&D <b>x</b> *i* _j_"), title
+        assert _is_literal_latex(date, "Rev C.2 <bench> | 2026-04-12 | jlcpcb"), date
 
 
 # ---------------------------------------------------------------------------

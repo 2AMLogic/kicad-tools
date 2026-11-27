@@ -167,10 +167,47 @@ def render_pdf(html_content: str, output_path: Path | str) -> None:
     weasyprint.HTML(string=html_content).write_pdf(str(output_path))
 
 
+_JSON_QUOTED_FRONT_MATTER_KEYS = frozenset({"title", "subtitle", "author", "date"})
+
 # Pattern pandoc prints to stderr (exit 0) when it cannot resolve a
 # referenced image/resource. Each occurrence names one dropped figure, e.g.
 #   [WARNING] Could not fetch resource images/pcb_front.png: replacing ...
 _PANDOC_DROPPED_RESOURCE_RE = re.compile(r"Could not fetch resource ([^:]+):")
+
+_PANDOC_METADATA_BOOLEANS = frozenset({"true", "True", "TRUE", "false", "False", "FALSE"})
+
+
+def _front_matter_cover_scalars(markdown_path: Path) -> dict[str, str]:
+    """Decode the JSON-quoted cover scalars of a Markdown file's YAML front matter.
+
+    Only top-level ``key: "..."`` lines for the scalars the bundled template
+    emits (``title``, ``subtitle``, ``author``, ``date``) are returned, in
+    file order. Plain or single-quoted scalars, other keys and nested
+    structures are left for pandoc to read.
+
+    Args:
+        markdown_path: Path to the Markdown source file.
+
+    Returns:
+        The decoded scalars keyed by front-matter field name; a malformed
+        JSON value is skipped rather than failing the render.
+    """
+    scalars: dict[str, str] = {}
+    with markdown_path.open(encoding="utf-8") as source:
+        if source.readline().strip() != "---":
+            return scalars
+        for line in source:
+            if line.rstrip() in {"---", "..."}:
+                break
+            key, separator, scalar = line.partition(":")
+            if (
+                separator
+                and key in _JSON_QUOTED_FRONT_MATTER_KEYS
+                and scalar.strip().startswith('"')
+            ):
+                with contextlib.suppress(json.JSONDecodeError):
+                    scalars[key] = json.loads(scalar)
+    return scalars
 
 
 def render_pdf_pandoc(
@@ -192,6 +229,15 @@ def render_pdf_pandoc(
     prints a ``Could not fetch resource ...`` warning to stderr and replaces
     the image with its alt text. This function inspects stderr for that
     pattern and raises so the failure is never silently swallowed.
+
+    Pandoc parses the strings of a YAML metadata block as Markdown, so a
+    cover scalar holding a literal backslash (a project named ``Panel A\\B``)
+    reaches the TeX engine as a raw control sequence and the build fails
+    (issue #10630). The JSON-quoted cover scalars are therefore decoded from
+    the front matter and re-supplied as command-line ``--metadata`` values,
+    which pandoc treats as literal text and which override the block; the TeX
+    writer then escapes them. A scalar spelled as a YAML boolean is left to
+    the block, because a boolean would suppress the template field.
 
     Args:
         markdown_path: Path to the Markdown source file.
@@ -221,18 +267,11 @@ def render_pdf_pandoc(
         # not the caller's cwd. This is the core fix for issue #4023.
         f"--resource-path={markdown_path.parent}",
     ]
-
-    # Pandoc parses YAML metadata as Markdown. Supply the decoded report
-    # date as literal metadata so markup in a PCB revision survives in TeX.
-    with markdown_path.open(encoding="utf-8") as source:
-        if source.readline().strip() == "---":
-            for line in source:
-                if line.rstrip() in {"---", "..."}:
-                    break
-                if line.startswith('date: "Rev '):
-                    with contextlib.suppress(json.JSONDecodeError):
-                        cmd.append(f"--metadata=date:{json.loads(line.partition(':')[2])}")
-                    break
+    cmd.extend(
+        f"--metadata={key}:{value}"
+        for key, value in _front_matter_cover_scalars(markdown_path).items()
+        if value and value not in _PANDOC_METADATA_BOOLEANS
+    )
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -324,9 +363,6 @@ def pdf_renderer_available() -> str | None:
     if _pandoc_available():
         return "pandoc"
     return None
-
-
-_JSON_QUOTED_FRONT_MATTER_KEYS = frozenset({"title", "subtitle", "author", "date"})
 
 
 def _strip_yaml_front_matter(content: str) -> tuple[str, dict]:
