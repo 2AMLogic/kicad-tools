@@ -106,15 +106,18 @@ class TestBuildNetlistHierarchical:
         assert len(netlist.components) == 6
 
     def test_shared_subsheet_referenced_twice(self):
-        """Same .kicad_sch used by two sheet instances loads once (circular guard)."""
+        """A reused sheet without placement annotations has one set of pin bindings."""
         netlist = build_netlist_from_schematic(FIXTURES / "root_shared.kicad_sch")
         refs = {c.reference for c in netlist.components}
-        # root has R1; sub_b has R3, R4.
-        # sub_b is referenced twice but the file is the same, so circular
-        # detection means it loads only once. The second reference is skipped.
         assert "R1" in refs
         assert "R3" in refs
         assert "R4" in refs
+        assert [
+            net.name
+            for net in netlist.nets
+            for node in net.nodes
+            if (node.reference, node.pin) == ("R3", "1")
+        ] == ["Net-(R3-1)"]
 
     def test_missing_subsheet_no_crash(self):
         """A missing sub-sheet file does not crash the build."""
