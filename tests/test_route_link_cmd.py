@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("shapely")
+from shapely.geometry import Point, box  # noqa: E402
 
 from kicad_tools.cli import main  # noqa: E402
 from kicad_tools.cli.route_link_cmd import LinkSpecError, parse_link_spec  # noqa: E402
@@ -34,6 +35,28 @@ BOARD = """(kicad_pcb
     (fp_text reference "R2" (at 0 -1.5) (layer "F.SilkS"))
     (pad "1" smd rect (at 0 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "SIG")))
   (segment (start 115 100.6) (end 115 119.4) (width 0.2) (layer "F.Cu") (net 2) (uuid "00000000-0000-0000-0000-000000000010"))
+)
+"""
+OFFSET_PAD_BOARD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SENSE")
+  (gr_rect (start 1 1) (end 21 19) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+  (footprint "P" (layer "F.Cu") (uuid "00000000-0000-0000-0000-000000000001") (at 6 8)
+    (fp_text reference "P1" (at 0 -1.5) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "SENSE")))
+  (footprint "P" (layer "F.Cu") (uuid "00000000-0000-0000-0000-000000000002") (at 12 14)
+    (fp_text reference "P2" (at 0 -1.5) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "SENSE")))
+  (footprint "P" (layer "F.Cu") (uuid "00000000-0000-0000-0000-000000000003") (at 12 9 {angle})
+    (fp_text reference "P3" (at 0 -1.5) (layer "F.SilkS"))
+    (pad "1" thru_hole {shape} (at 0 0 {angle}) (size 2 2) (drill 0.4 (offset 0.6 0)) {rounding} (layers "*.Cu" "*.Mask") (net 1 "SENSE")))
+  (segment (start 6 8) (end 12 14) (width 0.25) (layer "F.Cu") (net 1) (uuid "00000000-0000-0000-0000-000000000010"))
 )
 """
 LINK = "SIG R1.1 R2.1"
@@ -135,6 +158,62 @@ class TestCommit:
         sig = [s for s in pcb.segments if s.net_number == 1]
         assert sig and len(pcb.vias) == 2
         assert {s.layer for s in sig} == {"F.Cu", "B.Cu"}
+
+    @pytest.mark.parametrize(
+        ("angle", "shape", "source_flash"),
+        [
+            (90, "rect", box(11, 7.4, 13, 9.4)),
+            (0, "rect", box(11.6, 8, 13.6, 10)),
+            (-90, "rect", box(11, 8.6, 13, 10.6)),
+            (90, "circle", Point(12, 8.4).buffer(1)),
+            (90, "roundrect", box(11.5, 7.9, 12.5, 8.9).buffer(0.5)),
+        ],
+    )
+    def test_offset_pad_link_lands_on_both_named_pads(
+        self, tmp_path, capsys, angle, shape, source_flash
+    ):
+        board = tmp_path / "offset.kicad_pcb"
+        out = tmp_path / "saved.kicad_pcb"
+        board.write_text(
+            OFFSET_PAD_BOARD.format(
+                angle=angle,
+                shape=shape,
+                rounding="(roundrect_rratio 0.25)" if shape == "roundrect" else "",
+            )
+        )
+        before = board.read_bytes()
+        args = (
+            str(board),
+            "--link",
+            "SENSE P3.1 P2.1",
+            "--link-layers",
+            "F.Cu",
+            "--trace-width",
+            ".25",
+            "--clearance",
+            ".2",
+        )
+        rc, doc = _run(capsys, *args, "--probe")
+        assert rc == 0 and doc["links"][0]["routable"]
+        assert board.read_bytes() == before
+        probe_length = doc["links"][0]["length_mm"]
+        rc, doc = _run(capsys, *args, "-o", str(out))
+        assert rc == 0 and doc["links"][0]["status"] == "committed"
+        assert doc["links"][0]["length_mm"] == probe_length
+        assert board.read_bytes() == before
+
+        pcb = PCB.load(str(out))
+        ox, oy = pcb.board_origin
+        original = PCB.load(str(board)).segments[0]
+        added = [s for s in pcb.segments if s.uuid != original.uuid]
+        assert added and all(s.layer == "F.Cu" and s.net_number == 1 for s in added)
+        assert not pcb.vias
+        # Board-file coordinates of the source flash and P2.1. A connection
+        # ending on the existing diagonal alone would also clear the open.
+        ends = [Point(x + ox, y + oy) for s in added for x, y in (s.start, s.end)]
+        assert any(source_flash.covers(p) for p in ends)
+        destination_flash = box(11.5, 13.5, 12.5, 14.5)
+        assert any(destination_flash.covers(p) for p in ends)
 
     def test_output_file_leaves_input_alone(self, board, tmp_path, capsys):
         out = tmp_path / "out.kicad_pcb"

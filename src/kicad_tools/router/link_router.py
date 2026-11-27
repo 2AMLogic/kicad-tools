@@ -504,6 +504,8 @@ def _build_model(pcb: PCB) -> _BoardModel:
 
 def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None:
     """The copper of footprint pad ``ref.pad_number`` as a :class:`LinkTerminal`."""
+    from kicad_tools.geometry.copper import pad_copper_outline
+
     copper = _copper_layer_names(pcb)
     fp = pcb.get_footprint(ref)
     if fp is None:
@@ -513,7 +515,9 @@ def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None
             layers = _pad_layers(list(getattr(pad, "layers", []) or []), copper)
             if not layers:
                 return None
-            geom = _pad_geometry(fp, pad)
+            geom = pad_copper_outline(pad, fp.position, fp.rotation)
+            if geom is None:
+                return None
             c = geom.centroid
             return LinkTerminal(f"{ref}.{pad_number}", (c.x, c.y), dict.fromkeys(layers, geom))
     return None
