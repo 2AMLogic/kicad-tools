@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -37,8 +38,14 @@ from .pnp import _ref_sort_key, is_through_hole_footprint
 if TYPE_CHECKING:
     from ..drc.violation import DRCViolation
     from ..manufacturers.base import AssemblyCapabilities, ManufacturerProfile
-    from ..schema.pcb import PCB, Pad
-    from ..spec.schema import BOMEntry, LeadProfile, ProjectSpec
+    from ..schema.pcb import PCB, Footprint, Pad
+    from ..spec.schema import (
+        BOMEntry,
+        LeadProfile,
+        ProjectSpec,
+        SmdLandPattern,
+        WireTermination,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +226,11 @@ def _lead_record(profile: LeadProfile) -> dict:
     return rec
 
 
+def _wire_record(wire: WireTermination) -> dict:
+    """Serialized form of a declared wire termination (prepared diameter + source)."""
+    return {"diameter_mm": wire.diameter_mm, "source": wire.source}
+
+
 def _lead_fit_finding(
     reference: str,
     pad: Pad,
@@ -228,6 +240,7 @@ def _lead_fit_finding(
     tolerance_source: str | None,
     tolerance_reason: str,
     profile_error: str | None,
+    wire: WireTermination | None = None,
 ) -> dict:
     """Build one per-pad lead-fit record (Issue #10299).
 
@@ -239,8 +252,16 @@ def _lead_fit_finding(
     computed at full precision (required diameter subtracted from the
     opening diameter) and rounded for reporting; the verdicts use the
     unrounded values.
+
+    A declared wire termination (Issue #10473) is assessed the same way
+    from the maximum outside diameter of its prepared end: *profile* is
+    the round profile built from the declaration, ``mpn`` stays unset
+    because no part describes the pad, and the declaration is carried in
+    ``wire`` instead of ``lead``.
     """
     mpn = entry.part if entry is not None else None
+    lead_record = _lead_record(profile) if profile is not None and wire is None else None
+    wire_record = _wire_record(wire) if wire is not None else None
 
     # A slot hole: identify it with both axes and stop -- a slot's long
     # axis must not be mistaken for a round hole diameter.
@@ -251,7 +272,8 @@ def _lead_fit_finding(
             "pad": pad.number,
             "mpn": mpn,
             "hole": {"shape": "slot", "size_mm": [slot_w, slot_h]},
-            "lead": _lead_record(profile) if profile is not None else None,
+            "lead": lead_record,
+            "wire": wire_record,
             "status": "unassessed",
             "reason": (
                 f"slot hole {slot_w:.{_LEAD_MARGIN_DECIMALS}f} x "
@@ -267,7 +289,8 @@ def _lead_fit_finding(
             "pad": pad.number,
             "mpn": mpn,
             "hole": hole,
-            "lead": _lead_record(profile) if profile is not None else None,
+            "lead": lead_record,
+            "wire": wire_record,
             "status": "unassessed",
             "reason": "through-hole pad has no drill diameter",
         }
@@ -275,6 +298,11 @@ def _lead_fit_finding(
     if profile is None:
         if profile_error:
             reason = profile_error
+        elif wire is not None:
+            reason = (
+                f"wire termination declared for pad {pad.number} of {reference} "
+                "without a prepared diameter"
+            )
         elif entry is None:
             reason = (
                 f"no verified lead dimensions: reference {reference} has no "
@@ -288,6 +316,7 @@ def _lead_fit_finding(
             "mpn": mpn,
             "hole": hole,
             "lead": None,
+            "wire": wire_record,
             "status": "unassessed",
             "reason": reason,
         }
@@ -301,7 +330,8 @@ def _lead_fit_finding(
         "pad": pad.number,
         "mpn": mpn,
         "hole": hole,
-        "lead": _lead_record(profile),
+        "lead": lead_record,
+        "wire": wire_record,
         "required_diameter_mm": round(float(required_mm), _LEAD_MARGIN_DECIMALS),
         "nominal_margin_mm": round(float(nominal_margin), _LEAD_MARGIN_DECIMALS),
         "nominal_status": "fail" if nominal_margin < 0 else "pass",
@@ -347,15 +377,21 @@ def _format_lead_finding(f: dict) -> str:
             f"{hole['size_mm'][1]:.{_LEAD_MARGIN_DECIMALS}f} mm"
         )
     )
+    wire = f.get("wire")
     lead = f["lead"] or {}
-    if lead.get("shape") == "round":
+    if wire is not None:
+        lead_desc = f"wire termination dia {wire['diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm"
+        source = wire.get("source")
+    elif lead.get("shape") == "round":
         lead_desc = f"round lead dia {lead['diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm"
+        source = lead.get("source")
     else:
         lead_desc = (
             f"rectangular lead {lead['width_mm']:.{_LEAD_MARGIN_DECIMALS}f} x "
             f"{lead['thickness_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm"
         )
-    src = f" per '{lead.get('source', '')}'" if lead.get("source") else ""
+        source = lead.get("source")
+    src = f" per '{source}'" if source else ""
     head = (
         f"{tag}: {hole_desc} vs {lead_desc} "
         f"(needs {f['required_diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm dia){src}"
@@ -382,6 +418,303 @@ def _lead_finding_sort_key(f: dict) -> tuple[int, tuple, tuple[int, int, str]]:
     pad_no = str(f["pad"])
     pad_key: tuple[int, int, str] = (0, int(pad_no), "") if pad_no.isdigit() else (1, 0, pad_no)
     return (order.get(f["status"], 3), _ref_sort_key(f["reference"]), pad_key)
+
+
+# ---------------------------------------------------------------------------
+# SMD two-terminal land-pattern verification (Issue #10505)
+# ---------------------------------------------------------------------------
+
+# Measurements are reported to 3 decimals (0.001 mm = 1 um).  Dimensional
+# equality uses +/-0.001 mm (1 um) against exact Decimal target values after
+# 9-decimal normalization: this absorbs KiCad 4-decimal coordinate rounding and
+# floating-point trig noise across rotated/mirrored placements while catching
+# any genuine copper land-pattern discrepancy (>= 2 um).
+_SMD_DIM_DECIMALS = 3
+_SMD_DIM_TOLERANCE_MM = 0.001
+_SMD_DIM_TOLERANCE_DEC = Decimal("0.001")
+_SMD_MIN_PITCH_MM = 1e-6
+_SMD_AXIS_ALIGN_TOL = 1e-3  # ~0.057 deg max deviation from terminal/transverse axes
+_SUPPORTED_SMD_PAD_SHAPES = frozenset({"rect", "roundrect", "oval", "circle"})
+
+
+def _pad_number_sort_key(pad_no: str) -> tuple[int, int, str]:
+    """Sort numeric pad numbers numerically, then non-numeric lexicographically."""
+    text = str(pad_no)
+    return (0, int(text), "") if text.isdigit() else (1, 0, text)
+
+
+def _smd_expected_record(pattern: SmdLandPattern) -> dict:
+    """Serialized form of a declared two-terminal SMD land pattern."""
+    return {
+        "pad_shape": pattern.pad_shape,
+        "pad_depth_mm": round(float(pattern.pad_depth_mm), _SMD_DIM_DECIMALS),
+        "pad_width_mm": round(float(pattern.pad_width_mm), _SMD_DIM_DECIMALS),
+        "pitch_mm": round(float(pattern.resolved_pitch_decimal_mm()), _SMD_DIM_DECIMALS),
+        "outer_span_mm": round(float(pattern.resolved_outer_span_decimal_mm()), _SMD_DIM_DECIMALS),
+        "source": pattern.source,
+    }
+
+
+def _smd_pattern_signature(pattern: SmdLandPattern) -> tuple:
+    """Canonical key for checking whether two rows declare the same pattern."""
+    return (
+        pattern.pad_shape,
+        Decimal(str(pattern.pad_depth_mm)),
+        Decimal(str(pattern.pad_width_mm)),
+        pattern.resolved_pitch_decimal_mm(),
+        pattern.resolved_outer_span_decimal_mm(),
+        pattern.source.strip(),
+    )
+
+
+def _copper_smd_pads(fp: Footprint) -> list[Pad]:
+    """Return copper-bearing SMD pads on *fp* (ignoring paste/mask-only pads)."""
+    return [
+        p
+        for p in fp.pads
+        if p.type == "smd" and any(str(layer).endswith(".Cu") for layer in (p.layers or ()))
+    ]
+
+
+def _measure_two_terminal_smd_copper(
+    fp: Footprint,
+) -> tuple[dict | None, dict | None, str | None]:
+    """Measure a placed two-terminal SMD footprint after undoing rotation and flip.
+
+    KiCad stores ``pad.position`` in footprint-local coordinates (already
+    y-mirrored on ``B.Cu``) and ``pad.rotation`` in the board-absolute frame
+    (already including ``fp.rotation``).  Subtracting ``fp.rotation`` recovers
+    the footprint-local pad angle, and negating local ``y`` and local angle for
+    ``B.Cu`` placements undoes front-to-back mirroring.
+
+    Returns ``(rounded_measured, raw_measured, error_reason)``.
+    """
+    from ..core.geometry import rotate_pad_offset
+
+    pads = _copper_smd_pads(fp)
+    if len(pads) != 2:
+        return (
+            None,
+            None,
+            f"expected 2 copper SMD pads, found {len(pads)}; "
+            "only two-terminal SMD chips are assessed",
+        )
+
+    p1, p2 = sorted(
+        pads,
+        key=lambda p: (_pad_number_sort_key(p.number), p.position[0], p.position[1]),
+    )
+    cu1 = {str(layer) for layer in p1.layers if str(layer).endswith(".Cu")}
+    cu2 = {str(layer) for layer in p2.layers if str(layer).endswith(".Cu")}
+    if not (cu1 & cu2) and "*.Cu" not in cu1 and "*.Cu" not in cu2:
+        return (
+            None,
+            None,
+            f"copper SMD pads {p1.number} ({', '.join(sorted(cu1))}) and "
+            f"{p2.number} ({', '.join(sorted(cu2))}) are on different copper layers",
+        )
+
+    for pad in (p1, p2):
+        if pad.shape not in _SUPPORTED_SMD_PAD_SHAPES:
+            return (
+                None,
+                None,
+                f"pad {pad.number} has unsupported shape '{pad.shape}'; "
+                "only rect, roundrect, oval and circle pads are assessed",
+            )
+        if pad.size[0] <= 0 or pad.size[1] <= 0:
+            return (
+                None,
+                None,
+                f"pad {pad.number} has non-positive size ({pad.size[0]}, {pad.size[1]}) mm",
+            )
+
+    is_back = fp.layer == "B.Cu"
+
+    def _undo_placement(pad: Pad) -> tuple[float, float, float]:
+        lx, ly = float(pad.position[0]), float(pad.position[1])
+        local_rot = float(pad.rotation) - float(fp.rotation)
+        if is_back:
+            return (lx, -ly, -local_rot)
+        return (lx, ly, local_rot)
+
+    ux1, uy1, rot1 = _undo_placement(p1)
+    ux2, uy2, rot2 = _undo_placement(p2)
+
+    dx = ux2 - ux1
+    dy = uy2 - uy1
+    pitch = math.hypot(dx, dy)
+    if pitch < _SMD_MIN_PITCH_MM:
+        return (None, None, "copper SMD pads have coincident centers; terminal axis is undefined")
+
+    # Unit vectors along the terminal axis (u) and transverse axis (t).
+    ux, uy = dx / pitch, dy / pitch
+    tx, ty = -uy, ux
+
+    raw_pads: list[dict] = []
+    rounded_pads: list[dict] = []
+    for pad, pad_rot in ((p1, rot1), (p2, rot2)):
+        w, h = float(pad.size[0]), float(pad.size[1])
+        if pad.shape == "circle":
+            if abs(Decimal(f"{w:.9f}") - Decimal(f"{h:.9f}")) > _SMD_DIM_TOLERANCE_DEC:
+                return (
+                    None,
+                    None,
+                    f"circular pad {pad.number} has unequal axes ({w:.3f} x {h:.3f} mm)",
+                )
+            depth, width = w, h
+        else:
+            # Pad's size[0] axis in the unrotated, unmirrored footprint frame.
+            wx, wy = rotate_pad_offset(1.0, 0.0, pad_rot)
+            dot_u = abs(wx * ux + wy * uy)
+            dot_t = abs(wx * tx + wy * ty)
+            if dot_t <= _SMD_AXIS_ALIGN_TOL:
+                depth, width = w, h
+            elif dot_u <= _SMD_AXIS_ALIGN_TOL:
+                depth, width = h, w
+            else:
+                return (
+                    None,
+                    None,
+                    f"pad {pad.number} is not axis-aligned with the terminal axis "
+                    f"(relative rotation {pad_rot:.2f} deg)",
+                )
+        raw_pads.append(
+            {"pad": pad.number, "shape": pad.shape, "depth_mm": depth, "width_mm": width}
+        )
+        rounded_pads.append(
+            {
+                "pad": pad.number,
+                "shape": pad.shape,
+                "depth_mm": round(depth, _SMD_DIM_DECIMALS),
+                "width_mm": round(width, _SMD_DIM_DECIMALS),
+            }
+        )
+
+    # Outer copper span along the terminal axis.
+    s1 = ux1 * ux + uy1 * uy
+    s2 = ux2 * ux + uy2 * uy
+    d1 = raw_pads[0]["depth_mm"]
+    d2 = raw_pads[1]["depth_mm"]
+    outer_span = max(s1 + d1 / 2.0, s2 + d2 / 2.0) - min(s1 - d1 / 2.0, s2 - d2 / 2.0)
+
+    raw = {"pads": raw_pads, "pitch_mm": pitch, "outer_span_mm": outer_span}
+    rounded = {
+        "pads": rounded_pads,
+        "pitch_mm": round(pitch, _SMD_DIM_DECIMALS),
+        "outer_span_mm": round(outer_span, _SMD_DIM_DECIMALS),
+    }
+    return (rounded, raw, None)
+
+
+def _dim_matches(measured_mm: float, expected_mm: Decimal) -> bool:
+    """Compare a measured copper dimension against an exact target within +/-0.001 mm."""
+    return abs(Decimal(f"{measured_mm:.9f}") - expected_mm) <= _SMD_DIM_TOLERANCE_DEC
+
+
+def _smd_land_pattern_finding(
+    fp: Footprint,
+    mpn: str | None,
+    pattern: SmdLandPattern | None,
+    pattern_error: str | None,
+) -> dict:
+    """Build one per-component SMD land-pattern finding (Issue #10505)."""
+    measured, raw, geom_error = _measure_two_terminal_smd_copper(fp)
+    expected = _smd_expected_record(pattern) if pattern is not None else None
+    source = pattern.source if pattern is not None else None
+
+    if pattern is None or geom_error is not None or raw is None:
+        reasons = [r for r in (pattern_error, geom_error) if r]
+        return {
+            "reference": fp.reference,
+            "mpn": mpn,
+            "footprint": fp.name,
+            "source": source,
+            "expected": expected,
+            "measured": measured,
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "; ".join(reasons) if reasons else "unassessed",
+        }
+
+    expected_depth = Decimal(str(pattern.pad_depth_mm))
+    expected_width = Decimal(str(pattern.pad_width_mm))
+    expected_pitch = pattern.resolved_pitch_decimal_mm()
+    expected_outer = pattern.resolved_outer_span_decimal_mm()
+
+    mismatched: list[str] = []
+    for pad_rec in raw["pads"]:
+        pad_id = pad_rec["pad"]
+        if pad_rec["shape"] != pattern.pad_shape:
+            mismatched.append(f"pad {pad_id} shape")
+        if not _dim_matches(pad_rec["depth_mm"], expected_depth):
+            mismatched.append(f"pad {pad_id} depth_mm")
+        if not _dim_matches(pad_rec["width_mm"], expected_width):
+            mismatched.append(f"pad {pad_id} width_mm")
+    if not _dim_matches(raw["pitch_mm"], expected_pitch):
+        mismatched.append("pitch_mm")
+    if not _dim_matches(raw["outer_span_mm"], expected_outer):
+        mismatched.append("outer_span_mm")
+
+    return {
+        "reference": fp.reference,
+        "mpn": mpn,
+        "footprint": fp.name,
+        "source": source,
+        "expected": expected,
+        "measured": measured,
+        "mismatched_fields": mismatched,
+        "status": "fail" if mismatched else "pass",
+    }
+
+
+def _format_measured_smd(measured: dict | None) -> str:
+    """Format measured copper geometry for one-line details output."""
+    if measured is None:
+        return "measured geometry unavailable"
+    fmt = f".{_SMD_DIM_DECIMALS}f"
+    pad_bits = ", ".join(
+        f"pad {p['pad']} {p['shape']} {p['depth_mm']:{fmt}} x {p['width_mm']:{fmt}} mm"
+        for p in measured["pads"]
+    )
+    return (
+        f"{pad_bits}, pitch {measured['pitch_mm']:{fmt}} mm, "
+        f"outer span {measured['outer_span_mm']:{fmt}} mm"
+    )
+
+
+def _format_smd_land_pattern_finding(f: dict) -> str:
+    """One ``details`` line per component carrying full evidence."""
+    mpn = f.get("mpn")
+    tag = f"{f['reference']}" + (f" [{mpn}]" if mpn else "")
+    if f["status"] == "unassessed":
+        measured_text = (
+            f" (measured: {_format_measured_smd(f['measured'])})"
+            if f.get("measured") is not None
+            else ""
+        )
+        return f"{tag}: unassessed: {f['reason']}{measured_text}"
+
+    exp = f["expected"]
+    fmt = f".{_SMD_DIM_DECIMALS}f"
+    src = f" per '{f['source']}'" if f.get("source") else ""
+    verdict = (
+        f"fail (mismatches: {', '.join(f['mismatched_fields'])})"
+        if f["status"] == "fail"
+        else "pass"
+    )
+    return (
+        f"{tag}: {verdict}{src}; "
+        f"expected {exp['pad_shape']} {exp['pad_depth_mm']:{fmt}} x {exp['pad_width_mm']:{fmt}} mm, "
+        f"pitch {exp['pitch_mm']:{fmt}} mm, outer span {exp['outer_span_mm']:{fmt}} mm; "
+        f"measured {_format_measured_smd(f['measured'])}"
+    )
+
+
+def _smd_finding_sort_key(f: dict) -> tuple[int, tuple]:
+    """Failures first, then unassessed, then passes; reference order within."""
+    order = {"fail": 0, "unassessed": 1, "pass": 2}
+    return (order.get(f["status"], 3), _ref_sort_key(f["reference"]))
 
 
 # ---------------------------------------------------------------------------
@@ -878,6 +1211,8 @@ class PreflightChecker:
             # verified lead dimensions report *unassessed* rather than
             # passing silently.
             results.append(self._check_assembly_lead_fit())
+            # MPN-specific two-terminal SMD land-pattern check (Issue #10505).
+            results.append(self._check_assembly_smd_land_pattern())
             results.append(self._check_stackup_copper())
 
         # THT-in-CPL warning
@@ -1362,6 +1697,12 @@ class PreflightChecker:
         unknown tolerance are reported as unassessed, never as a fit;
         one pad's missing data never hides another pad's failure.
 
+        Issue #10473: a pad named by a ``wire_terminations`` declaration
+        is assessed by the maximum outside diameter of the prepared wire
+        or ferrule end that enters it instead of its part's lead, so a
+        wire land needs no ``bom_entries`` MPN.  Sibling pads keep the
+        component lead lookup.
+
         Vias (not pads), SMD pads and non-plated holes are excluded.  The
         result describes a centred geometric fit only -- one input to
         reviewing placement and lead-pitch tolerances.
@@ -1383,6 +1724,7 @@ class PreflightChecker:
         tolerance_mm: float | None = None
         tolerance_source: str | None = None
         entries: dict[str, tuple[int, BOMEntry]] = {}
+        wires: dict[tuple[str, str], list[tuple[int, WireTermination]]] = {}
         if spec is not None:
             mfg = spec.requirements.manufacturing if spec.requirements else None
             if mfg is not None:
@@ -1393,13 +1735,17 @@ class PreflightChecker:
                 else:
                     tolerance_mm = mfg.finished_hole_tolerance_mm
                     tolerance_source = mfg.finished_hole_tolerance_source
+            from ..spec.schema import LeadProfile
             from .bom_spec_overlay import expand_ref_range
 
             for row, assignment in enumerate(spec.bom_entries or []):
                 for ref in expand_ref_range(assignment.ref):
                     entries[ref] = (row, assignment)
+            for row, termination in enumerate(spec.wire_terminations or []):
+                wires.setdefault((termination.ref, termination.pad), []).append((row, termination))
 
         findings: list[dict] = []
+        matched_wires: set[tuple[str, str]] = set()
         for fp in self._pcb.footprints:
             if fp.dnp:
                 continue
@@ -1411,7 +1757,26 @@ class PreflightChecker:
                 entry = None
                 profile_error = None
                 profile: LeadProfile | None = None
-                if fp.reference in entries:
+                wire: WireTermination | None = None
+                declared = wires.get((fp.reference, pad.number))
+                if declared:
+                    matched_wires.add((fp.reference, pad.number))
+                    # The prepared wire or ferrule end enters a declared pad,
+                    # not its part's lead (Issue #10473).
+                    row, wire = declared[0]
+                    profile_error = spec_errors.wires.get(row)
+                    if len(declared) > 1:
+                        profile_error = (
+                            f"{len(declared)} wire terminations declared for "
+                            f"{fp.reference} pad {pad.number}"
+                        )
+                    elif profile_error is None and wire.diameter_mm is not None:
+                        profile = LeadProfile(
+                            shape="round",
+                            diameter_mm=wire.diameter_mm,
+                            source=wire.source or "",
+                        )
+                elif fp.reference in entries:
                     row, entry = entries[fp.reference]
                     profile_error = spec_errors.pad_containers.get(row) or spec_errors.profiles.get(
                         (row, pad.number)
@@ -1430,6 +1795,7 @@ class PreflightChecker:
                         tolerance_source,
                         tolerance_reason,
                         profile_error,
+                        wire=wire,
                     )
                 )
 
@@ -1440,8 +1806,15 @@ class PreflightChecker:
             for f in findings
             if f["status"] != "unassessed" and f["tolerance"]["status"] == "unassessed"
         ]
+        unmatched_wires = [
+            f"{ref} pad {pad}: no matching plated through-hole pad on PCB"
+            for (ref, pad) in wires
+            if (ref, pad) not in matched_wires
+        ]
+        not_applied = [*spec_errors.unattached_wires, *unmatched_wires]
         data: dict = {
             "pads": findings,
+            "wire_terminations_not_applied": list(not_applied),
             "summary": {
                 "pads": len(findings),
                 "failed": len(failed),
@@ -1452,7 +1825,7 @@ class PreflightChecker:
             },
         }
 
-        if not findings:
+        if not findings and not not_applied:
             return PreflightResult(
                 name=name,
                 status="OK",
@@ -1469,17 +1842,19 @@ class PreflightChecker:
         if failed:
             message = f"Through-hole lead fit fails on {len(failed)} pad(s): {_refs(failed)}"
             status: Literal["OK", "WARN", "FAIL"] = "FAIL"
-        elif unassessed or tolerance_unassessed:
+        elif unassessed or tolerance_unassessed or not_applied:
             bits = []
             if unassessed:
                 bits.append(
                     f"{len(unassessed)} pad(s) unassessed "
-                    "(no verified lead dimensions or unsupported geometry)"
+                    "(no verified lead or prepared wire dimensions, or unsupported geometry)"
                 )
             if tolerance_unassessed:
                 bits.append(
                     f"{len(tolerance_unassessed)} pad(s) assessed without a finished-hole tolerance"
                 )
+            if not_applied:
+                bits.append(f"{len(not_applied)} wire termination declaration(s) not applied")
             message = "Through-hole lead fit unverified: " + "; ".join(bits) + "; no failures"
             status = "WARN"
         else:
@@ -1492,8 +1867,160 @@ class PreflightChecker:
         lines = [_format_lead_finding(f) for f in sorted(findings, key=_lead_finding_sort_key)]
         if len(lines) > 40:  # pragma: no cover - large boards
             lines = lines[:40] + [f"(and {len(lines) - 40} more pads in data.pads)"]
+        lines.extend(f"Wire termination declaration not applied: {note}" for note in not_applied)
         lines.append(
             "Assessment covers centred geometric fit only (not lead pitch or placement tolerances)."
+        )
+        return PreflightResult(
+            name=name,
+            status=status,
+            message=message,
+            details="\n".join(lines),
+            data=data,
+        )
+
+    def _check_assembly_smd_land_pattern(self) -> PreflightResult:
+        """Compare placed two-terminal SMD copper against declared MPN drawings.
+
+        Issue #10505: a designer declares a source-attributed manufacturer SMD
+        land pattern on a ``.kct`` ``bom_entries`` assignment (``land_pattern:``
+        with pad shape, depth along the terminal axis, transverse width,
+        pitch/outer span, and mandatory drawing/page ``source``).  This check
+        reads the placed PCB without mutating it, undoes footprint rotation and
+        front-to-back mirroring, and compares both copper pads' shape, depth,
+        width, center pitch, and outer copper span within ``+/-0.001 mm``.
+
+        Matching by footprint or package family name alone never verifies a
+        part: only a valid pattern declared for the reference's exact BOM MPN
+        counts.  Missing MPNs, missing or source-less declarations, and
+        unusable pad geometry are reported as unassessed with explicit reasons
+        without hiding findings on other references.
+        """
+        name = "assembly_smd_land_pattern"
+        if self._pcb is None:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No PCB loaded; SMD land pattern not assessed",
+                data={
+                    "components": [],
+                    "tolerance_mm": _SMD_DIM_TOLERANCE_MM,
+                    "summary": {"components": 0, "passed": 0, "failed": 0, "unassessed": 0},
+                },
+            )
+
+        spec, spec_errors = self._load_project_spec()
+        entries: dict[str, tuple[int, BOMEntry]] = {}
+        patterns_by_mpn: dict[str, dict[tuple, SmdLandPattern]] = {}
+        if spec is not None:
+            from .bom_spec_overlay import expand_ref_range
+
+            for row, assignment in enumerate(spec.bom_entries or []):
+                mpn_key = assignment.part.strip()
+                if mpn_key and assignment.land_pattern is not None:
+                    sig = _smd_pattern_signature(assignment.land_pattern)
+                    patterns_by_mpn.setdefault(mpn_key, {})[sig] = assignment.land_pattern
+                for ref in expand_ref_range(assignment.ref):
+                    entries[ref] = (row, assignment)
+
+        findings: list[dict] = []
+        for fp in self._pcb.footprints:
+            if (
+                fp.dnp
+                or fp.exclude_from_bom
+                or "board_only" in getattr(fp, "attr_flags", ())
+                or is_through_hole_footprint(fp)
+            ):
+                continue
+
+            copper_pads = _copper_smd_pads(fp)
+            entry_pair = entries.get(fp.reference)
+            has_declared_pattern = entry_pair is not None and (
+                entry_pair[1].land_pattern is not None or entry_pair[0] in spec_errors.land_patterns
+            )
+            if len(copper_pads) != 2 and not has_declared_pattern:
+                continue
+
+            mpn: str | None = None
+            pattern: SmdLandPattern | None = None
+            pattern_error: str | None = None
+            if entry_pair is None:
+                pattern_error = (
+                    f"no MPN or SMD land pattern: reference {fp.reference} has no "
+                    "bom_entries assignment in the project spec"
+                )
+            else:
+                row, entry = entry_pair
+                mpn = entry.part.strip() or None
+                if mpn is None:
+                    pattern_error = f"missing MPN on bom_entries assignment for {fp.reference}"
+                elif row in spec_errors.land_patterns:
+                    pattern_error = spec_errors.land_patterns[row]
+                elif entry.land_pattern is not None:
+                    pattern = entry.land_pattern
+                else:
+                    mpn_patterns = patterns_by_mpn.get(mpn)
+                    if mpn_patterns and len(mpn_patterns) == 1:
+                        pattern = next(iter(mpn_patterns.values()))
+                    elif mpn_patterns and len(mpn_patterns) > 1:
+                        pattern_error = f"conflicting SMD land-pattern declarations for MPN {mpn}"
+                    else:
+                        pattern_error = f"no verified SMD land pattern declared for MPN {mpn}"
+
+            findings.append(_smd_land_pattern_finding(fp, mpn, pattern, pattern_error))
+
+        passed = [f for f in findings if f["status"] == "pass"]
+        failed = [f for f in findings if f["status"] == "fail"]
+        unassessed = [f for f in findings if f["status"] == "unassessed"]
+        data: dict = {
+            "components": findings,
+            "tolerance_mm": _SMD_DIM_TOLERANCE_MM,
+            "summary": {
+                "components": len(findings),
+                "passed": len(passed),
+                "failed": len(failed),
+                "unassessed": len(unassessed),
+            },
+        }
+
+        if not findings:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No populated two-terminal SMD chips; SMD land-pattern check not applicable",
+                data=data,
+            )
+
+        def _refs(fs: list[dict], limit: int = 5) -> str:
+            shown = ", ".join(f["reference"] for f in fs[:limit])
+            if len(fs) > limit:
+                shown += f" (and {len(fs) - limit} more)"
+            return shown
+
+        if failed:
+            message = f"SMD land pattern mismatch on {len(failed)} component(s): {_refs(failed)}"
+            status: Literal["OK", "WARN", "FAIL"] = "FAIL"
+        elif unassessed:
+            message = (
+                f"SMD land pattern unverified: {len(unassessed)} two-terminal SMD "
+                "component(s) unassessed (missing MPN, source, or usable geometry); no failures"
+            )
+            status = "WARN"
+        else:
+            message = (
+                f"SMD land pattern verified: all {len(findings)} two-terminal SMD "
+                "component(s) match declared drawings"
+            )
+            status = "OK"
+
+        lines = [
+            _format_smd_land_pattern_finding(f) for f in sorted(findings, key=_smd_finding_sort_key)
+        ]
+        if len(lines) > 40:  # pragma: no cover - large boards
+            lines = lines[:40] + [f"(and {len(lines) - 40} more components in data.components)"]
+        lines.append(
+            f"Dimensional comparison tolerance: +/-{_SMD_DIM_TOLERANCE_MM:.{_SMD_DIM_DECIMALS}f} mm "
+            "(two-terminal SMD copper pads; placement rotation and mirroring undone)."
         )
         return PreflightResult(
             name=name,
