@@ -922,12 +922,18 @@ def add_router_patterns(project: dict, assigned: dict[str, str], inventory: set[
         owned[net] = entry.copy()
 
 
-def _remove_router_netclasses(project_data: dict) -> None:
+def _remove_router_netclasses(project_data: dict, *, keep_definitions: bool = False) -> None:
     """Drop the classes / assignments a previous kct pass declared (#6390).
 
     When ``meta.kct_netclass_assignments`` (#10133) also records the class kct
     assigned each net to, an entry whose target class the user has since
     changed in KiCad is authored intent and is left intact.
+
+    ``keep_definitions`` (Issue #10555) still drops those assignments and the
+    patterns, but leaves the recorded class *definitions* in ``net_settings``
+    for :func:`apply_router_netclasses` to treat as authored: the caller
+    could not prove the project is still kct-owned, so a definition may
+    carry a hand edit that regenerating it from ``Default`` would erase.
     """
     classes, nets = router_netclass_provenance(project_data)
     remove_router_patterns(project_data, nets)
@@ -953,6 +959,9 @@ def _remove_router_netclasses(project_data: dict) -> None:
                 if norm != [recorded_classes[net]]:
                     continue
             assignments.pop(net, None)
+
+    if keep_definitions:
+        return
 
     # A surviving pattern or assignment makes its class definition authored too.
     if classes:
@@ -1004,6 +1013,8 @@ def apply_router_netclasses(
     project_data: dict,
     net_class_map: Mapping[str, NetClassRouting],
     net_names: Iterable[str] | None = None,
+    *,
+    keep_unverified_definitions: bool = False,
 ) -> dict:
     """Declare the router's stricter net classes in a project (Issue #6390).
 
@@ -1025,7 +1036,15 @@ def apply_router_netclasses(
 
     * the classes / assignments a previous kct pass declared (recorded under
       ``meta.kct_router_netclasses``) are replaced, everything else is left
-      alone;
+      alone -- unless ``keep_unverified_definitions`` is set (Issue #10555):
+      then only their assignments and patterns are refreshed, and the class
+      *definitions* stay and count as authored below.  The caller sets it
+      when it could not prove the project is still kct-owned (no valid
+      stamp), because a hand edit -- a track width raised in KiCad -- is
+      exactly what invalidates the stamp, and regenerating the class from
+      ``Default`` would erase it.  A kept definition is neither rebuilt nor
+      re-recorded, so the later project write (Issue #10133) keeps treating
+      it as authored as well;
     * a net an authored pattern or assignment already classifies keeps its
       authored class;
     * a router class whose name collides with an authored class of a
@@ -1044,6 +1063,9 @@ def apply_router_netclasses(
             map.  An empty map removes the previously declared classes.
         net_names: The board's nets; map entries for other nets are ignored.
             ``None`` uses every map key.
+        keep_unverified_definitions: Keep the class definitions a previous
+            pass recorded under ``meta.kct_router_netclasses`` instead of
+            replacing them (Issue #10555); see above.
 
     Returns:
         The same ``project_data`` dict.
@@ -1055,7 +1077,7 @@ def apply_router_netclasses(
             f"router net classes not declared: authored netclasses cannot be evaluated safely ({exc})"
         )
         return project_data
-    _remove_router_netclasses(project_data)
+    _remove_router_netclasses(project_data, keep_definitions=keep_unverified_definitions)
     inventory = set(net_class_map) if net_names is None else set(net_names)
     names = inventory.intersection(net_class_map)
     names.discard("")
@@ -1741,6 +1763,15 @@ def write_drc_constraints(
     :mod:`kicad_tools.manufacturers.netclass_dru`).  ``None`` keeps whatever
     a previous route declared.
 
+    Issue #10555: the incoming project is checked for a valid kct stamp
+    *before* it is merged or stamped here.  Without one, the definitions of
+    the classes a previous route recorded are kept -- only their assignments
+    and patterns are refreshed -- and treated as authored classes (see
+    :func:`apply_router_netclasses`).  A hand edit, such as a track width
+    raised in KiCad, is exactly what invalidates the stamp; regenerating the
+    class from ``Default`` would erase it before the final project write
+    (Issue #10133) ever saw it.
+
     Router coupled pairs (Issue #6429): ``router_coupled_pairs`` lists the
     ``(P, N)`` pairs the router coupled-routed.  Those KiCad's
     ``isCoupledDiffPair()`` does not recognise by name are recorded under
@@ -1891,9 +1922,11 @@ def write_drc_constraints(
     except FileNotFoundError:
         original_project = None
 
+    owned_before_merge = False
     if original_project is not None:
         try:
             project_data = json.loads(pro_path.read_text(encoding="utf-8"))
+            owned_before_merge = is_kct_owned_project(project_data)
             merge_project_rules(project_data, rules, preserve_board_rules=preserve_board_rules)
             if manufacturer_id:
                 project_data.setdefault("meta", {})["manufacturer"] = manufacturer_id
@@ -1921,6 +1954,7 @@ def write_drc_constraints(
             project_data,
             router_net_classes,
             board_net_names(board) if board.exists() else None,
+            keep_unverified_definitions=not owned_before_merge,
         )
     if router_coupled_pairs is not None:
         apply_router_coupled_pairs(
