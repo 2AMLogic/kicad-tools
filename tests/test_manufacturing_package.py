@@ -3356,6 +3356,31 @@ class TestSimulationEvidence:
             assert not any(rel.endswith(name) for rel in case["evidence"])
             assert not any(rel.endswith(name) for rel in manifest["files"])
 
+    @pytest.mark.parametrize(
+        "producer_only",
+        [[], ["sim/retired-a.lib", "sim/retired-b.lib"]],
+        ids=["missing", "invalid"],
+    )
+    def test_missing_model_with_readable_result(self, tmp_path, monkeypatch, producer_only):
+        declared = "sim/supply.lib"
+        case = self._case("installed", inputs=[declared])
+        project, pcb = self._project(tmp_path, monkeypatch, [case])
+        recorded = dict.fromkeys([declared, *producer_only], self._digest(b"tested model"))
+        self._write_result(project, "installed", 85.6, inputs=recorded)
+
+        result = self._export(pcb, tmp_path)
+        manifest = json.loads(result.manifest_path.read_text())
+        row = manifest["simulation"]["cases"][0]
+        if producer_only:
+            assert row["status"] == "invalid"
+            assert all(path in row["diagnostic"] for path in producer_only)
+        else:
+            assert row["status"] == "missing"
+            assert declared in row["diagnostic"]
+        assert row["diagnostic"] in result.readme_path.read_text()
+        assert not any(path.endswith(".lib") for path in row["evidence"])
+        assert not any(path.endswith(".lib") for path in manifest["files"])
+
     def test_removed_result_is_missing(self, tmp_path, monkeypatch):
         project, pcb = self._project(tmp_path, monkeypatch)
         (project / "sim" / "installed.result.json").unlink()
