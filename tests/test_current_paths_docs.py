@@ -34,6 +34,7 @@ import pytest
 from kicad_tools.manufacturers import DesignRules
 from kicad_tools.physics.ampacity import width_for_current
 from kicad_tools.router.current_paths import (
+    CaseContribution,
     CurrentPathSidecar,
     CurrentPathSpec,
     OperatingCase,
@@ -68,14 +69,19 @@ _BURST_ILLUSTRATION = re.compile(
     r"(?P<peak>[\d.]+) A at the coincident peak, and sizes the feed for their "
     r"(?P<rms>[\d.]+) A RMS"
 )
-# A row of the "Current on the shared feed" table, and the sentence stating
-# the IPC-2221 widths for the example's 1.0 mm copper.
+# A row of the "Current on the shared feed" table, and the sentences stating
+# the IPC-2221 widths for the example's 1.0 mm copper, on an external layer
+# and then on an inner one.
 _FEED_TABLE_ROW = re.compile(
     r"^\| `(?P<case>[\w+-]+)` \| \*{0,2}(?P<amps>[\d.]+) A\*{0,2} \|", re.MULTILINE
 )
 _WIDTH_SENTENCE = re.compile(
     r"(?P<alone>[\d.]+) A needs (?P<alone_mm>[\d.]+) mm and "
     r"(?P<together>[\d.]+) A needs (?P<together_mm>[\d.]+) mm"
+)
+_INNER_WIDTH_SENTENCE = re.compile(
+    r"On an inner layer the same currents need "
+    r"(?P<alone_mm>[\d.]+) mm and (?P<together_mm>[\d.]+) mm"
 )
 
 
@@ -94,6 +100,17 @@ def _section(markdown: str, heading: str) -> str:
 def _cases_section() -> str:
     """The published "Operating cases" subsection."""
     return _section(CLI_MD.read_text(encoding="utf-8"), CASES_HEADING)
+
+
+def _bullet(lead_in: str) -> str:
+    """The subsection's bullet whose bold lead-in is ``lead_in``, whitespace-normalized."""
+    match = re.search(
+        rf"^- \*\*{re.escape(lead_in)}\*\* (?P<text>.*?)(?=^- |\n\n|\Z)",
+        _cases_section(),
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match, f"the {lead_in!r} bullet is missing from the Operating cases section"
+    return " ".join(match.group("text").split())
 
 
 def _published_cases_json() -> tuple[str, str]:
@@ -225,14 +242,52 @@ def test_each_case_places_the_documented_current_on_the_shared_feed(case_name: s
 
 
 def test_published_ipc_2221_widths_are_what_the_checker_requires() -> None:
-    published = _WIDTH_SENTENCE.search(" ".join(_cases_section().split()))
+    text = " ".join(_cases_section().split())
+    published = _WIDTH_SENTENCE.search(text)
     assert published, "the 1.0 mm copper sentence is missing from the Operating cases section"
-    for amps, width in (
-        (published["alone"], published["alone_mm"]),
-        (published["together"], published["together_mm"]),
+    inner = _INNER_WIDTH_SENTENCE.search(text, published.end())
+    assert inner, "the inner-layer widths are missing from the 1.0 mm copper sentence"
+    for amps, widths in (
+        (published["alone"], (published["alone_mm"], inner["alone_mm"])),
+        (published["together"], (published["together_mm"], inner["together_mm"])),
     ):
-        required = width_for_current(float(amps), copper_weight_oz=1.0, layer="external")
-        assert f"{required:.3f}" == width
+        for layer, width in zip(("external", "internal"), widths, strict=True):
+            required = width_for_current(float(amps), copper_weight_oz=1.0, layer=layer)
+            assert f"{required:.3f}" == width, f"{amps} A on {layer}: {required:.3f} mm"
+
+
+@pytest.mark.parametrize(
+    ("case", "checker_says", "documented"),
+    [
+        pytest.param(
+            OperatingCase("idle", (CaseContribution("VOUT_LOAD", 0.0),)),
+            "zero or non-finite current",
+            "`current_a` is zero or non-finite",
+            id="zero-current",
+        ),
+        pytest.param(
+            OperatingCase("idle", (CaseContribution("VOUT_LOAD", math.inf),)),
+            "zero or non-finite current",
+            "`current_a` is zero or non-finite",
+            id="non-finite-current",
+        ),
+        pytest.param(
+            OperatingCase("idle", ()),
+            "lists no active path",
+            "lists no contributions",
+            id="no-contributions",
+        ),
+    ],
+)
+def test_bad_reference_bullet_covers_zero_current_and_no_contributions(
+    case: OperatingCase, checker_says: str, documented: str
+) -> None:
+    """What a case says about itself blocks a verdict too: an `error`, never a skip."""
+    (finding,) = _case_findings(_published_sidecar().specs, [case])
+    assert finding.severity == "error"
+    assert finding.message.startswith("Operating case 'idle' cannot be evaluated: ")
+    assert checker_says in finding.message
+    assert documented in _bullet("A bad reference blocks a verdict.")
 
 
 def test_cases_are_judged_together_but_never_merged() -> None:

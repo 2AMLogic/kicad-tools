@@ -715,3 +715,106 @@ def test_fab_dfm_not_required_by_fab_review(env):
     board = _released(env)
     wf.sign_off_bundle(env["bundle"], board, "Bob", stage="fab-review")
     assert wf.preflight(env["bundle"], board).fab_dfm is None
+
+
+# --- Issue #10431: the supplementary purchasing list, export through review page ---
+
+
+class AskingSource(Source):
+    """A stock source that records which catalog ids it is asked about."""
+
+    def __init__(self, stock):
+        super().__init__(stock)
+        self.asked = []
+
+    def get_component_inventory(self, codes):
+        self.asked.append(list(codes))
+        return super().get_component_inventory(codes)
+
+
+def test_purchasing_list_flows_from_export_to_the_review_page(env, tmp_path, monkeypatch):
+    from kicad_tools.export import assembly
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightConfig
+    from tests.test_manufacturing_package import FUSE_PURCHASING, _fuse_assembly_export
+
+    src, bundle = env["src"], env["bundle"]
+    for name in ("bom.csv", "cpl.csv"):
+        (bundle / name).unlink()
+    spec = src / "project.kct"
+    monkeypatch.setattr(assembly.AssemblyPackage, "export", _fuse_assembly_export)
+
+    def export(rows):
+        spec.write_text("kct_version: '1.0'\nproject:\n  name: Fuse bench controller\n" + rows)
+        result = ManufacturingPackage(
+            pcb_path=src / "b.kicad_pcb",
+            schematic_path=src / "b.kicad_sch",
+            manufacturer="jlcpcb",
+            config=ManufacturingConfig(
+                output_dir=bundle,
+                include_project_zip=False,
+                include_report=False,
+                include_gerbers=False,
+                silk_fix=False,
+                emit_drc_constraints=False,
+                auto_lcsc=False,
+                preflight=PreflightConfig(skip_all=True),
+            ),
+        ).export()
+        assert result.success, result.errors
+        write_manifest(env)
+
+    def submit(label, quantity):
+        env["out"] = tmp_path / f"out-{label}-{quantity}"
+        source = AskingSource({"C7000001": 500, "C7000002": 500})
+        result = run(env, source, quantity=quantity, dry_run=True)
+        assert not result.stock.blocked
+        return source, result
+
+    export(FUSE_PURCHASING)
+    # The list is frozen with the bundle: edit it after the export and the
+    # handoff refuses it, as it would an edited BOM or Gerber.
+    frozen = (bundle / "purchasing.json").read_bytes()
+    (bundle / "purchasing.json").write_bytes(frozen.replace(b"SYN-COVER-1", b"SYN-COVER-9"))
+    with pytest.raises(wf.WorkflowError, match="purchasing.json"):
+        submit("edited", 2)
+    assert not (tmp_path / "out-edited-2").exists()
+    (bundle / "purchasing.json").write_bytes(frozen)
+
+    source, two = submit("pending", 2)
+    _, one = submit("pending", 1)
+    section = (two.page.directory / "index.md").read_text().split("## Purchasing list", 1)[1]
+
+    assert "| Snap-on cover for the 5 x 20 mm fuse holder | 3 | 6 | F1, F2, F3 |" in section
+    assert "| 5 x 20 mm cartridge, AC | 1 | 2 | F1 |" in section
+    assert "- 5 x 20 mm cartridge, DC: 4 for this build (2 per board), linked F2, F3" in section
+    assert (
+        "| Snap-on cover for the 5 x 20 mm fuse holder | 3 | 3 |"
+        in (one.page.directory / "index.md").read_text()
+    )
+    assert json.loads((two.page.directory / "purchasing.json").read_bytes())["items"][2] == {
+        "description": "5 x 20 mm cartridge, DC",
+        "per_board": 2,
+        "required": 4,
+        "refs": ["F2", "F3"],
+        "status": "pending",
+        "pending": "DC rating and breaking capacity still to be chosen",
+    }
+    # The fabricator side never learns of a supplementary row.
+    assert source.asked == [["C7000001", "C7000002"]]
+    plan = json.loads(two.plan.plan_bytes)
+    assert [row["catalog_id"] for row in plan["demand"]] == ["C7000001", "C7000002"]
+    matches = json.loads((two.plan.directory / "expected-matches.json").read_bytes())
+    assert [match["reference"] for match in matches] == ["F1", "F2", "F3", "J2"]
+
+    export(
+        FUSE_PURCHASING.replace(
+            "    pending: DC rating and breaking capacity still to be chosen\n",
+            "    manufacturer: Example Fuse Co\n    mpn: SYN-CART-DC\n",
+        )
+    )
+    _, resolved = submit("resolved", 2)
+    section = (resolved.page.directory / "index.md").read_text().split("## Purchasing list", 1)[1]
+
+    assert "Outstanding selections: none" in section and "PENDING" not in section
+    assert "| 5 x 20 mm cartridge, DC | 2 | 4 | F2, F3 | Example Fuse Co SYN-CART-DC |" in section

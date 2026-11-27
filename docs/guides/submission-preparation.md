@@ -380,7 +380,14 @@ checklist, reviewer/timestamp/policy version, and links), a human-readable
 live stock observation), byte-exact copies of the plan's declared upload/
 download file set under `uploads/`, and any caller-supplied `ReviewAsset`s
 under `layer-views/` (`kind="manufacturing"`) or `test-evidence/`
-(`kind="synthetic-test-evidence"`). If `record` is omitted the page is
+(`kind="synthetic-test-evidence"`). When the bundle carries the project's
+supplementary purchasing list (Issue #10431), `prepare_submission` verifies it
+like every other bundle file and scales it by the board quantity into the
+plan's `purchasing` block, and the page adds a `purchasing.json` plus a
+"Purchasing list" section in `index.md` whose "Outstanding selections" part
+names each row whose part is not chosen yet. That list is the buyer's: it adds
+nothing to `demand`, to `expected-matches.json` or to the stock gate. If
+`record` is omitted the page is
 rendered with an explicit `human_approval: not-established` state and a
 "NOT REVIEWED" banner — human approval is never inferred from a prepared
 plan alone. If `record` is supplied it is independently reverified first; a
