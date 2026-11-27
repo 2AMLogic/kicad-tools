@@ -111,7 +111,7 @@ run_bulk() {
   if [[ "${BOARD_07_CI_ENABLED:-}" != "true" ]]; then
     test_args+=(--ignore=tests/test_board_07_matchgroup_test.py)
   fi
-  uv run pytest -n auto -rfEsx -o addopts= --benchmark-disable --timeout=60 \
+  uv run pytest -n auto --dist loadgroup -rfEsx -o addopts= --benchmark-disable --timeout=60 \
     -m "not slow and not ci_extended" --durations=30 "${test_args[@]}" "$@"
 }
 
