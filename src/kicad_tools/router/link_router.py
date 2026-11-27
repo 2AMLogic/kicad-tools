@@ -50,7 +50,7 @@ import heapq
 import math
 import re
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -368,6 +368,71 @@ def _pad_layers(pad_layers: list[str], copper: list[str]) -> list[str]:
     return out
 
 
+def _padstack_lands(fp: Any, pad: Any, layers: Collection[str]) -> dict[str, Any] | None:
+    """Standard copper outlines per layer, or None when the pad has uniform geometry.
+
+    KiCad keeps the front definition on the pad and the other definitions under
+    its padstack. An unmodelled or missing layer cannot establish contact.
+    """
+    node = getattr(pad, "_sexp_node", None)
+    stack = node.find_child("padstack") if node is not None else None
+    if stack is None:
+        return None
+    mode = stack.find_child("mode")
+    name = mode.get_string(0) if mode is not None else None
+    if name == "normal" and not stack.find_children("layer"):
+        return None
+    if name not in ("front_inner_back", "custom"):
+        return {}
+
+    from kicad_tools.geometry.copper import (
+        EXACT_PAD_SHAPES,
+        pad_copper_outline,
+        pad_outline_is_exact,
+    )
+
+    by_name: dict[str, Any] = {}
+    if pad_outline_is_exact(pad):
+        by_name["F.Cu"] = pad_copper_outline(pad, fp.position, fp.rotation)
+    for entry in stack.find_children("layer"):
+        layer = entry.get_string(0)
+        size, shape = entry.find_child("size"), entry.find_child("shape")
+        if layer is None or size is None or shape is None:
+            continue
+        kind = shape.get_string(0)
+        w, h = size.get_float(0), size.get_float(1)
+        if kind not in EXACT_PAD_SHAPES or entry.find_child("chamfer") is not None:
+            continue
+        if (
+            w is None
+            or h is None
+            or not (math.isfinite(w) and math.isfinite(h) and w > 0 and h > 0)
+        ):
+            continue
+        offset = entry.find_child("offset")
+        dx, dy = (offset.get_float(0), offset.get_float(1)) if offset is not None else (0.0, 0.0)
+        rounding = entry.find_child("roundrect_rratio")
+        ratio = rounding.get_float(0) if rounding is not None else 0.25
+        if any(value is None or not math.isfinite(value) for value in (dx, dy, ratio)):
+            continue
+        # Detach the view: mutation of a linked Pad writes through to the board.
+        land = replace(
+            pad,
+            _sexp_node=None,
+            shape=kind,
+            size=(w, h),
+            drill_offset=(dx, dy),
+            roundrect_rratio=ratio,
+        )
+        by_name[layer] = pad_copper_outline(land, fp.position, fp.rotation)
+    result = {}
+    for layer in layers:
+        key = "Inner" if name == "front_inner_back" and layer.startswith("In") else layer
+        if (outline := by_name.get(key)) is not None:
+            result[layer] = outline
+    return result
+
+
 def _pad_geometry(fp: Any, pad: Any) -> Any:
     """Board-relative copper outline of a footprint pad (un-eroded)."""
     from shapely.geometry import LineString, Point, Polygon
@@ -487,11 +552,15 @@ def _build_model(pcb: PCB) -> _BoardModel:
                 continue
             geom = _pad_geometry(fp, pad)
             pad_drill = float(getattr(pad, "drill", 0.0) or 0.0)
-            pad_geoms.append(geom)
+            lands = dict.fromkeys(layers, geom)
+            stack = _padstack_lands(fp, pad, layers)
+            if stack is not None:
+                lands.update(stack)
+            pad_geoms.extend(lands.values() if stack is not None else (geom,))
             items.append(
                 _Item(
                     int(getattr(pad, "net_number", 0) or 0),
-                    dict.fromkeys(layers, geom),
+                    lands,
                     True,
                     pad_drill,
                     getattr(fp, "reference", None) or "",
@@ -568,7 +637,13 @@ def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None
                 return None
             geom = _pad_geometry(fp, pad)
             c = geom.centroid
-            return LinkTerminal(f"{ref}.{pad_number}", (c.x, c.y), dict.fromkeys(layers, geom))
+            stack = _padstack_lands(fp, pad, layers)
+            # The ordinary named-pad route retains its existing approximation
+            # for unmodelled shapes. Junctions separately require exact lands.
+            lands = dict.fromkeys(layers, geom)
+            if stack is not None:
+                lands.update(stack)
+            return LinkTerminal(f"{ref}.{pad_number}", (c.x, c.y), lands)
     return None
 
 
@@ -679,13 +754,18 @@ def _join_island(pcb: PCB, model: _BoardModel, net_number: int, pad: LinkTermina
     destination = None
     for fp in pcb.footprints:
         for pin in fp.pads:
-            if pin.net_number != net_number or not pad_outline_is_exact(pin):
-                continue
-            geom = pad_copper_outline(pin, fp.position, fp.rotation)
-            if geom is None:
+            if pin.net_number != net_number:
                 continue
             layers = _pad_layers(pin.layers, copper)
-            nodes.append(dict.fromkeys(layers, geom))
+            lands = _padstack_lands(fp, pin, layers)
+            if lands is None:
+                if not pad_outline_is_exact(pin):
+                    continue
+                outline = pad_copper_outline(pin, fp.position, fp.rotation)
+                lands = dict.fromkeys(layers, outline) if outline is not None else {}
+            if not lands:
+                continue
+            nodes.append(lands)
             if f"{fp.reference}.{pin.number}" == pad.label and destination is None:
                 destination = nodes[-1]
     if not destination:
@@ -1289,48 +1369,56 @@ def _junction_pad_areas(
     board_margin, declared = board_mask_margin(pcb)
     default_margin = board_margin if board_margin is not None else math.nan
     board_version = pcb._file_version()
-    copper = []
-    expanded: dict[str, list[Any]] = {}
+    uniform = []
+    per_layer: dict[str, list[Any]] = {}
+    unknown_sites: set[str] = set()
+    unknown_target: set[str] = set()
     target: dict[str, list[Any]] = {}
     for fp in pcb.footprints:
         for pin in fp.pads:
-            outline = pad_copper_outline(pin, fp.position, fp.rotation)
-            if outline is None:
-                continue
-            if not pad_outline_is_exact(pin):
-                # The connectivity fallback can erode an unsupported pad shape.
-                # Retain at least the router's existing pad exclusion there.
-                outline = outline.union(_pad_geometry(fp, pin))
-            copper.append(outline)
-            pad_layers = _pad_layers(pin.layers, model.copper)
             mask_layers = {f"{side}.Cu" for side in pad_mask_sides(pin)}
-            opening = outline
+            layers = set(_pad_layers(pin.layers, model.copper)) | mask_layers
+            is_target = f"{fp.reference}.{pin.number}" == destination.label
+            stack = _padstack_lands(fp, pin, layers)
+            if stack is None:
+                outline = pad_copper_outline(pin, fp.position, fp.rotation)
+                if outline is None:
+                    continue
+                if not pad_outline_is_exact(pin):
+                    outline = outline.union(_pad_geometry(fp, pin))
+                uniform.append(outline)
+                lands = dict.fromkeys(layers, outline)
+            else:
+                lands = stack
+                unknown_sites.update(layers - lands.keys())
+                if is_target:
+                    unknown_target.update(layers - lands.keys())
             if mask_layers:
                 margin, _ = pad_mask_margin(
                     pin, fp, default_margin, declared, board_version=board_version
                 )
-                if margin is None or not math.isfinite(margin):
-                    return {}, destination
-                # A contracted mask still leaves pad copper to avoid. Square
-                # corners bound the positive expansion of a rectangular land.
-                if margin > 0:
-                    opening = outline.buffer(margin, join_style="mitre")
-                    for layer in mask_layers:
-                        expanded.setdefault(layer, []).append(opening)
-            if f"{fp.reference}.{pin.number}" == destination.label:
-                for layer in set(pad_layers) | mask_layers:
-                    target.setdefault(layer, []).append(
-                        opening if layer in mask_layers else outline
-                    )
+            else:
+                margin = 0.0
+            if margin is None or not math.isfinite(margin):
+                return {}, destination
+            for layer, land in lands.items():
+                # A contracted opening still leaves the copper to avoid.
+                expanded = layer in mask_layers and margin > 0
+                area = land.buffer(margin, join_style="mitre") if expanded else land
+                if stack is not None or expanded:
+                    per_layer.setdefault(layer, []).append(area)
+                if is_target:
+                    target.setdefault(layer, []).append(area)
 
-    # Junctions already stay outside every pad projection. Add physical mask
-    # expansions only on the face containing the opening.
-    projections = unary_union(copper)
-    sites = dict.fromkeys(model.copper, projections)
-    for layer, shapes in expanded.items():
-        sites[layer] = unary_union([projections, *shapes])
-    layers = {layer: unary_union(shapes) for layer, shapes in target.items()}
-    return sites, LinkTerminal(destination.label, destination.point, layers)
+    projections = unary_union(uniform)
+    sites = {
+        layer: unary_union([projections, *per_layer[layer]]) if layer in per_layer else projections
+        for layer in model.copper
+        if layer not in unknown_sites
+    }
+    target_areas = {layer: unary_union(shapes) for layer, shapes in target.items()}
+    target_areas.update(dict.fromkeys(unknown_target))
+    return sites, LinkTerminal(destination.label, destination.point, target_areas)
 
 
 def junction_sites(
@@ -1378,7 +1466,12 @@ def junction_sites(
     from_here = Point(near)
     tracks: list[tuple[float, Segment, Any]] = []
     for seg in [*pcb.segments, *model.extra_segments]:
-        if seg.net_number != net_number or seg.start == seg.end or seg.layer not in island:
+        if (
+            seg.net_number != net_number
+            or seg.start == seg.end
+            or seg.layer not in island
+            or seg.layer not in pad_areas
+        ):
             continue
         if endpoint_layer is not None and seg.layer != endpoint_layer:
             continue
@@ -1436,9 +1529,11 @@ def _branch_clears_pad(
     from kicad_tools.sexp.builders import fmt
 
     for x1, y1, x2, y2, layer in route.segments:
-        geom = pad.layers.get(layer)
-        if geom is None:
+        if layer not in pad.layers:
             continue
+        geom = pad.layers[layer]
+        if geom is None:  # the destination has an unmodelled land on this layer
+            return False
         a, b = _written_point(x1, y1, origin), _written_point(x2, y2, origin)
         line = LineString([a, b]) if a != b else Point(a)
         if line.distance(geom) < fmt(route.width_for(layer)) / 2 - 1e-9:
@@ -1447,7 +1542,8 @@ def _branch_clears_pad(
     for x, y in route.vias:
         center = Point(_written_point(x, y, origin))
         if any(
-            center.distance(geom) < fmt(route.via_size) / 2 - 1e-9 for geom in pad.layers.values()
+            geom is None or center.distance(geom) < fmt(route.via_size) / 2 - 1e-9
+            for geom in pad.layers.values()
         ):
             return False
     return True

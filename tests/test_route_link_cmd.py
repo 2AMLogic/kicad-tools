@@ -129,6 +129,18 @@ def tee(tmp_path: Path) -> Path:
     return _tee(tmp_path, TEE_TRACK)
 
 
+def _plated_destination(tmp_path: Path, host: str, pad: str, source_y: float = 9) -> Path:
+    """Three plated pads with P2's front and back lands specified independently."""
+    board = _tee(tmp_path, host, thru_hole=True)
+    before, p2 = board.read_text().split('(fp_text reference "P2"')
+    board.write_text(
+        (before + '(fp_text reference "P2"' + p2.replace(TEE_THH, pad, 1))
+        .replace("(at 12 9)", f"(at 12 {source_y})")
+        .replace('(31 "B.Cu" signal)', '(1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)')
+    )
+    return board
+
+
 def _file_segments(path: Path) -> list[tuple]:
     """``(start, end, width, layer, uuid)`` per SENSE track, in the file's millimetres."""
     pcb = PCB.load(str(path))
@@ -343,6 +355,67 @@ class TestCommit:
         assert {(s[2], s[3]) for s in (first, second, branch)} == {(0.25, "F.Cu")}
         assert first[4] == TEE_HOST_UUID  # the half with the original start keeps it
         assert len({s[4] for s in (first, second, branch)}) == 3
+
+    @pytest.mark.parametrize(
+        "layer,mode",
+        [("B.Cu", "front_inner_back"), ("In1.Cu", "front_inner_back"), ("In1.Cu", "custom")],
+    )
+    @pytest.mark.parametrize("diameter,connected", [(0.5, False), (1.5, True)])
+    def test_join_track_contacts_the_plated_land_on_the_host_layer(
+        self, tmp_path, capsys, layer, mode, diameter, connected
+    ):
+        from shapely.geometry import LineString, Point
+
+        inner = "Inner" if mode == "front_inner_back" else "In1.Cu"
+        pad = (
+            '(pad "1" thru_hole circle (at 0 0) (size 1.5 1.5) (drill 0.3) (layers "*.Cu" "*.Mask") '
+            f'(padstack (mode {mode}) (layer "{inner}" (shape circle) (size {diameter} {diameter})) '
+            f'(layer "B.Cu" (shape circle) (size {diameter} {diameter})))'
+        )
+        host = TEE_TRACK.replace("start 5 4", "start 5.68 14").replace("end 5 14", "end 11 9")
+        board = _plated_destination(tmp_path, host.replace("F.Cu", layer), pad)
+        output = tmp_path / "saved.kicad_pcb"
+        link = _joined(capsys, board, "--join-track", "--link-layers", layer, "-o", str(output))
+        assert link["status"] == "committed"
+        branch = [
+            LineString([a, b]) for a, b, _, _, uid in _file_segments(output) if uid != TEE_HOST_UUID
+        ]
+        if connected:
+            assert link["junction"] == {"x": 11.0, "y": 9.0, "layer": layer}
+            assert any(line.distance(Point(11, 9)) == 0 for line in branch)
+        else:
+            assert "junction" not in link and link["join_track_skipped"]
+            assert min(line.distance(Point(5, 14)) for line in branch) <= diameter / 2 + 0.125
+
+    @pytest.mark.parametrize("back_size,source_y", [(1, 13.35), (2, 13.35), (2, 12.65)])
+    def test_join_track_clears_the_plated_back_land_and_its_mask(
+        self, tmp_path, capsys, back_size, source_y
+    ):
+        from shapely.geometry import LineString, box
+
+        pad = (
+            '(pad "1" thru_hole rect (at 0 0) (size 1 1) (drill 0.3) (layers "*.Cu" "*.Mask") '
+            '(padstack (mode front_inner_back) (layer "Inner" (shape rect) (size 1 1)) '
+            f'(layer "B.Cu" (shape rect) (size {back_size} {back_size})))'
+        )
+        board = _plated_destination(tmp_path, TEE_TRACK_B, pad, source_y)
+        output = tmp_path / "saved.kicad_pcb"
+        link = _joined(capsys, board, "--join-track", "--link-layers", "B.Cu", "-o", str(output))
+        assert link["status"] == "committed"
+        if back_size == 1 or source_y == 12.65:
+            assert link["junction"] == {"x": 5.0, "y": source_y, "layer": "B.Cu"}
+        if "junction" in link:
+            half = back_size / 2
+            opening = box(5 - half, 14 - half, 5 + half, 14 + half)
+            host = LineString([(5, 4), (5, 14)])
+            branch = [
+                LineString([a, b]).buffer(w / 2)
+                for a, b, w, _, _ in _file_segments(output)
+                if not host.covers(LineString([a, b]))
+            ]
+            assert branch and all(g.intersection(opening).area < 1e-9 for g in branch)
+        else:
+            assert link["join_track_skipped"]
 
     def test_second_join_track_link_splits_the_piece_it_lands_on(self, tmp_path, capsys):
         board = _tee(tmp_path, TEE_TRACK, extra_pads=TEE_PAD4)
