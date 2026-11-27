@@ -44,6 +44,7 @@ from .pad_slits import (
     ReplacementCheck,
     adds_trace_gap,
     covered_via_elbow,
+    mask_opening_check,
     pad_gap_check,
     via_exit_doglegs,
     via_gap_check,
@@ -494,6 +495,7 @@ class TraceOptimizer:
         self.collision_checker = collision_checker
         self._pad_gap_check = pad_gap_check(getattr(collision_checker, "grid", None))
         self._via_gap_check: ReplacementCheck | None = None
+        self._mask_opening_check: ReplacementCheck | None = None
         self.net_anchors = net_anchors
         # Endpoints of the *other* chains in the current optimize_segments call
         # (same net and layer). A branch can end on a chain's body (a T-join
@@ -579,6 +581,22 @@ class TraceOptimizer:
         """
         self._pad_zones = zones
         self._pad_zone_clearance = danger_clearance
+
+    def set_mask_opening_guard(self, clearance: float, mask_margin: float = 0.0) -> None:
+        """Register the fab mask-to-copper *clearance* (Issue #9424).
+
+        While set, each pass's rewrite of a chain is declined when it adds
+        same-net copper beside a pad's mask opening -- the defect
+        ``kct check --mfr`` reports as ``mask_to_copper``: a leg whose rounded
+        corner comes within *clearance* of an opening it does not enter, or
+        copper over an opening that is not one clean entry.  Only growth counts,
+        so a rewrite that leaves the chain's defects unchanged or fewer is kept.
+        *mask_margin* is the board's solder-mask expansion.  Callers that never
+        call this get the previous behaviour.
+        """
+        self._mask_opening_check = mask_opening_check(
+            getattr(self.collision_checker, "grid", None), clearance, mask_margin
+        )
 
     def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
         """Optimize a list of segments for a single net/layer.
@@ -745,6 +763,20 @@ class TraceOptimizer:
             and not self._lays_copper_twice(old, new)
             and self._keeps_pad_escapes(old, new)
             and (self._pad_gap_check is None or self._pad_gap_check(old, new, self._other_copper))
+            and (
+                self._mask_opening_check is None
+                or self._mask_opening_check(old, new, self._other_copper)
+            )
+        )
+
+    def _replacement_is_clear(
+        self, original: list[Segment], candidate: list[Segment], kept: list[Segment]
+    ) -> bool:
+        """Whether a staircase replacement keeps the fab pad gap and mask openings."""
+        if self._pad_gap_check is not None and not self._pad_gap_check(original, candidate, kept):
+            return False
+        return self._mask_opening_check is None or self._mask_opening_check(
+            original, candidate, kept
         )
 
     def _lays_copper_twice(self, old: list[Segment], new: list[Segment]) -> bool:
@@ -872,7 +904,7 @@ class TraceOptimizer:
             self.config,
             self._path_is_clear,
             self._other_copper,
-            replacement_is_clear=self._pad_gap_check,
+            replacement_is_clear=self._replacement_is_clear,
         )
 
     def convert_corners_45(self, segments: list[Segment]) -> list[Segment]:

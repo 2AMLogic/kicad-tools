@@ -16,6 +16,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10486** (closed): Route-link option to join an existing same-net branch outside a component pad
+- **PR #10519**: feat: add route-link --join-track to tee into a pad's track
+- **PR #10563**: fix(router): decline optimizer shortcuts that park a bend beside their own pad's mask opening
+- **PR #10593**: fix(drc): bridge aligned same-net pads when an offset run grazes one of them
+- **Issue #10121** (closed): Verify the nine Board 05 pour-slot warnings against the native copper film
 - **Issue #10587** (closed): test flake: test_count_corners_serpentine_4000_under_budget exceeds its 1.0s wall-clock budget in the Test job
 - **PR #10591**: test: gate _count_corners serpentine budget on best of 3 runs
 - **Issue #10590** (closed): Placement treats a large interior Edge.Cuts opening as the board exterior

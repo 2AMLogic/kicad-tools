@@ -439,6 +439,7 @@ def escape_endpoint_pad(
         # Issue #6718: an unchanged terminal keeps its authored roundrect corners.
         roundrect_rratio=pad.roundrect_rratio if shape == pad.shape else None,
         chamfered_outline=pad.chamfered_outline if shape == pad.shape else (),
+        mask_chamfered_outline=pad.mask_chamfered_outline if shape == pad.shape else (),
         escape_terminal=not (unchanged and extent is None),
         terminal_layers=terminal_layers,
     )

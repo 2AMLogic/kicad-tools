@@ -1,0 +1,436 @@
+"""Board 05's seed-42 optimizer shortcuts that park a bend beside their own pad's mask opening."""
+
+import argparse
+import math
+
+import pytest
+
+from kicad_tools.cli.route_cmd import (
+    _optimize_traces,
+    _resolve_route_mask_guard,
+    _uniform_board_mask_margin,
+)
+from kicad_tools.geometry.copper import standard_pad_polygon
+from kicad_tools.router.core import Autorouter
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.optimizer.pad_slits import mask_opening_check
+from kicad_tools.router.primitives import Route, Segment
+from kicad_tools.router.rules import DesignRules
+from kicad_tools.validate.mask_copper import clean_own_pad_entry
+
+JLCPCB_MASK_CLEARANCE = 0.09
+CHECKER_UNCERTAINTY_MM = 0.010004
+GUARD = (JLCPCB_MASK_CLEARANCE, 0.0)
+RULES = {"same_net_pad_gap_band_edge_mm": 0.15, "same_net_trace_gap_band_edge_mm": 0.1016}
+
+#: U1/14 on board 05: a 0.55 x 1.475 roundrect centred (161.7, 104.1625).
+U1_14 = ((161.7, 104.1625), (0.55, 1.475), "roundrect")
+#: J3/3 on board 05: a 1.7 mm circle centred (178.5, 95.08).
+J3_3 = ((178.5, 95.08), (1.7, 1.7), "circle")
+#: RV1/2 on board 05: a 1.44 mm circle centred (169.96, 131.0), the SPEED chain's end.
+RV1_2 = ((169.96, 131.0), (1.44, 1.44), "circle")
+
+#: The nFAULT F.Cu chain the router left before the optimizer (commit journal record 314).
+NFAULT = [
+    (161.7, 104.1625),
+    (161.585, 104.0475),
+    (161.585, 103.58),
+    (161.585, 103.19),
+    (161.065, 102.67),
+    (157.815, 102.67),
+]
+#: The HALL_A F.Cu chain the router left before the optimizer (record 317).
+HALL_A = [
+    (173.4125, 91.0),
+    (173.87, 90.5425),
+    (173.87, 90.32),
+    (174.455, 89.735),
+    (175.17, 89.735),
+    (177.055, 91.62),
+    (177.055, 93.7),
+    (177.705, 94.35),
+    (178.435, 95.08),
+    (178.5, 95.08),
+]
+#: The SPEED F.Cu chain the router left before the optimizer (record 50).
+SPEED = [
+    (170.55, 126.0),
+    (170.1, 126.45),
+    (170.1, 126.72),
+    (170.1, 130.295),
+    (169.96, 130.435),
+    (169.96, 131.0),
+]
+
+_ROUNDRECT = {"shape": "roundrect", "roundrect_rratio": 0.25}
+_PIN = {"width": 0.55, "height": 1.475, **_ROUNDRECT}
+NFAULT_PADS = [
+    ("U1", {"x": 161.7, "y": 104.1625, **_PIN}),
+    ("U1L", {"x": 160.9, "y": 104.1625, "net": 11, "net_name": "OTHER_A", **_PIN}),
+    ("U1R", {"x": 162.5, "y": 104.1625, "net": 12, "net_name": "OTHER_B", **_PIN}),
+    ("V1", {"x": 157.815, "y": 102.67, "width": 0.6, "height": 0.6, "shape": "circle"}),
+]
+HALL_A_PADS = [
+    ("R10", {"x": 173.4125, "y": 91.0, "width": 0.6, "height": 0.6, "shape": "circle"}),
+    (
+        "J3",
+        {
+            "x": 178.5,
+            "y": 95.08,
+            "width": 1.7,
+            "height": 1.7,
+            "shape": "circle",
+            "through_hole": True,
+            "drill": 1.0,
+        },
+    ),
+]
+SPEED_PADS = [
+    (
+        "C14",
+        {"x": 170.55, "y": 126.0, "width": 1.0, "height": 1.45, **_ROUNDRECT},
+    ),
+    (
+        "RV1",
+        {
+            "x": 169.96,
+            "y": 131.0,
+            "width": 1.44,
+            "height": 1.44,
+            "shape": "circle",
+            "through_hole": True,
+            "drill": 1.0,
+        },
+    ),
+]
+
+
+def _router(origin, pads, points, net, name):
+    router = Autorouter(
+        16,
+        16,
+        rules=DesignRules(**RULES),
+        origin_x=origin[0],
+        origin_y=origin[1],
+        force_python=True,
+        physics_enabled=False,
+    )
+    for ref, kwargs in pads:
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": "1",
+                    "net": net,
+                    "net_name": name,
+                    "authored_layers": ("*.Mask",) if kwargs.get("through_hole") else ("F.Mask",),
+                    **kwargs,
+                }
+            ],
+        )
+    route = Route(
+        net=net,
+        net_name=name,
+        segments=[
+            Segment(*a, *b, 0.2, Layer.F_CU, net, name)
+            for a, b in zip(points, points[1:], strict=False)
+        ],
+    )
+    router.routes = [route]
+    router.grid.mark_route(route)
+    return router
+
+
+def _nfault(points=NFAULT):
+    return _router((155, 99), NFAULT_PADS, points, 10, "nFAULT")
+
+
+def _hall_a():
+    return _router((170, 86), HALL_A_PADS, HALL_A, 15, "HALL_A")
+
+
+def _speed():
+    return _router((164, 121), SPEED_PADS, SPEED, 18, "SPEED")
+
+
+def _run(router, *, guard):
+    args = argparse.Namespace(_mfr_mask_guard=GUARD) if guard else argparse.Namespace()
+    _optimize_traces(router, args, quiet=True)
+    return router.routes[0]
+
+
+def _points(route):
+    segments = route.segments
+    return [(round(s.x1, 6), round(s.y1, 6)) for s in segments] + [
+        (round(segments[-1].x2, 6), round(segments[-1].y2, 6))
+    ]
+
+
+def _length(route):
+    return sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in route.segments)
+
+
+def _mask_defects(route, pad):
+    """Legs ``kct check --mfr jlcpcb`` reports against *pad*'s opening, by the rule's own measure."""
+    from shapely.geometry import LineString
+
+    (cx, cy), (w, h), shape = pad
+    opening = standard_pad_polygon(cx, cy, w, h, shape, 0.0, 0.25)
+    defects = []
+    for seg in route.segments:
+        copper = LineString([(seg.x1, seg.y1), (seg.x2, seg.y2)]).buffer(
+            seg.width / 2, quad_segs=64
+        )
+        gap = copper.distance(opening)
+        if 0 < gap < JLCPCB_MASK_CLEARANCE:
+            defects.append(round(gap, 4))
+        elif gap == 0 and not clean_own_pad_entry(
+            opening,
+            copper,
+            opening,
+            f"pad:{shape}",
+            seg.width,
+            ((seg.x1, seg.y1), (seg.x2, seg.y2)),
+            clearance_mm=JLCPCB_MASK_CLEARANCE,
+            uncertainty_mm=CHECKER_UNCERTAINTY_MM,
+        ):
+            defects.append(0.0)
+    return defects
+
+
+def test_staircase_shortcut_parks_its_bend_beside_the_pad_without_the_guard():
+    """The defect: the compressed exit turns 0.12 mm above U1/14, 0.02 mm from the opening."""
+    route = _run(_nfault(), guard=False)
+    assert _points(route) == [
+        (161.7, 104.1625),
+        (161.7, 103.305),
+        (161.065, 102.67),
+        (157.815, 102.67),
+    ]
+    assert _mask_defects(route, U1_14) == [0.02]
+
+
+def test_staircase_shortcut_beside_own_pad_is_declined():
+    route = _run(_nfault(), guard=True)
+    assert _points(route) == [
+        (161.7, 104.1625),
+        (161.585, 104.0475),
+        (161.585, 103.19),
+        (161.065, 102.67),
+        (157.815, 102.67),
+    ]
+    assert _mask_defects(route, U1_14) == []
+
+
+def test_detour_shortcut_beside_own_pad_is_declined():
+    unguarded = _run(_hall_a(), guard=False)
+    assert _points(unguarded) == [(173.4125, 91.0), (177.4925, 95.08), (178.5, 95.08)]
+    assert _mask_defects(unguarded, J3_3) == [0.0575]
+
+    incoming = _hall_a().routes[0]
+    guarded = _run(_hall_a(), guard=True)
+    assert _mask_defects(guarded, J3_3) == []
+    assert _length(guarded) < _length(incoming)
+
+
+def test_rewrite_that_leaves_the_chain_no_worse_is_kept():
+    """The router's own RV1/2 exit already overlaps the wiper opening: the shortcut is kept."""
+    assert (
+        _points(_run(_speed(), guard=False))
+        == _points(_run(_speed(), guard=True))
+        == [
+            (170.55, 126.0),
+            (170.55, 130.41),
+            (169.96, 131.0),
+        ]
+    )
+
+
+@pytest.mark.parametrize(("grid", "clearance"), [(None, 0.09), ("grid", 0.0), ("grid", -0.1)])
+def test_guard_needs_a_grid_and_a_clearance(grid, clearance):
+    assert mask_opening_check(grid, clearance) is None
+
+
+def test_mask_margin_grows_the_opening():
+    grid = _nfault().grid
+    above = [Segment(161.2, 103.2, 162.2, 103.2, 0.2, Layer.F_CU, 10, "nFAULT")]
+    assert mask_opening_check(grid, JLCPCB_MASK_CLEARANCE, 0.0)([], above, [])
+    assert not mask_opening_check(grid, JLCPCB_MASK_CLEARANCE, 0.05)([], above, [])
+
+
+def test_board_mask_margin_resolution(tmp_path):
+    plain = tmp_path / "plain.kicad_pcb"
+    plain.write_text("(kicad_pcb (setup (pad_to_mask_clearance 0.05)))")
+    assert _uniform_board_mask_margin(plain) == 0.05
+    undeclared = tmp_path / "undeclared.kicad_pcb"
+    undeclared.write_text("(kicad_pcb (setup))")
+    assert _uniform_board_mask_margin(undeclared) == 0.0
+    overridden = tmp_path / "overridden.kicad_pcb"
+    overridden.write_text(
+        "(kicad_pcb (setup (pad_to_mask_clearance 0)) (pad (solder_mask_margin 0.2)))"
+    )
+    assert _uniform_board_mask_margin(overridden) is None
+    ruled = tmp_path / "ruled.kicad_pcb"
+    ruled.write_text("(kicad_pcb (setup))")
+    (tmp_path / "ruled.kicad_dru").write_text("(constraint solder_mask_margin 0.1)")
+    assert _uniform_board_mask_margin(ruled) is None
+    assert _uniform_board_mask_margin(tmp_path / "missing.kicad_pcb") is None
+
+
+def test_route_mask_guard_resolution(tmp_path):
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text("(kicad_pcb (setup (pad_to_mask_clearance 0)))")
+    assert _resolve_route_mask_guard(None, board) is None
+    assert _resolve_route_mask_guard("seeed", board) is None
+    assert _resolve_route_mask_guard("jlcpcb", board) == GUARD
+    board.write_text("(kicad_pcb (pad (solder_mask_margin 0.1)))")
+    assert _resolve_route_mask_guard("jlcpcb", board) is None
+
+
+def test_covered_pads_cannot_offset_a_new_front_mask_defect():
+    from pathlib import Path
+
+    from kicad_tools.router.io import load_pcb_for_routing
+
+    fixture = Path(__file__).parents[1] / "fixtures" / "mask_pass_through_via_contact.kicad_pcb"
+    router, _ = load_pcb_for_routing(str(fixture), validate_drc=False, force_python=True)
+    points = [(91, 99.35), (92.7, 101.05), (106, 101.05), (107.7, 99.35), (109, 99.35)]
+    check = mask_opening_check(router.grid, JLCPCB_MASK_CLEARANCE)
+    original = [
+        Segment(*a, *b, 0.2, Layer.F_CU, 1, "N1") for a, b in zip(points, points[1:], strict=False)
+    ]
+    shortcut = Segment(*points[0], *points[-1], 0.2, Layer.F_CU, 1, "N1")
+    assert not check(original, [shortcut], [])
+    shortcut.layer = Layer.B_CU
+    assert check([], [shortcut], [])
+
+
+def test_mask_opening_follows_offset_and_chamfer():
+    offset = {
+        "x": 100,
+        "y": 100,
+        "width": 2,
+        "height": 2,
+        "shape": "rect",
+        "through_hole": True,
+        "drill": 0.4,
+        "copper_offset": (0, 0.6),
+    }
+    grid = _router((92, 92), [("R1", offset)], [], 1, "N1").grid
+    check = mask_opening_check(grid, JLCPCB_MASK_CLEARANCE)
+    for layer in (Layer.F_CU, Layer.B_CU):
+        assert not check([], [Segment(97, 101.75, 103, 101.75, 0.2, layer, 1, "N1")], [])
+
+    chamfer = {
+        **offset,
+        "shape": "roundrect",
+        "copper_offset": (0, 0),
+        "chamfered_outline": ((-1, -1), (0, -1), (1, 0), (1, 1), (-1, 1)),
+    }
+    grid = _router((92, 92), [("R1", chamfer)], [], 1, "N1").grid
+    check = mask_opening_check(grid, JLCPCB_MASK_CLEARANCE)
+    assert check([], [Segment(100, 98, 102, 100, 0.1, Layer.F_CU, 1, "N1")], [])
+
+
+@pytest.mark.parametrize("minimum", [0, 0.65])
+def test_mask_web_merging_disables_guard_in_board_or_project(tmp_path, minimum):
+    import json
+
+    board = tmp_path / "board.kicad_pcb"
+    expected = GUARD if minimum == 0 else None
+    board.write_text(f"(kicad_pcb (setup (solder_mask_min_width {minimum})))")
+    assert _resolve_route_mask_guard("jlcpcb", board) == expected
+    board.write_text("(kicad_pcb (setup))")
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"solder_mask_min_width": minimum}}}})
+    )
+    assert _resolve_route_mask_guard("jlcpcb", board) == expected
+
+
+@pytest.mark.parametrize("ratio", [None, 0.25])
+def test_roundrect_mask_shortcuts_use_plotted_radius(ratio):
+    pad = {"x": 100, "y": 100, "width": 2, "height": 2, "shape": "roundrect"}
+    if ratio is not None:
+        pad["roundrect_rratio"] = ratio
+    grid = _router((92, 92), [("R1", pad)], [], 1, "N1").grid
+    check = mask_opening_check(grid, JLCPCB_MASK_CLEARANCE)
+    for points, allowed in [
+        ([(98.85, 103), (99.85, 104), (104, 99.85), (103, 98.85)], False),
+        ([(102, 102), (100.67, 100.67), (100.57, 100.77), (100.79, 100.79)], True),
+    ]:
+        before = [
+            Segment(*a, *b, 0.10, Layer.F_CU, 1, "N1")
+            for a, b in zip(points, points[1:], strict=False)
+        ]
+        shortcut = Segment(*points[0], *points[-1], 0.10, Layer.F_CU, 1, "N1")
+        assert check(before, [shortcut], []) == allowed
+
+
+@pytest.mark.parametrize("token", [".2", "0.2", "2e-1"])
+def test_equivalent_mask_margins_resolve_to_same_guard(tmp_path, token):
+    board = tmp_path / "margin.kicad_pcb"
+    board.write_text(f"(kicad_pcb (setup (pad_to_mask_clearance {token})))")
+    assert _resolve_route_mask_guard("jlcpcb", board) == (JLCPCB_MASK_CLEARANCE, 0.2)
+
+
+def _file_shortcut(tmp_path, pad_fields, points, width, *, minimum=None):
+    from pathlib import Path
+
+    from kicad_tools.router.io import load_pcb_for_routing
+
+    fixture = Path(__file__).parents[1] / "fixtures" / "mask_pass_through_via_contact.kicad_pcb"
+    text = fixture.read_text()
+    start = text.index('(pad "1" smd rect')
+    end = text.index('(net 1 "N1")', start)
+    text = text[:start] + '(pad "1" smd ' + pad_fields + "\n" + text[end:]
+    if minimum:
+        text = text.replace("(pad_to_mask_clearance 0)", minimum)
+    start = text.index("\t(segment")
+    tracks = "".join(
+        f'(segment (start {x1} {y1}) (end {x2} {y2}) (width {width}) (layer "F.Cu") (net 1))\n'
+        for (x1, y1), (x2, y2) in zip(points, points[1:], strict=False)
+    )
+    board = tmp_path / "shortcut.kicad_pcb"
+    board.write_text(text[:start] + tracks + text[text.index("\t(gr_rect", start) :])
+    router, _ = load_pcb_for_routing(
+        str(board), validate_drc=False, force_python=True, load_existing_routes=True
+    )
+    router.routes, router.existing_routes = router.existing_routes, []
+    guard = _resolve_route_mask_guard("jlcpcb", board)
+    _optimize_traces(router, argparse.Namespace(_mfr_mask_guard=guard), quiet=True)
+    return guard, _points(router.routes[0])
+
+
+@pytest.mark.parametrize("radius", ["", "(roundrect_rratio 0.25)"])
+def test_file_chamfer_retains_plotted_round_corners(tmp_path, radius):
+    points = [(98.85, 103), (99.85, 104), (104, 99.85), (103, 98.85)]
+    pad = f'roundrect (at 0 0) (size 2 2) (chamfer_ratio 0.2) (chamfer top_left) {radius} (layers "F.Cu" "F.Mask")'
+    from shapely.geometry import LineString, box
+
+    guard, result = _file_shortcut(tmp_path, pad, points, 0.10)
+    assert guard == GUARD
+    # The nearest (bottom-right) corner is a 0.5 mm arc around the inset box.
+    gap = LineString(result).distance(box(99.5, 99.5, 100.5, 100.5)) - 0.5 - 0.05
+    assert gap == pytest.approx(1.465255, abs=0.001)
+
+
+@pytest.mark.parametrize("space", ["", " "])
+@pytest.mark.parametrize("setting", ["layers", "solder_mask_margin", "solder_mask_min_width"])
+def test_file_mask_fields_accept_equivalent_whitespace(tmp_path, space, setting):
+    points = [(91, 99.35), (92.7, 101.05), (106, 101.05), (107.7, 99.35), (109, 99.35)]
+    pad = f'rect (at 0 0) (size 2 1) ({space}layers "F.Cu" "F.Mask")'
+    minimum = None
+    if setting == "solder_mask_margin":
+        pad += f" ({space}solder_mask_margin -0.2)"
+    elif setting == "solder_mask_min_width":
+        minimum = f"({space}solder_mask_min_width 0.65)"
+    guard, result = _file_shortcut(tmp_path, pad, points, 0.20, minimum=minimum)
+    if setting == "layers":
+        assert guard == GUARD
+        from shapely.geometry import LineString, box
+
+        gap = LineString(result).distance(box(99, 99.5, 101, 100.5)) - 0.10
+        assert gap == pytest.approx(0.45)
+    else:
+        assert guard is None
+        assert result == [points[0], points[-1]]

@@ -532,3 +532,96 @@ and 1337 produced identical saved PCBs (SHA-256
 `f6fbdbcb81a6e80e5732af89e6dec8584cfca182850c56018a266e33c35b8f27`).
 Each completed 37/37 nets and 143/143 connections with 120 vias. Native
 DRC and ERC returned zero findings, and both copper and label LVS passed.
+
+## Optimizer bends beside their own pad's mask opening, 2026-11-27 (issue #9424)
+
+Measured on Linux x86_64 with C++ router build 79 and pinned kicad-cli
+10.0.6 (`KCT_KICAD_DOCKER=1`). Other work shared the host throughout
+(1-minute load 11 to 28 during the first routes, up to 53 on the re-run).
+
+On `origin/main` @ `73575b4dd`, and again at `0a3c4eb6c` with the same board
+bytes (SHA-256 `b5d0e180347327366495b3fb7955e0860066ac48b7fb5e156d7a63d179610716`),
+seed 42 passed the route and every native check and carried **18
+`mask_to_copper` errors, 101 warnings and 252 infos** in the full JLCPCB
+check, and 0 errors / 97 warnings in the nightly rule set. Fourteen of the 18
+errors are track
+segments against openings of their own net. Five are a leg whose rounded end
+comes within the 0.09 mm mask clearance of an opening it does not touch
+(HALL_A at J3/3 0.0575 mm, nFAULT at U1/14 0.020 mm, GND_SENSE at U2/7
+0.015 mm, VM at U3/5 0.045 mm, SPEED at RV1/2 0.014 mm); nine are copper
+over an opening that is not one clean entry. The rest are three vias beside
+same-net pads (C2/1, R6/2, R4/1) and the V3P3 pour at U2/15.
+
+The commit journal (`access_witness.json`) dates each segment's first
+commit. Nine of the fourteen first appear in the optimizer's post-route pass
+(GND_SENSE, SENSE_IN, HALL_A, EN_C, SPEED, nFAULT, RESET twice and
+DRIVER_SLEEP). Four come from the router's own path (VM at U3/5 and C1/1
+twice, PG_DELAY at U3/7), and the GND segment at C3/2 is not in the journal.
+
+`kct route` now gives the trace optimizer the manufacturer's
+mask-to-copper clearance (the cited policy `kct check --mfr` judges
+`mask_to_copper` with) and the board's solder-mask expansion. Each rewrite
+counts, per track segment against the openings of its own net, the defects
+the mask rule reports: copper nearer than the clearance without touching,
+or copper over an opening that fails the rule's one-clean-entry test. The
+rewrite is declined when the count grows and kept when the unoptimised
+chain carries as many (the SPEED exit at RV1/2), so no shortcut is traded
+for a worse path. A board whose mask margin is not uniform, or a route
+without a cited mask policy, keeps the previous behaviour.
+
+### Historical Linux measurements through `9b3d17c`
+
+| Seed | Route wall (s) | Vias | Nightly errors / warnings | Full-mask errors / warnings / infos |
+| --- | ---: | ---: | ---: | ---: |
+| 42 | 287.6 | 124 | 0 / 98 | 14 / 103 / 255 |
+| 7 | 281.8 | 124 | 0 / 98 | 14 / 103 / 255 |
+| 1337 | 339.6 | 124 | 0 / 98 | 14 / 103 / 255 |
+
+All three seeds exited 0 with 37/37 nets and 143/143 connections, kicad-cli
+DRC 0 errors / 0 warnings / 0 unconnected, ERC 0 and both LVS checks clean.
+The saved boards are byte-identical (SHA-256
+`6c50088c0656a808c019fee1f9bb13c4831eacef40a858d75ad16d4374875357`), and no
+route log carries a `per-net wall clock bound` or `stage deadline fired`
+line. `kct check` took 12.6 s with the mask pass skipped and 43.2 to 48.3 s
+with it. The three seeds were routed again at `9b3d17c` (base `0a3c4eb6c`): the same board bytes and counts, walls 384.7, 293.3 and
+270.8 s.
+
+Those runs predate the review fix that keys the guard's openings off each
+pad's authored mask layers (59 of 229 modelled openings, all on the GND
+thermal pads U2/29 and U3/9, left the model). Seed 42 was routed again
+through `board_05_unattended.py` at `65db53069` (the head with that fix):
+wall 265.4 s, 37/37 nets, 143/143 connections, 124 vias, kicad-cli DRC
+0 / 0 / 0, ERC 0, both LVS checks clean, 0 errors / 98 warnings in the
+`kct check` pass, and the same SHA-256 (`6c50088c...`) for the saved board.
+Only seed 42 was re-run at `65db53069`.
+
+Against the seed-42 baseline four errors are gone: HALL_A at J3/3, nFAULT
+at U1/14, EN_C at U1/12 (an off-centre exit hugging the pad's side) and
+DRIVER_SLEEP at R8/1. Two warnings are new: nFAULT at U1/14 now measures
+0.135 mm, advisory and the shape the router's own path has, and one
+`pour_slot` pair (EN_C and DRIVER_SLEEP; `pour_slot` 64 to 65). Every other
+finding kept its identity. The 98 nightly warnings are 65 `pour_slot`, 9
+`redundant_copper_covered`, 6 `redundant_copper_staircase`, 4
+`redundant_copper_detour`, 2 `redundant_copper_fragments`, 11
+`netclass_agreement` findings (Issue #10139, not examined here) and 1
+`plane_split`.
+
+Seeds 7 and 1337 were not run on the baseline revision. The ten remaining
+segment errors and the three vias are the router's own geometry, which a
+rewrite-relative guard cannot reach: the pathfinder has to keep its bends
+and vias clear of the openings of the pads they connect, or a repair has to
+move them. `--skip mask_to_copper` stays in the gate.
+
+### Board 05 manufacturing measurements at `5f92e7fe8`
+
+The reviewer ran the unattended script with native router build 79 and pinned KiCad 10.0.6. Each row grades the prepared `seed-<seed>/bldc_controller_routed.kicad_pcb` with the `bldc_controller_routed.kicad_pro` sibling written by that revision in the same seed directory. The PCB column gives the SHA-256 prefix.
+
+| Revision | Host | Seed | PCB | Route (s) | Vias | Nightly errors / warnings | Full JLCPCB errors / warnings / infos |
+| --- | --- | ---: | --- | ---: | ---: | --- | --- |
+| `5f92e7fe8` | Linux x86_64, emulated | 42 | `75b33310` | 378.8 | 124 | 0 / 90 | 14 / 95 / 255 |
+| `5f92e7fe8` | macOS arm64 | 42 | `bc26856c` | 528.2 | 120 | 0 / 80 | 10 / 85 / 261 |
+| `5f92e7fe8` | macOS arm64 | 7 | `bc26856c` | 463.3 | 120 | 0 / 80 | 10 / 85 / 261 |
+| `5f92e7fe8` | macOS arm64 | 1337 | `bc26856c` | 279.4 | 120 | 0 / 80 | 10 / 85 / 261 |
+| `8351670c5` (base) | macOS arm64 | 42 | `0de87784` | 454.9 | 120 | 0 / 79 | 14 / 83 / 258 |
+
+All rows completed 37/37 nets and 143/143 connections with clean native DRC, ERC and LVS. On macOS the same-host seed-42 comparison confirmed the four mask error removals. The strict nightly gate still failed on warnings. On the same Linux PCB, changing just the Differential width in the sibling project from 0.15 mm to the historical 0.20 mm raised netclass warnings from 3 to 11, accounting for the eight-warning difference from the historical Linux counts. Full PCB hashes and native verification details are in the [reviewer's measurement record](https://github.com/2AMLogic/kicad-tools/pull/10563#issuecomment-7214132170).
