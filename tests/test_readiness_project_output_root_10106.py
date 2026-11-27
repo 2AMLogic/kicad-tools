@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -73,7 +74,17 @@ def digest_for(project: Path, name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_declared_root_generates_then_verifies_at_documented_destinations(tmp_path):
+@pytest.mark.parametrize("use_alias", [False, True], ids=["physical-tmpdir", "symlinked-tmpdir"])
+def test_declared_root_generates_then_verifies_at_documented_destinations(
+    tmp_path, monkeypatch, use_alias
+):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    if use_alias:
+        alias = tmp_path / "linked-staging"
+        alias.symlink_to(staging, target_is_directory=True)
+        staging = alias
+    monkeypatch.setattr(tempfile, "tempdir", str(staging))
     project = make_project(tmp_path)
 
     code, _ = run(project, "--generate")

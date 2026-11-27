@@ -2603,6 +2603,19 @@ class Via:
     # board); the source S-expression is not rewritten.
     layers_read_as_through: bool = field(default=False, compare=False, repr=False)
     locked: bool = field(default=False, compare=False)
+    # Issue #10364: read-only evidence for verifying wire ends. Per-layer copper
+    # diameters from a ``(padstack (layer "B.Cu" (size D)) ...)`` block (outer
+    # layers only, keyed ``F.Cu``/``B.Cu``; empty when the via has no padstack
+    # block) and whether the bore is closed by per-via ``(filling yes)``,
+    # ``(capping yes)`` or ``(plugging (front|back yes))``. Not re-serialized.
+    padstack_sizes: dict[str, float] = field(default_factory=dict, compare=False, repr=False)
+    hole_closed: bool = field(default=False, compare=False, repr=False)
+
+    def copper_diameter(self, layer: str) -> float | None:
+        """Copper diameter on ``layer``; ``None`` if a padstack hides that layer."""
+        if not self.padstack_sizes:
+            return self.size
+        return self.padstack_sizes.get(layer)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Via:
@@ -2656,6 +2669,30 @@ class Via:
                 via.tenting_front = front.get_string(0)
             if back := tenting.find("back"):
                 via.tenting_back = back.get_string(0)
+        # Issue #10364: per-layer padstack diameters and closed-bore flags.
+        if padstack := sexp.find("padstack"):
+            aliases = {"F.Cu": "F.Cu", "Top": "F.Cu", "B.Cu": "B.Cu", "Bottom": "B.Cu"}
+            mode = padstack.find("mode")
+            mode_name = mode.get_string(0) if mode else None
+            if mode_name in ("front_inner_back", "custom"):
+                # KiCad writes the front diameter in the via's top-level size.
+                via.padstack_sizes["F.Cu"] = via.size
+            for layer in padstack.find_all("layer"):
+                name = aliases.get(layer.get_string(0) or "")
+                lsize = layer.find("size")
+                if name and lsize and (d := lsize.get_float(0)):
+                    via.padstack_sizes[name] = d
+            if mode_name == "normal" and not via.padstack_sizes:
+                pass  # uniform diameter: the top-level size applies everywhere
+            elif not via.padstack_sizes:
+                via.padstack_sizes = {"?": 0.0}  # unreadable: nothing verifiable
+        for token in ("filling", "capping"):
+            if node := sexp.find(token):
+                via.hole_closed |= node.get_string(0) == "yes"
+        if plug := sexp.find("plugging"):
+            for side in ("front", "back"):
+                if (n := plug.find(side)) and n.get_string(0) == "yes":
+                    via.hole_closed = True
         # Net — handles both (net N "name") and (net "name") formats.
         # KiCad 10 may emit (net "name") without a numeric net number.
         if net := sexp.find("net"):
@@ -4043,8 +4080,7 @@ class PCB:
 
         # KiCad 10 --save-board: no header table survived. Synthesize one from
         # the inline name-only references so the recovery loop below has a map.
-        if not self._nets:
-            self._synthesize_net_table()
+        self._synthesize_net_table()
 
         # Build bidirectional lookups from the header declarations
         name_to_number: dict[str, int] = {}
@@ -4122,7 +4158,12 @@ class PCB:
         No-op if a header table already exists or if there are no named
         inline references to recover from.
         """
-        if self._nets:
+        # A lone (net 0 "") declares only the no-net sentinel. Name-only
+        # copper on such a board still needs the same in-memory net table.
+        lone_sentinel = (
+            self._nets.keys() == {0} and not self._nets[0].name and self._net_name_only_dialect
+        )
+        if self._nets and not lone_sentinel:
             return
 
         # Iterate elements in a stable order and collect (name, surviving_num).
@@ -6708,6 +6749,32 @@ class PCB:
             return True
 
         return False
+
+    def set_footprint_property(self, reference: str, name: str, value: str) -> bool:
+        """Set a custom footprint field, retaining its existing display settings."""
+        fp = self.get_footprint(reference)
+        if fp is None or fp._sexp_node is None:
+            return False
+        for prop in fp._sexp_node.find_children("property"):
+            if prop.get_string(0) == name:
+                prop.children[1] = SExp.quoted_atom(value)
+                break
+        else:
+            prop = SExp.list(
+                "property",
+                SExp.quoted_atom(name),
+                SExp.quoted_atom(value),
+                SExp.list("at", 0, 0),
+                SExp.list("layer", fp.layer.replace(".Cu", ".Fab")),
+                SExp.list("hide", "yes"),
+                SExp.list("uuid", self.mint_uuid("property", fp.uuid, name)),
+                SExp.list("effects", SExp.list("font", SExp.list("size", 1, 1))),
+            )
+            if fp.layer == "B.Cu":
+                _mirror_text_effects(prop)
+            fp._sexp_node.append(prop)
+        fp.properties[name] = value
+        return True
 
     # Silkscreen management methods
 

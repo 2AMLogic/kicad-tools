@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .arc_widths import ArcWidthEdit
 
 
 @dataclass
@@ -100,6 +104,23 @@ class OptimizationConfig:
     pair key -> 1), or ``None`` when the checker cannot run.  After the DRC
     phase, any key whose count exceeds the input board's is attributed to the
     changed nets and those nets are rolled back."""
+
+    plan_arc_widths: Callable[[str, set[str]], dict[str, list[ArcWidthEdit]]] | None = None
+    """Compute collision-checked arc edits against the original PCB text and its locked nets."""
+
+    @property
+    def track_pass_enabled(self) -> bool:
+        return any(
+            (
+                self.merge_collinear,
+                self.eliminate_zigzags,
+                self.convert_45_corners,
+                self.remove_jogs,
+                self.compress_staircase,
+                self.pull_tight,
+                self.shorten_detours,
+            )
+        )
 
 
 @dataclass

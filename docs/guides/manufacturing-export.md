@@ -27,6 +27,17 @@ URIs before exporting. Libraries supplied by KiCad's global installation
 are not copied; footprint libraries and 3D models are outside this symbol
 packaging support.
 
+For a board under `kicad/`, select the assembly directory as the root when
+the export needs project-relative inputs elsewhere in that assembly.
+
+```sh
+kct export kicad/board.kicad_pcb --project-root . -o manufacturing/
+```
+
+The named directory must contain the selected board. Omitting the option uses
+the board directory. An explicitly supplied `--spec` selects BOM information
+independently of that choice.
+
 ## The Editable Project: One Basename, One Working Revision
 
 KiCad opens a project through one basename: `board.kicad_pro` pairs with
@@ -119,6 +130,60 @@ pip install kicad-tools
 ```
 
 You'll also need KiCad 8+ installed for Gerber generation via `kicad-cli`.
+
+## Separate editable KiCad files from generated output
+
+Keep the PCB, schematic, project, rules and local libraries under version control.
+For example, place them in `kicad/`, alongside a project-root `.kicad-tools.toml`
+that declares a sibling output directory. Both the output path and receipt
+input names are relative to the directory containing the TOML file. You can
+pass an enclosing checkout to `--project-root` and move the declared project
+on its own. A narrower `--project-root` must contain the board, its dependencies
+and the output directory.
+
+```toml
+[readiness]
+output_root = "output"
+```
+
+From the project root, generate the package and its readiness receipt. Rendering
+the selected board puts the views and their provenance in `output/renders/`.
+The verification command writes a second receipt in `output/readiness-verification/`.
+
+```bash
+kct readiness kicad/controller.kicad_pcb --sch kicad/controller.kicad_sch --mfr jlcpcb --generate
+kct render kicad/controller.kicad_pcb
+kct readiness kicad/controller.kicad_pcb --sch kicad/controller.kicad_sch --mfr jlcpcb --verify
+```
+
+After reviewing the package, use your reviewer name to sign it. The generated
+receipt at `output/readiness.json` and the verification receipt shown here
+both bind the release to the selected PCB and bundle. Keep the receipt used
+at sign-off with the package. Submission checks the PCB and schematic paths
+and hashes against that receipt, including a schematic in a sibling source
+directory. A dry run prepares a local order preview and checks stock. Give it
+a new directory outside the source and manufacturing directories.
+
+```bash
+kct tapeout-sign-off output/manufacturing --board kicad/controller.kicad_pcb \
+  --readiness output/readiness-verification/readiness.json --reviewer "Your name"
+kct submit-jlcpcb output/manufacturing --board kicad/controller.kicad_pcb \
+  --schematic kicad/controller.kicad_sch --quantity 5 --dry-run -o ../controller-submission-preview
+```
+
+These root-anchored `.gitignore` entries cover disposable output and local
+editor state.
+
+```gitignore
+/output/
+/kicad/*.kicad_prl
+/kicad/~*.lck
+```
+
+Keep historical source revisions in `history/`. Copy the exact released
+package, signed manifest, readiness receipt and human fabrication review
+records you intend to retain into a versioned directory such as
+`releases/rev-d/`. These paths stay trackable alongside the editable design.
 
 ## Are We Ship-Ready? (`kct fleet status`)
 
@@ -404,6 +469,84 @@ R1,10k,0402,30.00,20.00,0,top
 U1,ATmega328P,TQFP-32,50.00,40.00,0,top
 ```
 
+## Accessories and Off-Board Parts: the Purchasing List
+
+The BOM and CPL describe what the factory places. A complete assembly often
+needs more: a cover for each fuse holder, a cartridge bought separately,
+chassis resistors wired to land footprints on the board. None of those has a
+placement, so none can appear in the BOM or CPL, and a prose list kept beside
+the project goes stale as soon as the board quantity or the revision changes.
+
+Declare them in the project `.kct` instead. Each `purchasing` row has a
+description, a whole-number `quantity` **per board**, optional `refs` naming the
+board designators the item belongs to (wire lands included), and either a
+`manufacturer` and `mpn` or a `pending` note saying what is still undecided:
+
+```yaml
+purchasing:
+  - description: Snap-on cover for the 5 x 20 mm fuse holder
+    quantity: 3            # one for each holder: F1, F2 and F3
+    refs: [F1, F2, F3]
+    manufacturer: Example Fuse Co
+    mpn: "SYN-COVER-1"     # quote a part number that begins with a digit
+  - description: 5 x 20 mm cartridge, AC
+    quantity: 1
+    refs: [F1]
+    manufacturer: Example Fuse Co
+    mpn: "SYN-CART-AC"
+  - description: 5 x 20 mm cartridge, DC
+    quantity: 2
+    refs: [F2, F3]
+    pending: DC rating and breaking capacity still to be chosen
+  - description: Mains cord set
+    quantity: 1            # nothing on the board to link it to
+    manufacturer: Example Cable Co
+    mpn: "SYN-CORD-1"
+```
+
+A row's `quantity` already covers all of its `refs`, and several rows may name
+the same designator (the holder's cover and its cartridge both link to `F1`).
+The holder itself stays in the BOM through `bom_entries`, exactly as before.
+
+`kct export` reads the declaration and writes `purchasing.json` into the
+manufacturing bundle, with its SHA-256 and size in `manifest.json`. The
+fabricator BOM and CPL are byte-for-byte what they would be without the
+declaration. The console names the file and every selection still pending:
+
+```text
+  [ok] Purchasing list: purchasing.json
+  1 purchasing selection(s) still pending:
+    - 5 x 20 mm cartridge, DC
+```
+
+An invalid row (a zero quantity, a selected part without a part number, a
+pending row that also names one) fails the export and names the row, so a list
+that cannot be trusted never ships. Removing the declaration or setting it to
+an empty list withdraws the earlier export. An unreadable spec on a rerun
+preserves the last exported list and reports an error. Each generated list carries a checksum of its original rows, so the exporter
+can recognize it after the manifest is renamed or removed. For an older list
+without that checksum, the exporter checks the configured manifest. If neither
+identifies a valid purchasing list, export asks you to move it aside.
+
+A buyer can keep an independently created `purchasing.json` in the output
+directory when the project declares no purchasing rows. If a declared list
+would overwrite that file, or if another enabled output uses the same path,
+export reports the collision before writing the package.
+
+### For the buyer
+
+`kct submit-jlcpcb` reads the frozen list, multiplies each row by the ordered
+board quantity and publishes it as `purchasing.json` in the review page, listed
+in `review-page-manifest.json`. The page's "Purchasing list" section shows the
+per-board and build quantities, and "Outstanding selections" names every
+pending row by description and linked designators. For two boards the example
+above asks for 6 covers, 2 AC cartridges and 4 DC cartridges, the last still
+marked pending and carrying no part number. Resolve the row in the `.kct`,
+then export and submit again: the revised page lists nothing outstanding.
+
+The list is for purchasing only. Nothing in it is placed, matched or
+stock-checked by the factory, and it never reaches the JLCPCB stock gate.
+
 ## CLI Commands
 
 ### Export Gerbers
@@ -551,6 +694,59 @@ if __name__ == "__main__":
         sys.exit(1)
     export_for_jlcpcb(sys.argv[1], sys.argv[2], sys.argv[3])
 ```
+
+## Via Drills Against the Mask, Stencil and Land (`--via-land-overlap`)
+
+Under an ordinary via process every routed via should stay tented and off the
+stencil. `--via-land-overlap` measures the archive the export has just written,
+so it reports what the assembler receives rather than what the source board
+says (Issue #10357):
+
+```bash
+kct export board.kicad_pcb --mfr jlcpcb --via-land-overlap --format json
+```
+
+The opt-in appends a `via_land_overlap` entry to the preflight list of the JSON
+output and of `manifest.json`. A drill counts when the exported drill disk of a
+via matched to a plated Excellon hit shares area with the solder-mask opening,
+the stencil opening and one SMD land on the same face. A drill whose center
+lies outside the opening still counts when its edge reaches it.
+
+```json
+{
+  "name": "via_land_overlap",
+  "status": "WARN",
+  "data": {
+    "expected_vias": 499, "matched_vias": 499, "distinct_holes": 22,
+    "dispositions": {"undeclared": 22, "filled_capped": 0, "exposed_thermal": 0},
+    "coverage": {"status": "complete", "reasons": []},
+    "observations": [
+      {"face": "F", "reference": "U1", "pad": "3", "drill_file": "board-PTH.drl",
+       "drill_center_mm": [12.7, -3.4], "drill_diameter_mm": 0.3,
+       "overlap_area_mm2": 0.0075, "edge_overlap": true,
+       "process_disposition": "undeclared", "declarations": []}
+    ]
+  }
+}
+```
+
+- `drill_center_mm` is the coordinate as printed in `drill_file`, in millimetres.
+  A physical hole is counted once in `distinct_holes` however many faces
+  observe it.
+- `process_disposition` names the declaration that applies to an intersection:
+  `filled_capped` under the bundle's declared via-in-pad process (the
+  manifest's `fabrication_process`), `exposed_thermal` on a pad carrying
+  KiCad's `pad_prop_heatsink` property, or `undeclared`. A manufacturer's
+  via-in-pad capability or a pad name alone is not a declaration.
+- `coverage.status` is `complete` only when every routed via matched a drill
+  hit and the mask and paste plots of every reached face were read and line up
+  with the board. Otherwise `reasons` names what is missing, unsupported,
+  unregistered or ambiguous, the findings of the measured faces are kept, and
+  a zero is not a complete one.
+
+The result is `OK` when coverage is complete and every intersection is
+declared, and `WARN` otherwise; it never blocks the export. A standard export
+does not run the measurement.
 
 ## Other Manufacturers
 

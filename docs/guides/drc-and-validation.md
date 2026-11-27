@@ -75,11 +75,16 @@ explicit rule on byte-identical geometry:
 ```
 
 reported `silk_over_copper` with `clearance 0.1500 mm; actual 0.0850 mm`.
-KiCad's built-in silk check does fire with no `min_silk_clearance` key
-present at all, once the silk genuinely *overlaps* the aperture — and reports
-no numeric clearance/actual pair, consistent with an overlap test rather than
-a gap threshold. This is a behavioural characterisation, not a claim about
-KiCad's implementation; the upstream cause has not been established here.
+KiCad's built-in silk check also reports a stroke crossing exposed copper
+with no `min_silk_clearance` key or custom rule. That finding has no numeric
+clearance/actual pair.
+
+On KiCad 10.0.6, expanding a round pad or untented via's mask opening by
+0.40 mm leaves the built-in finding at the copper edge. In
+`kct check --mfr jlcpcb`, a silk stroke crossing that edge raises
+`silk_over_copper` (error for a pad, info for a via). A stroke wholly in
+the ring of bare substrate clears this rule. Reference placement still
+keeps text clear of the full mask opening.
 
 The practical rule that follows: **cross-layer silk clearance needs an
 explicit rule in the `.kicad_dru`.** kicad-tools emits one for the profiles
@@ -457,9 +462,11 @@ changed (e.g. per-layer `path_ampacity` keys or geometry-named silk keys), the
 defect is gone, or the rule did not run in this invocation (orphan lines say
 `[rule not evaluated in this run]` when so -- for example `ampacity` without a
 net-class-map sidecar or when `project.kct` declares currents that no net
-class maps, or `path_ampacity` without `--current-paths`; any coverage
-`unknown` whose reason is `needs_input:<X>` counts, since the absent input
-keeps the rule from emitting anything); neither
+class maps, or `path_ampacity` without
+[`--current-paths`](../reference/cli.md#declared-branch-current-paths---current-paths),
+whose sidecar schema the CLI reference documents under "Declared branch
+current paths"; any coverage `unknown` whose reason is `needs_input:<X>`
+counts, since the absent input keeps the rule from emitting anything); neither
 is touched. A keyed entry whose hash version predates `ev3` (e.g. an
 `ev2:` entry) cannot be recomputed at all: it is listed by key, with its
 version, and left alone too (Issue #9482). The command previews by default and changes no file; add

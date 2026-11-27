@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import stat
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -1333,17 +1334,25 @@ def _print_clear_lines(clear_outcome, origin_x: float, origin_y: float, dry_run:
 
 
 def _load_sidecar_wires(pcb_path: Path) -> list | None:
-    """The board's wire-list sidecar records, or None when absent/unreadable (#8747)."""
-    from kicad_tools.pcb.reinforcement_sidecar import load_wires, sidecar_path
+    """The board's wire-list sidecar records, or None when absent/unreadable (#8747).
+
+    An entry that is not a JSON object is not passed over with that warning:
+    it raises ``ValueError`` for the caller to refuse the command (Issue
+    #10401). Falling back to the size rule would edit the board without the
+    anchors the list names.
+    """
+    from kicad_tools.pcb.reinforcement_sidecar import check_wire_records, load_wires, sidecar_path
 
     path = sidecar_path(pcb_path)
     if not path.is_file():
         return None
     try:
-        return load_wires(path)
+        wires = load_wires(path)
     except (OSError, ValueError) as e:
         print(f"Warning: ignoring unreadable {path}: {e}", file=sys.stderr)
         return None
+    check_wire_records(path, wires)
+    return wires
 
 
 def _drop_cleared_wires(output_path: Path, clear_outcome, origin_x: float, origin_y: float) -> int:
@@ -1426,6 +1435,21 @@ def _opening_entries(openings, origin_x: float, origin_y: float) -> list:
     ]
 
 
+def _check_clear_destination(destination: Path) -> None:
+    """Read the wire records before a clear or replacement writes any files."""
+    from kicad_tools.pcb.reinforcement_sidecar import load_wire_records
+
+    try:
+        mode = destination.lstat().st_mode
+    except FileNotFoundError:
+        return  # No directory entry, so there are no records to drop.
+    if stat.S_ISLNK(mode):
+        mode = destination.stat().st_mode
+    if not stat.S_ISREG(mode):
+        raise ValueError("expected a regular reinforcement sidecar file")
+    load_wire_records(destination)
+
+
 def _finish_reinforce_clear(
     args, pcb, pcb_path: Path, output_path: Path, clear_outcome, dry_run: bool, output_format: str
 ) -> int:
@@ -1502,9 +1526,16 @@ def _finish_reinforce_clear(
 
 
 def _run_reinforce_list_wires(args, pcb_path: Path, net_name: str | None) -> int:
-    """``pcb reinforce --list-wires``: print the sidecar's wires (#8744)."""
+    """``pcb reinforce --list-wires``: print the sidecar's wires (#8744).
+
+    Only an unfiltered JSON dump prints the file as it stands. Every other
+    listing reads the entries as records, so one that is not a JSON object is
+    refused with :func:`~kicad_tools.pcb.reinforcement_sidecar.load_wire_records`
+    (Issue #10401).
+    """
     from kicad_tools.pcb.reinforcement_sidecar import (
         format_wire_list,
+        load_wire_records,
         load_wires,
         sidecar_path,
     )
@@ -1513,8 +1544,9 @@ def _run_reinforce_list_wires(args, pcb_path: Path, net_name: str | None) -> int
     if not path.is_file():
         print(f"Error: no reinforcement sidecar at {path}", file=sys.stderr)
         return 1
+    raw_dump = getattr(args, "format", "text") == "json" and not net_name
     try:
-        wires = load_wires(path)
+        wires = load_wires(path) if raw_dump else load_wire_records(path)
     except (OSError, ValueError) as e:
         print(f"Error reading {path}: {e}", file=sys.stderr)
         return 1
@@ -1534,11 +1566,14 @@ def _run_reinforce_adopt(args, pcb_path: Path, net_name: str | None) -> int:
     ``<board>.reinforcement.json``. Nothing on the board moves and the board is
     not written; wires the sidecar already records are kept as they are, so a
     re-run is a no-op.
+
+    An existing sidecar is read as records: an entry that is not a JSON object
+    refuses the adoption before anything is written (Issue #10401).
     """
     from kicad_tools.pcb.reinforcement_sidecar import (
         adopt_wire_records,
         already_recorded,
-        load_wires,
+        load_wire_records,
         sidecar_path,
         write_sidecar,
     )
@@ -1554,7 +1589,7 @@ def _run_reinforce_adopt(args, pcb_path: Path, net_name: str | None) -> int:
         return 1
     path = sidecar_path(pcb_path)
     try:
-        existing = load_wires(path) if path.is_file() else []
+        existing = load_wire_records(path) if path.is_file() else []
     except (OSError, ValueError) as e:
         print(f"Error reading {path}: {e}", file=sys.stderr)
         return 1
@@ -1766,9 +1801,13 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     clear_outcome = None
     # Issue #8916: the records are also how a parallel re-run tells its own
     # earlier copper from copper that predates the tool.
-    prior_wires = (
-        _load_sidecar_wires(pcb_path) if (clear_only or replace or strategy != "wire") else None
-    )
+    try:
+        prior_wires = (
+            _load_sidecar_wires(pcb_path) if (clear_only or replace or strategy != "wire") else None
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
     if clear_only or replace:
         try:
             clear_outcome = clear_anchors(
@@ -1780,6 +1819,18 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         except ReinforceError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
+        if not dry_run and _cleared_anything(clear_outcome):
+            from kicad_tools.pcb.reinforcement_sidecar import sidecar_path
+
+            destination = sidecar_path(output_path)
+            try:
+                _check_clear_destination(destination)
+            except (OSError, ValueError) as exc:
+                reason = str(exc).removeprefix(f"{destination}: ")
+                print(
+                    f"Error reading {destination}: {reason} -- nothing was written", file=sys.stderr
+                )
+                return 1
         if clear_only:
             return _finish_reinforce_clear(
                 args, pcb, pcb_path, output_path, clear_outcome, dry_run, output_format

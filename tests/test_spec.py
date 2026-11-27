@@ -539,6 +539,395 @@ class TestCopperWeight:
         assert mfg.copper_weight is None
 
 
+class TestLeadProfile:
+    """Verified maximum lead dimensions on a BOM entry (Issue #10299)."""
+
+    def test_round_lead_required_diameter(self):
+        """A round lead needs its maximum diameter."""
+        from kicad_tools.spec.schema import LeadProfile
+
+        lead = LeadProfile(shape="round", diameter_mm=1.0, source="calipers 2026-11-20")
+        assert lead.required_diameter_mm() == pytest.approx(1.0)
+        assert lead.max_dimensions_mm() == (1.0,)
+
+    def test_rectangular_lead_required_diameter_is_diagonal(self):
+        """A rectangular lead needs the diagonal of its maximum width/thickness."""
+        from kicad_tools.spec.schema import LeadProfile
+
+        lead = LeadProfile(
+            shape="rectangular", width_mm=1.4, thickness_mm=0.8, source="datasheet p. 9"
+        )
+        # sqrt(1.4^2 + 0.8^2) = 1.6124515...
+        assert lead.required_diameter_mm() == pytest.approx(1.61245155, rel=1e-6)
+        assert lead.max_dimensions_mm() == (1.4, 0.8)
+
+    def test_round_requires_diameter(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import LeadProfile
+
+        with pytest.raises(ValidationError, match="requires diameter_mm"):
+            LeadProfile(shape="round", source="datasheet")
+
+    def test_rectangular_requires_width_and_thickness(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import LeadProfile
+
+        with pytest.raises(ValidationError, match="width_mm and thickness_mm"):
+            LeadProfile(shape="rectangular", width_mm=1.4, source="datasheet")
+        with pytest.raises(ValidationError, match="width_mm and thickness_mm"):
+            LeadProfile(shape="rectangular", thickness_mm=0.8, source="datasheet")
+
+    def test_shape_dimension_mismatch_rejected(self):
+        """Round takes diameter only; rectangular takes width/thickness only."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import LeadProfile
+
+        with pytest.raises(ValidationError, match="diameter_mm only"):
+            LeadProfile(shape="round", diameter_mm=1.0, width_mm=1.4, source="datasheet")
+        with pytest.raises(ValidationError, match="width_mm and thickness_mm; "):
+            LeadProfile(
+                shape="rectangular", width_mm=1.4, thickness_mm=0.8, diameter_mm=1.0, source="s"
+            )
+
+    def test_blank_source_rejected(self):
+        """Dimensions without provenance cannot be traced, so they are refused."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import LeadProfile
+
+        with pytest.raises(ValidationError, match="require a source"):
+            LeadProfile(shape="round", diameter_mm=1.0, source="   ")
+
+    def test_dimensions_must_be_positive(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import LeadProfile
+
+        with pytest.raises(ValidationError):
+            LeadProfile(shape="round", diameter_mm=0, source="datasheet")
+        with pytest.raises(ValidationError):
+            LeadProfile(shape="rectangular", width_mm=-1.4, thickness_mm=0.8, source="datasheet")
+
+
+class TestFinishedHoleTolerance:
+    """Fabricator lower finished-hole tolerance (Issue #10299)."""
+
+    def test_declared_with_source(self):
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(
+            finished_hole_tolerance_mm=-0.08,
+            finished_hole_tolerance_source="JLCPCB capabilities, through-hole tolerances",
+        )
+        assert mfg.finished_hole_tolerance_mm == -0.08
+        assert mfg.finished_hole_tolerance_source == "JLCPCB capabilities, through-hole tolerances"
+
+    def test_zero_is_allowed(self):
+        """Zero (hole never smaller than nominal) is a valid lower tolerance."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(
+            finished_hole_tolerance_mm=0.0, finished_hole_tolerance_source="fab quote"
+        )
+        assert mfg.finished_hole_tolerance_mm == 0.0
+
+    def test_requires_source(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        with pytest.raises(ValidationError, match="finished_hole_tolerance_source"):
+            ManufacturingRequirements(finished_hole_tolerance_mm=-0.08)
+
+    def test_positive_rejected(self):
+        """The sign convention is lower/negative; a positive value misunderstands it."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        with pytest.raises(ValidationError):
+            ManufacturingRequirements(
+                finished_hole_tolerance_mm=0.08, finished_hole_tolerance_source="misread"
+            )
+
+    def test_unset_by_default(self):
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        assert ManufacturingRequirements().finished_hole_tolerance_mm is None
+        assert ManufacturingRequirements().finished_hole_tolerance_source is None
+
+
+class TestBOMEntryLeadDeclarations:
+    """Lead declarations on bom_entries load from a .kct file (Issue #10299)."""
+
+    def test_lead_and_pad_leads_parse(self, tmp_path):
+        from kicad_tools.spec.parser import load_spec
+
+        spec_file = tmp_path / "project.kct"
+        spec_file.write_text(
+            "kct_version: '1.0'\n"
+            "project:\n"
+            "  name: T\n"
+            "bom_entries:\n"
+            "  - ref: Q1-Q8\n"
+            "    part: STW70N60DM2\n"
+            "    lead:\n"
+            "      shape: rectangular\n"
+            "      width_mm: 1.4\n"
+            "      thickness_mm: 0.8\n"
+            "      source: STW70N60DM2 datasheet package drawing, pp. 9-10\n"
+            "    pad_leads:\n"
+            "      '2':\n"
+            "        shape: round\n"
+            "        diameter_mm: 1.0\n"
+            "        source: measured with calipers 2026-11-20\n"
+        )
+        spec = load_spec(spec_file)
+        assert spec.bom_entries is not None
+        entry = spec.bom_entries[0]
+        assert entry.lead is not None
+        assert entry.lead.shape == "rectangular"
+        assert entry.lead.width_mm == pytest.approx(1.4)
+        assert entry.lead.thickness_mm == pytest.approx(0.8)
+        assert entry.lead.source == "STW70N60DM2 datasheet package drawing, pp. 9-10"
+        assert entry.pad_leads is not None
+        assert entry.pad_leads["2"].shape == "round"
+        assert entry.pad_leads["2"].diameter_mm == pytest.approx(1.0)
+
+    def test_lead_declarations_round_trip(self, tmp_path):
+        """save_spec -> load_spec preserves the lead declarations verbatim."""
+        from kicad_tools.spec.parser import load_spec, save_spec
+        from kicad_tools.spec.schema import BOMEntry, LeadProfile, ProjectMetadata, ProjectSpec
+
+        spec = ProjectSpec(
+            project=ProjectMetadata(name="T"),
+            bom_entries=[
+                BOMEntry(
+                    ref="Q1",
+                    part="STW70N60DM2",
+                    lead=LeadProfile(
+                        shape="rectangular", width_mm=1.4, thickness_mm=0.8, source="p. 9"
+                    ),
+                    pad_leads={"3": LeadProfile(shape="round", diameter_mm=1.0, source="calipers")},
+                )
+            ],
+        )
+        path = tmp_path / "project.kct"
+        save_spec(spec, path)
+        loaded = load_spec(path)
+        assert loaded.bom_entries is not None
+        entry = loaded.bom_entries[0]
+        assert entry.lead == spec.bom_entries[0].lead
+        assert entry.pad_leads == spec.bom_entries[0].pad_leads
+
+    def test_tolerance_parses_from_spec(self, tmp_path):
+        from kicad_tools.spec.parser import load_spec
+
+        spec_file = tmp_path / "project.kct"
+        spec_file.write_text(
+            "kct_version: '1.0'\n"
+            "project:\n"
+            "  name: T\n"
+            "requirements:\n"
+            "  manufacturing:\n"
+            "    finished_hole_tolerance_mm: -0.08\n"
+            "    finished_hole_tolerance_source: JLCPCB capabilities\n"
+        )
+        spec = load_spec(spec_file)
+        assert spec.requirements is not None
+        assert spec.requirements.manufacturing is not None
+        assert spec.requirements.manufacturing.finished_hole_tolerance_mm == pytest.approx(-0.08)
+
+
+class TestPurchasingEntries:
+    """Supplementary procurement rows declared in a .kct file (Issue #10431)."""
+
+    # Synthetic purchasing identifiers only: nothing here names a real product.
+    FUSE_ROWS = (
+        "purchasing:\n"
+        "  - description: Snap-on cover for the 5 x 20 mm fuse holder\n"
+        "    quantity: 3\n"
+        "    refs: [F1, F2, F3]\n"
+        "    manufacturer: Example Fuse Co\n"
+        "    mpn: SYN-COVER-1\n"
+        "  - description: 5 x 20 mm cartridge, AC\n"
+        "    quantity: 1\n"
+        "    refs: [F1]\n"
+        "    manufacturer: Example Fuse Co\n"
+        "    mpn: SYN-CART-AC\n"
+        "  - description: 5 x 20 mm cartridge, DC\n"
+        "    quantity: 2\n"
+        "    refs: [F2, F3]\n"
+        "    pending: DC rating and breaking capacity still to be chosen\n"
+        "  - description: Chassis ballast resistor, wire wound\n"
+        "    quantity: 2\n"
+        "    refs: [R9, R10]\n"
+        "    manufacturer: Example Resistor Co\n"
+        "    mpn: SYN-BALLAST-1\n"
+    )
+
+    def _load(self, tmp_path, rows):
+        from kicad_tools.spec.parser import load_spec
+
+        path = tmp_path / "project.kct"
+        path.write_text(f"kct_version: '1.0'\nproject:\n  name: T\n{rows}")
+        return load_spec(path)
+
+    def test_unset_by_default(self):
+        from kicad_tools.spec.schema import ProjectMetadata, ProjectSpec
+
+        assert ProjectSpec(project=ProjectMetadata(name="T")).purchasing is None
+
+    def test_fuse_example_parses(self, tmp_path):
+        cover, ac, dc, ballast = self._load(tmp_path, self.FUSE_ROWS).purchasing
+
+        assert cover.description == "Snap-on cover for the 5 x 20 mm fuse holder"
+        assert cover.quantity == 3
+        assert cover.refs == ["F1", "F2", "F3"]
+        assert (cover.manufacturer, cover.mpn, cover.pending) == (
+            "Example Fuse Co",
+            "SYN-COVER-1",
+            None,
+        )
+        assert (ac.refs, ac.quantity, ac.mpn) == (["F1"], 1, "SYN-CART-AC")
+        # A pending row keeps its quantity and carries no part number at all.
+        assert (dc.quantity, dc.refs, dc.pending) == (
+            2,
+            ["F2", "F3"],
+            "DC rating and breaking capacity still to be chosen",
+        )
+        assert dc.manufacturer is None and dc.mpn is None
+        # A chassis item links to wire lands; another row may omit the board link.
+        assert (ballast.refs, ballast.mpn) == (["R9", "R10"], "SYN-BALLAST-1")
+
+    def test_row_without_board_reference_and_empty_list(self, tmp_path):
+        rows = (
+            "purchasing:\n"
+            "  - description: Chassis ballast resistor\n"
+            "    quantity: 1\n"
+            "    manufacturer: Example Resistor Co\n"
+            "    mpn: SYN-BALLAST-1\n"
+        )
+        only = self._load(tmp_path, rows).purchasing
+        assert only[0].refs is None
+        assert self._load(tmp_path, "purchasing: []\n").purchasing == []
+
+    @pytest.mark.parametrize("exclude_none", [True, False])
+    def test_round_trip(self, tmp_path, exclude_none):
+        from kicad_tools.spec.parser import load_spec, save_spec
+
+        path = tmp_path / "project.kct"
+        spec = self._load(tmp_path, self.FUSE_ROWS)
+        save_spec(spec, path, exclude_none=exclude_none)
+        assert load_spec(path).purchasing == spec.purchasing
+
+    def test_blank_surrounding_whitespace_is_trimmed(self, tmp_path):
+        rows = (
+            "purchasing:\n"
+            "  - description: '  Cover  '\n"
+            "    quantity: 1\n"
+            "    refs: [' F1 ', '']\n"
+            "    pending: undecided\n"
+        )
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="non-blank designators"):
+            self._load(tmp_path, rows)
+        rows = rows.replace("' F1 ', ''", "' F1 '")
+        (entry,) = self._load(tmp_path, rows).purchasing
+        assert (entry.description, entry.refs) == ("Cover", ["F1"])
+
+    @pytest.mark.parametrize(
+        ("rows", "message"),
+        [
+            (("    quantity: 0\n"), "positive whole number"),
+            (("    quantity: -2\n"), "positive whole number"),
+            (("    quantity: 1.5\n"), "valid integer"),
+            (("    quantity: true\n"), "positive whole number"),
+            (("    description: '   '\n    quantity: 1\n"), "non-blank description"),
+            (("    quantity: 1\n    manufacturer: Example\n"), "needs both manufacturer and mpn"),
+            (("    quantity: 1\n    mpn: SYN-1\n"), "needs both manufacturer and mpn"),
+            (("    quantity: 1\n"), "needs both manufacturer and mpn"),
+            (
+                ("    quantity: 1\n    manufacturer: Example\n    mpn: '  '\n"),
+                "non-blank",
+            ),
+            (
+                (
+                    "    quantity: 1\n    manufacturer: Example\n    mpn: SYN-1\n"
+                    "    pending: undecided\n"
+                ),
+                "must not set manufacturer or mpn",
+            ),
+            (("    quantity: 1\n    pending: '  '\n"), "pending must be non-blank"),
+            (("    quantity: 1\n    pending:\n"), "pending must say"),
+            (
+                ("    quantity: 1\n    refs: [F1, F1]\n    pending: undecided\n"),
+                "repeat a designator",
+            ),
+            (
+                ("    quantity: 1\n    refs: ['']\n    pending: undecided\n"),
+                "non-blank designators",
+            ),
+            (("    quantity: 1\n    refs: F1\n    pending: undecided\n"), "valid list"),
+            (("    quantity: 1\n    mpn: 12345\n    pending: undecided\n"), "valid string"),
+        ],
+        ids=[
+            "zero-quantity",
+            "negative-quantity",
+            "fractional-quantity",
+            "boolean-quantity",
+            "blank-description",
+            "manufacturer-without-mpn",
+            "mpn-without-manufacturer",
+            "neither-selected-nor-pending",
+            "blank-mpn",
+            "pending-with-part-number",
+            "blank-pending",
+            "bare-pending",
+            "repeated-designator",
+            "blank-designator",
+            "designators-not-a-list",
+            "numeric-mpn-needs-quoting",
+        ],
+    )
+    def test_invalid_row_is_refused_with_its_input_error(self, tmp_path, rows, message):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match=message) as refused:
+            self._load(tmp_path, f"purchasing:\n  - description: Cover\n{rows}")
+        assert "purchasing.0" in str(refused.value)
+
+    def test_unquoted_part_number_losing_leading_zeros_is_refused(self, tmp_path):
+        """``0031.8221`` unquoted is a YAML float; it must never become ``31.8221``."""
+        from pydantic import ValidationError
+
+        rows = "purchasing:\n  - description: Holder\n    quantity: 1\n    mpn: 0031.8221\n"
+        with pytest.raises(ValidationError, match="valid string"):
+            self._load(tmp_path, rows)
+        rows = rows.replace("mpn: 0031.8221", "manufacturer: Example\n    mpn: '0031.8221'")
+        assert self._load(tmp_path, rows).purchasing[0].mpn == "0031.8221"
+
+    def test_rows_may_share_a_designator(self, tmp_path):
+        rows = (
+            "purchasing:\n"
+            "  - description: Cover\n"
+            "    quantity: 1\n"
+            "    refs: [F1]\n"
+            "    manufacturer: Example\n"
+            "    mpn: SYN-COVER-1\n"
+            "  - description: Cartridge\n"
+            "    quantity: 1\n"
+            "    refs: [F1]\n"
+            "    manufacturer: Example\n"
+            "    mpn: SYN-CART-AC\n"
+        )
+        assert [row.refs for row in self._load(tmp_path, rows).purchasing] == [["F1"], ["F1"]]
+
+
 class TestMountingHoleGroupSpec:
     """Tests for the MountingHoleGroupSpec schema (Issue #3352, P_AS1)."""
 

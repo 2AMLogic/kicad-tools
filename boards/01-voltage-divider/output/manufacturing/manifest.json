@@ -23,8 +23,8 @@
       },
       "optimize_traces": {
         "copper_oz": 1.0,
-        "corners_after": 5,
-        "corners_before": 5,
+        "corners_after": 4,
+        "corners_before": 4,
         "layers": 2,
         "segments_after": 9,
         "segments_before": 9,
@@ -43,67 +43,67 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "019a88a73aed18db88fe1bd59f7e2bd86cde95a6b44fcc74f3b2bf1b4f9d565e",
-      "size": 1825
+      "sha256": "d1791370956962913fac6bd16314506702a6021bfb14b9e396bc02e90a1a592f",
+      "size": 2212
     },
     "assembly-back.pdf": {
-      "sha256": "1f7fb6bac361e583d6b506b03f43c637f8dac57073787215502e2dcfd15ff1a4",
-      "size": 8733
+      "sha256": "762635aca8889ca42736c0092b14ba962cd829e534f554c04e9c0d802593f6d0",
+      "size": 8804
     },
     "assembly-front.pdf": {
-      "sha256": "7966311dff1b95058decc6f8ff20585a66a9a74d23174810b9f2fe37513dfc71",
-      "size": 19589
+      "sha256": "1aeabcc7772acd60b33c6f5348db4aceddc474e372229824bba5c05a0b7a8575",
+      "size": 19669
     },
     "bom_jlcpcb.csv": {
       "sha256": "e27d3eb62752fff2b81d590930c5034c38cef022b4bf458891f038622e6ee878",
       "size": 175
     },
     "check-report.json": {
-      "sha256": "9cef8ab9841765215b33512cfff4eb5876ec8f4fae736c13bd203717a3919c8c",
-      "size": 126109
+      "sha256": "1c99bb3e249fe9daa4f60be1a36befc2e0fac508f2b952fafce473837a306c41",
+      "size": 116399
     },
     "cpl_jlcpcb.csv": {
       "sha256": "847457252c291c9086804931f5016de06f78dc1aa1020d4a0068bc98ddd89c36",
       "size": 377
     },
     "gerbers/gerbers.zip": {
-      "sha256": "11c012e6e39df361c3dcb002251b3d97e599b3f8564eec6538cc7014c16a4b0b",
-      "size": 15708
+      "sha256": "a9075c048558c25c990f61b40a1fa3168ddc238166e8b19f9300b0eae69af919",
+      "size": 15902
     },
     "images/assembly.png": {
-      "sha256": "40855c76d00618e1505662e335316ebc3cccc140beb05c5b6584dcd0f64e3daf",
-      "size": 152228
+      "sha256": "60b15db7f93126c43276d0af80512fe40d610deb9cccaeb0fd48f8b07ea9c3ce",
+      "size": 155720
     },
     "images/layer_B_Cu.png": {
-      "sha256": "e6ded628dfa03c53ac7e8f049d340b64beb8cfefb95d0f3c4477deff0babbad9",
-      "size": 77114
+      "sha256": "f69304aa8bfbc00c89ed7418621fc7891872f7fff53446aabb7c4d8e412c6f85",
+      "size": 79795
     },
     "images/layer_F_Cu.png": {
-      "sha256": "9b06f5c754a65b52d8a78156294671d5a7862366badbe2d1fb702b1cba1aa299",
-      "size": 112871
+      "sha256": "39627a19860c2859f49cdf17aca664e8fc7797351eb95290732252e529635f03",
+      "size": 115666
     },
     "images/pcb_back.png": {
-      "sha256": "3569924c6c9d963bba916c8a0ec2ac3ec50d6d1272f0c6862c9d33d496f61feb",
-      "size": 79190
+      "sha256": "296d6de707712c94c05bf991549953ac5944d67822df34d7379777e719da1e9d",
+      "size": 81552
     },
     "images/pcb_copper.png": {
-      "sha256": "dc96b62c318e67ee67dea5d2b6ce03a9a1b2e8da25dd8cb08a6b63f9eabcae12",
-      "size": 82916
+      "sha256": "5a2da88f31196faeb3993a23e6a5d064f592e5899631c675d7d098d47fc36651",
+      "size": 86201
     },
     "images/pcb_front.png": {
-      "sha256": "d815c5e04f79a0f2acd1c58f13f0ca04a6853abd98c6a6fbd3d7176f3a95007e",
-      "size": 200093
+      "sha256": "461bfafaa5d858ab1cd561beba685e544dde212eed5eb238b378187749fbded0",
+      "size": 202618
     },
     "images/schematic_voltage_divider.png": {
       "sha256": "02421af6d6d8fcfc31b5d5d4ddbb02bba24ae16635caccd9e9c90b4acb05e10b",
       "size": 118121
     },
     "kicad_project.zip": {
-      "sha256": "d3e695b7b62b620755176457c58ab78611183dcdcb67a385f54cf71d9773b98b",
-      "size": 15740
+      "sha256": "8fd6c865dc088d580c9b729aada791afa3cff50d6bf5e0cb830c71b79cf71d46",
+      "size": 15832
     },
     "native-drc.json": {
-      "sha256": "10bbc584c93b3b2abed0729a49842f4010816c7c2635a2ca2f139e32adee4ad4",
+      "sha256": "0d0ff51f63234a71f5779b1134f7bf328cb4f4db5c00fdabb5780cc695813b11",
       "size": 252
     },
     "procurement-review.md": {
@@ -111,19 +111,19 @@
       "size": 13488
     },
     "report.md": {
-      "sha256": "91bc6fb64d9aee5449bbe9ff791340891327b0d5cfa0b6cdb4b6dbbebad40116",
+      "sha256": "ef85489504ab8ef97900b23ee09c6fa3ce40a6b3210f55e0ab89881a68c86e49",
       "size": 2464
     },
     "report.pdf": {
-      "sha256": "c5d9e538b5ebbf5b1c0d5f80d26ba9a99926f7dd5311d3f046efb2986e7d6958",
-      "size": 905287
+      "sha256": "be21e7683751f06608e7fffbc0a41824551c012cb10daab54f5d46db87e8c882",
+      "size": 925915
     },
     "schematic.pdf": {
-      "sha256": "31ae8587c31b52577ef563637c2df00405b1f45777e8ffbaa97e5c9712eb7e89",
-      "size": 47876
+      "sha256": "f5d79356a1d6c5ca854e3d4fce1ccb70e5f445cb5de9ef2180ebd23fbaebba1a",
+      "size": 47852
     }
   },
-  "generated_at": "2026-11-24T17:18:27Z",
+  "generated_at": "2026-11-26T19:43:14Z",
   "kicad_tools_version": "0.29.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -155,7 +155,7 @@
       "status": "OK"
     },
     {
-      "message": "Schematic auto-detected: voltage_divider.kicad_sch",
+      "message": "Schematic file found: voltage_divider.kicad_sch",
       "name": "schematic_file",
       "status": "OK"
     },
@@ -183,6 +183,72 @@
       "message": "Drill holes present (2 vias, 4 TH pads)",
       "name": "drill_holes",
       "status": "OK"
+    },
+    {
+      "data": {
+        "pads": [
+          {
+            "hole": {
+              "diameter_mm": 1.0,
+              "shape": "round"
+            },
+            "lead": null,
+            "mpn": "ZX-PZ2.54-1-2PZZ",
+            "pad": "1",
+            "reason": "no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ",
+            "reference": "J2",
+            "status": "unassessed"
+          },
+          {
+            "hole": {
+              "diameter_mm": 1.0,
+              "shape": "round"
+            },
+            "lead": null,
+            "mpn": "ZX-PZ2.54-1-2PZZ",
+            "pad": "2",
+            "reason": "no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ",
+            "reference": "J2",
+            "status": "unassessed"
+          },
+          {
+            "hole": {
+              "diameter_mm": 1.0,
+              "shape": "round"
+            },
+            "lead": null,
+            "mpn": "ZX-PZ2.54-1-2PZZ",
+            "pad": "1",
+            "reason": "no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ",
+            "reference": "J1",
+            "status": "unassessed"
+          },
+          {
+            "hole": {
+              "diameter_mm": 1.0,
+              "shape": "round"
+            },
+            "lead": null,
+            "mpn": "ZX-PZ2.54-1-2PZZ",
+            "pad": "2",
+            "reason": "no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ",
+            "reference": "J1",
+            "status": "unassessed"
+          }
+        ],
+        "summary": {
+          "failed": 0,
+          "finished_hole_tolerance_mm": null,
+          "finished_hole_tolerance_source": null,
+          "pads": 4,
+          "tolerance_unassessed": 0,
+          "unassessed": 4
+        }
+      },
+      "details": "J1 pad 1 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ\nJ1 pad 2 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ\nJ2 pad 1 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ\nJ2 pad 2 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ\nAssessment covers centred geometric fit only (not lead pitch or placement tolerances).",
+      "message": "Through-hole lead fit unverified: 4 pad(s) unassessed (no verified lead dimensions or unsupported geometry); no failures",
+      "name": "assembly_lead_fit",
+      "status": "WARN"
     },
     {
       "message": "No usable stackup copper to reconcile; profile default copper applies",
@@ -223,7 +289,7 @@
         "order_boards": 5,
         "parts": [
           {
-            "age_days": 1,
+            "age_days": 0,
             "lcsc": "C17414",
             "per_board": 2,
             "refs": [
@@ -231,8 +297,8 @@
               "R2"
             ],
             "source": "live",
-            "stock": 44589073,
-            "verified": false
+            "stock": 43938128,
+            "verified": true
           },
           {
             "age_days": null,
@@ -247,6 +313,10 @@
             "verified": false
           }
         ],
+        "sources": {
+          "offline_catalog": "hit",
+          "parts_cache": "hit"
+        },
         "strict": false,
         "unresolved": []
       },
@@ -280,6 +350,6 @@
   "producer": "kct readiness",
   "version": "1.0",
   "warning_counts_by_rule": {
-    "mask_to_copper": 8
+    "mask_to_copper": 3
   }
 }

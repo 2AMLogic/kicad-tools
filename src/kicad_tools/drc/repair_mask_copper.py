@@ -47,10 +47,12 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
 from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
@@ -67,6 +69,7 @@ if TYPE_CHECKING:
     from kicad_tools.manufacturers.base import DesignRules
     from kicad_tools.router.board_clearance_rules import BoardClearanceRules
     from kicad_tools.schema.pcb import PCB, Pad
+    from kicad_tools.validate.mask_geometry import MaskOpening
 
 #: Message marker the mask rule writes for a same-net segment that enters its
 #: own pad (``validate/mask_copper.py``).
@@ -76,6 +79,8 @@ OWN_PAD_ENTRY_MARKER = "same-net own-pad entry"
 #: relation plus the disjoint measurement relation.
 PASS_THROUGH_MARKER = "same-net pass-through"
 DISJOINT_RELATION_MARKER = "Mask-to-copper disjoint"
+_OVERLAP_RELATION_MARKER = "Mask-to-copper overlap"
+_ViaLead = tuple[float, float, float, float, float, str, int | str]
 
 _TOLERANCE_MM = 0.01
 # The mask rule counts an authored end as inside the pad within its construction
@@ -193,7 +198,7 @@ class MaskNudgeAction:
     #: along different lines (a chamfer between perpendicular runs); empty
     #: means every point shares ``(dx, dy)``.
     shifts: list[tuple[float, float]] = field(default_factory=list)
-    # An outside elbow's lead must keep this gap to the plotted pad opening.
+    # Required plotted separation between the moved conductor and the pad opening.
     minimum_mask_gap_mm: float | None = field(default=None, kw_only=True)
 
     def shift(self, index: int) -> tuple[float, float]:
@@ -209,23 +214,20 @@ class MaskNudgeAction:
 
 @dataclass
 class MaskViaRelocateAction(MaskNudgeAction):
-    """One applied (or, in a dry run, predicted) via relocation with kept
-    approach lines (issue #9939's disjoint-via increment).
+    """Relocate a via and keep its connections in one undoable edit.
 
-    The via centre translates by ``(dx, dy)`` like a nudge, but an anchored
-    track end does not have to follow it verbatim: each end may slide along
-    its own segment line to the point where a 0/45/90/135-degree connection
-    -- recorded in ``added_segments`` and lying wholly inside the new via
-    land -- runs to the new centre, so no approach changes angle.  ``points``
-    still names every moved item (the via, each slid end and every added
-    connection) for finding-attribution; undo removes the added copper.
+    A track end can slide along its original line and join the new centre
+    through an aligned segment inside the via land. A pad whose copper touched
+    the original annulus can instead reach the new centre through an aligned
+    segment starting inside the pad. ``points`` names every moved or added item
+    for finding attribution, and undo removes all added copper.
     """
 
     #: ``(segment uuid, end tag, old_x, old_y, new_x, new_y)`` -- one entry
     #: per anchored end that slid along its own line to its connection point.
     end_moves: list[tuple[str, str, float, float, float, float]] = field(default_factory=list)
     #: ``(uuid, start_x, start_y, end_x, end_y, width, layer, net)`` for each
-    #: short aligned connection the action adds inside the new via land.
+    #: aligned connection the action adds inside the new via land or to the pad.
     added_segments: list[tuple[str, float, float, float, float, float, str, int | str]] = field(
         default_factory=list
     )
@@ -288,6 +290,24 @@ class MaskRepairResult:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class _SwappedElbow:
+    """A two-leg elbow after its legs traded places, before anything moves."""
+
+    uuid: str  # the reported conductor
+    tag: str  # its end at the elbow
+    elbow: tuple[float, float]  # that end as authored
+    anchor: tuple[float, float]  # its other end, which stays
+    width: float
+    other_uuid: str
+    other_tag: str
+    other_elbow: tuple[float, float]  # as authored; may sit a hair off ``elbow``
+    other_width: float
+    far: tuple[float, float]  # the other leg's far end, which stays
+    corner: tuple[float, float]  # where the swap puts the reported end
+    other_corner: tuple[float, float]  # and the other, keeping their offset
+
+
 def _num(node: SExp | None) -> float:
     """First atom of ``node`` as a number (0.0 when absent)."""
     atom = node.get_first_atom() if node is not None else None
@@ -339,11 +359,19 @@ class MaskCopperRepairer(CopperGapRepairer):
     refusal (``_anchored_ends``) and the endpoint update helper.
     """
 
-    def __init__(self, pcb_path: str | Path, *, project_pcb_path: str | Path | None = None):
+    def __init__(
+        self,
+        pcb_path: str | Path,
+        *,
+        project_pcb_path: str | Path | None = None,
+        will_refill: bool = False,
+    ):
         # ``DrillClearanceRepairer.__init__`` parses the file and builds the
         # same ``nets`` / ``net_names`` indexes this class historically did.
         super().__init__(pcb_path)
         self._project_pcb_path = Path(project_pcb_path) if project_pcb_path else self.path
+        # The staged CLI pass regenerates the old via antipad before checking a pad bridge.
+        self._will_refill = will_refill
         self._pivot_pad_bounds: dict[str, BaseGeometry | None] = {}
 
     @cached_property
@@ -353,11 +381,12 @@ class MaskCopperRepairer(CopperGapRepairer):
         return BoardClearanceRules.from_board(self._project_pcb_path)
 
     @cached_property
-    def _elbow_mask_apertures(self) -> dict[tuple[str, str], BaseGeometry]:
+    def _pad_mask_openings(self) -> dict[tuple[str, str], MaskOpening]:
         """Standard pad mask outlines in the same file coordinates as the track ends."""
         from kicad_tools.schema.pcb import PCB
         from kicad_tools.validate.mask_geometry import (
             ADVANCED_PAD_FEATURES,
+            MaskOpening,
             board_mask_margin,
             pad_mask_margin,
             pad_mask_shapes,
@@ -366,7 +395,7 @@ class MaskCopperRepairer(CopperGapRepairer):
 
         pcb = PCB(self.doc)
         board_margin, declared = board_mask_margin(pcb)
-        apertures: dict[tuple[str, str], BaseGeometry] = {}
+        apertures: dict[tuple[str, str], MaskOpening] = {}
         if board_margin is None:
             return apertures
         version = pcb._file_version()
@@ -379,18 +408,30 @@ class MaskCopperRepairer(CopperGapRepairer):
                     and any(node.find(name) is not None for name in ADVANCED_PAD_FEATURES)
                 ):
                     continue
-                margin, _ = pad_mask_margin(pad, fp, board_margin, declared, board_version=version)
+                margin, source = pad_mask_margin(
+                    pad, fp, board_margin, declared, board_version=version
+                )
                 if margin is None or not math.isfinite(margin):
                     continue
                 try:
-                    _copper, aperture = pad_mask_shapes(pad, fp, margin)
+                    copper, aperture = pad_mask_shapes(pad, fp, margin)
                 except ValueError:
                     continue
                 if not aperture.is_empty:
+                    copper = translate(copper, *pcb._board_origin)
                     aperture = translate(aperture, *pcb._board_origin)
                     identity = _bare(pad.uuid) if pad.uuid else f"{fp.reference}:pad:{index}"
                     for side in sides:
-                        apertures[identity, f"{side}.Cu"] = aperture
+                        apertures[identity, f"{side}.Cu"] = MaskOpening(
+                            identity,
+                            f"{side}.Mask",
+                            "pad",
+                            margin,
+                            source,
+                            margin < 0,
+                            aperture,
+                            copper,
+                        )
         return apertures
 
     # ------------------------------------------------------------------
@@ -413,6 +454,14 @@ class MaskCopperRepairer(CopperGapRepairer):
         if isinstance(atom, str):
             return atom
         return self.nets.get(atom, "") if isinstance(atom, int) else ""
+
+    def pour_nets(self) -> set[str]:
+        """Return named nets whose copper can change when KiCad refills the board."""
+        return {
+            name
+            for zone in self.doc.find_all("zone")
+            if zone.find("keepout") is None and (name := self._net_name(zone))
+        }
 
     def off_angle_tracks(self) -> Counter[str]:
         return off_angle_tracks(self.doc)
@@ -535,29 +584,92 @@ class MaskCopperRepairer(CopperGapRepairer):
             return best
         raise MaskTraceAngleError(f"neither elbow preserves contact and clearance for track {uid}")
 
-    def disconnected_bends(
-        self, before: MaskCopperRepairer, actions: list[MaskRepairAction | MaskNudgeAction]
-    ) -> set[str]:
-        """Check all physical copper groups, including taps without a pad on either side."""
+    def disconnected_copper_nets(self, before: MaskCopperRepairer, names: set[str]) -> set[str]:
+        """Check all physical copper groups, including taps without a pad on either side.
+
+        Matches authored copper items (pads, vias, segments and arcs) by UUID
+        when present so a KiCad zone-refill save that reorders segments/vias
+        and regenerates filled polygons does not trigger false disconnections.
+        Items without a baseline UUID must have a unique geometry match.
+        """
         from kicad_tools.schema.pcb import PCB
         from kicad_tools.validate.connectivity import ConnectivityValidator
+        from kicad_tools.validate.copper_contact import PAD, TRACK, VIA, CopperItem
 
-        names = {act.net_name for act in actions if act.bends}
         if not names:
             return set()
         old_board, new_board = PCB(before.doc), PCB(self.doc)
         old, new = ConnectivityValidator(old_board), ConnectivityValidator(new_board)
+
+        def identities(board: PCB, item: CopperItem) -> tuple[str, tuple] | None:
+            if item.kind == PAD:
+                fi, pi = item.key
+                fp = board.footprints[fi]
+                pad = fp.pads[pi]
+                return _bare(pad.uuid), (
+                    PAD,
+                    fp.reference,
+                    pad.number,
+                    item.center,
+                    item.layers,
+                    pad.shape,
+                    pad.size,
+                    pad.rotation,
+                )
+            if item.kind == VIA:
+                via = board.vias[item.key]
+                return _bare(via.uuid), (VIA, via.position, via.size, via.drill, item.layers)
+            if item.kind == TRACK:
+                kind, idx = item.key
+                track = board.segments[idx] if kind == "segment" else board.arcs[idx]
+                return _bare(track.uuid), (
+                    kind,
+                    track.start,
+                    track.end,
+                    track.width,
+                    track.layer,
+                    track.mid if isinstance(track, Arc) else None,
+                )
+            return None  # Fill polygons participate in contact, but are regenerated.
+
         disconnected = set()
         for name in names:
             old_net, new_net = old_board.get_net_by_name(name), new_board.get_net_by_name(name)
-            if (
-                old_net is None
-                or new_net is None
-                or not new._contact_graph(new_net.number).preserves_connections(
-                    old._contact_graph(old_net.number)
-                )
-            ):
+            if old_net is None or new_net is None:
                 disconnected.add(name)
+                continue
+            old_graph = old._contact_graph(old_net.number)
+            new_graph = new._contact_graph(new_net.number)
+            baseline = [
+                (identity, group)
+                for item, group in zip(old_graph.items, old_graph.component, strict=True)
+                if (identity := identities(old_board, item)) is not None
+            ]
+            known_ids = {uid for (uid, _), _group in baseline if uid}
+            by_uuid: dict[tuple, list[int]] = {}
+            by_geometry: dict[tuple, list[int]] = {}
+            for item, group in zip(new_graph.items, new_graph.component, strict=True):
+                identity = identities(new_board, item)
+                if identity is None:
+                    continue
+                uid, geometry = identity
+                if uid in known_ids:
+                    by_uuid.setdefault((geometry[0], uid), []).append(group)
+                else:
+                    by_geometry.setdefault(geometry, []).append(group)
+
+            destinations: dict[int, int] = {}
+            for (uid, geometry), old_group in baseline:
+                if uid:
+                    matches = by_uuid.pop((geometry[0], uid), [])
+                else:
+                    # A native save can assign the first UUID. Require one
+                    # unclaimed match, independent of the saved item order.
+                    matches = by_geometry.pop(geometry, [])
+                new_group = matches[0] if len(matches) == 1 else None
+                if new_group is None or destinations.setdefault(old_group, new_group) != new_group:
+                    disconnected.add(name)
+                    break
         return disconnected
 
     @staticmethod
@@ -691,12 +803,13 @@ class MaskCopperRepairer(CopperGapRepairer):
             poly = rotate(poly, -pad.rotation, origin=(cx, cy))
         return poly
 
-    def _other_net_obstacles(
+    def _other_net_obstacles_with_meta(
         self, layer: str, net_name: str, skip_uuid: str, pads: dict
-    ) -> list[BaseGeometry]:
-        obstacles: list[BaseGeometry] = []
+    ) -> list[tuple[BaseGeometry, str, str]]:
+        obstacles: list[tuple[BaseGeometry, str, str]] = []
         for uuid, node in self._segment_nodes().items():
-            if uuid == skip_uuid or self._net_name(node) == net_name:
+            obs_net = self._net_name(node)
+            if uuid == skip_uuid or obs_net == net_name:
                 continue
             layer_node = node.find("layer")
             if layer_node is None or _bare(layer_node.get_first_atom()) != layer:
@@ -706,15 +819,18 @@ class MaskCopperRepairer(CopperGapRepairer):
             if start is None or end is None or width_node is None:
                 continue
             width = _num(width_node)
-            obstacles.append(LineString([start, end]).buffer(width / 2, quad_segs=16))
+            obstacles.append(
+                (LineString([start, end]).buffer(width / 2, quad_segs=16), "Track", obs_net)
+            )
         for via in self.doc.find_all("via"):
-            if self._net_name(via) == net_name:
+            obs_net = self._net_name(via)
+            if obs_net == net_name:
                 continue
             at = self._xy(via.find("at"))
             size_node = via.find("size")
             if at is None or size_node is None:
                 continue
-            obstacles.append(Point(at).buffer(_num(size_node) / 2, quad_segs=16))
+            obstacles.append((Point(at).buffer(_num(size_node) / 2, quad_segs=16), "Via", obs_net))
         for poly, _, layers, pad_net, _, _ in pads.values():
             if pad_net == net_name and net_name:
                 continue
@@ -723,8 +839,16 @@ class MaskCopperRepairer(CopperGapRepairer):
                 or "*.Cu" in layers
                 or ("F&B.Cu" in layers and layer in {"F.Cu", "B.Cu"})
             ):
-                obstacles.append(poly)
+                obstacles.append((poly, "Pad", pad_net))
         return obstacles
+
+    def _other_net_obstacles(
+        self, layer: str, net_name: str, skip_uuid: str, pads: dict
+    ) -> list[BaseGeometry]:
+        return [
+            geom
+            for geom, _, _ in self._other_net_obstacles_with_meta(layer, net_name, skip_uuid, pads)
+        ]
 
     def _junction(
         self, layer: str, point: tuple[float, float], skip_uuid: str, net_name: str
@@ -805,6 +929,13 @@ class MaskCopperRepairer(CopperGapRepairer):
         touched_by_action: set[str] = set()
         pass_throughs: dict[str, list[DRCViolation]] = {}
         reported_tracks: set[str] = set()
+        reported_vias: set[str] = {
+            uuids[-1]
+            for v in findings
+            if len(uuids := _item_uuids(v)) >= 2
+            and uuids[-1] not in segments
+            and self._via_by_uuid(uuids[-1]) is not None
+        }
 
         for violation in findings:
             uuids = _item_uuids(violation)
@@ -815,9 +946,13 @@ class MaskCopperRepairer(CopperGapRepairer):
             openings = uuids[:-1]
             if conductor in segments:
                 reported_tracks.add(conductor)
-            if (
-                PASS_THROUGH_MARKER in violation.message
-                and DISJOINT_RELATION_MARKER in violation.message
+            if PASS_THROUGH_MARKER in violation.message and (
+                DISJOINT_RELATION_MARKER in violation.message
+                or (
+                    conductor not in segments
+                    and _OVERLAP_RELATION_MARKER in violation.message
+                    and self._via_by_uuid(conductor) is not None
+                )
             ):
                 # One grouped edit per conductor clears every opening it has
                 # findings against (issue #9896); collected and repaired below.
@@ -846,6 +981,8 @@ class MaskCopperRepairer(CopperGapRepairer):
                         violation.required_value_mm,
                         margin_mm,
                         touched_by_action,
+                        reported_vias,
+                        warning_clearance_mm,
                     )
                 ):
                     moved.add(conductor)
@@ -1440,6 +1577,20 @@ class MaskCopperRepairer(CopperGapRepairer):
                     touched_by_action,
                 ):
                     return None
+                if self._balance_pad_bend(
+                    seg,
+                    conductor,
+                    openings[0],
+                    pads,
+                    result,
+                    max_displacement,
+                    dry_run,
+                    clearance_mm,
+                    required,
+                    margin_mm,
+                    touched_by_action,
+                ):
+                    return None
             return refusal
         via_node = self._via_by_uuid(conductor)
         if via_node is not None:
@@ -1474,6 +1625,7 @@ class MaskCopperRepairer(CopperGapRepairer):
                 touched_by_action,
                 reported_tracks,
                 warning_clearance_mm,
+                any(_OVERLAP_RELATION_MARKER in v.message for v in members),
             )
         return "not_a_straight_segment", ""
 
@@ -1565,8 +1717,12 @@ class MaskCopperRepairer(CopperGapRepairer):
                 return "exceeds_max_displacement", f"needs {displacement:.4f}mm"
             moving_uuids = {seg_uuid, *(member[0] for member in joined)}
 
-            new_start = start if start == fixed else (start[0] + dx, start[1] + dy)
-            new_end = end if end == fixed else (end[0] + dx, end[1] + dy)
+            # Check the same coordinates that _apply_nudge will write.
+            def shifted(point: tuple[float, float]) -> tuple[float, float]:
+                return round(point[0] + dx, 4), round(point[1] + dy, 4)
+
+            new_start = start if start == fixed else shifted(start)
+            new_end = end if end == fixed else shifted(end)
             moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
                 (
                     copper,
@@ -1589,12 +1745,9 @@ class MaskCopperRepairer(CopperGapRepairer):
                 moves.append(
                     (
                         LineString([join_other, join_end]).buffer(join_width / 2, quad_segs=16),
-                        LineString(
-                            [
-                                join_other,
-                                (join_end[0] + dx, join_end[1] + dy),
-                            ]
-                        ).buffer(join_width / 2, quad_segs=16),
+                        LineString([join_other, shifted(join_end)]).buffer(
+                            join_width / 2, quad_segs=16
+                        ),
                         layer,
                     )
                 )
@@ -1702,6 +1855,173 @@ class MaskCopperRepairer(CopperGapRepairer):
         if not all(is_45_aligned(new[0] - x, new[1] - y) for x, y in (pad_end, via)):
             return None
         return new[0] - corner[0], new[1] - corner[1]
+
+    def _balance_pad_bend(
+        self,
+        seg: SExp,
+        uid: str,
+        opening: str,
+        pads: dict,
+        result: MaskRepairResult,
+        max_displacement: float,
+        dry_run: bool,
+        clearance_mm: float | None,
+        required: float,
+        margin_mm: float,
+        touched: set[str],
+    ) -> bool:
+        """Split a pad-to-pad bend's axial leg between its two fixed lands."""
+        from kicad_tools.schema.pcb import PCB
+
+        _, destination, _, net, ref, _ = pads[opening]
+        if self._locks.is_generator_owned(seg) or self._board_rules.dru_error:
+            return False
+        layer_node = seg.find("layer")
+        if layer_node is None:
+            return False
+        layer = _bare(layer_node.get_first_atom())
+        width = _num(seg.find("width"))
+        start, end = self._xy(seg.find("start")), self._xy(seg.find("end"))
+        if start is None or end is None or width <= 0:
+            return False
+        # The finding is on the diagonal. The remaining axial track must end
+        # at the centre of the opening it passes, regardless of track order.
+        span_x, span_y = abs(start[0] - end[0]), abs(start[1] - end[1])
+        if span_x < _MIN_RUN_MM or not math.isclose(span_x, span_y, abs_tol=1e-9, rel_tol=0):
+            return False
+        for fixed_tag, anchor, corner in (("start", start, end), ("end", end, start)):
+            owners = [
+                pad_id
+                for pad_id, (_, centre, layers, name, _, _) in pads.items()
+                if pad_id != opening
+                and name == net
+                and (layer in layers or "*.Cu" in layers)
+                and math.dist(anchor, centre) < 1e-6
+            ]
+            if len(owners) != 1:
+                continue
+            members, blocked = self._junction(layer, corner, uid, net)
+            if blocked or len(members) != 1:
+                continue
+            tail_id, tail, tail_tag = members[0]
+            far = self._xy(tail.find("end" if tail_tag == "start" else "start"))
+            if (
+                tail_id in touched
+                or self._locks.is_generator_owned(tail)
+                or _num(tail.find("width")) != width
+                or self._xy(tail.find(tail_tag)) != corner
+                or far is None
+                or math.dist(far, destination) >= 1e-6
+            ):
+                continue
+            dx, dy = (far[0] - corner[0]) / 2, (far[1] - corner[1]) / 2
+            distance = math.hypot(dx, dy)
+            if (dx != 0 and dy != 0) or not _MIN_RUN_MM <= distance <= max_displacement:
+                continue
+            # Check the coordinates that _apply_nudge and the split will save.
+            # Decline if their precision would skew or stretch the diagonal.
+            inner = round(corner[0] + dx, 4), round(corner[1] + dy, 4)
+            lead = round(anchor[0] + dx, 6), round(anchor[1] + dy, 6)
+            if (
+                math.dist(inner, (corner[0] + dx, corner[1] + dy)) > 1e-9
+                or math.dist(lead, (anchor[0] + dx, anchor[1] + dy)) > 1e-9
+            ):
+                continue
+            legs = [(anchor, lead), (lead, inner), (inner, far)]
+            copper = [LineString(leg).buffer(width / 2, quad_segs=16) for leg in legs]
+            if not self._balanced_bend_clears_mask(
+                legs, copper, {opening, owners[0]}, layer, width, pads, required, margin_mm
+            ):
+                continue
+            # Both pieces of the split diagonal inherit its original clearance.
+            # The shorter tail can already lie closer to the same obstacle.
+            diagonal = LineString([anchor, corner]).buffer(width / 2, quad_segs=16)
+            tail_copper = LineString([corner, far]).buffer(width / 2, quad_segs=16)
+            moves = [
+                (diagonal, unary_union(copper[:2]), layer),
+                (tail_copper, copper[2], layer),
+            ]
+            if self._loses_same_net_contact(
+                moves, layer, net, {uid, tail_id}, pads, protect_ends=True
+            ):
+                continue
+            floor = max(clearance_mm or 0, self._board_rules.net_requirement(net, self.net_names))
+            if self._copper_floor_reason(
+                moves, layer, net, uid, pads, floor
+            ) or self._pull_in_crowds_pad(
+                PCB(self.doc), layer, net, pads, [(old, new) for old, new, _ in moves]
+            ):
+                continue
+            bend = MaskTraceBend(uid, str(uuid4()), fixed_tag, anchor, lead)
+            action = MaskNudgeAction(
+                action="nudge_clear",
+                uuid=uid,
+                kind="segment",
+                pad_uuid=opening,
+                pad_ref=ref,
+                net_name=net,
+                layer=layer,
+                old_x=corner[0],
+                old_y=corner[1],
+                new_x=inner[0],
+                new_y=inner[1],
+                dx=dx,
+                dy=dy,
+                displacement_mm=distance,
+                detail=f"distributed the straight leg between two pad centres at {ref}",
+                openings=[opening],
+                bends=[bend],
+                points=[
+                    ("segment", uid, bend.moved_tag, *corner),
+                    ("segment", tail_id, tail_tag, *corner),
+                ],
+            )
+            if self._apply_nudge(action, result, dry_run) is not None:
+                return False
+            if not dry_run:
+                self._insert_segment_after_last(bend.split(self.doc, seg))
+            return True
+        return False
+
+    def _balanced_bend_clears_mask(
+        self,
+        legs: list[tuple[tuple[float, float], tuple[float, float]]],
+        copper: list[BaseGeometry],
+        owners: set[str],
+        layer: str,
+        width: float,
+        pads: dict,
+        required: float,
+        margin_mm: float,
+    ) -> bool:
+        """A nearby opening must either clear the leg or qualify as its own pad entry."""
+        from kicad_tools.validate.mask_copper import _within_own_pad
+
+        apertures = self._pad_mask_openings
+        if any((uid, layer) not in apertures or uid in self._pivot_pad_bounds for uid in owners):
+            return False
+        for (uid, side), aperture in apertures.items():
+            if side != layer:
+                continue
+            for ends, shape in zip(legs, copper, strict=True):
+                if shape.distance(aperture.geometry) >= required + margin_mm:
+                    continue
+                if uid not in owners:
+                    return False
+                item = {"kind": "segment", "width_mm": width, "endpoints_mm": ends}
+                qualifies, _, _ = _within_own_pad(
+                    aperture.geometry,
+                    shape,
+                    aperture.copper,
+                    {"kind": f"pad:{pads[uid][5]}"},
+                    item,
+                    aperture.margin_mm,
+                    required,
+                    _MASK_UNCERTAINTY_MM,
+                )
+                if not qualifies:
+                    return False
+        return True
 
     def _slide_shared_pad_exit(
         self,
@@ -2266,6 +2586,19 @@ class MaskCopperRepairer(CopperGapRepairer):
                 return self._apply_nudge(action, result, dry_run) is None
         return False
 
+    def _anchor_on_reported_via(
+        self, anchor: tuple[float, float], net: str, reported_vias: set[str]
+    ) -> bool:
+        """Whether ``anchor`` sits on a same-net via that still has its own mask finding."""
+        for uid in reported_vias:
+            via = self._via_by_uuid(uid)
+            if via is None or self._net_name(via) != net:
+                continue
+            pos = self._xy(via.find("at"))
+            if pos is not None and math.dist(anchor, pos) < _TOLERANCE_MM:
+                return True
+        return False
+
     def _flip_elbow_into_pad(
         self,
         seg: SExp,
@@ -2279,6 +2612,8 @@ class MaskCopperRepairer(CopperGapRepairer):
         required: float | None,
         margin_mm: float,
         touched: set[str],
+        reported_vias: set[str] | None = None,
+        warning_clearance_mm: float | None = None,
     ) -> bool:
         """Swap the two legs of an elbow to make a straight entry into the pad.
 
@@ -2294,7 +2629,13 @@ class MaskCopperRepairer(CopperGapRepairer):
         authored offset inside the junction tolerance. A corner that stays outside
         the pad is accepted when the far leg's end is inside it and the other leg
         clears the whole opening (a stub handing a hugging track over to the pad).
-        Returns ``True`` when applied.
+
+        The swap is also held to the mask rule before anything moves: a swapped
+        leg that overlaps the opening has to be one clean entry, and one that
+        misses it has to clear it by the policy gap plus margin.  A swap whose
+        entry leg is not clean is slid out along the pad's lead instead
+        (:meth:`_slide_swapped_elbow_along_lead`) when a lead continues from
+        the entry leg's far end.  Returns ``True`` when applied.
         """
         if required is None or opening in self._pivot_pad_bounds:
             return False
@@ -2316,7 +2657,6 @@ class MaskCopperRepairer(CopperGapRepairer):
         rules = self._board_rules
         if rules.dru_error:
             return False
-        copper_floor = max(clearance_mm or 0.0, rules.net_requirement(net, self.net_names))
         inside = pad.buffer(-_INSIDE_EPS_MM)
 
         for elbow, anchor, tag in ((end, start, "end"), (start, end, "start")):
@@ -2336,88 +2676,386 @@ class MaskCopperRepairer(CopperGapRepairer):
             if other_elbow is None or far is None or other_width_node is None:
                 continue
             other_width = _num(other_width_node) or width
-            # Give the first leg the second leg's vector. Translating both
-            # corner ends by the same delta gives the second leg the first's.
-            flipped = (
+            # Give the first leg the second leg's vector first (the mirror elbow
+            # keeps both leg lengths and angles). When that corner stays inside
+            # the mask opening, try the two orthogonal L-corners between anchor
+            # and far so an axial-plus-45° pad-corner approach can enter the pad
+            # perpendicularly while its outer leg clears the opening (#9939).
+            from ..router.quantize import _is_quantum_aligned
+
+            mirror = (
                 round(anchor[0] + far[0] - other_elbow[0], 4),
                 round(anchor[1] + far[1] - other_elbow[1], 4),
             )
-            dx, dy = flipped[0] - elbow[0], flipped[1] - elbow[1]
-            other_flipped = (round(other_elbow[0] + dx, 4), round(other_elbow[1] + dy, 4))
-            displacement = math.hypot(dx, dy)
-            if displacement < _TOLERANCE_MM or displacement > max_displacement:
-                continue
-            if min(math.dist(anchor, flipped), math.dist(other_flipped, far)) < _MIN_RUN_MM:
-                continue
-            minimum_mask_gap = None
-            if not (inside.contains(Point(flipped)) and inside.contains(Point(other_flipped))):
-                # The corner stays outside the pad (a stub that hands a track
-                # hugging the pad edge over to the pad, #9939): the swap is
-                # still a legal entry when the far leg now runs straight into
-                # the pad and the other leg clears the whole opening.
-                aperture = self._elbow_mask_apertures.get((opening, layer))
-                minimum_mask_gap = required + margin_mm
-                if not (
-                    inside.contains(Point(far))
-                    and aperture is not None
-                    and LineString([anchor, flipped]).distance(aperture) - width / 2
-                    >= minimum_mask_gap - 1e-9
+            candidates: list[tuple[tuple[float, float], bool]] = [(mirror, True)]
+            # If the outer anchor sits on a via with its own finding this pass,
+            # let the via relocate first so the orthogonal lead uses its final seat.
+            if not self._anchor_on_reported_via(anchor, net, reported_vias or set()):
+                for ortho in (
+                    (round(anchor[0], 4), round(far[1], 4)),
+                    (round(far[0], 4), round(anchor[1], 4)),
+                ):
+                    if all(
+                        math.dist(ortho, prev) >= _TOLERANCE_MM
+                        for prev in (*(pt for pt, _ in candidates), elbow)
+                    ):
+                        candidates.append((ortho, False))
+
+            for flipped, is_mirror in candidates:
+                dx, dy = flipped[0] - elbow[0], flipped[1] - elbow[1]
+                saved_flipped = (round(elbow[0] + dx, 4), round(elbow[1] + dy, 4))
+                other_flipped = (round(other_elbow[0] + dx, 4), round(other_elbow[1] + dy, 4))
+                displacement = math.hypot(dx, dy)
+                if displacement < _TOLERANCE_MM or displacement > max_displacement:
+                    continue
+                if (
+                    min(math.dist(anchor, saved_flipped), math.dist(other_flipped, far))
+                    < _MIN_RUN_MM
                 ):
                     continue
+                if not is_mirror and not (
+                    _is_quantum_aligned(saved_flipped[0] - anchor[0], saved_flipped[1] - anchor[1])
+                    and _is_quantum_aligned(far[0] - other_flipped[0], far[1] - other_flipped[1])
+                ):
+                    continue
+                minimum_mask_gap = None
+                corner_inside = inside.contains(Point(saved_flipped)) and inside.contains(
+                    Point(other_flipped)
+                )
+                if not is_mirror and corner_inside:
+                    # An axis-aligned entry straight into an inside corner must
+                    # stay clear of the pad's side edges by at least half width.
+                    corner_inside = pad.buffer(-width / 2).contains(Point(saved_flipped))
+                if not corner_inside:
+                    # The corner stays outside the pad (a stub that hands a track
+                    # hugging the pad edge over to the pad, #9939): the swap is
+                    # still a legal entry when the far leg now runs straight into
+                    # the pad and the other leg clears the whole opening.
+                    aperture = self._pad_mask_openings.get((opening, layer))
+                    minimum_mask_gap = required + margin_mm
+                    if not (
+                        inside.contains(Point(far))
+                        and aperture is not None
+                        and LineString([anchor, saved_flipped]).distance(aperture.geometry)
+                        - width / 2
+                        >= minimum_mask_gap - 1e-9
+                    ):
+                        continue
 
-            moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
-                (
-                    LineString([anchor, elbow]).buffer(width / 2, quad_segs=16),
-                    LineString([anchor, flipped]).buffer(width / 2, quad_segs=16),
-                    layer,
-                ),
-                (
-                    LineString([other_elbow, far]).buffer(other_width / 2, quad_segs=16),
-                    LineString([other_flipped, far]).buffer(other_width / 2, quad_segs=16),
-                    layer,
-                ),
-            ]
-            points: list[tuple[str, str, str | None, float, float]] = [
-                ("segment", seg_uuid, tag, *elbow),
-                ("segment", other_uuid, other_tag, *other_elbow),
-            ]
-            if not self._slide_keeps_connections(points, dx, dy, net):
+                moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
+                    (
+                        LineString([anchor, elbow]).buffer(width / 2, quad_segs=16),
+                        LineString([anchor, saved_flipped]).buffer(width / 2, quad_segs=16),
+                        layer,
+                    ),
+                    (
+                        LineString([other_elbow, far]).buffer(other_width / 2, quad_segs=16),
+                        LineString([other_flipped, far]).buffer(other_width / 2, quad_segs=16),
+                        layer,
+                    ),
+                ]
+                points: list[tuple[str, str, str | None, float, float]] = [
+                    ("segment", seg_uuid, tag, *elbow),
+                    ("segment", other_uuid, other_tag, *other_elbow),
+                ]
+                if not self._slide_keeps_connections(points, dx, dy, net):
+                    continue
+                if self._copper_floor_reason(
+                    moves, layer, net, seg_uuid, pads, clearance_mm, pairwise_rules=rules
+                ):
+                    continue
+                if self._other_opening_reason(
+                    [opening],
+                    moves,
+                    [
+                        (elbow, saved_flipped, frozenset({layer})),
+                        (other_elbow, other_flipped, frozenset({layer})),
+                    ],
+                    pads,
+                    required,
+                    displacement,
+                ):
+                    continue
+                swap = _SwappedElbow(
+                    uuid=seg_uuid,
+                    tag=tag,
+                    elbow=elbow,
+                    anchor=anchor,
+                    width=width,
+                    other_uuid=other_uuid,
+                    other_tag=other_tag,
+                    other_elbow=other_elbow,
+                    other_width=other_width,
+                    far=far,
+                    corner=saved_flipped,
+                    other_corner=other_flipped,
+                )
+                if self._swapped_elbow_unclear(swap, opening, layer, pads, required, margin_mm):
+                    if self._slide_swapped_elbow_along_lead(
+                        swap,
+                        opening,
+                        layer,
+                        net,
+                        pads,
+                        result,
+                        max_displacement,
+                        dry_run,
+                        clearance_mm,
+                        required,
+                        margin_mm,
+                        warning_clearance_mm,
+                        touched,
+                    ):
+                        return True
+                    continue
+                action = MaskNudgeAction(
+                    action="nudge_clear",
+                    uuid=seg_uuid,
+                    kind="segment",
+                    pad_uuid=opening,
+                    pad_ref=ref,
+                    net_name=net,
+                    layer=layer,
+                    old_x=elbow[0],
+                    old_y=elbow[1],
+                    new_x=saved_flipped[0],
+                    new_y=saved_flipped[1],
+                    dx=dx,
+                    dy=dy,
+                    displacement_mm=displacement,
+                    detail=f"flipped a two-leg elbow {displacement:.4f}mm for a straight entry into {ref}",
+                    openings=[opening],
+                    points=points,
+                    minimum_mask_gap_mm=minimum_mask_gap,
+                )
+                return self._apply_nudge(action, result, dry_run) is None
+        return False
+
+    def _swapped_elbow_unclear(
+        self,
+        swap: _SwappedElbow,
+        opening: str,
+        layer: str,
+        pads: dict,
+        required: float,
+        margin_mm: float,
+    ) -> bool:
+        """Whether the mask rule would still report a leg of a swapped elbow.
+
+        A leg that overlaps the pad's opening has to be one clean entry by the
+        rule's own measure: an authored end strictly inside the pad, and no
+        more copper beside the opening than one crossing leaves.  A leg that
+        misses the opening has to clear it by the policy gap plus ``margin_mm``.
+        Nothing is refused without a modelled opening; the verified re-check
+        judges that swap instead.
+        """
+        from ..validate.mask_copper import clean_own_pad_entry
+
+        aperture = self._pad_mask_openings.get((opening, layer))
+        if aperture is None:
+            return False
+        pad, _centre, _layers, _net, _ref, shape = pads[opening]
+        for start, end, width in (
+            (swap.anchor, swap.corner, swap.width),
+            (swap.other_corner, swap.far, swap.other_width),
+        ):
+            copper = LineString([start, end]).buffer(width / 2, quad_segs=16)
+            gap = copper.distance(aperture.geometry)
+            if gap > 0:
+                if gap < required + margin_mm - 1e-9:
+                    return True
                 continue
-            if self._copper_floor_reason(moves, layer, net, seg_uuid, pads, copper_floor):
-                continue
-            if self._other_opening_reason(
-                [opening],
-                moves,
-                [
-                    (elbow, flipped, frozenset({layer})),
-                    (other_elbow, other_flipped, frozenset({layer})),
-                ],
-                pads,
-                required,
-                displacement,
+            if not clean_own_pad_entry(
+                aperture.geometry,
+                copper,
+                pad,
+                f"pad:{shape}",
+                width,
+                (start, end),
+                clearance_mm=required,
+                uncertainty_mm=_MASK_UNCERTAINTY_MM,
+                margin_mm=aperture.margin_mm,
             ):
-                continue
-            action = MaskNudgeAction(
-                action="nudge_clear",
-                uuid=seg_uuid,
-                kind="segment",
-                pad_uuid=opening,
-                pad_ref=ref,
-                net_name=net,
-                layer=layer,
-                old_x=elbow[0],
-                old_y=elbow[1],
-                new_x=flipped[0],
-                new_y=flipped[1],
-                dx=dx,
-                dy=dy,
-                displacement_mm=displacement,
-                detail=f"flipped a two-leg elbow {displacement:.4f}mm for a straight entry into {ref}",
-                openings=[opening],
-                points=points,
-                minimum_mask_gap_mm=minimum_mask_gap,
-            )
-            return self._apply_nudge(action, result, dry_run) is None
+                return True
+        return False
+
+    def _slide_swapped_elbow_along_lead(
+        self,
+        swap: _SwappedElbow,
+        opening: str,
+        layer: str,
+        net: str,
+        pads: dict,
+        result: MaskRepairResult,
+        max_displacement: float,
+        dry_run: bool,
+        clearance_mm: float | None,
+        required: float,
+        margin_mm: float,
+        warning_clearance_mm: float | None,
+        touched: set[str],
+    ) -> bool:
+        """Slide a swapped elbow out along the pad's lead until its legs clear the opening.
+
+        The swap ends its second leg at ``far``, where a pad lead carries on
+        into the pad.  Carrying that joint out along the lead leaves the lead
+        as the pad's only entry.  The swapped corner follows along its own
+        leg's line, so the second leg stays parallel to itself and every angle
+        is kept; the first leg may double back past its anchor, but no leg may
+        shrink to a point.  The smallest slide that puts both swapped legs
+        outside the opening by the policy gap plus ``margin_mm`` -- the
+        manufacturer's advisory band first, when a slide fits it -- is taken
+        behind the same connection, clearance and opening gates as the swap,
+        and the lead itself has to be one clean entry.  Returns ``True`` when
+        applied.
+        """
+        from ..validate.mask_copper import clean_own_pad_entry
+
+        aperture = self._pad_mask_openings.get((opening, layer))
+        if aperture is None:
+            return False
+        pad, _centre, _layers, _net, ref, shape = pads[opening]
+        members, blocked = self._junction(layer, swap.far, swap.other_uuid, net)
+        if blocked or len(members) != 1 or self._has_fixed_junction_contact(swap.far, layer, net):
+            return False
+        lead_uuid, lead, lead_tag = members[0]
+        if (
+            lead_uuid in touched
+            or self._locks.is_locked(lead)
+            or self._locks.is_generator_owned(lead)
+        ):
+            return False
+        lead_end = self._xy(lead.find("end" if lead_tag == "start" else "start"))
+        lead_joint = self._xy(lead.find(lead_tag))
+        lead_width_node = lead.find("width")
+        if lead_end is None or lead_joint is None or lead_width_node is None:
+            return False
+        lead_width = _num(lead_width_node) or swap.other_width
+        into = (lead_end[0] - swap.far[0], lead_end[1] - swap.far[1])
+        lead_length = math.hypot(*into)
+        run = (swap.corner[0] - swap.anchor[0], swap.corner[1] - swap.anchor[1])
+        entry = (swap.far[0] - swap.corner[0], swap.far[1] - swap.corner[1])
+        det = run[0] * entry[1] - run[1] * entry[0]
+        if lead_length < _TOLERANCE_MM or abs(det) < 1e-9:
+            return False
+        run_length, entry_length = math.hypot(*run), math.hypot(*entry)
+        far_tag = "end" if swap.other_tag == "start" else "start"
+        rules = self._board_rules
+        first = LineString([swap.anchor, swap.elbow]).buffer(swap.width / 2, quad_segs=16)
+        second = LineString([swap.other_elbow, swap.far]).buffer(swap.other_width / 2, quad_segs=16)
+        lead_before = LineString([lead_joint, lead_end]).buffer(lead_width / 2, quad_segs=16)
+
+        for gap in dict.fromkeys((max(warning_clearance_mm or 0.0, required), required)):
+            for step in range(1, int(max_displacement / _SLIDE_STEP_MM + 1e-9) + 1):
+                slide = step * _SLIDE_STEP_MM
+                new_far = (
+                    round(swap.far[0] - slide * into[0] / lead_length, 4),
+                    round(swap.far[1] - slide * into[1] / lead_length, 4),
+                )
+                # The corner keeps to its leg's line while the second leg stays parallel.
+                offset = (new_far[0] - swap.anchor[0], new_far[1] - swap.anchor[1])
+                along = (offset[0] * entry[1] - offset[1] * entry[0]) / det
+                across = (run[0] * offset[1] - run[1] * offset[0]) / det
+                if min(abs(along) * run_length, across * entry_length) < _MIN_RUN_MM:
+                    continue
+                new_corner = (
+                    round(swap.anchor[0] + along * run[0], 4),
+                    round(swap.anchor[1] + along * run[1], 4),
+                )
+                shift = (new_corner[0] - swap.elbow[0], new_corner[1] - swap.elbow[1])
+                carried = (new_far[0] - swap.far[0], new_far[1] - swap.far[1])
+                displacement = max(math.hypot(*shift), math.hypot(*carried))
+                if displacement > max_displacement:
+                    break
+                new_other = (
+                    round(swap.other_elbow[0] + shift[0], 4),
+                    round(swap.other_elbow[1] + shift[1], 4),
+                )
+                new_lead = (
+                    round(lead_joint[0] + carried[0], 4),
+                    round(lead_joint[1] + carried[1], 4),
+                )
+                first_moved = LineString([swap.anchor, new_corner]).buffer(
+                    swap.width / 2, quad_segs=16
+                )
+                second_moved = LineString([new_other, new_far]).buffer(
+                    swap.other_width / 2, quad_segs=16
+                )
+                if any(
+                    copper.distance(aperture.geometry) < gap + margin_mm - 1e-9
+                    for copper in (first_moved, second_moved)
+                ):
+                    continue
+                lead_moved = LineString([new_lead, lead_end]).buffer(lead_width / 2, quad_segs=16)
+                if not clean_own_pad_entry(
+                    aperture.geometry,
+                    lead_moved,
+                    pad,
+                    f"pad:{shape}",
+                    lead_width,
+                    (new_lead, lead_end),
+                    clearance_mm=required,
+                    uncertainty_mm=_MASK_UNCERTAINTY_MM,
+                    margin_mm=aperture.margin_mm,
+                ):
+                    continue
+                moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
+                    (first, first_moved, layer),
+                    (second, second_moved, layer),
+                    (lead_before, lead_moved, layer),
+                ]
+                points: list[tuple[str, str, str | None, float, float]] = [
+                    ("segment", swap.uuid, swap.tag, *swap.elbow),
+                    ("segment", swap.other_uuid, swap.other_tag, *swap.other_elbow),
+                    ("segment", swap.other_uuid, far_tag, *swap.far),
+                    ("segment", lead_uuid, lead_tag, *lead_joint),
+                ]
+                shifts: list[tuple[float, float]] = [shift, shift, carried, carried]
+                if not self._slide_keeps_connections(points, 0.0, 0.0, net, shifts):
+                    continue
+                if self._copper_floor_reason(
+                    moves, layer, net, swap.uuid, pads, clearance_mm, pairwise_rules=rules
+                ):
+                    continue
+                if self._other_opening_reason(
+                    [opening],
+                    moves,
+                    [
+                        (swap.elbow, new_corner, frozenset({layer})),
+                        (swap.other_elbow, new_other, frozenset({layer})),
+                        (swap.far, new_far, frozenset({layer})),
+                        (lead_joint, new_lead, frozenset({layer})),
+                    ],
+                    pads,
+                    required,
+                    displacement,
+                ):
+                    continue
+                action = MaskNudgeAction(
+                    action="nudge_clear",
+                    uuid=swap.uuid,
+                    kind="segment",
+                    pad_uuid=opening,
+                    pad_ref=ref,
+                    net_name=net,
+                    layer=layer,
+                    old_x=swap.elbow[0],
+                    old_y=swap.elbow[1],
+                    new_x=new_corner[0],
+                    new_y=new_corner[1],
+                    dx=shift[0],
+                    dy=shift[1],
+                    displacement_mm=displacement,
+                    detail=(
+                        f"flipped a two-leg elbow {math.hypot(*shift):.4f}mm and slid it "
+                        f"{slide:.4f}mm along the {ref} lead for a straight entry"
+                    ),
+                    openings=[opening],
+                    points=points,
+                    shifts=shifts,
+                    minimum_mask_gap_mm=gap + margin_mm,
+                )
+                return self._apply_nudge(action, result, dry_run) is None
         return False
 
     def _slide_keeps_connections(
@@ -2506,12 +3144,14 @@ class MaskCopperRepairer(CopperGapRepairer):
         declines the whole grouped edit. An arc or pad whose shape cannot be
         modelled declines when it is anywhere near a reshaped leg.
         """
-        olds = [old for old, _new, _layer in moves]
-        news = [new for _old, new, _layer in moves]
-        reach = unary_union([old.buffer(_TOLERANCE_MM) for old in olds])
-        # Contact kept only if the new copper still overlaps by more than the
-        # editor's four-decimal rounding grid.
-        shrunk = [new.buffer(-0.0002) for new in news]
+        # Extending a straight leg can retain its entire old copper polygon,
+        # including a tangent contact at the fixed end. Shrinking that cap
+        # would manufacture a gap. Apply the rounding margin to legs that
+        # actually give up copper.
+        receding = [(old, new.buffer(-0.0002)) for old, new, _layer in moves if not new.covers(old)]
+        if not receding:
+            return False
+        reach = unary_union([old.buffer(_TOLERANCE_MM) for old, _kept in receding])
         neighbours: list[BaseGeometry] = []
         for uuid, node in self._segment_nodes().items():
             if uuid in moving or self._net_name(node) != net_name:
@@ -2576,7 +3216,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         for neighbour in neighbours:
             if not reach.intersects(neighbour):
                 continue
-            for old, kept in zip(olds, shrunk, strict=True):
+            for old, kept in receding:
                 if old.intersects(neighbour) and not kept.intersects(neighbour):
                     return True
         return False
@@ -2629,6 +3269,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         touched_by_action: set[str],
         reported_tracks: set[str],
         warning_clearance_mm: float | None,
+        pad_bond: bool = False,
     ) -> tuple[str, str] | None:
         """Move a pass-through via clear while preserving its track connections.
 
@@ -2646,6 +3287,8 @@ class MaskCopperRepairer(CopperGapRepairer):
             return "not_same_net", ""
         if self._locks.is_locked(via_node):
             return "locked_via", ""
+        if pad_bond and self._locks.is_generator_owned(via_node):
+            return "generator_owned_via", ""
 
         at = self._xy(via_node.find("at"))
         size_node = via_node.find("size")
@@ -2681,8 +3324,55 @@ class MaskCopperRepairer(CopperGapRepairer):
             self._via_span_layer_set(via_node),
             joined,
             pads,
-            max_displacement,
+            max_displacement + (math.dist(at, entries[0][1]) if pad_bond else 0.0),
         )
+
+        if pad_bond:
+            if joined or len(openings) != 1 or design_rules is None or project is None:
+                return "unverified_pad_bond", ""
+            gap = max(required, warning_clearance_mm or 0.0) + margin_mm
+            for bridge_push, bridge in self._pad_bond_bridges(
+                via_node,
+                via_uuid,
+                openings[0],
+                pads,
+                at,
+                size,
+                gap,
+                required,
+                max_displacement,
+                design_rules,
+            ):
+                refusal = self._via_tails_candidate(
+                    via_node,
+                    via_uuid,
+                    openings,
+                    pads,
+                    result,
+                    at,
+                    size,
+                    copper,
+                    joined,
+                    bridge_push,
+                    required,
+                    math.hypot(*bridge_push),
+                    max_displacement,
+                    dry_run,
+                    clearance_mm,
+                    design_rules,
+                    touched_by_action,
+                    project,
+                    bridge=bridge,
+                )
+                if refusal is None:
+                    action = result.actions[-1]
+                    assert isinstance(action, MaskViaRelocateAction)
+                    action.minimum_mask_gap_mm = gap
+                    return None
+            return (
+                "no_safe_pad_bridge",
+                "no aligned pad connection clears the project and mask limits",
+            )
 
         push = self._push_clear_of_openings(
             copper, [(pads[o][0], pads[o][1]) for o in openings], required + margin_mm
@@ -2767,6 +3457,106 @@ class MaskCopperRepairer(CopperGapRepairer):
         if not preserve_approach and relocate(required + margin_mm):
             return None
         return primary_reason
+
+    def _pad_bond_bridges(
+        self,
+        via_node: SExp,
+        via_uuid: str,
+        opening: str,
+        pads: dict,
+        at: tuple[float, float],
+        size: float,
+        gap: float,
+        required: float,
+        max_displacement: float,
+        design_rules: DesignRules,
+    ) -> Iterator[tuple[tuple[float, float], _ViaLead]]:
+        """Find straight entries from an isolated SMD pad to a tented via's new centre."""
+        from kicad_tools.router.io import authored_net_widths
+        from kicad_tools.router.rules import net_class_map_from_path
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.mask_copper import _within_own_pad
+        from kicad_tools.validate.rules.silkscreen import _iter_silk_geometries, _via_is_tented
+
+        owner, (cx, cy), layers, net, _, shape = pads[opening]
+        faces = set(layers) & {"F.Cu", "B.Cu"}
+        if len(faces) != 1 or owner.covers(Point(at)) or owner.distance(Point(at)) >= size / 2:
+            return
+        layer = faces.pop()
+        mask_opening = self._pad_mask_openings.get((opening, layer))
+        if mask_opening is None:
+            return
+        aperture = mask_opening.geometry
+        if not aperture.intersects(Point(at).buffer(size / 2)):
+            return
+        pcb = PCB(self.doc)
+        via = next((v for v in pcb.vias if v.uuid == via_uuid), None)
+        if via is None or via.via_type not in (None, "through") or via.drill <= 0:
+            return
+        if any(not _via_is_tented(via, pcb.setup, side) for side in ("F", "B")):
+            return
+        net_node = via_node.find("net")
+        net_value = net_node.get_first_atom() if net_node is not None else None
+        if not isinstance(net_value, (int, str)):
+            return
+        sidecar = self._project_pcb_path.with_name("net_class_map.json")
+        try:
+            classes = (
+                net_class_map_from_path(sidecar, pcb_path=self._project_pcb_path)
+                if sidecar.exists()
+                else {}
+            )
+        except (OSError, ValueError, TypeError):
+            return
+        if net in classes:
+            trace_width = classes[net].neck_trace_width or classes[net].trace_width
+        else:
+            trace_width = authored_net_widths(self._project_pcb_path, [net]).get(net, 0.0)
+        width = max(design_rules.min_trace_width_mm, trace_width)
+        core = owner.buffer(-width / 2 - _MASK_UNCERTAINTY_MM)
+        if core.is_empty:
+            return
+        # Silk is in board-relative coordinates. Only geometry within the via's
+        # maximum reach can intersect the moved drill.
+        local = Point(via.position)
+        silk_gap = design_rules.min_silk_to_hole_clearance_mm or 0.0
+        silk = [
+            translate(g, *pcb.board_origin)
+            for _, g, *_ in _iter_silk_geometries(pcb)
+            if g.distance(local) <= max_displacement + via.drill / 2 + silk_gap
+        ]
+        for push in self._via_alternate_candidates(
+            at, size, [opening], pads, gap, max_displacement, None, preferred_gap=gap
+        ):
+            x, y = round(at[0] + push[0], 4), round(at[1] + push[1], 4)
+            seat = Point(x, y)
+            if aperture.distance(seat) - size / 2 < gap - 1e-6 or any(
+                g.distance(seat) <= via.drill / 2 + silk_gap for g in silk
+            ):
+                continue
+            # Intersections of allowed track directions with the axes through
+            # the pad centre. The whole end cap must fit inside its land.
+            anchors = {(cx, y), (x, cy)}
+            for sign in (-1, 1):
+                anchors.update(((cx, y + sign * (cx - x)), (x + sign * (cy - y), cy)))
+            for ax, ay in sorted(anchors, key=lambda p: (math.dist(p, (cx, cy)), p)):
+                ax, ay = round(ax, 6), round(ay, 6)
+                if not core.covers(Point(ax, ay)):
+                    continue
+                ends = [(ax, ay), (x, y)]
+                trace = LineString(ends).buffer(width / 2, quad_segs=32)
+                clean, _, _ = _within_own_pad(
+                    aperture,
+                    trace,
+                    owner,
+                    {"kind": f"pad:{shape}"},
+                    {"kind": "segment", "width_mm": width, "endpoints_mm": ends},
+                    0.0,
+                    required,
+                    _MASK_UNCERTAINTY_MM,
+                )
+                if clean:
+                    yield push, (ax, ay, x, y, width, layer, net_value)
 
     def _via_drag_candidate(
         self,
@@ -3043,6 +3833,8 @@ class MaskCopperRepairer(CopperGapRepairer):
         design_rules: DesignRules | None,
         touched_by_action: set[str],
         project: tuple,
+        *,
+        bridge: _ViaLead | None = None,
     ) -> tuple[str, str] | None:
         """Evaluate one alternative destination with the kept-line contact model."""
         from ..router.primitives import _make_uuid
@@ -3055,6 +3847,11 @@ class MaskCopperRepairer(CopperGapRepairer):
         if plan is None:
             return "no_aligned_contact", ""
         end_moves, tails, final_lines = plan
+        if bridge is not None:
+            ax, ay, vx, vy, width, layer, _net = bridge
+            trace = LineString([(ax, ay), (vx, vy)]).buffer(width / 2, quad_segs=32)
+            tails.append(bridge)
+            final_lines.append((copper, trace, layer))
         for start_x, start_y, end_x, end_y, *_rest in tails:
             if not _is_quantum_aligned(
                 round(end_x, 6) - round(start_x, 6), round(end_y, 6) - round(start_y, 6)
@@ -3072,15 +3869,32 @@ class MaskCopperRepairer(CopperGapRepairer):
         if refusal_detail is not None:
             return "would_violate_clearance", refusal_detail
         if design_rules is not None:
-            reason = self._target_clearance_reason(at[0], at[1], new_at[0], new_at[1], design_rules)
+            if bridge is not None and self._will_refill:
+                reason = self._target_clearance_reason(
+                    *at, *new_at, design_rules, before_refill=True
+                )
+            else:
+                reason = self._target_clearance_reason(*at, *new_at, design_rules)
             if reason is not None and self._fail_closed_reason_is_local(reason, new_at, size, pads):
                 return "would_violate_clearance", reason
         for span_layer in sorted(span_layers):
+            layer_moves = [m for m in moves if m[2] == span_layer] if bridge else moves
             refusal = self._copper_floor_reason(
-                moves, span_layer, net_name, via_uuid, pads, clearance_mm
+                layer_moves, span_layer, net_name, via_uuid, pads, clearance_mm
             )
             if refusal is not None:
                 return refusal
+            if bridge:
+                kept = unary_union([new for _, new, _ in layer_moves])
+                if self._loses_same_net_contact(
+                    [(copper, kept, span_layer)],
+                    span_layer,
+                    net_name,
+                    {via_uuid},
+                    pads,
+                    protect_ends=True,
+                ):
+                    return "would_break_same_net_contact", ""
         refusal = self._other_opening_reason(
             openings,
             moves,
@@ -3106,7 +3920,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         first = pads[openings[0]]
         refs = ", ".join(pads[o][4] for o in openings)
         action = MaskViaRelocateAction(
-            action="relocate_clear",
+            action="bridge_via" if bridge else "relocate_clear",
             uuid=via_uuid,
             kind="via",
             pad_uuid=openings[0],
@@ -3120,7 +3934,9 @@ class MaskCopperRepairer(CopperGapRepairer):
             dx=push[0],
             dy=push[1],
             displacement_mm=displacement,
-            detail=(
+            detail=f"bridged {refs} to the relocated via on {bridge[5]}"
+            if bridge
+            else (
                 f"moved via {displacement:.4f}mm clear of {refs}, "
                 f"keeping {len(joined)} approach line(s) with "
                 f"{len(added)} in-land connection(s)"
@@ -3561,10 +4377,25 @@ class MaskCopperRepairer(CopperGapRepairer):
         skip_uuid: str,
         pads: dict,
         clearance_mm: float | None,
+        *,
+        pairwise_rules: BoardClearanceRules | None = None,
     ) -> tuple[str, str] | None:
         """Decline a move that crowds other-net copper below the floor."""
-        required = clearance_mm if clearance_mm is not None else 0.0
-        for obstacle in self._other_net_obstacles(layer, net_name, skip_uuid, pads):
+        from kicad_tools.router.board_clearance_rules import ItemProps
+
+        base_required = clearance_mm if clearance_mm is not None else 0.0
+        track_props = ItemProps("Track", net_name) if pairwise_rules is not None else None
+        for obstacle, obs_kind, obs_net in self._other_net_obstacles_with_meta(
+            layer, net_name, skip_uuid, pads
+        ):
+            required = base_required
+            if pairwise_rules is not None and track_props is not None:
+                obs_props = ItemProps(obs_kind, obs_net)
+                required = max(
+                    required,
+                    pairwise_rules.clearance(track_props, obs_props, layer),
+                    pairwise_rules.physical_clearance(track_props, obs_props, layer),
+                )
             for old_shape, new_shape, _layer in moves:
                 new_d = new_shape.distance(obstacle)
                 if new_d < required - 1e-6 and new_d < old_shape.distance(obstacle) - 1e-6:

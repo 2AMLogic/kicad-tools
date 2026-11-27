@@ -7,11 +7,17 @@ import json
 import math
 from pathlib import Path
 
+import pytest
+
+from kicad_tools.cli import main
 from kicad_tools.cli.commands.pcb import run_pcb_command
 from kicad_tools.pcb.reinforcement_sidecar import (
+    is_parallel,
     load_wires,
+    load_wires_if_present,
     merge_wires,
     sidecar_path,
+    wire_key,
 )
 from kicad_tools.physics.wire_gauge import bare_copper_diameter_mm
 from kicad_tools.schema.pcb import PCB
@@ -246,6 +252,250 @@ def test_parallel_short_leg_is_recorded_and_cleared(tmp_path):
     assert load_wires(sidecar_path(p)) == []
 
 
+# ----------------------------- an entry that is not an object (Issue #10401)
+
+
+def _reinforced(tmp_path: Path, *nets: str) -> tuple[Path, list[dict]]:
+    """The two-net board after reinforcing each of ``nets``: ``(board, its records)``."""
+    p = _board(tmp_path)
+    for net in nets:
+        assert run_pcb_command(_args(p, net)) == 0
+    return p, load_wires(sidecar_path(p))
+
+
+def _rewrite_sidecar(board: Path, entries: list) -> Path:
+    """Put a version-1 sidecar of raw ``entries`` beside ``board``; its path."""
+    sc = sidecar_path(board)
+    sc.write_text(json.dumps({"version": 1, "wires": entries}, indent=2) + "\n", encoding="utf-8")
+    return sc
+
+
+def _snapshot(*paths: Path) -> dict[Path, bytes]:
+    return {p: p.read_bytes() for p in paths}
+
+
+def _assert_refused(err: str, sidecar: Path, index: int) -> None:
+    """The diagnostic names the sidecar, the first offending entry and what it should be."""
+    assert str(sidecar) in err
+    assert f"wires[{index}]" in err
+    assert "JSON object" in err
+
+
+_NON_OBJECTS = [
+    pytest.param(None, id="null"),
+    pytest.param(1.5, id="number"),
+    pytest.param("oops", id="string"),
+    pytest.param([{"net": "NET_B"}], id="array"),
+    pytest.param(False, id="boolean"),
+]
+
+
+@pytest.mark.parametrize("bad", _NON_OBJECTS)
+def test_reinforce_refuses_a_non_object_entry_after_another_nets_record(tmp_path, capsys, bad):
+    """Add reads the sidecar again to merge its record; the merge used to raise."""
+    p, (_net_a, net_b) = _reinforced(tmp_path, "NET_A", "NET_B")
+    sidecar = _rewrite_sidecar(p, [net_b, bad])
+    before = _snapshot(p, sidecar)
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, "NET_A")) == 1
+    captured = capsys.readouterr()
+    _assert_refused(captured.err, sidecar, 1)
+    assert captured.out == ""
+    assert _snapshot(p, sidecar) == before
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("bad", _NON_OBJECTS)
+def test_clear_refuses_a_non_object_entry_instead_of_falling_back_to_the_size_rule(
+    tmp_path, capsys, bad, dry_run
+):
+    """The list names the anchors to remove, so it is never skipped over as unreadable
+    -- under --dry-run too, which reads it just the same."""
+    p, (net_a, net_b) = _reinforced(tmp_path, "NET_A", "NET_B")
+    sidecar = _rewrite_sidecar(p, [net_b, net_a, bad])
+    before = _snapshot(p, sidecar)
+    for net in ("NET_A", "NET_B"):
+        capsys.readouterr()
+        assert run_pcb_command(_args(p, net, clear=True, dry_run=dry_run)) == 1
+        captured = capsys.readouterr()
+        _assert_refused(captured.err, sidecar, 2)
+        assert captured.out == ""
+    assert _snapshot(p, sidecar) == before
+
+
+@pytest.mark.parametrize("bad", _NON_OBJECTS)
+def test_replace_refuses_a_non_object_entry(tmp_path, capsys, bad):
+    p, (net_a, net_b) = _reinforced(tmp_path, "NET_A", "NET_B")
+    sidecar = _rewrite_sidecar(p, [net_b, bad, net_a])
+    before = _snapshot(p, sidecar)
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, "NET_B", replace=True)) == 1
+    captured = capsys.readouterr()
+    _assert_refused(captured.err, sidecar, 1)
+    assert captured.out == ""
+    assert _snapshot(p, sidecar) == before
+
+
+@pytest.mark.parametrize("fmt", ["text", "json"])
+@pytest.mark.parametrize("bad", _NON_OBJECTS)
+def test_adopt_refuses_a_non_object_entry_even_after_a_recorded_match(tmp_path, capsys, bad, fmt):
+    """An entry before the matching record used to raise; one after it went unread (exit 0)."""
+    p, (record,) = _reinforced(tmp_path, "NET_A")
+    for entries, index in (([bad, record], 0), ([record, bad], 1)):
+        sidecar = _rewrite_sidecar(p, entries)
+        before = _snapshot(p, sidecar)
+        capsys.readouterr()
+        assert run_pcb_command(_args(p, net=None, adopt=True, format=fmt)) == 1
+        captured = capsys.readouterr()
+        _assert_refused(captured.err, sidecar, index)
+        assert captured.out == ""
+        assert _snapshot(p, sidecar) == before
+
+
+@pytest.mark.parametrize("net", [None, "NET_A", "NET_B"])
+@pytest.mark.parametrize("bad", _NON_OBJECTS)
+def test_list_wires_text_refuses_a_non_object_entry(tmp_path, capsys, bad, net):
+    """With or without --net, the text listing has to read every entry to print it."""
+    p, (net_a, net_b) = _reinforced(tmp_path, "NET_A", "NET_B")
+    sidecar = _rewrite_sidecar(p, [net_a, bad, net_b])
+    before = sidecar.read_bytes()
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, net, list_wires=True)) == 1
+    captured = capsys.readouterr()
+    _assert_refused(captured.err, sidecar, 1)
+    assert captured.out == ""
+    assert sidecar.read_bytes() == before
+
+
+def test_list_wires_json_refuses_a_net_filter_but_dumps_the_file_unfiltered(tmp_path, capsys):
+    """The list from the issue: the dump prints every entry in file order; filtering
+    needs records, so --net refuses and names the first offender."""
+    p, (net_a, net_b) = _reinforced(tmp_path, "NET_A", "NET_B")
+    entries = [None, 1.5, net_a, "oops", [net_b], False, net_b]
+    sidecar = _rewrite_sidecar(p, entries)
+    before = sidecar.read_bytes()
+    for net in ("NET_A", "NET_B"):
+        capsys.readouterr()
+        assert run_pcb_command(_args(p, net, list_wires=True, format="json")) == 1
+        captured = capsys.readouterr()
+        _assert_refused(captured.err, sidecar, 0)
+        assert captured.out == ""
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, net=None, list_wires=True, format="json")) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"sidecar": str(sidecar), "wires": entries}
+    assert captured.err == ""
+    assert sidecar.read_bytes() == before
+
+
+@pytest.mark.parametrize("existing_output", [False, True])
+@pytest.mark.parametrize("fmt", ["text", "json"])
+def test_clear_to_an_output_with_a_bad_destination_sidecar_writes_nothing(
+    tmp_path, capsys, fmt, existing_output
+):
+    """The output board used to be saved before ``drop_wires`` reached the sidecar
+    beside it, which is not the valid one beside the input."""
+    p, (net_a,) = _reinforced(tmp_path, "NET_A")
+    out = tmp_path / "out.kicad_pcb"
+    if existing_output:
+        out.write_bytes(p.read_bytes())
+    bad = _rewrite_sidecar(out, [net_a, None])
+    watched = [p, sidecar_path(p), bad] + ([out] if existing_output else [])
+    before = _snapshot(*watched)
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, "NET_A", clear=True, output=str(out), format=fmt)) == 1
+    captured = capsys.readouterr()
+    _assert_refused(captured.err, bad, 1)
+    assert captured.out == ""
+    assert out.exists() is existing_output
+    assert _snapshot(*watched) == before
+
+
+@pytest.mark.parametrize(
+    ("reinforced", "mode"),
+    [("NET_B", {}), ("NET_B", {"replace": True}), ("NET_A", {"replace": True})],
+    ids=["add", "replace", "replace-after-clear"],
+)
+def test_reinforce_to_an_output_with_a_bad_destination_sidecar_writes_nothing(
+    tmp_path, capsys, reinforced, mode
+):
+    """The sidecar beside a ``-o`` board is merged into, or dropped from and then
+    merged into; either way it refuses the command before the board is saved."""
+    p, (net,) = _reinforced(tmp_path, reinforced)
+    out = tmp_path / "out.kicad_pcb"
+    bad = _rewrite_sidecar(out, [net, "oops"])
+    before = _snapshot(p, sidecar_path(p), bad)
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, "NET_A", output=str(out), **mode)) == 1
+    captured = capsys.readouterr()
+    _assert_refused(captured.err, bad, 1)
+    assert captured.out == ""
+    assert not out.exists()
+    assert _snapshot(p, sidecar_path(p), bad) == before
+
+
+def test_writers_refuse_a_non_object_entry_and_leave_the_file_alone(tmp_path):
+    """``write_sidecar`` and ``drop_wires`` rewrite the file from what they read, so
+    they refuse the list instead of raising mid-merge or writing around the entry."""
+    from kicad_tools.pcb.reinforcement_sidecar import (
+        check_wire_records,
+        drop_wires,
+        load_wire_records,
+        write_sidecar,
+    )
+
+    p, (net_a, net_b) = _reinforced(tmp_path, "NET_A", "NET_B")
+    sidecar = _rewrite_sidecar(p, [net_b, None])
+    before = sidecar.read_bytes()
+    with pytest.raises(ValueError, match=r"wires\[1\] is null, not a JSON object"):
+        load_wire_records(sidecar)
+    with pytest.raises(ValueError, match=r"wires\[1\]"):
+        write_sidecar(p, [net_a])
+    with pytest.raises(ValueError, match=r"wires\[1\]"):
+        drop_wires(sidecar, "NET_B", [(a["x"], a["y"]) for a in net_b["anchors"]])
+    assert sidecar.read_bytes() == before
+    assert check_wire_records(sidecar, [net_b, net_a]) is None
+    assert check_wire_records(sidecar, []) is None
+
+
+def test_empty_list_and_legacy_object_records_keep_their_behaviour(tmp_path, capsys):
+    """Both are valid: every consumer reads them as before."""
+    legacy = {
+        "net": "NET_B",
+        "layer": "F.Cu",
+        "leg_start": {"x": 20.0, "y": 70.0},
+        "leg_end": {"x": 120.0, "y": 70.0},
+        "anchors": [{"x": 20.0, "y": 70.0}, {"x": 120.0, "y": 70.0}],
+        "length_mm": 100.0,
+        "wire_gauge_awg": 16,
+        "status": "full",
+    }
+    p = _board(tmp_path)
+    sidecar = _rewrite_sidecar(p, [])
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, net=None, list_wires=True)) == 0
+    assert "No wires recorded." in capsys.readouterr().out
+    for net in (None, "NET_A"):
+        assert run_pcb_command(_args(p, net=net, list_wires=True, format="json")) == 0
+        assert json.loads(capsys.readouterr().out)["wires"] == []
+    assert run_pcb_command(_args(p, net=None, adopt=True)) == 0
+    assert run_pcb_command(_args(p, "NET_A", clear=True)) == 0
+    assert load_wires(sidecar) == []
+
+    _rewrite_sidecar(p, [legacy])
+    assert run_pcb_command(_args(p, net=None, list_wires=True)) == 0
+    out = capsys.readouterr().out
+    assert "1 wire(s):" in out and "NET_B F.Cu 100.0 mm 16 AWG [full]" in out
+    assert run_pcb_command(_args(p, net="NET_B", list_wires=True, format="json")) == 0
+    assert json.loads(capsys.readouterr().out)["wires"] == [legacy]
+    assert run_pcb_command(_args(p, net=None, adopt=True)) == 0
+    assert run_pcb_command(_args(p)) == 0
+    assert [w["net"] for w in load_wires(sidecar)] == ["NET_A", "NET_B"]
+    assert next(w for w in load_wires(sidecar) if w["net"] == "NET_B") == legacy
+    assert run_pcb_command(_args(p, "NET_A", clear=True)) == 0
+    assert load_wires(sidecar) == [legacy]
+
+
 # ------------------------------------------------------- --adopt (Issue #9419)
 
 
@@ -321,3 +571,377 @@ def test_adopt_reports_a_strip_without_anchor_holes(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Adopted 0 wire(s)" in out and "Not adopted" in out
     assert not sidecar_path(p).exists()
+
+
+# --------------------------------------------------------------------------
+# Issue #10419: --clear refuses before any write when the destination
+# reinforcement sidecar cannot be read
+# --------------------------------------------------------------------------
+
+_BAD_VERSION = '{"version": 2, "wires": []}\n'
+_MODES = ["inplace", "fresh", "existing"]
+
+
+def _unreadable_sidecars() -> list:
+    """``(file text, reason)`` for three sidecars no version-1 reader accepts."""
+    with pytest.raises(ValueError) as info:
+        json.loads("{not json\n")
+    return [
+        pytest.param(_BAD_VERSION, "not a version 1 reinforcement sidecar", id="wrong_version"),
+        pytest.param("{not json\n", str(info.value), id="malformed_json"),
+        pytest.param('{"version": 1}\n', "missing 'wires' list", id="no_wire_list"),
+    ]
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    """Every file under ``root`` by relative path, so an absent file shows up too."""
+    return {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+def _reinforced_source(tmp_path: Path, **reinforce) -> Path:
+    """The two-net board reinforced on NET_A (2 anchors, 1 mask opening), in ``tmp_path/src``.
+
+    A ``.kicad_pro`` sits beside it, so a project-sidecar copy to a refused
+    ``-o`` output would be noticed.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    board = _board(src)
+    assert run_pcb_command(_args(board, **reinforce)) == 0
+    (src / "board.kicad_pro").write_text('{"board": {}}\n')
+    return board
+
+
+def _output_arg(tmp_path: Path, mode: str) -> str | None:
+    """The ``-o`` of a clear: in place, a fresh output, or an output holding another board."""
+    if mode == "inplace":
+        return None
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    out = out_dir / "out.kicad_pcb"
+    if mode == "existing":
+        _two_net_pcb(length=80.0).save(out)
+    return str(out)
+
+
+def _destination(board: Path, output: str | None) -> Path:
+    return Path(output) if output else board
+
+
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("text, reason", _unreadable_sidecars())
+def test_clear_refuses_before_writing_on_unreadable_destination(
+    tmp_path, capsys, mode, text, reason
+):
+    board, output = _reinforced_source(tmp_path), _output_arg(tmp_path, mode)
+    bad = sidecar_path(_destination(board, output))
+    bad.write_text(text)
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    rc = run_pcb_command(_args(board, clear=True, output=output))
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert str(bad) in captured.err and reason in captured.err
+    assert _tree_bytes(tmp_path) == before
+    assert captured.out == ""
+
+
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("kind", ["dangling", "directory"])
+@pytest.mark.parametrize(
+    "flags", [["--clear"], ["--replace"], ["--replace", "--anchor-mode", "spaced"]]
+)
+def test_refuses_unreadable_destination_entry(tmp_path, capsys, mode, kind, flags):
+    board = _reinforced_source(tmp_path)
+    output = _output_arg(tmp_path, mode)
+    destination = sidecar_path(_destination(board, output))
+    destination.unlink(missing_ok=True)
+    target = tmp_path / "missing.json"
+    if kind == "dangling":
+        destination.symlink_to(target)
+    else:
+        destination.mkdir()
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    argv = ["pcb", "reinforce", str(board), "--net", "NET_A", *flags]
+    if output:
+        argv.extend(["-o", output])
+    assert main(argv) == 1
+
+    captured = capsys.readouterr()
+    assert str(destination) in captured.err and captured.out == ""
+    assert _tree_bytes(tmp_path) == before
+    if kind == "dangling":
+        assert destination.readlink() == target and not target.exists()
+    else:
+        assert destination.is_dir()
+
+
+@pytest.mark.parametrize("flag", ["--clear", "--replace"])
+def test_readable_destination_symlink_is_preserved(tmp_path, flag):
+    board = _reinforced_source(tmp_path)
+    destination = sidecar_path(board)
+    target = destination.rename(tmp_path / "records.json")
+    destination.symlink_to(target)
+
+    assert main(["pcb", "reinforce", str(board), "--net", "NET_A", flag]) == 0
+    assert destination.readlink() == target
+    assert len(load_wires(target)) == (0 if flag == "--clear" else 1)
+
+
+def test_clear_refusal_leaves_the_output_directory_as_it_was(tmp_path, capsys):
+    """A refused ``-o`` clear copies no project sidecar either."""
+    board = _reinforced_source(tmp_path)
+    output = _output_arg(tmp_path, "fresh")
+    sidecar_path(Path(output)).write_text(_BAD_VERSION)
+
+    capsys.readouterr()
+    assert run_pcb_command(_args(board, clear=True, output=output)) == 1
+
+    assert [p.name for p in (tmp_path / "out").iterdir()] == ["out.kicad_pcb.reinforcement.json"]
+
+
+def test_clear_refusal_prints_no_json_document(tmp_path, capsys):
+    board = _reinforced_source(tmp_path)
+    bad = sidecar_path(board)
+    bad.write_text(_BAD_VERSION)
+
+    capsys.readouterr()
+    assert run_pcb_command(_args(board, clear=True, format="json")) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == "" and str(bad) in captured.err
+
+
+def test_clear_of_a_parallel_copy_refuses_on_unreadable_destination(tmp_path, capsys):
+    """The source records identify the copy; the destination still has to be readable."""
+    src = tmp_path / "src"
+    src.mkdir()
+    board = src / "short.kicad_pcb"
+    _two_net_pcb(length=12.0).save(board)
+    assert run_pcb_command(_args(board, strategy="parallel")) == 0
+    output = _output_arg(tmp_path, "fresh")
+    bad = sidecar_path(Path(output))
+    bad.write_text(_BAD_VERSION)
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    assert run_pcb_command(_args(board, clear=True, output=output)) == 1
+
+    captured = capsys.readouterr()
+    assert str(bad) in captured.err and captured.out == ""
+    assert _tree_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_replace_with_unreadable_destination_writes_nothing(tmp_path, capsys, mode):
+    """Regression control: ``--replace`` drops the cleared wires before its board save."""
+    board, output = _reinforced_source(tmp_path), _output_arg(tmp_path, mode)
+    bad = sidecar_path(_destination(board, output))
+    bad.write_text(_BAD_VERSION)
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    assert run_pcb_command(_args(board, replace=True, output=output)) == 1
+
+    captured = capsys.readouterr()
+    assert str(bad) in captured.err and captured.out == ""
+    assert _tree_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("text, reason", _unreadable_sidecars())
+@pytest.mark.parametrize("clear", [True, False], ids=["clear", "replace"])
+def test_unreadable_source_falls_back_to_size_toward_a_fresh_destination(
+    tmp_path, capsys, text, reason, clear
+):
+    board = _reinforced_source(tmp_path)
+    sidecar_path(board).write_text(text)
+    output = _output_arg(tmp_path, "fresh")
+    source_before = _tree_bytes(tmp_path / "src")
+
+    capsys.readouterr()
+    rc = run_pcb_command(_args(board, clear=clear, replace=not clear, output=output, format="json"))
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert f"Warning: ignoring unreadable {sidecar_path(board)}" in captured.err
+    assert json.loads(captured.out)["identified_by"] == "size"
+    assert len(PCB.load(Path(output)).vias) == (0 if clear else 2)
+    written = sidecar_path(Path(output))
+    if clear:
+        assert not written.exists()
+    else:
+        assert len(load_wires(written)) == 1
+    assert _tree_bytes(tmp_path / "src") == source_before
+
+
+@pytest.mark.parametrize("clear", [True, False], ids=["clear", "replace"])
+@pytest.mark.parametrize("mode", _MODES)
+def test_dry_run_reports_an_unreadable_destination_without_failing(tmp_path, capsys, mode, clear):
+    board, output = _reinforced_source(tmp_path), _output_arg(tmp_path, mode)
+    sidecar_path(_destination(board, output)).write_text(_BAD_VERSION)
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    rc = run_pcb_command(
+        _args(board, clear=clear, replace=not clear, output=output, dry_run=True, format="json")
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    doc = json.loads(captured.out)
+    assert doc["dry_run"] is True and doc["anchors_cleared"] == 2
+    assert doc["identified_by"] == ("size" if mode == "inplace" else "sidecar")
+    assert "Error" not in captured.err
+    assert _tree_bytes(tmp_path) == before
+
+
+def test_clear_without_a_sidecar_still_saves(tmp_path):
+    board = _reinforced_source(tmp_path)
+    sidecar_path(board).unlink()
+
+    assert run_pcb_command(_args(board, clear=True)) == 0
+
+    assert PCB.load(board).vias == []
+    assert not sidecar_path(board).exists()
+
+
+def test_clear_with_nothing_to_remove_ignores_an_unreadable_sidecar(tmp_path, capsys):
+    board = _board(tmp_path)
+    sidecar_path(board).write_text(_BAD_VERSION)
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    assert run_pcb_command(_args(board, clear=True)) == 0
+
+    captured = capsys.readouterr()
+    assert "Nothing to clear" in captured.out
+    assert "Error" not in captured.err
+    assert _tree_bytes(tmp_path) == before
+
+
+# ------------------------------------------- read-only loader (Issue #10398)
+
+
+def _wire_record(net: str, x: float, **extra) -> dict:
+    return {
+        "net": net,
+        "layer": "F.Cu",
+        "kind": "run",
+        "path": None,
+        "paths": [],
+        "leg_start": {"x": x, "y": 0.0},
+        "leg_end": {"x": x + 10.0, "y": 0.0},
+        "anchors": [{"x": x, "y": 0.0}, {"x": x + 10.0, "y": 0.0}],
+        "length_mm": 10.0,
+        "straight_line_mm": 10.0,
+        "wire_gauge_awg": 16,
+        "max_end_shift_mm": None,
+        "bare_diameter_mm": round(bare_copper_diameter_mm(16), 4),
+        "mask_opening": None,
+        "status": "full",
+        "reason": "reinforced",
+        **extra,
+    }
+
+
+def _parallel_record(net: str, x: float) -> dict:
+    return _wire_record(
+        net,
+        x,
+        strategy="parallel",
+        copy_status="placed",
+        copy_layer="B.Cu",
+        polyline=[{"x": x, "y": 0.0}, {"x": x + 10.0, "y": 0.0}],
+        copy_segments=[
+            {"start": {"x": x, "y": 0.0}, "end": {"x": x + 10.0, "y": 0.0}, "width_mm": 2.0}
+        ],
+        stitch_vias=[{"x": x + 5.0, "y": 0.0}],
+        stitch_via_size_mm=0.8,
+        stitch_via_drill_mm=0.4,
+    )
+
+
+def _sidecar_with(tmp_path: Path, entries: list) -> tuple[Path, Path]:
+    board = tmp_path / "board.kicad_pcb"
+    board.touch()
+    sidecar = sidecar_path(board)
+    sidecar.write_text(
+        json.dumps({"version": 1, "wires": entries}, indent=2) + "\n", encoding="utf-8"
+    )
+    return board, sidecar
+
+
+def test_read_only_loader_returns_the_objects_in_file_order(tmp_path):
+    """Objects survive whole and in order around entries that are not objects,
+    and reading leaves the file's bytes alone."""
+    legacy = _wire_record("NET_A", 0.0)
+    parallel = _parallel_record("NET_B", 20.0)
+    board, sidecar = _sidecar_with(
+        tmp_path, [None, legacy, "not a record", 7, [legacy], parallel, False]
+    )
+    before = sidecar.read_bytes()
+    assert load_wires_if_present(board) == [legacy, parallel]
+    assert sidecar.read_bytes() == before
+
+
+def test_read_only_loader_keeps_legacy_wire_and_parallel_copy_meaning(tmp_path):
+    legacy = _wire_record("NET_A", 0.0)
+    parallel = _parallel_record("NET_B", 20.0)
+    board, _ = _sidecar_with(tmp_path, [parallel, None, legacy])
+    loaded = load_wires_if_present(board)
+    assert loaded == [parallel, legacy]
+    assert [is_parallel(w) for w in loaded] == [True, False]
+    assert [wire_key(w) for w in loaded] == [wire_key(parallel), wire_key(legacy)]
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [[], [None], ["not a record"], [1, 2.5, True, [1, {"net": "NET_A"}], None]],
+)
+def test_read_only_loader_with_no_object_is_empty(tmp_path, entries):
+    board, sidecar = _sidecar_with(tmp_path, entries)
+    before = sidecar.read_bytes()
+    assert load_wires_if_present(board) == []
+    assert sidecar.read_bytes() == before
+
+
+def test_read_only_loader_absent_sidecar_is_empty(tmp_path):
+    board = tmp_path / "board.kicad_pcb"
+    board.touch()
+    assert load_wires_if_present(board) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "not json",
+        json.dumps([_wire_record("NET_A", 0.0)]),
+        json.dumps({"version": 2, "wires": [_wire_record("NET_A", 0.0)]}),
+        json.dumps({"version": 1, "wires": {"NET_A": _wire_record("NET_A", 0.0)}}),
+        json.dumps({"version": 1}),
+    ],
+)
+def test_read_only_loader_unreadable_envelope_is_empty(tmp_path, text):
+    board = tmp_path / "board.kicad_pcb"
+    board.touch()
+    sidecar = sidecar_path(board)
+    sidecar.write_text(text, encoding="utf-8")
+    before = sidecar.read_bytes()
+    assert load_wires_if_present(board) == []
+    assert sidecar.read_bytes() == before
+
+
+def test_low_level_loader_still_reads_every_entry(tmp_path):
+    """``load_wires`` feeds ``write_sidecar`` and ``drop_wires``: dropping an
+    entry there would silently delete it from the owner's file."""
+    legacy = _wire_record("NET_A", 0.0)
+    board, sidecar = _sidecar_with(tmp_path, [None, legacy, "not a record"])
+    assert load_wires(sidecar) == [None, legacy, "not a record"]

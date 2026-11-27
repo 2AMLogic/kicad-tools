@@ -5,7 +5,9 @@ contract and native oracle. Results describe independent memberships, not
 assignment precedence, composite classes, or effective electrical constraints.
 """
 
+import re
 from copy import deepcopy
+from functools import lru_cache
 from string import ascii_letters, digits
 from typing import Any
 
@@ -27,7 +29,41 @@ _QUANTIFIERS = frozenset("*?+")
 _ALLOWED = _LITERAL | _REGEX_PUNCTUATION | _QUANTIFIERS
 
 
+# KiCad also evaluates a wildcard interpretation of each pattern. Encode its two
+# wildcards (and other regex punctuation) so that interpretation is literal.
+_ENCODED_NET = re.compile(r"\^+((?:[A-Za-z0-9_ :/\-]|\\x[0-9A-F]{2}|[^\x00-\x7f])+)\\z\$")
+
+
+def literal_netclass_pattern(net: str, inventory: set[str]) -> str:
+    """Return a schematic-visible pattern selecting this board net alone."""
+    if all(c in _LITERAL for c in net) and net + "\n" not in inventory:
+        return net
+    body = "".join(c if c in _LITERAL or ord(c) > 127 else f"\\x{ord(c):02X}" for c in net)
+    pattern = f"^{body}\\z$"
+    # The wildcard matcher also accepts the verbatim encoding (and its final
+    # newline variant). Extra regex anchors leave the intended match intact.
+    while pattern in inventory or pattern + "\n" in inventory:
+        pattern = "^" + pattern
+    return pattern
+
+
+@lru_cache(maxsize=1024)
+def encoded_netclass_name(pattern: str) -> str | None:
+    """Decode only the literal expression emitted by literal_netclass_pattern."""
+    match = _ENCODED_NET.fullmatch(pattern)
+    if match is None:
+        return None
+    return re.sub(r"\\x([0-9A-F]{2})", lambda m: chr(int(m[1], 16)), match[1])
+
+
+def matches_encoded_netclass(pattern: str, net: str) -> bool:
+    literal = encoded_netclass_name(pattern)
+    return literal is not None and net in (literal, pattern, pattern + "\n")
+
+
 def _supported(pattern: str) -> bool:
+    if encoded_netclass_name(pattern) is not None:
+        return True
     if not all(c in _ALLOWED for c in pattern):
         return False
     if any(
@@ -78,6 +114,9 @@ def _matches(pattern: str, net: str) -> bool:
     # NET_SETTINGS does not assign classes to the unnamed net.
     if not net:
         return False
+    literal = encoded_netclass_name(pattern)
+    if literal is not None:
+        return net in (literal, pattern, pattern + "\n")
     ends = {len(net)}
     if net.endswith("\n"):
         ends.add(len(net) - 1)
@@ -210,6 +249,7 @@ def diagnose_netclasses(data: Any, net_names: Any = None) -> dict[str, Any]:
             return False
         return True
 
+    inventory_set = set(inventory or ())
     for index, entry in enumerate(entries("netclass_patterns")):
         path = f"net_settings.netclass_patterns[{index}]"
         pattern = entry.get("pattern") if isinstance(entry, dict) else None
@@ -235,7 +275,12 @@ def diagnose_netclasses(data: Any, net_names: Any = None) -> dict[str, Any]:
             continue
         row["status"] = "supported"
         if inventory is not None:
-            row["matches"] = [net for net in inventory if _matches(pattern, net)]
+            literal = encoded_netclass_name(pattern)
+            if literal is not None or (pattern and all(c in _LITERAL for c in pattern)):
+                candidates = {pattern, pattern + "\n", literal or pattern}
+                row["matches"] = sorted(inventory_set.intersection(candidates))
+            else:
+                row["matches"] = [net for net in inventory if _matches(pattern, net)]
             if not row["matches"]:
                 diagnostic("no_matches", path + ".pattern", "No supplied board nets match.")
 

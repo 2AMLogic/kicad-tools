@@ -10,7 +10,8 @@
 # The fixture schematic is FULLY WIRED (#4012: 244/244 pads bound) and, since
 # #7557, every signal net routes (31/31), so this is a plain LVS-clean gate:
 # copper-LVS re-check (no flags; any open, short or vacuous verdict fails),
-# the synthetic routing gate on the regenerated bundle, plane-net completion
+# the synthetic routing gate and strict JLCPCB release DRC on the regenerated
+# four-layer bundle (#9406), plane-net completion
 # with NO known-open exclusions, and the --lvs-only asserter. NEVER
 # reintroduce a known-opens list to absorb a regression (guarded by
 # tests/test_board07_known_opens_sync.py).
@@ -24,9 +25,7 @@ step "Build C++ router backend"
 uv run kct build-native
 
 step "Regenerate board 07 from recipe (--step all, clean tmp directory)"
-# The recipe still exits non-zero on its allowlisted DRC residuals
-# (skew/impedance, #7550/#7349/#7619) -- tolerate it; the asserters below
-# are the gate.
+# The independent checks below inspect the recipe's outputs.
 rm -rf /tmp/board07-ci
 mkdir -p /tmp/board07-ci
 uv run python boards/07-matchgroup-test/generate_design.py \
@@ -49,14 +48,11 @@ cp -a /tmp/board07-ci/. boards/07-matchgroup-test/regression-output/
 uv run python scripts/ci/check_matchgroup_coverage.py \
   boards/07-matchgroup-test --skip-route --seed 42
 
-# NOTE: deliberately NO converged DRC re-check here, unlike boards 03/04.
-# CI's board-07 job never ran one on main, and converging it turned the gate
-# red (488 blocking errors from check_routed_drc_internal.py on the fresh
-# PCB; PR #9392 review, finding 2). Board 07's allowlist entry is explicitly
-# withheld until #6396 lands, and the residuals are #8839/#8842 territory;
-# convergence re-lands deliberately via the tracking issue, not silently.
-# (Main's local-gate --full ran this step for board 07 and fails the same
-# way -- that latent failure is filed, not silently dropped.)
+step "Check strict JLCPCB release DRC on the regenerated four-layer fixture"
+# The router emits a board-specific class map alongside the authored map.
+check_fresh_routed_drc /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
+  /tmp/board07-ci/matchgroup_test_routed.net_class_map.json
+
 step "Emit board.json via kct board-metrics"
 rm -rf /tmp/board07-staging
 mkdir -p /tmp/board07-staging/07-matchgroup-test/output

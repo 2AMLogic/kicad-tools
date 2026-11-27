@@ -4,7 +4,7 @@ This module implements DRC checks for silkscreen elements:
 - Minimum line width
 - Minimum text height and stroke thickness
 - Silkscreen-over-pad detection (legacy centroid heuristic)
-- Silkscreen-over-copper detection (geometric, vs pad mask apertures)
+- Silkscreen-over-copper detection on pads and untented vias
 - Silkscreen-over-silkscreen detection (geometric, silk vs silk)
 - Silkscreen-to-edge clearance (geometric, vs Edge.Cuts outline)
 - Silkscreen geometry coverage (which silk primitives were NOT modeled)
@@ -19,7 +19,7 @@ reports each one as an ``info`` finding.
 **Cross-gate counting model.**  The three geometric checks are designed to be
 count-comparable with ``kicad-cli pcb drc``, which is used as kct's referee at
 manufacturing sign-off.  Each emits **one violation per colliding pair**:
-``silk_over_copper`` per (silk item, mask aperture), ``silk_overlap`` per
+``silk_over_copper`` per (silk item, pad or via), ``silk_overlap`` per
 unordered (silk item, silk item), ``silk_edge_clearance`` per (silk item,
 outline) -- the outline being a single object, so that one is per silk item.
 A count mismatch against kicad-cli is therefore a bug to investigate, not a
@@ -32,8 +32,11 @@ import fnmatch
 import math
 import re
 import sys
+from bisect import bisect_left, bisect_right
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -1089,15 +1092,14 @@ def _stroke_geometry(
 
 def _pad_aperture_geometry(
     pad: Pad,
-    pad_pos: tuple[float, float],
-    min_mask_clearance: float,
+    footprint: Footprint,
+    margin: float,
 ) -> _Geometry:
-    """Build a shapely polygon for a pad's solder-mask aperture (exposed copper).
+    """Build a shapely polygon for a pad's solder-mask aperture.
 
-    Aperture = pad copper expanded by the mask margin (``pad.solder_mask_margin``
-    if set, else the profile default).  Approximated as a rectangle -- rounded
-    corners are over-approximated, matching the text-box approximation used
-    elsewhere in this module.
+    Expand the pad copper by its effective mask margin. Circular pads and
+    supported custom pads use their copper outline. Other shapes use an
+    oriented rectangle.
 
     The rectangle is **oriented by the pad's absolute angle** (``pad.rotation``
     already includes ``footprint.rotation`` per KiCad's file convention, see
@@ -1114,21 +1116,21 @@ def _pad_aperture_geometry(
     from shapely.affinity import rotate
     from shapely.geometry import box
 
-    # A custom pad's aperture follows its real copper -- the anchor plus
-    # filled primitives (Issue #9498) -- not the nominal anchor ``size`` box;
-    # KiCad masks the whole custom shape.  When the builder refuses, the
-    # anchor box below remains the aperture and ``check_silk_over_copper``
-    # emits the matching ``silk_over_copper_incomplete`` finding.
-    from kicad_tools.geometry.copper import custom_pad_board_outline
+    from kicad_tools.geometry.copper import (
+        custom_pad_board_outline,
+        pad_board_center,
+        pad_copper_outline,
+    )
 
-    custom = custom_pad_board_outline(pad, pad_pos)
-    if custom is not None:
-        margin = (
-            pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
-        )
-        return custom.buffer(margin) if margin else custom
+    pad_pos = pad_board_center(pad, footprint.position, footprint.rotation)
+    if pad.shape == "circle":
+        outline = pad_copper_outline(pad, footprint.position, footprint.rotation)
+    else:
+        outline = custom_pad_board_outline(pad, pad_pos)
+    if outline is not None:
+        return outline.buffer(margin) if margin else outline
 
-    margin = pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
+    # The coverage check also reports custom pads whose primitive geometry was refused.
     w = pad.size[0] + 2.0 * margin
     h = pad.size[1] + 2.0 * margin
     cx, cy = pad_pos
@@ -1141,20 +1143,33 @@ def _pad_aperture_geometry(
     return aperture
 
 
-def _via_aperture_geometry(via: Via, min_mask_clearance: float) -> _Geometry:
+def _board_mask_margin_or(board_margin: float | None, declared: bool, fallback: float) -> float:
+    """The margin every opening is expanded by when nothing local applies.
+
+    The board's ``pad_to_mask_clearance`` when it declares a finite one, else
+    *fallback* -- the manufacturer profile's
+    ``min_solder_mask_clearance_mm``.  KiCad plots a bare opening when the
+    board declares nothing (measured for pads and untented vias alike on the
+    pinned KiCad 10.0.6 image, #10384), which is tighter than a profile will
+    hold.  Both aperture iterators resolve through this one function, so the
+    pad and via sides cannot size their openings by two different rules again.
+    """
+    if board_margin is None or not declared:
+        return fallback
+    return board_margin
+
+
+def _via_aperture_geometry(via: Via, diameter: float) -> _Geometry:
     """Build a shapely polygon for an untented via's solder-mask opening.
 
-    Aperture = via annular copper (diameter ``via.size``) expanded by the
-    profile's mask margin.  Approximated as an axis-aligned box to
-    first-order-match :func:`_pad_aperture_geometry`'s convention (a circle
-    inscribes the box, so this slightly over-approximates the corners --
-    consistent with the pad/text AABB model used throughout this module).
+    The positive diameter includes the effective mask margin. The opening is
+    a disk centred on the via, with the same resolution as a circular pad's
+    copper outline (:func:`~kicad_tools.geometry.copper.pad_copper_outline`).
     """
-    from shapely.geometry import box
+    from shapely.geometry import Point
 
-    d = via.size + 2.0 * min_mask_clearance
     cx, cy = via.position
-    return box(cx - d / 2.0, cy - d / 2.0, cx + d / 2.0, cy + d / 2.0)
+    return Point(cx, cy).buffer(diameter / 2.0, quad_segs=32)
 
 
 def _via_is_tented(via: Via, setup: Setup | None, side: str) -> bool:
@@ -1194,7 +1209,7 @@ def _via_is_tented(via: Via, setup: Setup | None, side: str) -> bool:
 
 
 def _iter_via_apertures(
-    pcb: PCB, min_mask_clearance: float
+    pcb: PCB, min_mask_clearance: float, *, exposed_copper_only: bool = False
 ) -> Iterator[tuple[str, _Geometry, str]]:
     """Yield ``(side, geom, label)`` for every *untented* via mask opening.
 
@@ -1210,6 +1225,19 @@ def _iter_via_apertures(
     Tenting is resolved per side via :func:`_via_is_tented` (per-via override
     -> board setup default -> measured absent-token default).
 
+    The opening is the via's copper expanded by the same margin the pad side
+    uses (:func:`_board_mask_margin_or`).  Measured on the pinned KiCad 10.0.6
+    image (#10384): an untented via flashes ``via.size + 2 *
+    pad_to_mask_clearance`` on both mask layers, and a bare ``via.size`` when
+    the board declares no clearance.  A via has no local margin to resolve --
+    the parser rejects a ``solder_mask_margin`` node inside ``(via ...)`` -- so
+    *min_mask_clearance* is only the fallback for a board that declares
+    nothing.  kicad-cli's own ``silk_over_copper`` reaches only to bare copper
+    for pads and vias alike (same measurement), so a positive board clearance
+    makes this opening wider than the native finding. A zero or negative
+    effective diameter leaves no mask opening on either side. With
+    *exposed_copper_only*, limit the opening to the via copper diameter.
+
     A side is also skipped when the via never reaches it: a blind/micro via
     exposes copper only on the outer layer(s) its ``layers`` name and a
     buried via on neither outer side (Issue #9116, reusing the single
@@ -1217,10 +1245,17 @@ def _iter_via_apertures(
     untented ``F.Cu``--``In1.Cu`` blind via therefore yields no ``B``
     aperture for back silk to collide with.
     """
+    from ..mask_geometry import board_mask_margin
+
     setup = pcb.setup
+    board_margin, declared = board_mask_margin(pcb)
+    margin = _board_mask_margin_or(board_margin, declared, min_mask_clearance)
     ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    if exposed_copper_only:
+        margin = min(margin, 0.0)
     for via in pcb.vias:
-        if via.size <= 0:
+        diameter = via.size + 2.0 * margin
+        if via.size <= 0 or diameter <= 0:
             continue
         reached = _via_silk_sides(getattr(via, "via_type", None), getattr(via, "layers", ()))
         geom: _Geometry | None = None
@@ -1228,7 +1263,7 @@ def _iter_via_apertures(
             if side not in reached or _via_is_tented(via, setup, side):
                 continue
             if geom is None:
-                geom = _via_aperture_geometry(via, min_mask_clearance)
+                geom = _via_aperture_geometry(via, diameter)
             x, y = via.position
             net = f" [{via.net_name}]" if via.net_name else ""
             label = f"via{net} at ({x + ox:.3f}, {y + oy:.3f})"
@@ -1249,6 +1284,7 @@ def _iter_silk_geometries(
 
 def _iter_silk_elements(
     pcb: PCB,
+    radial_marks: dict[int, set[object]] | None = None,
 ) -> Iterator[tuple[str, _Geometry, str, tuple[float, float], str, str, str]]:
     """Yield ``(side, geom, label, location, layer, uuid, item)`` for every silk element.
 
@@ -1290,7 +1326,12 @@ def _iter_silk_elements(
             label = f"{footprint.reference} ({fp_text.text_type})"
             yield side, geom, label, center, fp_text.layer, fp_text.uuid, label
 
-        for graphic in footprint.graphics:
+        marks = (
+            _radial_polarity_strokes(footprint, _pad_margin_for(pcb, footprint))
+            if radial_marks is not None
+            else {}
+        )
+        for index, graphic in enumerate(footprint.graphics):
             side = _silk_side(graphic.layer)
             if side is None:
                 continue
@@ -1298,6 +1339,8 @@ def _iter_silk_elements(
             if geom is None:
                 continue
             label = f"{footprint.reference} (fp_{graphic.graphic_type})"
+            if radial_marks is not None and index in marks:
+                radial_marks[id(geom)] = marks[index]
             item = f"{footprint.reference} ({_graphic_descriptor('fp', graphic)})"
             yield side, geom, label, footprint.position, graphic.layer, graphic.uuid, item
 
@@ -1443,8 +1486,16 @@ def check_silk_coverage(
     return results
 
 
+def _exposed_pad_sides(pad: Pad) -> tuple[str, ...]:
+    """Outer sides where this pad has both copper and a mask opening."""
+    from ..mask_geometry import pad_mask_sides
+    from .clearance import _pad_on_layer
+
+    return tuple(side for side in pad_mask_sides(pad) if _pad_on_layer(pad, f"{side}.Cu"))
+
+
 def _iter_pad_apertures(
-    pcb: PCB, min_mask_clearance: float
+    pcb: PCB, min_mask_clearance: float, *, exposed_copper_only: bool = False
 ) -> Iterator[tuple[str, _Geometry, str]]:
     """Yield ``(side, geom, label)`` for every exposed pad mask aperture.
 
@@ -1457,27 +1508,52 @@ def _iter_pad_apertures(
     :func:`_iter_via_apertures` (#4624), which resolves per-via tenting
     (per-via override -> board setup default -> measured absent-token
     default).  ``check_silk_over_copper`` chains both iterators into a single
-    aperture index.
+    aperture index. With *exposed_copper_only*, yield the copper within
+    the opening on each side where both copper and mask are present.
     """
+    from kicad_tools.geometry.copper import pad_copper_outline, pad_outline_is_exact
+
+    from ..mask_geometry import board_mask_margin, pad_mask_margin
     from .clearance import _pad_has_no_copper, _pad_has_no_mask
 
+    board_margin, declared = board_mask_margin(pcb)
+    board_margin = _board_mask_margin_or(board_margin, declared, min_mask_clearance)
+    version = pcb._file_version()
     for footprint in pcb.footprints:
-        transform = _fp_transform(footprint)
         for pad in footprint.pads:
             if _pad_has_no_copper(pad) and _pad_has_no_mask(pad):
                 # Issue #9528: no copper and no mask opening: no aperture.
                 continue
             sides: tuple[str, ...]
-            if pad.type == "smd":
+            if pad.type not in {"smd", "thru_hole"}:
+                continue
+            if exposed_copper_only:
+                sides = _exposed_pad_sides(pad)
+                if not sides:
+                    continue
+            elif pad.type == "smd":
                 pad_side = "F" if footprint.layer == "F.Cu" else "B"
                 sides = (pad_side,)
-            elif pad.type == "thru_hole":
-                sides = ("F", "B")
             else:
-                # NPTH / connect / other: no exposed copper to smear silk onto.
-                continue
-            pad_pos = transform(pad.position)
-            geom = _pad_aperture_geometry(pad, pad_pos, min_mask_clearance)
+                sides = ("F", "B")
+            margin, _ = pad_mask_margin(
+                pad, footprint, board_margin, declared, board_version=version
+            )
+            if margin is None or not math.isfinite(margin):
+                margin = board_margin
+            if exposed_copper_only:
+                # Positive expansion uncovers substrate. Negative expansion
+                # covers the pad perimeter and can close the opening entirely.
+                if pad_outline_is_exact(pad):
+                    copper = pad_copper_outline(pad, footprint.position, footprint.rotation)
+                    assert copper is not None  # Shapely is required by the rule.
+                else:
+                    copper = _pad_aperture_geometry(pad, footprint, 0.0)
+                geom = copper.buffer(margin) if margin < 0 else copper
+                if geom.is_empty:
+                    continue
+            else:
+                geom = _pad_aperture_geometry(pad, footprint, margin)
             label = f"{footprint.reference} pad {pad.number}"
             for side in sides:
                 yield side, geom, label
@@ -1489,27 +1565,16 @@ def check_silk_over_copper(
 ) -> DRCResults:
     """Geometric check: silk text/graphics over exposed copper.
 
-    Builds a shapely geometry per silk element (text bbox or buffered graphic
-    stroke) and tests it against the solder-mask apertures of all pads and
-    untented vias on the matching silk side.  Emits a ``silk_over_copper``
-    finding (``warning`` by default, matching kicad-cli severity; ``error``
-    for pad apertures under a profile with ``silk_exposed_copper_is_error``
-    -- the jlcpcb profiles -- and ``info`` for via apertures there, per the
-    operator ruling of 2026-11-20, #9795) for any silk/aperture intersection.
+    The JLCPCB profiles check each modeled silk stroke against pad and
+    untented-via copper exposed on the matching side. An expanded mask
+    opening adds no copper. A reduced opening exposes only its interior.
+    A copper hit grades as an error on a pad and as info on a via (#9795).
+    Other profiles warn on overlap with the mask aperture.
 
-    **Counting model: one violation per (silk item, mask aperture) pair,
-    matching ``kicad-cli pcb drc``.**  A refdes straddling four pads yields four
-    violations, not one -- so a kct count and a kicad-cli count are directly
-    comparable, and every colliding pad is named rather than an arbitrary
-    representative.  Before #4612 this de-duplicated to one violation per silk
-    element, which under-reported by ~2x and named an R-tree-ordered arbitrary
-    member of the collision set; a count mismatch against kicad-cli is now a
-    bug, not a convention difference.  Violations are sorted by
-    ``(silk label, pad label)`` because ``STRtree.query`` order is unspecified.
-
-    The ``_MIN_OVERLAP_AREA_MM2`` gate is applied **per pair** (each silk/pad
-    intersection must clear it independently), which is the reading the per-pair
-    counting model implies.
+    Emit one finding per (silk item, feature) pair, sorted by label for
+    deterministic reporting. Text uses an approximate bounding box, so
+    its intersection must clear the per-pair area threshold. JLCPCB
+    graphic strokes use their modeled ink and need only positive area.
 
     This supersedes the crude centroid heuristic in
     :func:`check_silkscreen_over_pads` (which is retained for backward
@@ -1530,7 +1595,7 @@ def check_silk_over_copper(
         design_rules: Design rules providing the mask-clearance fallback.
 
     Returns:
-        DRCResults containing any ``silk_over_copper`` warnings.
+        DRCResults containing the profile-graded findings.
     """
     require_shapely("silk-over-copper geometry")
     from shapely import STRtree  # type: ignore[import-untyped]
@@ -1545,6 +1610,7 @@ def check_silk_over_copper(
 
     from .clearance import _pad_has_no_copper, _pad_has_no_mask
 
+    error_grade = bool(getattr(design_rules, "silk_exposed_copper_is_error", False))
     for footprint in pcb.footprints:
         for pad in footprint.pads:
             if (pad.shape or "").lower() != "custom":
@@ -1553,6 +1619,8 @@ def check_silk_over_copper(
                 continue
             if _pad_has_no_copper(pad) and _pad_has_no_mask(pad):
                 # Issue #9528: neither copper nor a mask opening to smear silk onto.
+                continue
+            if error_grade and not _exposed_pad_sides(pad):
                 continue
             geometry, refusal = custom_pad_outline_detail(
                 pad, _fp_transform(footprint)(pad.position)
@@ -1572,20 +1640,12 @@ def check_silk_over_copper(
             )
 
     min_mask = design_rules.min_solder_mask_clearance_mm
-    # Operator ruling 2026-11-20 (#9795, Issue #9798): under the jlcpcb
-    # profiles silk on exposed copper is an error -- but silk over a *via*
-    # is not (``info`` at most), so a via-only board cannot fail through
-    # this rule either.  Untented via apertures stay in the index (the
-    # native count parity of #4612/#4624 is unchanged); only the severity
-    # they grade at moves.
-    error_grade = bool(getattr(design_rules, "silk_exposed_copper_is_error", False))
-
     # Group apertures by side and index with an STRtree for fast lookup.
     # Pads and untented vias contribute to the same index (#4624).
     apertures: dict[str, list[tuple[_Geometry, str, bool]]] = {"F": [], "B": []}
-    for side, geom, label in _iter_pad_apertures(pcb, min_mask):
+    for side, geom, label in _iter_pad_apertures(pcb, min_mask, exposed_copper_only=error_grade):
         apertures[side].append((geom, label, False))
-    for side, geom, label in _iter_via_apertures(pcb, min_mask):
+    for side, geom, label in _iter_via_apertures(pcb, min_mask, exposed_copper_only=error_grade):
         apertures[side].append((geom, label, True))
 
     trees: dict[str, Any] = {}
@@ -1594,7 +1654,10 @@ def check_silk_over_copper(
             trees[side] = STRtree([g for g, _label, _via in entries])
 
     found: list[DRCViolation] = []
-    for side, geom, silk_label, location, layer, _uuid in _iter_silk_geometries(pcb):
+    for side, geom, silk_label, location, layer, _uuid, item in _iter_silk_elements(pcb):
+        # _iter_silk_elements gives graphics a coordinate-bearing item
+        # descriptor. Text retains its label and uses an approximate box.
+        use_area_threshold = not error_grade or item == silk_label
         side_entries = apertures.get(side)
         if not side_entries:
             continue
@@ -1607,7 +1670,8 @@ def check_silk_over_copper(
             # Require a non-trivial overlap area to reject hairline corner
             # touches that the AABB text approximation can manufacture.  Applied
             # per (silk, aperture) pair -- see the counting model above.
-            if geom.intersection(ap_geom).area < _MIN_OVERLAP_AREA_MM2:
+            area = geom.intersection(ap_geom).area
+            if area <= 0 or (use_area_threshold and area < _MIN_OVERLAP_AREA_MM2):
                 continue
             if error_grade:
                 severity = "info" if aperture_is_via else "error"
@@ -1970,6 +2034,297 @@ def check_silk_over_mask_opening(
     return results
 
 
+def _hatch_runs(offsets: Sequence[int], width: float) -> Iterator[list[int]]:
+    """Find runs on a regular pitch in projected nanometres."""
+    # Rounding each authored endpoint to 1 nm perturbs projected spacings.
+    tolerance = 3
+    pitches = Counter(b - a for a, b in pairwise(offsets) if tolerance < b - a < width)
+    remaining = set(offsets)
+    for pitch, _ in pitches.most_common():
+        gaps = (pitch, 2 * pitch) if 2 * pitch < width else (pitch,)
+        for first in offsets:
+            if first not in remaining:
+                continue
+            run = [first]
+            consecutive = 1
+            longest = 1
+            while True:
+                for gap in gaps:
+                    target = run[-1] + gap
+                    following = min(
+                        (
+                            n
+                            for n in range(target - tolerance, target + tolerance + 1)
+                            if 0 < n - run[-1] < width and n in remaining
+                        ),
+                        key=lambda n: abs(n - target),
+                        default=None,
+                    )
+                    if following is not None:
+                        run.append(following)
+                        consecutive = consecutive + 1 if gap == pitch else 1
+                        longest = max(longest, consecutive)
+                        break
+                else:  # Neither the next chord nor one across a cutout overlaps.
+                    break
+            if longest >= 4:
+                yield run
+                remaining.difference_update(run)
+
+
+def _painted_chords(
+    offsets: dict[int, list[tuple[float, float, int]]],
+    radius: float,
+    width: float,
+    pads: Sequence[tuple[float, float, float]],
+    round_pads: Sequence[tuple[float, float, float, float]],
+) -> dict[int, list[int]]:
+    """Keep rim-to-rim chords and pieces ending at a common pad cutout."""
+    members: dict[int, list[int]] = {}
+    # For each round pad, collect (tip radius, chord offset, graphic index).
+    round_tips: dict[int, list[tuple[float, int, int]]] = defaultdict(list)
+    ordered = sorted(offsets)
+    for i, offset in enumerate(ordered):
+        intervals = offsets[offset]
+        neighbours = [
+            span
+            for j in (i - 1, i + 1)
+            if 0 <= j < len(ordered) and abs(ordered[j] - offset) < width * 1e6
+            for span in offsets[ordered[j]]
+        ]
+        lateral = offset / 1e6
+        # Reaching the inner edge of the outline suffices on both sides.
+        reach = math.sqrt(max(0, (radius - width / 2) ** 2 - lateral**2))
+        for start, end, index in intervals:
+            # Overdraw is ambiguous, even when one line is a full chord.
+            overdrawn = any(
+                (a, b) != (start, end) and max(a, start) < min(b, end) for a, b, _ in intervals
+            )
+            if start > -reach or end < reach:
+                if start > -reach and end < reach:
+                    continue
+                cut_start = start > -reach
+                tip = start if cut_start else end
+                if not any(abs(tip - (a if cut_start else b)) <= 3e-6 for a, b, _ in neighbours):
+                    if overdrawn:
+                        continue
+                    for pad_index, (along, across, pad_radius, pad_reach) in enumerate(round_pads):
+                        toward_cut = tip - along if cut_start else along - tip
+                        distance = math.hypot(toward_cut, lateral - across)
+                        # Repair clearances above the cap fall outside this window.
+                        if (
+                            toward_cut > 0
+                            and pad_radius <= distance <= pad_radius + pad_reach + width / 2
+                        ):
+                            round_tips[pad_index].append((distance, offset, index))
+                    continue
+                if not any(
+                    abs(across - lateral) <= extent
+                    and 0 < (tip - along if cut_start else along - tip) <= extent
+                    for along, across, extent in pads
+                ):
+                    continue
+            # A qualifying offset still establishes hatch pitch when its ink is ambiguous.
+            chord = members.setdefault(offset, [])
+            if not overdrawn:
+                chord.append(index)
+
+    for tips in round_tips.values():
+        tips.sort()
+        radii = [r for r, _, _ in tips]
+        for r, offset, index in tips:
+            # The clipper approximates round outlines with 16 edges per
+            # quadrant. Allow the chord sagitta plus coordinate rounding.
+            tolerance = r * (1 - math.cos(math.pi / 64)) + 3e-6
+            lo = bisect_left(radii, r - tolerance)
+            hi = bisect_right(radii, r + tolerance)
+            distinct_offsets: set[int] = set()
+            for i in range(lo, hi):
+                distinct_offsets.add(tips[i][1])
+                if len(distinct_offsets) >= 4:
+                    members.setdefault(offset, []).append(index)
+                    break
+    return members
+
+
+def _positive_lead_mark(
+    footprint: Footprint,
+    graphics: Sequence[FootprintGraphic],
+    outline: FootprintGraphic,
+    center: tuple[float, float],
+    radius: float,
+) -> Iterator[tuple[int, int]]:
+    """Find the two strokes of a plus beside pad 1 of a painted radial body."""
+    pads = sorted(footprint.pads, key=lambda pad: pad.number)
+    if (
+        len(pads) != 2
+        or [pad.number for pad in pads] != ["1", "2"]
+        or any(pad.type != "thru_hole" for pad in pads)
+        or pads[0].shape not in ("rect", "roundrect")
+        or pads[1].shape != "circle"
+    ):
+        return
+    positive, negative = (p.position for p in pads)
+    midpoint = tuple((a + b) / 2 for a, b in zip(positive, negative, strict=True))
+    if math.dist(midpoint, center) > 1e-5:
+        return
+
+    # The library draws the sign in footprint-local axes. Match only a
+    # single horizontal and vertical with the same center and length.
+    candidates = defaultdict(list)
+    for index, line in enumerate(graphics):
+        if (
+            line.graphic_type != "line"
+            or line.layer != outline.layer
+            or line.stroke_width != outline.stroke_width
+        ):
+            continue
+        x1, y1 = line.start
+        x2, y2 = line.end
+        horizontal = y1 == y2
+        if not horizontal and x1 != x2:
+            continue
+        length = math.dist(line.start, line.end)
+        middle = ((x1 + x2) / 2, (y1 + y2) / 2)
+        if (
+            length <= 2 * line.stroke_width
+            or not radius < math.dist(center, middle) <= radius + length
+            or min(math.dist(center, p) for p in (line.start, line.end)) <= radius
+            or math.dist(positive, middle) >= math.dist(negative, middle)
+        ):
+            continue
+        key = tuple(round(n, 6) for n in (*middle, length))
+        candidates[key].append((index, horizontal))
+    for pair in candidates.values():
+        if len(pair) == 2 and pair[0][1] != pair[1][1]:
+            yield pair[0][0], pair[1][0]
+
+
+# Largest silk-to-pad repair clearance (mm) a clipped round cutout may reflect.
+_MAX_REPAIR_CLEARANCE_MM = 0.25
+
+
+def _pad_margin_for(pcb: PCB, footprint: Footprint) -> Callable[[Any], float]:
+    """Return a function giving a pad's effective mask expansion (never negative)."""
+    from ..mask_geometry import board_mask_margin, pad_mask_margin
+
+    board_margin, declared = board_mask_margin(pcb)
+    board_margin = _board_mask_margin_or(board_margin, declared, 0.0)
+    version = pcb._file_version()
+
+    def margin_of(pad: Any) -> float:
+        margin, _ = pad_mask_margin(pad, footprint, board_margin, declared, board_version=version)
+        if margin is None or not math.isfinite(margin):
+            margin = board_margin
+        return max(0.0, margin)
+
+    return margin_of
+
+
+def _radial_polarity_strokes(
+    footprint: Footprint, mask_margin: Callable[[Any], float] | None = None
+) -> dict[int, set[object]]:
+    """Map authored graphic indices to the painted runs they belong to."""
+    from kicad_tools.core.arcs import arc_sweep
+    from kicad_tools.validate.mask_geometry import pad_mask_sides
+
+    marks: dict[int, set[object]] = defaultdict(set)
+    for outline_index, outline in enumerate(footprint.graphics):
+        if _silk_side(outline.layer) is None or outline.is_filled or outline.stroke_width <= 0:
+            continue
+        arc = None
+        if outline.graphic_type == "circle" and outline.center is not None:
+            center = outline.center
+            radius = math.dist(center, outline.end)
+        elif outline.graphic_type == "arc" and outline.mid is not None:
+            arc = arc_sweep(outline.start, outline.mid, outline.end)
+            if arc is None:
+                continue
+            center, radius = arc.center, arc.radius
+        else:
+            continue
+
+        # Use the longest chord as the projection axis for its direction.
+        # Endpoint rounding moves a parallel segment transversely by a few nm.
+        directions: dict[tuple[float, float], dict[int, list[tuple[float, float, int]]]] = {}
+        lines = sorted(
+            (
+                (index, line)
+                for index, line in enumerate(footprint.graphics)
+                if line.graphic_type == "line"
+            ),
+            key=lambda item: math.dist(item[1].start, item[1].end),
+            reverse=True,
+        )
+        for index, line in lines:
+            if (
+                line.layer != outline.layer
+                or line.stroke_width != outline.stroke_width
+                or line.start == line.end
+            ):
+                continue
+            ends = (line.start, line.end)
+            if max(math.dist(center, p) for p in ends) > radius + line.stroke_width / 2:
+                continue
+            if not any(
+                abs(math.dist(center, (x, y)) - radius) <= line.stroke_width / 2
+                and (arc is None or arc.reaches(math.atan2(y - center[1], x - center[0])))
+                for x, y in ends
+            ):
+                continue
+            dx, dy = line.end[0] - line.start[0], line.end[1] - line.start[1]
+            for ux, uy in directions:
+                if abs(dx * uy - dy * ux) <= 3e-6:
+                    break
+            else:
+                length = math.hypot(dx, dy)
+                ux, uy = dx / length, dy / length
+                directions[ux, uy] = defaultdict(list)
+            offsets = directions[ux, uy]
+            x, y = line.start[0] - center[0], line.start[1] - center[1]
+            offset = round((ux * (y + dy / 2) - uy * (x + dx / 2)) * 1e6)
+            offset = next((n for n in range(offset - 2, offset + 3) if n in offsets), offset)
+            start, end = sorted((x * ux + y * uy, (x + dx) * ux + (y + dy) * uy))
+            offsets[offset].append((start, end, index))
+
+        for (ux, uy), offsets in directions.items():
+            # A pad can clip a chord at either end, including right through
+            # the opposite rim. Look for a repeated cut edge facing the pad.
+            pads = []
+            round_pads = []
+            for pad in footprint.pads:
+                x, y = pad.position[0] - center[0], pad.position[1] - center[1]
+                pads.append(
+                    (
+                        x * ux + y * uy,
+                        y * ux - x * uy,
+                        math.hypot(*pad.size) / 2 + 2 * outline.stroke_width,
+                    )
+                )
+                if pad.shape == "circle" and _silk_side(outline.layer) in pad_mask_sides(pad):
+                    along, across, _ = pads[-1]
+                    # Cutout reach: mask aperture plus the repair clearance and
+                    # half the stroke that the clipper keeps clear of it.
+                    reach = (mask_margin(pad) if mask_margin else 0.0) + _MAX_REPAIR_CLEARANCE_MM
+                    round_pads.append((along, across, pad.size[0] / 2, reach))
+            members = _painted_chords(offsets, radius, outline.stroke_width, pads, round_pads)
+            for run in _hatch_runs(sorted(members), outline.stroke_width * 1e6):
+                mark = object()
+                marks[outline_index].add(mark)
+                for offset in run:
+                    for index in members[offset]:
+                        marks[index].add(mark)
+        if outline_index in marks:
+            for first, second in _positive_lead_mark(
+                footprint, footprint.graphics, outline, center, radius
+            ):
+                # Its own mark: the plus can still collide with the body and other ink.
+                mark = object()
+                marks[first].add(mark)
+                marks[second].add(mark)
+    return marks
+
+
 def check_silk_overlap(
     pcb: PCB,
     design_rules: DesignRules,
@@ -2030,7 +2385,8 @@ def check_silk_overlap(
         "F": [],
         "B": [],
     }
-    for side, geom, label, location, layer, uuid in _iter_silk_geometries(pcb):
+    radial_marks: dict[int, set[object]] = {}
+    for side, geom, label, location, layer, uuid, _ in _iter_silk_elements(pcb, radial_marks):
         by_side[side].append((geom, label, location, layer, uuid))
 
     # A library outline is often several joined line primitives. Their round
@@ -2102,6 +2458,11 @@ def check_silk_overlap(
                 other_geom, label_b, _, _, uuid_b = entries[j]
                 if not geom.intersects(other_geom):
                     continue
+                if id(geom) in radial_marks and id(other_geom) in radial_marks:
+                    if radial_marks[id(geom)] & radial_marks[id(other_geom)] and not geom.equals(
+                        other_geom
+                    ):
+                        continue
                 overlap = geom.intersection(other_geom)
                 if overlap.area < _MIN_SILK_OVERLAP_AREA_MM2:
                     continue
@@ -2438,6 +2799,19 @@ def check_silk_ref_obscured(
         if ref_text.hidden:
             if is_fiducial_footprint(footprint):
                 continue  # hiding fiducial references is the convention (#8540)
+            if (
+                footprint.exclude_from_bom
+                and footprint.exclude_from_pos_files
+                and footprint.pads
+                and all(
+                    pad.type == "np_thru_hole"
+                    and not pad.number
+                    and not pad.net_number
+                    and not pad.net_name
+                    for pad in footprint.pads
+                )
+            ):
+                continue  # Bare tooling holes have no part to identify (#10350).
             if _has_replacement_silk_text(pcb, footprint, ref_text.layer, Polygon):
                 continue  # hidden on purpose, replaced by a function label (#9435)
             results.add(

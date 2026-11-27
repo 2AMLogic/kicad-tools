@@ -1,9 +1,9 @@
 """Place global fiducials on a PCB.
 
 ``kct pcb add-fiducials`` searches each requested board side for copper-free
-sites near the board corners, outside every courtyard and at least
+sites near the board corners, clear of same-side silkscreen, outside every courtyard and at least
 ``--edge-margin`` from the board edge, then inserts stock ``Fiducial``
-footprints flagged ``board_only`` / ``exclude_from_bom`` /
+footprints with unprinted silk references and flags ``board_only`` / ``exclude_from_bom`` /
 ``exclude_from_pos_files`` so BOM, CPL and schematic parity stay clean.
 
 Zone fills are not treated as obstacles (a fiducial inside a pour gets a
@@ -111,10 +111,11 @@ def _build_obstacles(pcb, side: str, keepout: float):
 
     from kicad_tools.geometry.courtyard import _courtyard_polygon
     from kicad_tools.router.rule_area_resolve import all_rule_area_zones
+    from kicad_tools.validate.rules.silkscreen import _iter_silk_geometries
     from kicad_tools.validate.rules.via_pad_geometry import pad_absolute_bbox
 
     cu, short = _side_layers(side)
-    geoms = []
+    geoms = [geom for silk_side, geom, *_ in _iter_silk_geometries(pcb) if silk_side == short]
     for fp in pcb.footprints:
         if _is_fiducial(fp) and fp.layer == cu:
             # Existing fiducials are obstacles on their real side (courtyard-exempt).
@@ -358,6 +359,10 @@ def run_add_fiducials(
                 for x, y in sites:
                     ref = next(ref_iter)
                     fp = pcb.add_footprint(lib_id, ref, x, y, layer=layer, value="Fiducial")
+                    if any(
+                        t.text_type == "reference" and t.layer.endswith(".SilkS") for t in fp.texts
+                    ):
+                        pcb.set_reference_visibility(ref, visible=False)
                     fp.exclude_from_bom = True
                     fp.exclude_from_pos_files = True
                     if "board_only" not in fp._attr_unknown_tokens:

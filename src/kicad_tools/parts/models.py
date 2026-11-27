@@ -320,6 +320,7 @@ class SearchResult:
     source: str = "unknown"
     coverage: str = "unknown"
     diagnostics: list[str] = field(default_factory=list)
+    keyword_total: int | None = None
 
     @property
     def has_more(self) -> bool:

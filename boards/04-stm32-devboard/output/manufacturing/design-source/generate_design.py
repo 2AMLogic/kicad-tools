@@ -3064,6 +3064,14 @@ Gerbers: gerbers/gerbers.zip. Editable sources: kicad_project.zip. Engineering r
 """
 
 
+def finalize_silkscreen(routed_path: Path) -> bool:
+    """Apply the exporter's artwork edits before any evidence binds the routed PCB."""
+    from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+
+    result = run_default_silk_pass(routed_path, mfr="jlcpcb-tier1")
+    return result is not None and result["applied"]
+
+
 def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
     """Export the assembly bundle with the reviewed paid-drill native rules."""
     from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
@@ -3071,6 +3079,7 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
 
     process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
     process["validate_process"](routed_path)
+    process["validate_bypass_mask_escapes"](routed_path)
 
     print("\n" + "=" * 60)
     print("Generating manufacturing artifacts (reviewed paid drilling)...")
@@ -3468,6 +3477,8 @@ def main() -> int:
         # Keep the rerouted GND, USER_LED and oscillator copper clear of the
         # front mask openings introduced or affected by the bypass move (#10194).
         process["repair_bypass_mask_escapes"](routed_path)
+        if not finalize_silkscreen(routed_path):
+            raise RuntimeError("Could not finalize Board 04 silkscreen")
         if not check_silk_clear_of_holes(routed_path):
             raise RuntimeError("check_silk_clear_of_holes did not pass (#9455)")
 

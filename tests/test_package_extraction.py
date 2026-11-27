@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kicad_tools.datasheet.footprint_matcher import (
     FootprintMatch,
     FootprintMatcher,
@@ -15,6 +17,127 @@ from kicad_tools.datasheet.package import (
     get_default_pitch,
     parse_package_name,
 )
+from kicad_tools.datasheet.parser import DatasheetParser
+from kicad_tools.datasheet.tables import ExtractedTable
+
+
+def test_thermal_table_pin_counts_do_not_become_pitch(tmp_path, monkeypatch):
+    pdf = tmp_path / "packages.pdf"
+    pdf.touch()
+    parser = DatasheetParser(pdf)
+    thermal = ExtractedTable(
+        113,
+        ["Package", "Junction to case"],
+        [["LQFP48 7 × 7 mm", "42"], ["TSSOP20 6.4 × 4.4 mm", "19"], ["LQFP32 7 × 7 mm", "42"]],
+    )
+    tables = [thermal]
+    monkeypatch.setattr(parser, "extract_tables", lambda pages: tables)
+    found = {pkg.name: pkg for pkg in parser.extract_packages()}
+    package = found["LQFP32"]
+    assert package.pitch == get_default_pitch("qfp", 32)
+    assert package.pitch_inferred and package.confidence < 1
+    match = FootprintMatcher().find_matches(package)[0]
+    assert not match.dimension_match["pitch"]
+    assert match.confidence <= package.confidence
+    assert found["TSSOP20"].body_width == 6.4
+    assert found["TSSOP20"].body_length == 4.4
+
+    # A measured pitch takes precedence when it appears later in the PDF.
+    tables.append(
+        ExtractedTable(115, ["Package", "Dimensions"], [["LQFP32", "7 × 7 mm, pitch = 0.8 mm"]])
+    )
+    measured = next(pkg for pkg in parser.extract_packages() if pkg.name == "LQFP32")
+    assert measured.pitch == 0.8 and not measured.pitch_inferred
+    assert measured.source_page == 115
+    assert FootprintMatcher().find_matches(measured)[0].footprint == "LQFP-32_7x7mm_P0.8mm"
+
+
+@pytest.mark.parametrize(
+    "cells",
+    [
+        ["LQFP32", "7 x 7 mm", "pitch = 0.80 mm"],
+        ["LQFP32", "D=7 mm E=7 mm e=0.80 mm"],
+    ],
+)
+def test_body_and_measured_pitch_in_one_row(tmp_path, monkeypatch, cells):
+    pdf = tmp_path / "packages.pdf"
+    pdf.touch()
+    parser = DatasheetParser(pdf)
+    table = ExtractedTable(1, [], [cells])
+    monkeypatch.setattr(parser, "extract_tables", lambda pages: [table])
+    (package,) = parser.extract_packages()
+    assert (package.body_width, package.body_length, package.pitch) == (7, 7, 0.8)
+    assert not package.pitch_inferred
+    assert package.confidence == 1.0
+
+
+@pytest.mark.parametrize("pitch_first", [True, False])
+def test_measured_pitch_and_body_on_separate_pages(tmp_path, monkeypatch, pitch_first):
+    pdf = tmp_path / "packages.pdf"
+    pdf.touch()
+    parser = DatasheetParser(pdf)
+    pitch_row = ["LQFP32", "pitch = 0.80 mm"]
+    body_row = ["LQFP32", "8 x 9 mm"]
+    rows = [pitch_row, body_row] if pitch_first else [body_row, pitch_row]
+    tables = [
+        ExtractedTable(page, ["Package", "Details"], [row]) for page, row in enumerate(rows, 1)
+    ]
+    monkeypatch.setattr(parser, "extract_tables", lambda pages: tables)
+    (package,) = parser.extract_packages()
+    assert (package.body_width, package.body_length, package.pitch) == (8, 9, 0.8)
+    assert not package.pitch_inferred
+    assert package.confidence == 1.0
+    assert package.source_page == (1 if pitch_first else 2)
+
+
+@pytest.mark.parametrize("token", ["(P48)", "Pin-P48", "P48", "p 113 thermal"])
+def test_bare_pitch_token_falls_back_to_inferred_pitch(tmp_path, monkeypatch, token):
+    pdf = tmp_path / "packages.pdf"
+    pdf.touch()
+    parser = DatasheetParser(pdf)
+
+    def package_with(notes):
+        table = ExtractedTable(1, [], [["LQFP32", "7 x 7 mm", notes]])
+        monkeypatch.setattr(parser, "extract_tables", lambda pages: [table])
+        (package,) = parser.extract_packages()
+        return package
+
+    control = package_with("")
+    package = package_with(token)
+    assert package.pin_count == 32
+    assert (package.body_width, package.body_length) == (7, 7)
+    assert package.pitch == control.pitch == get_default_pitch("qfp", 32)
+    assert package.pitch_inferred and package.confidence == control.confidence < 1
+
+
+def test_measured_pitch_survives_earlier_bare_pitch_token(tmp_path, monkeypatch):
+    pdf = tmp_path / "packages.pdf"
+    pdf.touch()
+    parser = DatasheetParser(pdf)
+    table = ExtractedTable(1, [], [["LQFP32", "7 x 7 mm", "P48 pitch = 0.80"]])
+    monkeypatch.setattr(parser, "extract_tables", lambda pages: [table])
+    (package,) = parser.extract_packages()
+    assert (package.pitch, package.pitch_inferred, package.confidence) == (0.8, False, 1.0)
+
+
+def test_pitch_labels_and_body_dimensions():
+    assert "PITCH" not in extract_dimension_from_text("LQFP48, E=7.0 mm")
+    assert extract_dimension_from_text("P0.8 mm")["PITCH"] == 0.8
+    assert extract_dimension_from_text("P0.8mm")["PITCH"] == 0.8
+    assert extract_dimension_from_text("P50 mil")["PITCH"] == 1.27
+    assert extract_dimension_from_text("P=0.80")["PITCH"] == 0.8
+    assert extract_dimension_from_text("0.8 mm pitch")["PITCH"] == 0.8
+    assert extract_dimension_from_text("e=0.8")["PITCH"] == 0.8
+    assert extract_dimension_from_text("e = 0.80")["PITCH"] == 0.8
+    assert extract_dimension_from_text("Pitch 50 mil")["PITCH"] == 1.27
+    assert extract_dimension_from_text("P48 pitch = 0.80")["PITCH"] == 0.8
+    assert parse_package_name("QFP32_7x7mm")["pitch"] is None
+    assert parse_package_name("QFP32_7x7mm_P0.8mm")["pitch"] == 0.8
+
+
+@pytest.mark.parametrize("token", ["(P48) 7 x 7 mm", "Pin-P48 7 x 7 mm", "P48", "p 113 thermal"])
+def test_bare_pitch_token_is_not_a_measurement(token):
+    assert "PITCH" not in extract_dimension_from_text(token)
 
 
 class TestPackageInfo:
@@ -385,3 +508,86 @@ class TestPackageTypes:
         """Test SSOP has default pitch."""
         assert "pitch" in PACKAGE_TYPES["SSOP"]
         assert PACKAGE_TYPES["SSOP"]["pitch"] == 0.65
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "e=1.27mmA",
+        "pitch 1.27mmA",
+        "pitch 1.27B",
+        "pitch = 0.65mmX",
+        "e=1.27 mmA",
+        "pitch 500µm",
+        "pitch 500μm",
+        "e=1.27mmβ",
+        "e=1.27 mmβ",
+    ],
+)
+def test_pitch_token_with_attached_letter_is_ambiguous(text):
+    # Key must be absent: a truncated 1.0 or a falsy 0.0 must not be reported.
+    assert "PITCH" not in extract_dimension_from_text(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "pitch"),
+    [
+        ("e=1.27mm", 1.27),
+        ("e=0.8", 0.8),
+        ("Pitch 50 mil", 1.27),
+        ("pitch 0.8 millimeters", 0.8),
+        ("e=0.8 millimetres", 0.8),
+        ("0.8 mm pitch", 0.8),
+        ("e=1.27mmA pitch 0.8mm", 0.8),
+        ("pitch 1.27 B", 1.27),
+        ("pitch 50_mils pitch 0.8mm", 0.8),
+        ("pitch 50mil_A pitch 0.8mm", 0.8),
+    ],
+)
+def test_clean_pitch_forms_keep_their_values(text, pitch):
+    assert extract_dimension_from_text(text)["PITCH"] == pytest.approx(pitch)
+
+
+def test_uppercase_e_still_supplies_body_length_with_malformed_pitch():
+    dims = extract_dimension_from_text("E=7.0 mm e=1.27mmA")
+    assert dims["E"] == 7.0
+    assert "PITCH" not in dims
+
+
+@pytest.mark.parametrize(
+    ("cell", "pitch", "inferred"),
+    [
+        ("e=1.27mmA", None, True),
+        ("pitch = 0.65mmX", None, True),
+        ("pitch 500µm", None, True),
+        ("P1_GPIO", None, True),
+        ("P2_INT pitch 0.8mm", 0.8, False),
+        ("pitch 500μm pitch 0.8mm", 0.8, False),
+        ("pitch 0.8 millimeters", 0.8, False),
+        ("e=0.8 millimetres", 0.8, False),
+        ("e=1.27mmA pitch 0.8mm", 0.8, False),
+        ("e=1.27mm", 1.27, False),
+    ],
+)
+def test_malformed_pitch_cell_falls_back_like_empty_cell(
+    tmp_path, monkeypatch, cell, pitch, inferred
+):
+    pdf = tmp_path / "packages.pdf"
+    pdf.touch()
+
+    def extract(third_cell):
+        parser = DatasheetParser(pdf)
+        table = ExtractedTable(1, [], [["LQFP32", "7 x 7 mm", third_cell]])
+        monkeypatch.setattr(parser, "extract_tables", lambda pages: [table])
+        (package,) = parser.extract_packages()
+        return package
+
+    control = extract("")
+    package = extract(cell)
+    assert (package.pin_count, package.body_width, package.body_length) == (32, 7, 7)
+    assert package.pitch_inferred is inferred
+    if pitch is None:
+        assert package.pitch == control.pitch
+        assert package.confidence == control.confidence
+    else:
+        assert package.pitch == pytest.approx(pitch)

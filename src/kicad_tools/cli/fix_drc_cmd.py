@@ -7,7 +7,9 @@ This command repairs multiple types of DRC violations:
 - hole_to_hole_clearance (formerly dimension_drill_clearance, #4353): de-duplicate
   or slide vias via DrillClearanceRepairer
 - physical_copper_gap same-net slits (#9332): move a via clear of its own pad
-  or onto its own track via CopperGapRepairer
+  or onto its own track via CopperGapRepairer; rewrite a same-net trace shelf
+  at a routed branch (#10367) with a shortcut that keeps the trunk node, the
+  far end and the widths
 
 Success is never self-reported (Issues #6431 / #6434): after the last pass
 ``fix-drc`` re-checks the output with ``kct check``'s own rule set (the
@@ -43,6 +45,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.cli.fix_drc_creepage import (
+    CreepageVerificationError,
+    MaskCreepageAudit,
+    add_mask_creepage_args,
+)
 from kicad_tools.core.atomic_write import atomic_write_text
 from kicad_tools.drc.mask_trace_angles import MaskTraceAngleError
 from kicad_tools.drc.repair_clearance import ClearanceRepairer, RepairResult
@@ -352,7 +359,8 @@ Examples:
             "detected with kct check's rules, not kicad-cli, and is also part "
             "of the default set when the report carries such findings. "
             "'copper-gap' moves a via that sits too close to its own pad or "
-            "track (same-net physical_copper_gap slits), also detected with "
+            "track and rewrites a short same-net trace shelf at a routed "
+            "branch (same-net physical_copper_gap slits), also detected with "
             "kct check's rules and part of the default set."
         ),
     )
@@ -427,7 +435,12 @@ Examples:
         ),
     )
 
+    add_mask_creepage_args(parser)
     args = parser.parse_args(argv)
+    try:
+        args.creepage = MaskCreepageAudit(args) if args.voltage_map else None
+    except ValueError as error:
+        parser.error(str(error))
     if args.margin is not None and (not math.isfinite(args.margin) or args.margin < 0):
         parser.error("--margin must be a finite, nonnegative distance")
     args.mask_margin = PASS_THROUGH_MARGIN_MM if args.margin is None else args.margin
@@ -479,8 +492,9 @@ Examples:
     # Determine output path used for saving
     output_path = Path(args.output) if args.output else pcb_path
 
+    run_repair = _audited_repair if args.creepage else _execute_repair
     if not getattr(args, "transactional", False):
-        return _execute_repair(args, pcb_path, output_path, report)
+        return run_repair(args, pcb_path, output_path, report)
 
     # --transactional (issue #4541): wrap the whole multi-pass run in a
     # file-scoped snapshot/rollback transaction.  Exceptions and Ctrl-C roll
@@ -494,12 +508,59 @@ Examples:
     # rollback mid-run, while this transaction provides whole-command
     # failure safety.
     with board_transaction(output_path) as txn:
-        exit_code = _execute_repair(args, pcb_path, output_path, report)
+        exit_code = run_repair(args, pcb_path, output_path, report)
         if exit_code in (1, 3):
             txn.rollback()
             for line in txn.report_lines():
                 print(line, file=sys.stderr)
         return exit_code
+
+
+def _audited_repair(
+    args: argparse.Namespace, pcb_path: Path, output_path: Path, report: DRCReport
+) -> int:
+    """Publish only the complete, verified run, including across multiple passes."""
+    from kicad_tools.creepage.output_audit import publish_board, staged_board
+
+    audit: MaskCreepageAudit = args.creepage
+    try:
+        with staged_board(pcb_path, output_path) as candidate:
+            code = _execute_repair(args, pcb_path, candidate, report)
+            # A later no-progress pass (exit 1) can follow earlier verified
+            # edits. Preserve the command's ordinary partial-repair behaviour.
+            if candidate.exists() and not args.dry_run and code != 3:
+                publish_board(candidate, output_path)
+            return code
+    except CreepageVerificationError as error:
+        if not args.quiet:
+            if args.format == "json":
+                print(
+                    json.dumps(
+                        {
+                            "dry_run": args.dry_run,
+                            "total_repaired": 0,
+                            "error": str(error),
+                            "creepage": audit.report(),
+                        }
+                    )
+                )
+            else:
+                audit.print_findings()
+                print(f"Repair discarded: {error}", file=sys.stderr)
+        return 1
+
+
+def _refill_mixed_candidate(candidate: Path, pcb_path: Path) -> None:
+    """Non-mask edits after the last mask pass may have invalidated its fills."""
+    from kicad_tools.cli.runner import run_refill_zones
+    from kicad_tools.schema.pcb import PCB
+
+    if any(zone.keepout is None for zone in PCB.load(candidate).zones):
+        with _with_project_rules(candidate, pcb_path, private=True) as staged:
+            refill = run_refill_zones(staged, require_save=True)
+            if not refill.success:
+                raise CreepageVerificationError(f"Final zone refill failed: {refill.stderr}")
+            shutil.copyfile(staged, candidate)
 
 
 def _board_layer_count(pcb_path: Path) -> int:
@@ -725,7 +786,16 @@ def _execute_repair(
         args.copper_gap_findings_seen = True
 
     # Effective max passes: dry-run forces single pass since no geometry changes
-    effective_max_passes = 1 if args.dry_run else args.max_passes
+    preview = args.dry_run
+    effective_max_passes = 1 if preview else args.max_passes
+    audit: MaskCreepageAudit | None = getattr(args, "creepage", None)
+    original = pcb_path.read_text() if audit else ""
+    if audit:
+        audit.compare(original, original, "input")
+    if audit and preview:
+        # Grade actual geometry in the private output even for a preview.
+        args = argparse.Namespace(**vars(args))
+        args.dry_run = False
 
     # Human-readable side reports (--verify) go to stderr under --format json
     # so stdout carries only the JSON document (issue #5938).
@@ -804,9 +874,10 @@ def _execute_repair(
                                 non_targeted_count=non_targeted_count,
                             )
                         ],
-                        args.dry_run,
+                        preview,
                         args.max_displacement,
                         args.max_passes,
+                        creepage=audit,
                     )
                 if non_targeted_count > 0:
                     # No repairable violations, but non-targeted violations exist
@@ -828,7 +899,7 @@ def _execute_repair(
         if not args.quiet and args.format == "text" and pass_num == 1:
             # Engine-label the detection total so it cannot be read as a
             # contradiction next to the pure-Python --verify counts.
-            print(f"Found {total_targeted} repairable violation(s) ({args.engine} engine):")
+            print(f"Found {total_targeted} targeted violation(s) ({args.engine} engine):")
             if clearance_violations:
                 print(f"  Clearance: {len(clearance_violations)}")
             if drill_violations:
@@ -874,6 +945,8 @@ def _execute_repair(
             pass_number=pass_num,
             local_reroute=args.local_reroute,
             design_rules=drill_design_rules,
+            manufacturer=args.mfr,
+            layers=args.layers,
         )
 
         mask_result = MaskRepairResult()
@@ -1010,6 +1083,12 @@ def _execute_repair(
     recheck: Recheck | None = None
     if not args.dry_run and pass_results:
         board_after = output_path if output_path.exists() else pcb_path
+        if audit:
+            last_edit = next((p for p in reversed(pass_results) if p.repaired), None)
+            if output_path.exists() and last_edit and not last_edit.mask_result.repaired:
+                _refill_mixed_candidate(board_after, pcb_path)
+            if audit.compare(original, board_after.read_text(), "final"):
+                raise CreepageVerificationError("Final board worsens creepage")
         recheck = _final_recheck(board_after, pcb_path, args)
 
     # Output results
@@ -1017,10 +1096,11 @@ def _execute_repair(
         _print_results(
             pass_results,
             args.format,
-            args.dry_run,
+            preview,
             args.max_displacement,
             args.max_passes,
             recheck=recheck,
+            creepage=audit,
         )
 
     # --verify: kct check's rule set on the (potentially modified) output and
@@ -1202,6 +1282,8 @@ def _run_single_pass(
     pass_number: int = 1,
     local_reroute: bool = False,
     design_rules: DesignRules | None = None,
+    manufacturer: str = "jlcpcb",
+    layers: int | None = None,
     copper_violations: list | None = None,
 ) -> tuple[RepairResult, DrillRepairResult, CopperGapResult]:
     """Execute a single repair pass (clearance + drill + copper gap).
@@ -1269,7 +1351,12 @@ def _run_single_pass(
             ):
                 load_path = output_path
 
-            copper_repairer = CopperGapRepairer(load_path)
+            from kicad_tools.schema.pcb import PCB
+
+            _, policy = _board_gap_policy(PCB.load(load_path), manufacturer, layers)
+            copper_repairer = CopperGapRepairer(
+                load_path, project_pcb_path=pcb_path, fab_gap_policy=policy
+            )
             copper_result = copper_repairer.repair_gaps(
                 copper_violations,
                 max_displacement=max_displacement,
@@ -1511,14 +1598,31 @@ def _mask_native_pad_groups(board: Path) -> list[frozenset[str]]:
     return [frozenset(group) for group in json.loads(result.stdout)]
 
 
-def _mask_native_state(board: Path) -> tuple[Counter, int]:
+@dataclass
+class _MaskNativeState:
+    errors: Counter = field(default_factory=Counter)
+    opens: int = 0
+    clearance_gaps: dict[tuple, list[float]] = field(default_factory=dict)
+
+    def worsened_clearance(self, before: _MaskNativeState) -> tuple[float, float] | None:
+        for key, gaps in self.clearance_gaps.items():
+            previous = before.clearance_gaps.get(key, [])
+            # A pair can have several witnesses. Compare the worst remaining
+            # gaps in order, allowing a repair to remove or improve a witness.
+            for old, new in zip(sorted(previous), sorted(gaps), strict=False):
+                if new < old - 1e-6:
+                    return old, new
+        return None
+
+
+def _mask_native_state(board: Path) -> _MaskNativeState:
     """Read the native errors and opens on the copper actually stored on disk."""
     from kicad_tools.drc.geometric import run_geometric_drc
 
     report = run_geometric_drc(board, refill_zones=False, all_track_errors=True)
     if not report.ran:
         raise RuntimeError(f"could not check saved copper: {report.note}")
-    failures: Counter = Counter()
+    state = _MaskNativeState(opens=report.unconnected_count)
     for v in report.error_violations:
         items: tuple[str, ...] | tuple[tuple[float, float, str], ...]
         if v.type_str == "invalid_outline" and v.items == ["PCB"]:
@@ -1527,8 +1631,16 @@ def _mask_native_state(board: Path) -> tuple[Counter, int]:
             items = tuple((loc.x_mm, loc.y_mm, loc.layer) for loc in v.locations)
         else:
             items = tuple(sorted(v.item_uuids if any(v.item_uuids) else v.items))
-        failures[v.type_str, v.rule, items] += 1
-    return failures, report.unconnected_count
+        key = (v.type_str, v.rule, items)
+        state.errors[key] += 1
+        if (
+            v.type_str in {"clearance", "hole_clearance", "copper_edge_clearance"}
+            and v.actual_value_mm is not None
+        ):
+            state.clearance_gaps.setdefault((*key, v.required_value_mm), []).append(
+                v.actual_value_mm
+            )
+    return state
 
 
 def _run_mask_pass(
@@ -1559,7 +1671,7 @@ def _run_mask_pass(
     if not args.dry_run and output_path.exists() and (pass_number > 1 or earlier_saved):
         load_path = output_path
     try:
-        repairer = MaskCopperRepairer(load_path, project_pcb_path=pcb_path)
+        repairer = MaskCopperRepairer(load_path, project_pcb_path=pcb_path, will_refill=True)
         request = default_request_for_manufacturer(args.mfr)
         result = repairer.repair(
             mask_violations,
@@ -1594,9 +1706,11 @@ def _run_mask_pass(
                 isinstance(action, MaskNudgeAction) or action.action == "pull_in"
                 for action in result.actions
             )
-            has_bends = any(action.bends for action in result.actions)
+            bend_nets = {action.net_name for action in result.actions if action.bends}
+            # Refill can split existing copper even when a move added no segment.
+            contact_nets = edited_nets | before.pour_nets() if has_zones else bend_nets
             before_native = (
-                _mask_native_state(candidate) if has_zones or check_copper or has_bends else None
+                _mask_native_state(candidate) if has_zones or check_copper or bend_nets else None
             )
             # On a partially connected board one new contact can hide a split,
             # even on the same net. Keep KiCad's actual pad groups for that case.
@@ -1607,6 +1721,27 @@ def _run_mask_pass(
             )
             proposed = len(result.actions)
             repairer.save(candidate)
+            from kicad_tools.cli.runner import run_refill_zones
+
+            audit = getattr(args, "creepage", None)
+
+            def refill_candidate() -> None:
+                refill = run_refill_zones(candidate, require_save=True)
+                if not refill.success:
+                    message = f"could not persist repaired zone fills: {refill.stderr}"
+                    if audit:
+                        raise CreepageVerificationError(message)
+                    raise RuntimeError(message)
+
+            def lost_contacts() -> set[str]:
+                if not contact_nets:
+                    return set()
+                return MaskCopperRepairer(candidate).disconnected_copper_nets(before, contact_nets)
+
+            # Refill zone pours before grading so moved tracks and via antipads
+            # are checked against the copper that will actually be published (#9939).
+            if has_zones:
+                refill_candidate()
             _verify_mask_actions(
                 result,
                 report,
@@ -1614,28 +1749,33 @@ def _run_mask_pass(
                 pcb_path,
                 candidate,
                 pad_islands,
-                lost_contacts=repairer.disconnected_bends(before, result.actions),
+                creepage_before=load_path if audit else None,
+                pass_number=pass_number,
+                lost_contacts=lost_contacts(),
             )
-            if has_bends and result.repaired < proposed:
-                lost = MaskCopperRepairer(candidate).disconnected_bends(before, result.actions)
+            if result.actions and result.repaired < proposed:
+                if has_zones:
+                    refill_candidate()
+                lost = lost_contacts()
                 if lost:
                     raise _MaskPadConnectionLost(
                         f"saved repair disconnected copper on {', '.join(sorted(lost))}"
                     )
-            if result.actions and has_zones:
-                from kicad_tools.cli.runner import run_refill_zones
-
-                refill = run_refill_zones(candidate, require_save=True)
-                if not refill.success:
-                    raise RuntimeError(f"could not persist repaired zone fills: {refill.stderr}")
             if result.actions and before_native is not None:
-                errors, opens = _mask_native_state(candidate)
-                new_errors = (errors - before_native[0]).total()
+                saved_native = _mask_native_state(candidate)
+                new_errors = (saved_native.errors - before_native.errors).total()
                 check_opens = has_zones or not args.no_connectivity_check
-                if new_errors or (check_opens and opens > before_native[1]):
+                if new_errors or (check_opens and saved_native.opens > before_native.opens):
                     raise RuntimeError(
                         "saved mask repair introduced native errors or opens "
-                        f"({new_errors} new errors, native opens {before_native[1]} to {opens})"
+                        f"({new_errors} new errors, native opens {before_native.opens} to {saved_native.opens})"
+                    )
+                worsened = saved_native.worsened_clearance(before_native)
+                if worsened is not None:
+                    old_gap, new_gap = worsened
+                    raise RuntimeError(
+                        f"saved mask repair reduced native clearance from {old_gap:.4f} "
+                        f"to {new_gap:.4f} mm under the same rule"
                     )
                 if native_groups:
                     membership = {
@@ -1697,8 +1837,10 @@ def _run_mask_pass(
                         f"saved repair introduced off-angle tracks {', '.join(sorted(skewed))}"
                     )
                 atomic_write_text(output_path, candidate.read_text())
-            elif output_path != load_path and not output_path.exists():
+            elif not audit and output_path != load_path and not output_path.exists():
                 atomic_write_text(output_path, load_path.read_text())
+    except CreepageVerificationError:
+        raise
     except Exception as e:
         print(f"Error during mask-to-copper repair: {e}", file=sys.stderr)
         reason = "recheck_unavailable"
@@ -1730,6 +1872,7 @@ _VERIFY_DISPOSITIONS = frozenset(
         "finding_not_cleared",
         "new_mask_finding",
         "mask_margin_not_met",
+        "creepage_worse",
         "new_drc_error",
         "would_bend_trace",
     }
@@ -1737,7 +1880,7 @@ _VERIFY_DISPOSITIONS = frozenset(
 
 
 class _ElbowGapCheck:
-    """Compare accepted outside elbows with the saved board's native mask measurements."""
+    """Check proposed conductor gaps against the saved board's native mask measurements."""
 
     def __init__(self, result: MaskRepairResult) -> None:
         self.required = {
@@ -1769,6 +1912,8 @@ def _verify_mask_actions(
     pad_islands: dict[str, list[frozenset]],
     *,
     lost_contacts: set[str] | None = None,
+    creepage_before: Path | None = None,
+    pass_number: int = 1,
 ) -> None:
     """Undo a grouped move if its saved geometry fails the mask, clearance or pad checks."""
     gaps = _ElbowGapCheck(result)
@@ -1805,6 +1950,20 @@ def _verify_mask_actions(
 
     disconnected = _split_mask_nets(pad_islands, candidate) if pad_islands else set()
     disconnected.update(lost_contacts or ())
+    # A refill can split another net's pour. No action on that net can be
+    # individually undone, so discard the private candidate as a whole.
+    unattributed = disconnected - {act.net_name for act in result.actions}
+    if unattributed:
+        raise _MaskPadConnectionLost(
+            f"repair disconnected copper on {', '.join(sorted(unattributed))}"
+        )
+    worse_nets = (
+        args.creepage.compare(
+            creepage_before.read_text(), candidate.read_text(), f"pass {pass_number}"
+        )
+        if creepage_before is not None
+        else set()
+    )
     keep = []
     revert = []
     for act in result.actions:
@@ -1820,6 +1979,8 @@ def _verify_mask_actions(
             revert.append((act, "mask_margin_not_met"))
         elif act.uuid in regressed:
             revert.append((act, "new_drc_error"))
+        elif act.net_name in worse_nets:
+            revert.append((act, "creepage_worse"))
         else:
             keep.append(act)
     if revert:
@@ -2138,6 +2299,20 @@ def _get_drc_report(
     return _run_python_drc(pcb_path, manufacturer=manufacturer, layers=layers)
 
 
+def _board_gap_policy(pcb, manufacturer, layers):
+    from kicad_tools.cli.check_cmd import _resolve_fab_gap_policy, stackup_copper_oz
+
+    outer, inner = stackup_copper_oz(pcb)
+    return outer, _resolve_fab_gap_policy(
+        manufacturer,
+        layers,
+        outer,
+        inner,
+        outer if outer is not None else 1.0,
+        len(pcb.copper_layers),
+    )
+
+
 def _run_python_drc(
     pcb_path: Path,
     manufacturer: str = "jlcpcb",
@@ -2206,24 +2381,10 @@ def _run_python_drc(
                     )
             rule_set.checker.mask_copper_request = request
         if copper_gap:
-            from kicad_tools.cli.check_cmd import _resolve_fab_gap_policy, stackup_copper_oz
-
-            outer, inner = stackup_copper_oz(pcb)
-            # The same tier-1/2 resolution ``kct check`` applies: an undeclared
-            # stackup follows the 1 oz entry (fix-drc has no --copper flag).
-            preset_oz = outer if outer is not None else 1.0
-            # And the same fab-view flags its DRCChecker(...) call passes:
-            # without ``fab_view`` the gap pass returns before scanning.
+            outer, policy = _board_gap_policy(pcb, rule_set.manufacturer, layers)
             rule_set.checker.fab_view = rule_set.manufacturer == "jlcpcb"
             rule_set.checker.fab_view_copper_oz = outer
-            rule_set.checker.fab_view_gap_policy = _resolve_fab_gap_policy(
-                rule_set.manufacturer,
-                layers,
-                outer,
-                inner,
-                preset_oz,
-                len(pcb.copper_layers),
-            )
+            rule_set.checker.fab_view_gap_policy = policy
         results = run_check_rule_set(rule_set)
         if elbow_gaps and elbow_gaps.required:
             # Use the physical observations before waiver and severity filtering.
@@ -2252,14 +2413,19 @@ def _print_results(
     max_displacement: float,
     max_passes: int = 1,
     recheck: Recheck | None = None,
+    creepage: MaskCreepageAudit | None = None,
 ) -> None:
     """Print combined repair results."""
     if output_format == "json":
-        _print_json(pass_results, dry_run, max_displacement, max_passes, recheck=recheck)
+        _print_json(
+            pass_results, dry_run, max_displacement, max_passes, recheck=recheck, creepage=creepage
+        )
     elif output_format == "summary":
         _print_summary(pass_results, dry_run, recheck=recheck)
     else:
         _print_text(pass_results, dry_run, max_displacement, recheck=recheck)
+    if creepage and output_format != "json":
+        creepage.print_findings()
 
 
 def _violation_line(violation: DRCViolation) -> str:
@@ -2306,6 +2472,7 @@ def _print_json(
     max_displacement: float,
     max_passes: int = 1,
     recheck: Recheck | None = None,
+    creepage: MaskCreepageAudit | None = None,
 ) -> None:
     """Print results as JSON."""
     # Aggregate totals from the last pass for backward-compatible top-level keys
@@ -2478,6 +2645,7 @@ def _print_json(
             "snapped_to_pad": copper_result.snapped_to_pad,
             "snapped_to_track": copper_result.snapped_to_track,
             "opened": copper_result.opened,
+            "rewritten_shelves": copper_result.rewritten_shelves,
             "actions": [
                 {
                     "action": a.action,
@@ -2488,6 +2656,7 @@ def _print_json(
                     "displacement_mm": round(a.displacement_mm, 4),
                     "detail": a.detail,
                     "reverted": (bool(rolled_back) or (a.uuid in reverted_uuids)),
+                    **({"shelf": a.shelf.to_dict()} if a.shelf is not None else {}),
                 }
                 for a in copper_result.actions
             ],
@@ -2537,6 +2706,8 @@ def _print_json(
             recheck, pass_results[0].violations_before if pass_results else 0
         )
 
+    if creepage:
+        data["creepage"] = creepage.report()
     print(json.dumps(data, indent=2))
 
 
@@ -2913,6 +3084,12 @@ def _print_text(
     remaining = first_violations - total_repaired_all
     if dry_run:
         print("Dry run: predictions only -- the board was not modified or re-checked.")
+        print(f"Targeted findings without a proposed repair: {remaining}")
+        if non_targeted:
+            print(f"Findings outside the repair targets: {non_targeted}")
+        if clearance_result.skipped_exceeds_max + drill_result.skipped_exceeds_max > 0:
+            print(f"    Try increasing --max-displacement (currently {max_displacement}mm)")
+        return
 
     if remaining <= 0 and non_targeted == 0:
         print("All violations repaired!")

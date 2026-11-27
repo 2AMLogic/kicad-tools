@@ -173,3 +173,105 @@ def test_merged_opening_with_a_different_net_owner_is_not_exempt():
     merged = [m for m in result.measurements if m.opening_kind == "merged_region"]
     assert merged
     assert all(m.disposition != "within_own_footprint" for m in merged)
+
+
+def _separate_aperture(**kwargs):
+    geometry = _geometry(owner_net="", **kwargs)
+    aperture = geometry.objects[OWNER]
+    del aperture["layers_geometry"]["F.Cu"]
+    aperture["layers"] = ["F.Mask", "F.Paste"]
+    aperture["pad_ref"] = None
+    return geometry
+
+
+def test_separate_technical_pad_preserves_aperture_identity_and_names_land():
+    m, severity = _measure(_separate_aperture())
+    assert (m.opening_uuids, m.owner_ref, m.same_net) == ((OWNER,), "U1/1", True)
+    assert m.disposition == "within_own_footprint" and severity == "info"
+
+
+def test_separate_aperture_requires_a_numbered_local_land_and_full_containment():
+    for geometry in (
+        _separate_aperture(owner_parent=""),
+        _separate_aperture(conductor_parent="another-footprint"),
+        _separate_aperture(conductor=box(0, 0, 1.99, 3)),
+        _separate_aperture(net=""),
+        _separate_aperture(conductor_kind="zone"),
+    ):
+        m, severity = _measure(geometry)
+        assert m.same_net is None and severity == "error"
+
+    geometry = _separate_aperture()
+    geometry.objects[OTHER]["pad_ref"] = None
+    assert _measure(geometry)[1] == "error"
+
+    geometry = _separate_aperture()
+    geometry.objects[OWNER]["pad_ref"] = "U1/3"
+    assert _measure(geometry)[1] == "error"
+
+
+def test_technical_pad_with_opposite_side_copper_stays_unattributed():
+    geometry = _separate_aperture()
+    geometry.objects[OWNER]["layers_geometry"]["B.Cu"] = CIRCLE
+    assert _measure(geometry)[1] == "error"
+
+
+def test_authored_inner_copper_prevents_assignment_even_without_native_polygon():
+    geometry = _separate_aperture()
+    geometry.objects[OWNER]["layers"] = ["F.Mask", "In1.Cu"]
+    m, severity = _measure(geometry)
+    assert (m.owner_ref, m.owner_net, m.same_net) == (None, None, None)
+    assert severity == "error"
+
+
+def test_foreign_pad_clearance_names_both_nets_and_keeps_error():
+    geometry = _separate_aperture()
+    geometry.objects["foreign-pad"] = dict(
+        geometry.objects[OTHER],
+        net="SENSE",
+        pad_ref="U2/1",
+        parent_uuid="fp-2",
+        layers_geometry={"F.Cu": box(2.07, 1, 2.5, 2)},
+    )
+    result = assess_attributed_geometry(geometry, POLICY, ())
+    m = next(m for m in result.measurements if m.conductor_uuid == "foreign-pad")
+    assert (m.opening_uuids, m.owner_ref, m.owner_net, m.same_net) == (
+        (OWNER,),
+        "U1/1",
+        "GND",
+        False,
+    )
+    assert (m.relation, m.disposition) == ("disjoint", "violation")
+    finding = next(v for v in assessment_results(result).violations if "foreign-pad" in v.items)
+    assert (finding.nets, finding.severity) == (("GND", "SENSE"), "error")
+
+
+def test_second_land_under_only_part_of_aperture_prevents_assignment():
+    geometry = _separate_aperture()
+    third = "00000000-0000-0000-0000-000000000003"
+    geometry.objects[third] = dict(
+        geometry.objects[OTHER], pad_ref="U1/3", layers_geometry={"F.Cu": box(1.7, 1.4, 2.5, 1.6)}
+    )
+    assert _measure(geometry)[1] == "error"
+
+
+def test_separate_aperture_keeps_foreign_copper_and_checks_track_entry():
+    geometry = _separate_aperture()
+    inside = LineString([(1.4, 1.5), (1.6, 1.5)]).buffer(0.05)
+    trace = {
+        "kind": "segment",
+        "net": "GND",
+        "layers_geometry": {"F.Cu": inside},
+        "margin_mm": {},
+        "endpoints_mm": [(1.4, 1.5), (1.6, 1.5)],
+        "width_mm": 0.1,
+    }
+    geometry.objects["own-track"] = trace
+    geometry.objects["foreign-track"] = dict(trace, net="OTHER")
+    geometry.objects["foreign-pad"] = dict(
+        geometry.objects[OTHER], parent_uuid="another-footprint", layers_geometry={"F.Cu": inside}
+    )
+    results = assess_attributed_geometry(geometry, POLICY, ())
+    found = {m.conductor_uuid: m for m in results.measurements}
+    assert found["own-track"].disposition == "within_own_pad"
+    assert found["foreign-track"].disposition == found["foreign-pad"].disposition == "violation"

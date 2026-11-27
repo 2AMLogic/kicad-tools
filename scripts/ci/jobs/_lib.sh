@@ -16,6 +16,9 @@
 #               it to SKIP, CI never sees it because kicad-cli/npm are always
 #               present in the CI images)
 #   die_skip    print a notice and exit $SKIP_RC
+#   check_fresh_routed_drc <pcb> [additional sidecar...]
+#               check a generated fixture and its own project, rules and
+#               class maps against the zero-error JLCPCB release gate.
 #   check_drc_over_committed_path <fresh> <committed>
 #               stage a fresh routed PCB over its committed repo path (the
 #               DRC gates key allowlist/mfr overrides off that path), run
@@ -41,6 +44,19 @@ SKIP_RC=75
 die_skip() {
   echo "$*" >&2
   exit "$SKIP_RC"
+}
+
+check_fresh_routed_drc() {
+  local pcb=$1 file
+  shift
+  local stem=${pcb%.kicad_pcb}
+  for file in "$pcb" "$stem.kicad_pro" "$stem.kicad_dru" "$(dirname "$pcb")/net_class_map.json" "$@"; do
+    if [ ! -s "$file" ]; then
+      echo "Missing or empty generated DRC input: $file" >&2
+      return 1
+    fi
+  done
+  uv run python scripts/ci/check_routed_drc_internal.py "$pcb" --mfr jlcpcb --allow 0
 }
 
 # Idempotent restore of a staged-over committed path (file or directory).

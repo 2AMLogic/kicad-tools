@@ -42,6 +42,7 @@ class BoardItemLocks:
 
     def __init__(self, board: SExp):
         members_by_group: dict[str, list[str]] = {}
+        self._group_members: set[str] = set()
         locked: list[str] = []
         generated: list[str] = []
         # Group definitions belong to the board or a footprint. Nested groups
@@ -55,6 +56,7 @@ class BoardItemLocks:
                     for members in group.find_children("members")
                     for member in members.get_atoms()
                 ]
+                self._group_members.update(ids)
                 group_id = _item_id(group)
                 if group_id:
                     members_by_group[group_id] = ids
@@ -72,6 +74,25 @@ class BoardItemLocks:
             bool(self._locked_members) and _item_id(item) in self._locked_members
         )
 
+    def is_group_member(self, item: SExp) -> bool:
+        """Whether replacing the item's ID would leave a dangling member reference."""
+        return _item_id(item) in self._group_members
+
     def is_generator_owned(self, item: SExp) -> bool:
         """A generator owns every track in its groups, even when it is unlocked."""
         return bool(self._generated_members) and _item_id(item) in self._generated_members
+
+
+def locked_copper_nets(board: SExp, net_names: dict[int, str]) -> set[str]:
+    """Nets with a directly or group-locked routed track, arc, or via."""
+    locks = BoardItemLocks(board)
+    protected = set()
+    for item in board.children:
+        if item.name in {"segment", "arc", "via"} and locks.is_locked(item):
+            net = item.find_child("net")
+            if net is not None:
+                value = net.get_first_atom()
+                name = net_names.get(value, net.get_string(1)) if isinstance(value, int) else value
+                if isinstance(name, str) and name:
+                    protected.add(name)
+    return protected

@@ -44,6 +44,7 @@ from kicad_tools._shapely import has_shapely, require_shapely
 from kicad_tools.creepage.standards import (
     DEFAULT_DIMENSION_X_MM,
     DEFAULT_INSULATION,
+    StandardLookupError,
     dimension_x_mm,
 )
 
@@ -52,6 +53,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
 
+
+# Banner attached to every selected-pair diagnostic (#10342), in both formats.
+SELECTED_PAIR_NOTICE = (
+    "LIMITED DIAGNOSTIC: only the explicitly requested net pairs were measured. "
+    "This is NOT a complete creepage census and is not release evidence; run "
+    "`kct creepage` without --pair (or kct audit / kct readiness) for the full board."
+)
 
 # Sentinel used as the "net B" name for HV-vs-board-edge pairs.
 BOARD_EDGE_LABEL = "<board edge>"
@@ -181,7 +189,25 @@ def voltage_map_from_dict(data: Any) -> tuple[dict[str, VoltageInterval], float]
 _PAIR_BOUNDS_KEY = "_pair_bounds"
 
 
-def pair_bounds_from_dict(data: Any) -> dict[frozenset[str], tuple[float, str]]:
+def board_net_key(pcb: PCB) -> Callable[[str], str]:
+    """Resolve exact board names first, then unique leading-slash aliases."""
+    names = {net.name for net in pcb.nets.values() if net.number and net.name}
+    aliases: dict[str, list[str]] = {}
+    for name in names:
+        aliases.setdefault(_norm_net_key(name), []).append(name)
+
+    def resolve(name: str) -> str:
+        if name in names:
+            return name
+        candidates = aliases.get(_norm_net_key(name), [])
+        return candidates[0] if len(candidates) == 1 else name
+
+    return resolve
+
+
+def pair_bounds_from_dict(
+    data: Any, *, net_key: Callable[[str], str] = _norm_net_key
+) -> dict[frozenset[str], tuple[float, str]]:
     """Parse the reserved ``_pair_bounds`` list of a voltage map (#8043).
 
     Each entry is ``{"nets": [a, b], "max_dv": volts, "why": "reason"}`` and
@@ -191,7 +217,7 @@ def pair_bounds_from_dict(data: Any) -> dict[frozenset[str], tuple[float, str]]:
     pair's ΔV, never raise it.  Transitive pairs are the author's to declare.
 
     Returns ``{frozenset({norm_a, norm_b}): (max_dv, why)}`` keyed by the
-    :func:`_norm_net_key`-normalised, unordered pair.  A map without the key
+    ``net_key``-normalised, unordered pair.  A map without the key
     yields ``{}``.
 
     Raises:
@@ -219,7 +245,7 @@ def pair_bounds_from_dict(data: Any) -> dict[frozenset[str], tuple[float, str]]:
             or not all(isinstance(n, str) and n for n in nets)
         ):
             raise ValueError(f"{where}.nets must be a list of exactly two net names")
-        a, b = _norm_net_key(nets[0]), _norm_net_key(nets[1])
+        a, b = net_key(nets[0]), net_key(nets[1])
         if a == b:
             raise ValueError(f"{where}.nets must name two distinct nets, got {nets[0]!r} twice")
         max_dv = _coerce_voltage(f"{where}.max_dv", entry.get("max_dv"))
@@ -238,9 +264,11 @@ def pair_bounds_from_dict(data: Any) -> dict[frozenset[str], tuple[float, str]]:
 def pair_bounds_unmapped_nets(
     bounds: Mapping[frozenset[str], tuple[float, str]],
     voltage_nets: Iterable[str],
+    *,
+    net_key: Callable[[str], str] = _norm_net_key,
 ) -> list[str]:
     """Return sorted net names in *bounds* absent from the voltage map (typo guard)."""
-    mapped = {_norm_net_key(n) for n in voltage_nets}
+    mapped = {net_key(n) for n in voltage_nets}
     return sorted({n for pair in bounds for n in pair} - mapped)
 
 
@@ -564,6 +592,207 @@ def mains_suspect_nets(pcb: PCB) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Scoped per-pad-pair exceptions (Issue #10317)
+# ---------------------------------------------------------------------------
+
+#: Top-level key of the ``--exceptions`` sidecar: an ``"exceptions"`` list.
+EXCEPTIONS_KEY = "exceptions"
+
+#: The two metrics a scoped exception can waive (#10317).
+_EXCEPTION_METRICS = ("creepage", "clearance")
+
+
+class CreepageExceptionError(ValueError):
+    """A scoped exception failed validation against the board (#10317).
+
+    Raised by :func:`compute_creepage_census` when an exception's selector
+    (footprint reference, pad numbers, nets) does not resolve unambiguously --
+    an invalid or ambiguous selector can never waive a finding, so it fails
+    the run loudly instead.
+    """
+
+
+@dataclass(frozen=True)
+class CreepageException:
+    """One reviewed per-pad-pair creepage/clearance exception (#10317).
+
+    The operator's reviewed component-bound waiver: a single footprint, one
+    unordered pair of its pad numbers, one metric, and the reason a reviewer
+    accepted the shortfall.  ``pads`` is stored sorted, so ``[1, 2]`` and
+    ``[2, 1]`` are the same exception.  Structural validation (fields present
+    and well-formed) happens in :func:`creepage_exceptions_from_dict`; board
+    validation (the selector resolves, the two pads sit on two different
+    nets) happens in the census via :exc:`CreepageExceptionError`.
+    """
+
+    footprint: str
+    pads: tuple[str, str]
+    metric: str
+    reason: str
+
+
+def creepage_exceptions_from_dict(data: Any) -> list[CreepageException]:
+    """Parse the ``--exceptions`` sidecar of ``kct creepage`` (#10317).
+
+    ``data`` is the decoded JSON object of the exception file:
+
+    .. code-block:: json
+
+        {"exceptions": [{"footprint": "R1", "pads": [1, 2],
+                         "metric": "creepage", "reason": "..."}]}
+
+    Each entry needs exactly the four keys ``footprint`` (a non-empty
+    reference), ``pads`` (a two-element list of pad numbers -- integers are
+    canonicalised to the pad's string number, so ``1`` and ``"1"`` match the
+    same pad; order is irrelevant), ``metric`` (``"creepage"`` or
+    ``"clearance"``) and ``reason`` (non-blank).  ``_``-prefixed top-level
+    keys (e.g. ``_comment``) are ignored, matching the voltage-map sidecar
+    convention; any other top-level key is rejected so a typo cannot silently
+    drop the whole file.
+
+    Returns one :class:`CreepageException` per entry.
+
+    Raises:
+        TypeError: if ``data`` is not a dict.
+        ValueError: on a malformed entry, a duplicate
+            ``(footprint, pads, metric)`` declaration, or an empty list.
+    """
+    if not isinstance(data, dict):
+        raise TypeError(f"creepage-exceptions file must be an object, got {type(data).__name__}")
+    for key in data:
+        if key != EXCEPTIONS_KEY and not (isinstance(key, str) and key.startswith("_")):
+            raise ValueError(
+                f"creepage-exceptions file: unrecognized top-level key {key!r} "
+                f"(expected {EXCEPTIONS_KEY!r})"
+            )
+    raw = data.get(EXCEPTIONS_KEY)
+    if raw is None:
+        raise ValueError(f"creepage-exceptions file must carry an {EXCEPTIONS_KEY!r} list")
+    if not isinstance(raw, list):
+        raise ValueError(f"{EXCEPTIONS_KEY!r} must be a list, got {type(raw).__name__}")
+    if not raw:
+        raise ValueError(f"{EXCEPTIONS_KEY!r} must declare at least one exception")
+    out: list[CreepageException] = []
+    seen: set[tuple[str, tuple[str, str], str]] = set()
+    for i, entry in enumerate(raw):
+        where = f"{EXCEPTIONS_KEY}[{i}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{where} must be an object, got {type(entry).__name__}")
+        if set(entry) != {"footprint", "pads", "metric", "reason"}:
+            raise ValueError(f"{where} must have exactly the keys footprint, pads, metric, reason")
+        footprint = entry["footprint"]
+        if not isinstance(footprint, str) or not footprint.strip():
+            raise ValueError(f"{where}.footprint must be a non-empty reference string")
+        pads = entry["pads"]
+        if not isinstance(pads, list) or len(pads) != 2:
+            raise ValueError(f"{where}.pads must be a list of exactly two pad numbers")
+        norm_pads: list[str] = []
+        for pad in pads:
+            if isinstance(pad, bool) or not isinstance(pad, (int, str)):
+                raise ValueError(f"{where}.pads entries must be pad numbers (string or integer)")
+            norm_pads.append(str(pad).strip())
+        if not all(norm_pads):
+            raise ValueError(f"{where}.pads entries must be non-empty pad numbers")
+        if norm_pads[0] == norm_pads[1]:
+            raise ValueError(f"{where}.pads must name two distinct pads")
+        metric = entry["metric"]
+        if metric not in _EXCEPTION_METRICS:
+            raise ValueError(
+                f"{where}.metric must be one of {', '.join(_EXCEPTION_METRICS)}, got {metric!r}"
+            )
+        reason = entry["reason"]
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(
+                f"{where}.reason is required (the reason makes the exception reviewable)"
+            )
+        footprint = footprint.strip()
+        pad_key = (
+            (norm_pads[0], norm_pads[1])
+            if norm_pads[0] <= norm_pads[1]
+            else (norm_pads[1], norm_pads[0])
+        )
+        dedup = (footprint, pad_key, metric)
+        if dedup in seen:
+            raise ValueError(
+                f"{where} duplicates the exception for {footprint} pads "
+                f"{pad_key[0]}/{pad_key[1]} ({metric})"
+            )
+        seen.add(dedup)
+        out.append(
+            CreepageException(
+                footprint=footprint, pads=pad_key, metric=metric, reason=reason.strip()
+            )
+        )
+    return out
+
+
+def _scoped_exception_maps(
+    pcb: PCB, exceptions: Sequence[CreepageException]
+) -> tuple[dict[tuple[str, tuple[str, str]], dict[str, str]], set[frozenset[int]]]:
+    """Validate scoped exceptions against the board and build the lookup maps (#10317).
+
+    Returns ``(waivers, affected)``:
+
+    * ``waivers`` -- ``{(footprint_ref, sorted pad pair): {metric: reason}}``,
+      the per-row waiver lookup of the decomposed pad-pair rows.
+    * ``affected`` -- the set of net-number pairs (unordered) carrying at
+      least one exception; those pairs are decomposed instead of collapsed.
+
+    Raises:
+        CreepageExceptionError: when a selector is invalid or ambiguous -- the
+            footprint is absent or duplicated, a pad number does not exist,
+            one pad number spans several nets, a pad carries no net, or both
+            pads sit on the same net.  An invalid or ambiguous selector can
+            never waive a finding.
+    """
+    by_ref: dict[str, list[Any]] = {}
+    for fp in pcb.footprints:
+        if fp.reference:
+            by_ref.setdefault(fp.reference, []).append(fp)
+    waivers: dict[tuple[str, tuple[str, str]], dict[str, str]] = {}
+    affected: set[frozenset[int]] = set()
+    for ex in exceptions:
+        pads_desc = f"{ex.footprint} pads {ex.pads[0]}/{ex.pads[1]}"
+        matches = by_ref.get(ex.footprint, [])
+        if not matches:
+            raise CreepageExceptionError(
+                f"{pads_desc}: footprint {ex.footprint!r} is not on the board"
+            )
+        if len(matches) > 1:
+            raise CreepageExceptionError(
+                f"{pads_desc}: footprint reference {ex.footprint!r} is ambiguous "
+                f"({len(matches)} footprints carry it)"
+            )
+        nets: list[int] = []
+        for pad_num in ex.pads:
+            pads = [p for p in matches[0].pads if p.number == pad_num]
+            if not pads:
+                raise CreepageExceptionError(
+                    f"{pads_desc}: footprint {ex.footprint!r} has no pad {pad_num!r}"
+                )
+            pad_nets = {p.net_number for p in pads}
+            if len(pad_nets) > 1:
+                raise CreepageExceptionError(
+                    f"{pads_desc}: pad {pad_num!r} of {ex.footprint!r} is ambiguous "
+                    "(pads with this number sit on several nets)"
+                )
+            nets.append(pad_nets.pop())
+        net_a, net_b = nets
+        if net_a == 0 or net_b == 0:
+            raise CreepageExceptionError(
+                f"{pads_desc}: both pads must carry assigned nets (found an unconnected pad)"
+            )
+        if net_a == net_b:
+            raise CreepageExceptionError(
+                f"{pads_desc}: pads {ex.pads[0]} and {ex.pads[1]} of {ex.footprint!r} "
+                "are on the same net; an exception needs two different nets"
+            )
+        waivers.setdefault((ex.footprint, ex.pads), {})[ex.metric] = ex.reason
+        affected.add(frozenset((net_a, net_b)))
+    return waivers, affected
+
+
+# ---------------------------------------------------------------------------
 # Result model
 # ---------------------------------------------------------------------------
 
@@ -643,6 +872,18 @@ class CreepagePair:
     # ``via_floating``, ``witness`` still marks the closest approach, not the
     # through-bore path.
     via_bore: str | None = None
+    # Scoped per-pad-pair exception identity (#10317).  ``footprint_ref`` /
+    # ``pad_numbers`` name the reviewed component and its pad pair; they are
+    # set only on the per-pad-pair ``same_footprint`` rows an exception file
+    # triggers (every other row keeps the collapsed binding-row identity and
+    # serialises unchanged).  ``exception_waivers`` maps each waived metric
+    # (``"creepage"`` / ``"clearance"``) to the operator's reviewed reason.
+    footprint_ref: str | None = None
+    pad_numbers: tuple[str, str] | None = None
+    exception_waivers: dict[str, str] = field(default_factory=dict)
+    # Governing voltage difference (V) of a selected-pair diagnostic row (#10342).
+    # ``None`` on every full-census row, so the census schema is unchanged.
+    governing_voltage_v: float | None = None
 
     @property
     def residual_passed(self) -> bool:
@@ -718,6 +959,35 @@ class CreepagePair:
         """``True`` only when BOTH creepage and clearance clear their bounds."""
         return self.creepage_passed and self.clearance_passed
 
+    @property
+    def waived_creepage(self) -> bool:
+        """``True`` when a scoped exception covers this row's creepage verdict (#10317)."""
+        return "creepage" in self.exception_waivers
+
+    @property
+    def waived_clearance(self) -> bool:
+        """``True`` when a scoped exception covers this row's clearance verdict (#10317)."""
+        return "clearance" in self.exception_waivers
+
+    @property
+    def gate_row_passed(self) -> bool:
+        """Waiver-aware row verdict the exit-code gate keys on (#4403 broad, #10317 scoped).
+
+        A row waived outright (``waived`` -- the broad same-footprint waiver or
+        a passing attach-zone residual) passes.  Otherwise a metric named by a
+        scoped exception passes even when its raw verdict fails, so waiving a
+        reviewed creepage shortfall leaves a failing air-clearance check on
+        the same pads active, and vice versa.  Without any waiver this is
+        exactly :attr:`passed`; the raw verdict never changes, so the
+        waiver-blind :attr:`CreepageReport.passed` (what ``kct audit`` keys
+        on) is unaffected.
+        """
+        if self.waived:
+            return True
+        creep_ok = self.creepage_passed or self.waived_creepage
+        clear_ok = self.clearance_passed or self.waived_clearance
+        return creep_ok and clear_ok
+
     def to_dict(self) -> dict[str, Any]:
         # Phase-1 backward compatibility: with no derived requirement (manual
         # --min only) the JSON schema matched phase 1 byte-for-byte.  The
@@ -738,10 +1008,23 @@ class CreepagePair:
         }
         if self.waived:
             base["waived"] = True
+        # Scoped per-pad-pair exception identity (#10317): emitted only on the
+        # rows an exception file decomposed, so every other row serialises
+        # byte-identically to the pre-#10317 schema.  ``gate_pass`` gives the
+        # row's waiver-aware verdict (a partially waived pair shows its
+        # remaining failure as ``false``).
+        if self.footprint_ref is not None and self.pad_numbers is not None:
+            base["footprint"] = self.footprint_ref
+            base["pads"] = [self.pad_numbers[0], self.pad_numbers[1]]
+        if self.exception_waivers:
+            base["exception"] = dict(self.exception_waivers)
+            base["gate_pass"] = self.gate_row_passed
         if self.via_floating is not None:
             base["via_floating"] = self.via_floating
         if self.via_bore is not None:
             base["via_bore"] = self.via_bore
+        if self.governing_voltage_v is not None:
+            base["governing_voltage_v"] = round(self.governing_voltage_v, 4)
         if self.witness is not None:
             base["witness"] = {
                 "point_a_mm": [round(v, 4) for v in self.witness["point_a_mm"]],
@@ -826,6 +1109,22 @@ class CreepageReport:
     board_thickness_mm: float | None = None
     board_thickness_source: str | None = None
     board_thickness_declarations_mm: dict[str, float] | None = None
+    # Scoped per-pad-pair exceptions that matched no census row (#10317): their
+    # net pair was not audited, so they waived nothing.  ``None`` (and omitted
+    # from JSON) when no exception file was supplied.
+    exceptions_unused: list[str] | None = None
+    # Selected-pair diagnostic (#10342).  ``None`` for a full census; otherwise
+    # the de-duplicated requested ``(net_a, net_b)`` names, in request order.
+    # Such a report measures ONLY these pairs and is never release evidence.
+    selected_pairs: list[tuple[str, str]] | None = None
+    # Requested pairs that could not be measured: ``{"nets": [a, b], "reason":
+    # <token>, "detail": <text>}``.  Any entry fails the verdicts below.
+    unresolved_pairs: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def is_selected_diagnostic(self) -> bool:
+        """``True`` for a limited selected-pair diagnostic (#10342)."""
+        return self.selected_pairs is not None
 
     @property
     def passed(self) -> bool:
@@ -838,19 +1137,26 @@ class CreepageReport:
         (#4403 safety guard).  Only :attr:`gate_passed` honors waivers, and only
         the standalone ``kct creepage`` CLI opts into it.
         """
-        return all(p.passed for p in self.pairs)
+        return not self.unresolved_pairs and all(p.passed for p in self.pairs)
 
     @property
     def gate_passed(self) -> bool:
-        """``True`` when every NON-waived pair clears its bounds (#4403).
+        """``True`` when every non-waived pair/metric clears its bounds (#4403, #10317).
 
-        Identical to :attr:`passed` unless the operator waived same-footprint
-        pairs via ``kct creepage --waive-same-footprint``.  Waived pairs remain
-        listed (annotated WAIVED) but drop out of this exit-code gate so the
-        actionable board-level defects are no longer buried under
-        component-rating residuals.
+        Identical to :attr:`passed` unless the operator waived pairs via
+        ``kct creepage --waive-same-footprint`` / ``--waive-attach-zone``
+        (whole rows) or a ``--exceptions`` file (per pad pair AND per metric:
+        a creepage exception leaves a failing air-clearance check on the same
+        pads active).  Waived rows remain listed (annotated WAIVED) but drop
+        out of this exit-code gate so the actionable board-level defects are
+        no longer buried under component-rating residuals.
         """
-        return all(p.passed for p in self.pairs if not p.waived)
+        return not self.unresolved_pairs and all(p.gate_row_passed for p in self.pairs)
+
+    @property
+    def gate_waived_count(self) -> int:
+        """Number of raw failures accepted by a whole-row or scoped waiver."""
+        return sum(not pair.passed and pair.gate_row_passed for pair in self.pairs)
 
     @property
     def has_hv_nets(self) -> bool:
@@ -866,6 +1172,19 @@ class CreepageReport:
         return self.voltage_map is not None
 
     def to_dict(self) -> dict[str, Any]:
+        d = self._census_dict()
+        if self.selected_pairs is not None:
+            d["diagnostic"] = {
+                "mode": "selected_pairs",
+                "limited": True,
+                "complete_census": False,
+                "notice": SELECTED_PAIR_NOTICE,
+                "requested_pairs": [list(p) for p in self.selected_pairs],
+            }
+            d["unresolved_pairs"] = list(self.unresolved_pairs)
+        return d
+
+    def _census_dict(self) -> dict[str, Any]:
         # Verdict semantics (#4687): ``passed`` is the RAW, waiver-blind result
         # (what ``kct audit`` keys off); ``gate_passed`` is the waiver-aware
         # verdict the standalone CLI exit code follows.  Both are always
@@ -878,6 +1197,13 @@ class CreepageReport:
             thickness["board_thickness_source"] = self.board_thickness_source
         if self.board_thickness_declarations_mm is not None:
             thickness["board_thickness_declarations_mm"] = self.board_thickness_declarations_mm
+        # waived_count is the historical count of whole-row waiver flags.
+        # For scoped exceptions also report how many raw failures actually cleared.
+        exc: dict[str, Any] = {}
+        if self.exceptions_unused is not None:
+            exc["gate_waived_count"] = self.gate_waived_count
+            if self.exceptions_unused:
+                exc["exceptions_unused"] = list(self.exceptions_unused)
         # Phase-1 backward compatibility: no standard -> phase-1 schema (plus
         # the additive verdict keys above, #4687).
         if self.standard is None:
@@ -894,6 +1220,7 @@ class CreepageReport:
                 "netless_items": self.netless_items,
                 "netless_treatment": "floating",
                 **thickness,
+                **exc,
             }
         d: dict[str, Any] = {
             "board": self.board,
@@ -927,6 +1254,7 @@ class CreepageReport:
             "netless_items": self.netless_items,
             "netless_treatment": "floating",
             **thickness,
+            **exc,
         }
         # Per-net voltage mode (#4371): the requirement varies per pair, so the
         # report-level scalar requirement / working voltage are null (already set
@@ -1358,6 +1686,9 @@ class _FootprintPadIndex:
         self._pads: dict[str, dict[tuple[str, int], list[Any]]] = {}
         # Same shape as ``_pads`` but holding the ``REF.pin`` labels (#8301).
         self._labels: dict[str, dict[tuple[str, int], list[str]]] = {}
+        # Same shape as ``_pads`` but holding the bare pad numbers, parallel
+        # to the polygon lists (#10317) -- the per-pad-pair rows key on them.
+        self._numbers: dict[str, dict[tuple[str, int], list[str]]] = {}
 
         copper_layer_names = [layer.name for layer in pcb.copper_layers]
         for fp in pcb.footprints:
@@ -1379,6 +1710,9 @@ class _FootprintPadIndex:
                         self._labels.setdefault(layer_name, {}).setdefault(
                             (ref, pad.net_number), []
                         ).append(_pad_label(fp, pad))
+                        self._numbers.setdefault(layer_name, {}).setdefault(
+                            (ref, pad.net_number), []
+                        ).append(str(pad.number))
 
     def relationship(self, layer_name: str, net_a: int, net_b: int, clearance_mm: float) -> str:
         """Classify a binding pair as ``"same_footprint"`` or ``"board"``."""
@@ -1423,6 +1757,18 @@ class _FootprintPadIndex:
         """Pad labels of footprint ``ref`` on ``net`` (#8301)."""
         return list((self._labels.get(layer_name) or {}).get((ref, net), []))
 
+    def footprint_pad_polys(self, layer_name: str, ref: str, net: int) -> list[tuple[str, Any]]:
+        """``(pad_number, polygon)`` per pad of footprint ``ref`` on ``net`` (#10317).
+
+        The per-pad-pair decomposition keys rows on the pad numbers the
+        operator's exception names, so the index keeps them alongside the
+        polygons the per-net union erases.
+        """
+        nums = (self._numbers.get(layer_name) or {}).get((ref, net), [])
+        polys = (self._pads.get(layer_name) or {}).get((ref, net), [])
+        # Appended in lockstep by __init__, so the lists always match.
+        return list(zip(nums, polys, strict=True))
+
     def shared_footprint_refs(self, layer_name: str, net_a: int, net_b: int) -> list[str]:
         """Sorted refdes of footprints with usable pads on both nets (#8301)."""
         by_net = self._by_net.get(layer_name) or {}
@@ -1455,7 +1801,16 @@ class _FootprintPadIndex:
         return out
 
 
-def _board_residual_after_same_footprint(
+class _BoardApproach(NamedTuple):
+    clearance: float
+    creepage: float
+    layer: str
+    geoms: tuple[Any, Any]
+    witness: dict[str, Any] | None
+    via_floating: str | None
+
+
+def _board_approaches_after_same_footprint(
     layer_unions: dict[str, dict[int, Any]],
     fp_index: _FootprintPadIndex,
     net_a: int,
@@ -1463,35 +1818,13 @@ def _board_residual_after_same_footprint(
     obstacles: list[Any],
     layer_items: dict[str, Labelled] | None = None,
     layer_islands: dict[str, list[tuple[Any, str]]] | None = None,
-) -> tuple[float, float, str, tuple[Any, Any], dict[str, Any] | None] | None:
-    """Smallest board-level ``(clearance, creepage, layer, (geom_a, geom_b), witness)`` for a ``same_footprint`` pair (#8232).
+) -> Iterable[_BoardApproach]:
+    """Yield board approaches with intra-package pad gaps excluded (#8232).
 
-    The pair's global minimum is a component-internal gap, which hides any
-    larger board-level approach on the same net pair.  To expose it, the pads
-    of the sharing footprint(s) are masked out of one net at a time (net A's
-    sharing pads vs. all of net B, then all of net A vs. net B's sharing
-    pads) and the pair is re-measured on every layer; the minimum creepage over
-    both variants and all layers is returned.  This drops the intra-footprint
-    pad pair but keeps e.g. a resistor pad -> neighbouring diode pad approach.
-    Cross-footprint approaches between two sharing footprints (A_i vs B_j,
-    i != j) are measured explicitly, and a layer where no footprint shares the
-    pair contributes its plain measurement.
-    A trace stub leaving a masked pad can still register a near-gap, which errs
-    conservative (more FAIL, never a false pass).  ``None`` when no residual
-    copper exists.  The witness (#8301) is the closest-point pair of the
-    winning masked variant -- never the waived intra-footprint minimum.
-
-    What the minimum measures (#8332): with pad B masked, the nearest remaining
-    net-B copper is the trace where it leaves the (masked) pad B -- not the
-    pad-to-trace straight gap and not a cross-footprint variant.  Because that
-    exit point moves when a trace is re-routed (e.g. a jog straightened onto the
-    pad centreline), the row can move while the router's pairwise kernel, whose
-    witness lies in the #4506 attach zone, is unchanged.  The returned geometry
-    pair is the binding variant, so the caller can apply the same attach-zone
-    classification (:func:`_witness_in_attach_zone`) a primary ``board`` minimum
-    gets and the census and router agree.
+    Mask the sharing pads on each net in turn, preserving approaches to
+    traces leaving the pads. Measure cross-footprint pairs explicitly since
+    neither masked variant includes both pads of such a pair.
     """
-    best: tuple[float, float, str, tuple[Any, Any], dict[str, Any] | None] | None = None
     for layer_name, unions in layer_unions.items():
         geom_a = unions.get(net_a)
         geom_b = unions.get(net_b)
@@ -1540,12 +1873,12 @@ def _board_residual_after_same_footprint(
             clearance, creepage = surface_path_length(ga, gb, obstacles, _bridged=True)
             # Floating-island hop (#8548): a net-0 conductor on the board path
             # must not let a same_footprint waiver hide a shorter bridged path.
-            clearance, creepage, _via = _island_hop(
+            clearance, creepage, via = _island_hop(
                 ga, gb, (layer_islands or {}).get(layer_name, ()), obstacles, clearance, creepage
             )
-            if best is None or creepage < best[1]:
-                best = (clearance, creepage, layer_name, (ga, gb), _witness(ga, gb, ia, ib))
-    return best
+            yield _BoardApproach(
+                clearance, creepage, layer_name, (ga, gb), _witness(ga, gb, ia, ib), via
+            )
 
 
 def _attach_zone_residual(
@@ -2294,8 +2627,23 @@ def compute_creepage_census(
     insulation: str = DEFAULT_INSULATION,
     attach_zones: Sequence[Any] | None = None,
     pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
+    exceptions: Sequence[CreepageException] | None = None,
+    selected_pairs: Sequence[tuple[str, str]] | None = None,
 ) -> CreepageReport:
     """Build the full HV creepage/clearance census for a board.
+
+    Selected-pair diagnostic (#10342)
+    ---------------------------------
+    When ``selected_pairs`` (``[(net_a, net_b), ...]`` board net names) is
+    supplied the census is replaced by a *limited diagnostic*: ``hv_nets`` is
+    ignored, only the requested unordered pairs are measured (neither endpoint
+    needs to be HV; a reversed duplicate is measured once), board-edge rows are
+    skipped, and a passing cross-face-only path is reported.  The geometry, the
+    distance / voltage-interval / pair-bound / rule / witness calculations are
+    the census's own.  A pair that cannot be measured (unknown net, net with no
+    copper, no path, or -- with a ``voltage_map`` -- an endpoint absent from the
+    map) is listed in :attr:`CreepageReport.unresolved_pairs`, which fails both
+    verdicts.  In this mode an unmapped selected net is NEVER defaulted to 0 V.
 
     ``order_thickness_mm`` is the nominal finished thickness selected for purchase.
     Without an explicit value, ``project_board`` identifies the original PCB whose
@@ -2344,6 +2692,24 @@ def compute_creepage_census(
     residual passes, so a waived witness never masks a failing one elsewhere on
     the same pair (softstart#88).  ``None`` (default) leaves the census unchanged.
 
+    Scoped per-pad-pair exceptions (#10317)
+    --------------------------------------
+    When ``exceptions`` (the parsed ``--exceptions`` sidecar,
+    :func:`creepage_exceptions_from_dict`) is supplied, every net pair whose
+    two nets carry at least one exception is **decomposed** instead of
+    collapsed to its binding minimum: each pad pair of every footprint sharing
+    both nets gets a ``same_footprint`` measurement (carrying the reviewed
+    footprint / pad-pair identity and the metric-scoped waiver), and the
+    board-level geometry is measured separately. Distinct limiting paths for
+    air clearance and surface creepage retain their own rows and witnesses.  The waiver applies per metric (a creepage exception leaves a
+    failing air-clearance check on the same pads active), and a second package
+    on the same nets, a different pad pair on the same footprint and a board
+    track each keep failing independently.  Selectors that do not resolve
+    unambiguously on the board raise :exc:`CreepageExceptionError`; entries
+    whose nets are not an audited pair waive nothing and are listed in
+    :attr:`CreepageReport.exceptions_unused`.  Without ``exceptions`` the
+    census is byte-identical to the pre-#10317 behavior.
+
     In single-voltage mode (no ``voltage_map``) the derived requirement is
     identical for every pair (it depends only on the standard + voltage + PD +
     material group, not on geometry), so it is stamped onto each row -- byte-for
@@ -2382,6 +2748,26 @@ def compute_creepage_census(
         insulation=insulation if standard is not None else None,
     )
 
+    # Scoped per-pad-pair exceptions (#10317): validate the selectors against
+    # the board before any geometry runs (an invalid or ambiguous selector
+    # fails the census loudly and can never waive a finding), then map them
+    # onto net pairs.  A pair carrying any exception is decomposed below
+    # instead of collapsing to its binding minimum.
+    exception_waivers: dict[tuple[str, tuple[str, str]], dict[str, str]] = {}
+    affected_pairs: set[frozenset[int]] = set()
+    applied_keys: set[tuple[str, tuple[str, str]]] = set()
+    if exceptions:
+        exception_waivers, affected_pairs = _scoped_exception_maps(pcb, exceptions)
+
+    def finish_report() -> CreepageReport:
+        if exceptions:
+            report.exceptions_unused = [
+                f"{ex.footprint} pads {ex.pads[0]}-{ex.pads[1]} ({ex.metric})"
+                for ex in exceptions
+                if (ex.footprint, ex.pads) not in applied_keys
+            ]
+        return report
+
     # Merged per-pair provenance (creepage + clearance citations together).
     pair_provenance: dict[str, Any] = {}
     if creepage_provenance:
@@ -2405,15 +2791,21 @@ def compute_creepage_census(
         )
 
     # --- Per-pair |dV| requirement machinery (map mode only, #4371) ---------
+    selected_mode = selected_pairs is not None
+    net_key = board_net_key(pcb) if selected_mode else _norm_net_key
     norm_vmap: dict[str, VoltageInterval] = {}
     if map_mode:
         assert voltage_map is not None
-        norm_vmap = {_norm_net_key(k): _as_interval(v) for k, v in voltage_map.items()}
+        for name, voltage in voltage_map.items():
+            voltage_key = net_key(name)
+            if selected_mode and name != voltage_key and voltage_key in voltage_map:
+                continue  # The map supplies the exact board spelling as well.
+            norm_vmap[voltage_key] = _as_interval(voltage)
     _req_cache: dict[float, tuple[float, float, dict[str, Any], dict[str, Any]]] = {}
 
     def _voltage(name: str) -> VoltageInterval:
         # Unmapped nets default to the degenerate 0 V interval.
-        return norm_vmap.get(_norm_net_key(name), VoltageInterval(0.0, 0.0))
+        return norm_vmap.get(net_key(name), VoltageInterval(0.0, 0.0))
 
     def _required_for_dv(
         dv: float,
@@ -2470,7 +2862,7 @@ def compute_creepage_census(
             dv, a_ep, b_ep, va, vb = dv_lo_hi, "lo", "hi", a.lo, b.hi
         bound_prov: dict[str, Any] | None = None
         if pair_bounds and not edge:
-            bound = pair_bounds.get(frozenset((_norm_net_key(name_a), _norm_net_key(name_b or ""))))
+            bound = pair_bounds.get(frozenset((net_key(name_a), net_key(name_b or ""))))
             if bound is not None and bound[0] < dv:
                 bound_prov = {
                     "unbounded_delta_v_v": round(dv, 4),
@@ -2500,8 +2892,38 @@ def compute_creepage_census(
             prov["clearance"] = clprov
         return req_creep, req_clear, prov
 
+    sel_partners: dict[int, list[int]] = {}
+    sel_keys: list[tuple[int, int]] = []
+    if selected_pairs is not None:
+        hv_nets, sel_partners, sel_keys = _resolve_selected_pairs(
+            pcb,
+            selected_pairs,
+            set(norm_vmap) if map_mode else None,
+            report,
+            net_key,
+            _pair_requirement if map_mode else None,
+        )
+        report.hv_nets = []
+
     if not hv_nets:
-        return report
+        return finish_report()
+
+    def _partners(hv_num: int, unions: dict[int, Any]) -> list[tuple[int, Any]]:
+        """Conductors to pair ``hv_num`` against within one layer/face's ``unions``."""
+        if selected_mode:
+            return [(o, unions[o]) for o in sel_partners.get(hv_num, ()) if o in unions]
+        out: list[tuple[int, Any]] = []
+        for other_num, geom in unions.items():
+            if other_num == 0 or other_num == hv_num:
+                continue
+            if other_num in hv_nets:
+                if not map_mode:
+                    continue
+                # Canonical dedup: evaluate each HV-HV pair once.
+                if other_num < hv_num:
+                    continue
+            out.append((other_num, geom))
+        return out
 
     number_to_name = {net.number: net.name for net in pcb.nets.values()}
     # Bridge sub-dimension-X cutouts once per census (#7058).
@@ -2570,15 +2992,7 @@ def compute_creepage_census(
             hv_geom = unions.get(hv_num)
             if hv_geom is None:
                 continue
-            for other_num, other_geom in unions.items():
-                if other_num == 0 or other_num == hv_num:
-                    continue
-                if other_num in hv_nets:
-                    if not map_mode:
-                        continue
-                    # Canonical dedup: evaluate each HV-HV pair once.
-                    if other_num < hv_num:
-                        continue
+            for other_num, other_geom in _partners(hv_num, unions):
                 clearance, creepage = surface_path_length(
                     hv_geom, other_geom, obstacles, _bridged=True
                 )
@@ -2613,10 +3027,13 @@ def compute_creepage_census(
     #
     # key -> (creepage, rim label, face of net A, face of net B, geom A, geom B)
     cross_best: dict[tuple[int, int], tuple[float, str, str, str, Any, Any]] = {}
+    scoped_cross: dict[tuple[int, int], list[tuple[float, str, str, str, Any, Any]]] = {}
     thickness_mm, thickness_source, declarations = _board_thickness_mm(pcb, order_thickness_mm)
     order_lookup = project_board if order_thickness_mm is None else None
     _copper = pcb.copper_layers
     _faces = [_copper[0].name, _copper[-1].name] if _copper else []
+    thickness_errors: dict[tuple[int, int], str] = {}
+    project_error: str | None = None
     thickness_evaluated = False
     if len(_faces) == 2 and _faces[0] != _faces[1]:
         rims = _cross_face_rims(pcb, obstacles)
@@ -2636,26 +3053,34 @@ def compute_creepage_census(
                 ga = unions_by_face[fa].get(hv_num)
                 if ga is None:
                     continue
-                for other_num, gb in unions_by_face[fb].items():
-                    if other_num == 0 or other_num == hv_num:
-                        continue
-                    if other_num in hv_nets:
-                        if not map_mode or other_num < hv_num:
-                            continue
+                for other_num, gb in _partners(hv_num, unions_by_face[fb]):
                     # Read the project once, on the first actual opposing-face pair.
                     if order_lookup is not None:
-                        order_thickness_mm = _project_order_thickness(order_lookup)
+                        try:
+                            order_thickness_mm = _project_order_thickness(order_lookup)
+                        except BoardThicknessError as exc:
+                            if not selected_mode:
+                                raise
+                            project_error = str(exc)
                         order_lookup = None
                         if order_thickness_mm is not None:
                             thickness_mm, thickness_source = order_thickness_mm, "project.kct"
                     key = (hv_num, other_num)
+                    if project_error is not None:
+                        thickness_errors[key] = project_error
+                        continue
                     prev = best.get(key)
-                    if prev is not None:
+                    scoped = frozenset(key) in affected_pairs
+                    if scoped:
+                        # A waived package gap cannot bound a board path in either direction.
+                        bound = math.inf
+                    elif prev is not None:
                         # Existing (same-face) row: a cross-face path binds
                         # only by being strictly shorter.
                         bound = prev[1] - _PASS_TOLERANCE
-                    elif order_thickness_mm is not None:
-                        # An explicit order also reports the shortest passing cross-face path.
+                    elif order_thickness_mm is not None or selected_mode:
+                        # An explicit order -- or an explicitly requested pair
+                        # (#10342) -- also reports the shortest passing cross-face path.
                         bound = math.inf
                     else:
                         # The pair shares no copper layer.  It enters the
@@ -2674,7 +3099,7 @@ def compute_creepage_census(
                     # candidate for this pair: only a strictly shorter path
                     # replaces it, so the orderings minimise.
                     earlier = cross_best.get(key)
-                    if earlier is not None:
+                    if earlier is not None and not scoped:
                         bound = min(bound, earlier[0])
                     best_cand = math.inf
                     best_label: str | None = None
@@ -2694,7 +3119,7 @@ def compute_creepage_census(
                         if thickness_mm is None:
                             if surface_legs >= limit:
                                 continue
-                            raise BoardThicknessError(
+                            error = BoardThicknessError(
                                 f"Board header thickness {declarations['general']:g} mm and stackup "
                                 f"thickness {declarations['stackup']:g} mm disagree. Supply "
                                 "the nominal finished thickness selected for purchase with "
@@ -2702,12 +3127,26 @@ def compute_creepage_census(
                                 "in the board's project.kct.",
                                 declarations,
                             )
+                            if not selected_mode:
+                                raise error
+                            thickness_errors[key] = str(error)
+                            break
                         thickness_evaluated = True
                         cand = surface_legs + thickness_mm
                         if cand < best_cand:
                             best_cand, best_label = cand, label
                     if best_label is not None and best_cand < bound:
-                        cross_best[key] = (best_cand, best_label, fa, fb, ga, gb)
+                        candidate = (best_cand, best_label, fa, fb, ga, gb)
+                        if scoped:
+                            scoped_cross.setdefault(key, []).append(candidate)
+                        if earlier is None or best_cand < earlier[0]:
+                            cross_best[key] = candidate
+    for (a, b), detail in thickness_errors.items():
+        best.pop((a, b), None)
+        cross_best.pop((a, b), None)
+        report.unresolved_pairs.append(
+            {"nets": [hv_nets[a], number_to_name[b]], "reason": "board_thickness", "detail": detail}
+        )
     if thickness_evaluated:
         report.board_thickness_mm = thickness_mm
         report.board_thickness_source = thickness_source
@@ -2756,9 +3195,115 @@ def compute_creepage_census(
             "residual_witness_mm": r_wit,
         }
 
+    def _scoped_exception_rows(
+        hv_num: int, other_num: int, net_a_name: str, net_b_name: str
+    ) -> None:
+        """Emit per-pad-pair + board rows for an exception-affected net pair (#10317).
+
+        The normal census collapses a net pair to its binding minimum, which
+        erases *which* package -- and which pad pair of it -- produced the
+        measurement: a waiver scoped to one reviewed pad pair could then never
+        leave a second package on the same nets failing.
+
+        Keep both metric minima within each waiver scope. When different
+        measurements bind, emit both rows so their witnesses stay attributable.
+        """
+        groups: dict[tuple[str, str | None, tuple[str, str] | None], list[CreepagePair]] = {}
+
+        def collect(**fields: Any) -> None:
+            if map_mode:
+                req_creep, req_clear, prov = _pair_requirement(net_a_name, net_b_name)
+                fields.update(req_creep=req_creep, req_clear=req_clear, prov=prov)
+            row = _make_pair(net_a=net_a_name, net_b=net_b_name, kind="conductor", **fields)
+            key = (row.relationship, row.footprint_ref, row.pad_numbers)
+            groups.setdefault(key, []).append(row)
+
+        for layer in layer_unions:
+            islands = layer_islands.get(layer, ())
+            for ref in fp_index.shared_footprint_refs(layer, hv_num, other_num):
+                for num_a, ga in fp_index.footprint_pad_polys(layer, ref, hv_num):
+                    for num_b, gb in fp_index.footprint_pad_polys(layer, ref, other_num):
+                        pads = (num_a, num_b) if num_a <= num_b else (num_b, num_a)
+                        key = (ref, pads)
+                        applied_keys.add(key)
+                        witness = _witness(
+                            ga, gb, [(ga, f"{ref}.{num_a}")], [(gb, f"{ref}.{num_b}")]
+                        )
+                        clr, crp = surface_path_length(ga, gb, obstacles, _bridged=True)
+                        collect(
+                            layer=layer,
+                            clearance_mm=clr,
+                            creepage_mm=crp,
+                            relationship="same_footprint",
+                            witness=witness,
+                            footprint_ref=ref,
+                            pad_numbers=pads,
+                            exception_waivers=exception_waivers.get(key, {}),
+                        )
+                        if islands:
+                            # Even a hop longer than the waived direct path can fail.
+                            clr, crp, via = _island_hop(
+                                ga, gb, islands, obstacles, math.inf, math.inf
+                            )
+                            if via is not None:
+                                collect(
+                                    layer=layer,
+                                    clearance_mm=clr,
+                                    creepage_mm=crp,
+                                    relationship="board",
+                                    witness=witness,
+                                    via_floating=via,
+                                )
+
+        for approach in _board_approaches_after_same_footprint(
+            layer_unions, fp_index, hv_num, other_num, obstacles, layer_items, layer_islands
+        ):
+            az = (
+                None
+                if approach.via_floating
+                else _attach_zone_row(
+                    approach.layer, *approach.geoms, hv_num, other_num, net_a_name, net_b_name
+                )
+            )
+            collect(
+                layer=approach.layer,
+                clearance_mm=approach.clearance,
+                creepage_mm=approach.creepage,
+                relationship="attach_zone" if az else "board",
+                witness=approach.witness,
+                via_floating=approach.via_floating,
+                **(az or {}),
+            )
+
+        for creep, label, fa, fb, ga, gb in scoped_cross.get((hv_num, other_num), []):
+            collect(
+                layer=f"{fa}/{fb}",
+                clearance_mm=_opposite_face_clearance(ga, gb),
+                creepage_mm=creep,
+                relationship="board",
+                via_bore=label,
+                witness=_witness(
+                    ga, gb, layer_items[fa].get(hv_num, []), layer_items[fb].get(other_num, [])
+                ),
+            )
+
+        for candidates in groups.values():
+            surface = min(candidates, key=lambda r: (r.creepage_mm, r.clearance_mm))
+            air = min(candidates, key=lambda r: (r.clearance_mm, r.creepage_mm))
+            report.pairs.append(surface)
+            if air is not surface:
+                report.pairs.append(air)
+
     for (hv_num, other_num), (clearance, creepage, layer_name) in best.items():
         net_a_name = hv_nets[hv_num]
         net_b_name = number_to_name.get(other_num, f"net{other_num}")
+        # Scoped per-pad-pair exceptions (#10317): the pair is decomposed into
+        # per-pad-pair + board rows instead of the collapsed binding row, so a
+        # waiver scoped to one reviewed pad pair leaves every other candidate
+        # failing independently.
+        if affected_pairs and frozenset((hv_num, other_num)) in affected_pairs:
+            _scoped_exception_rows(hv_num, other_num, net_a_name, net_b_name)
+            continue
         via_floating = best_via.get((hv_num, other_num))
         # Cross-face bore/edge path (#9704): when it is shorter than the
         # same-face binding path it takes over the creepage (never the layer,
@@ -2795,8 +3340,12 @@ def compute_creepage_census(
             # #8232: the minimum is component-internal; surface the smallest
             # board-level approach on the same pair as its own row so a waiver
             # of the same_footprint row cannot hide it.
-            board_row = _board_residual_after_same_footprint(
-                layer_unions, fp_index, hv_num, other_num, obstacles, layer_items, layer_islands
+            board_row = min(
+                _board_approaches_after_same_footprint(
+                    layer_unions, fp_index, hv_num, other_num, obstacles, layer_items, layer_islands
+                ),
+                key=lambda row: row.creepage,
+                default=None,
             )
             if board_row is not None:
                 # #8332: classify the residual row like a primary board minimum.
@@ -2887,8 +3436,30 @@ def compute_creepage_census(
             )
         )
 
+    if selected_mode:
+        copper_nets = {n for unions in layer_unions.values() for n in unions}
+        for a_num, b_num in sel_keys:
+            if (
+                (a_num, b_num) in thickness_errors
+                or (a_num, b_num) in best
+                or (a_num, b_num) in cross_best
+            ):
+                continue
+            na, nb = hv_nets[a_num], number_to_name.get(b_num, f"net{b_num}")
+            bare = [n for n, num in ((na, a_num), (nb, b_num)) if num not in copper_nets]
+            if bare:
+                reason = "no_copper"
+                detail = f"net(s) {', '.join(bare)} declared but carry no copper on this board"
+            else:
+                reason = "no_measurable_path"
+                detail = (
+                    "no copper layer carries both nets and no cross-face "
+                    "(bore / slot / outline) path joins them"
+                )
+            report.unresolved_pairs.append({"nets": [na, nb], "reason": reason, "detail": detail})
+
     # --- HV-vs-board-edge pairs (copper union across all layers) ---
-    edge_geom = board_edge_geometry(pcb)
+    edge_geom = None if selected_mode else board_edge_geometry(pcb)
     if edge_geom is not None and not edge_geom.is_empty:
         from shapely.ops import unary_union
 
@@ -2929,9 +3500,112 @@ def compute_creepage_census(
                     )
                 )
 
-    # Deterministic ordering: by net A, then edge last, then net B.
-    report.pairs.sort(key=lambda p: (p.net_a, p.kind == "edge", p.net_b))
-    return report
+    if selected_mode:
+        for row in report.pairs:
+            row.governing_voltage_v = (
+                row.provenance.get("voltage", {}).get("delta_v_v") if map_mode else working_voltage
+            )
+
+    # Deterministic ordering: by net A, then edge last, then net B; within a
+    # net pair the collapsed/#8232 rows keep their historical order
+    # (same-footprint before board), and the #10317 per-pad-pair rows sort by
+    # (footprint reference, pad numbers).
+    report.pairs.sort(
+        key=lambda p: (
+            p.net_a,
+            p.kind == "edge",
+            p.net_b,
+            p.relationship != "same_footprint",
+            p.footprint_ref or "",
+            p.pad_numbers or ("", ""),
+        )
+    )
+    return finish_report()
+
+
+def _resolve_selected_pairs(
+    pcb: PCB,
+    selected_pairs: Sequence[tuple[str, str]],
+    mapped_keys: set[str] | None,
+    report: CreepageReport,
+    net_key: Callable[[str], str],
+    requirement: Callable[[str, str], tuple[float, float, dict[str, Any]]] | None,
+) -> tuple[dict[int, str], dict[int, list[int]], list[tuple[int, int]]]:
+    """Resolve requested net-name pairs to board net numbers (#10342).
+
+    Records the de-duplicated request on ``report.selected_pairs`` and every pair
+    that cannot be measured on ``report.unresolved_pairs`` (``unknown_net``,
+    ``identical_nets``, ``no_potential``).  ``mapped_keys`` is the board-resolved
+    voltage-map key set, or ``None`` when no per-net potentials are in play.
+    Returns ``(first_endpoint_nets, partners, ordered (a, b) number pairs)``;
+    each unordered pair appears once, oriented as first requested.
+    """
+    by_name = {net.name: net.number for net in pcb.nets.values() if net.number and net.name}
+    number_to_name = {num: name for name, num in by_name.items()}
+
+    first_nets: dict[int, str] = {}
+    partners: dict[int, list[int]] = {}
+    ordered: list[tuple[int, int]] = []
+    seen: set[frozenset[Any]] = set()
+    report.selected_pairs = []
+    for raw_a, raw_b in selected_pairs:
+        a_num, b_num = by_name.get(net_key(raw_a)), by_name.get(net_key(raw_b))
+        ident = frozenset(
+            (a_num if a_num is not None else ("?", _norm_net_key(raw_a)),)
+            + (b_num if b_num is not None else ("?", _norm_net_key(raw_b)),)
+        )
+        if ident in seen:
+            continue  # reversed or repeated request: measured once
+        seen.add(ident)
+        report.selected_pairs.append((raw_a, raw_b))
+        unknown = [raw for raw, num in ((raw_a, a_num), (raw_b, b_num)) if num is None]
+        if unknown:
+            report.unresolved_pairs.append(
+                {
+                    "nets": [raw_a, raw_b],
+                    "reason": "unknown_net",
+                    "detail": f"net(s) {', '.join(unknown)} not found on the board",
+                }
+            )
+            continue
+        assert a_num is not None and b_num is not None
+        if a_num == b_num:
+            report.unresolved_pairs.append(
+                {
+                    "nets": [raw_a, raw_b],
+                    "reason": "identical_nets",
+                    "detail": "both names resolve to the same net",
+                }
+            )
+            continue
+        if mapped_keys is not None:
+            absent = [
+                number_to_name[n] for n in (a_num, b_num) if number_to_name[n] not in mapped_keys
+            ]
+            if absent:
+                report.unresolved_pairs.append(
+                    {
+                        "nets": [number_to_name[a_num], number_to_name[b_num]],
+                        "reason": "no_potential",
+                        "detail": (
+                            f"net(s) {', '.join(absent)} absent from the voltage map; "
+                            "an unmapped selected net is not assumed to be 0 V"
+                        ),
+                    }
+                )
+                continue
+        if requirement is not None:
+            try:
+                requirement(number_to_name[a_num], number_to_name[b_num])
+            except StandardLookupError as exc:
+                report.unresolved_pairs.append(
+                    {"nets": [raw_a, raw_b], "reason": "standard_lookup", "detail": str(exc)}
+                )
+                continue
+        first_nets[a_num] = number_to_name[a_num]
+        partners.setdefault(a_num, []).append(b_num)
+        ordered.append((a_num, b_num))
+    return first_nets, partners, ordered
 
 
 def apply_census_waivers(report: CreepageReport, *, waive_same_footprint: bool = False) -> None:

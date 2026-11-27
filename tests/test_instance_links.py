@@ -11,9 +11,13 @@ footprint name while leaving the link itself intact.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.export.manufacturing import ManufacturingPackage, ManufacturingResult
+from kicad_tools.sexp import parse_file, parse_string
 from kicad_tools.sync.instance_links import (
     check_instance_links,
     collect_symbol_instances,
@@ -36,6 +40,54 @@ SYMBOL_UUIDS = {
 }
 
 ABSENT_UUID = "dead0000-0000-0000-0000-00000000beef"
+
+
+@pytest.mark.parametrize("foreign_last", [False, True], ids=["foreign-first", "foreign-last"])
+def test_repeated_sheet_links_follow_last_matching_annotation(tmp_path, foreign_last):
+    fixture = Path(__file__).parent / "fixtures" / "sheet_qualified_lvs"
+    root = tmp_path / "repeat_root.kicad_sch"
+    root.write_bytes((fixture / root.name).read_bytes())
+    child = parse_file(fixture / "repeat_child.kicad_sch")
+    native_links = {}
+    for symbol in child.find_children("symbol"):
+        instances = symbol.find_child("instances")
+        original = instances.find_child("project")
+        foreign = deepcopy(original)
+        foreign.set_value(0, "foreign")
+        for path in foreign.find_children("path"):
+            ref_node = path.find_child("reference")
+            ref = ref_node.get_string(0)
+            if not ref.startswith("R"):
+                continue
+            alternate = f"R{int(ref[1:]) + 20}"
+            ref_node.set_value(0, alternate)
+            sheet = path.get_string(0).rsplit("/", 1)[1]
+            symbol_id = symbol.find_child("uuid").get_string(0)
+            native_links[ref] = (alternate if foreign_last else ref, f"/{sheet}/{symbol_id}")
+        if foreign_last:
+            instances.append(foreign)
+        else:
+            instances.children.insert(0, foreign)
+    (tmp_path / "repeat_child.kicad_sch").write_text(child.to_string())
+
+    pcb = parse_file(fixture / "repeat_board.kicad_pcb")
+    for fp in pcb.find_children("footprint"):
+        ref = next(p for p in fp.find_children("property") if p.get_string(0) == "Reference")
+        designator, path = native_links[ref.get_string(1)]
+        ref.set_value(1, designator)
+        fp.append(parse_string(f'(path "{path}")'))
+    board = tmp_path / "repeat_board.kicad_pcb"
+    board.write_text(pcb.to_string())
+    clean = check_instance_links(root, board)
+    assert (clean.checked, clean.linked, clean.findings, clean.skipped_no_symbol) == (4, 4, [], [])
+
+    pcb.find_children("footprint")[0].find_child("path").set_value(0, f"/{ABSENT_UUID}")
+    board.write_text(pcb.to_string())
+    damaged = check_instance_links(root, board)
+    assert (damaged.checked, damaged.linked, damaged.skipped_no_symbol) == (4, 3, [])
+    assert [(finding.reference, finding.category) for finding in damaged.findings] == [
+        (native_links["R1"][0], "stale_path")
+    ]
 
 
 def _root_symbol(
@@ -135,11 +187,11 @@ def _footprint(
 
 
 def _sheet_path(symbol_key: str) -> str:
-    return f"/{ROOT_UUID}/{SHEET_UUID}/{SYMBOL_UUIDS[symbol_key]}"
+    return f"/{SHEET_UUID}/{SYMBOL_UUIDS[symbol_key]}"
 
 
 def _root_path(symbol_key: str) -> str:
-    return f"/{ROOT_UUID}/{SYMBOL_UUIDS[symbol_key]}"
+    return f"/{SYMBOL_UUIDS[symbol_key]}"
 
 
 def _board_text(
@@ -413,7 +465,9 @@ def test_project_zip_step_runs_the_link_check(tmp_path: Path, monkeypatch) -> No
     sch, pcb = _write_project(tmp_path, _board_text(c1_path=None))
     pkg = ManufacturingPackage(pcb_path=pcb, schematic_path=sch)
 
-    def _fake_zip(pcb_path, out_dir, zip_name="kicad_project.zip", schematic_path=None):
+    def _fake_zip(
+        pcb_path, out_dir, zip_name="kicad_project.zip", schematic_path=None, *, project_root=None
+    ):
         out_dir.mkdir(parents=True, exist_ok=True)
         target = out_dir / zip_name
         target.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
@@ -492,3 +546,10 @@ def test_footprint_path_token_parsed_and_preserved(tmp_path: Path) -> None:
     reloaded = PCB.load(out)
     r1b = next(fp for fp in reloaded.footprints if fp.reference == "R1")
     assert r1b.path == _root_path("R1")
+
+
+def test_pcb_path_with_extra_schematic_root_is_stale(tmp_path: Path) -> None:
+    board = _board_text().replace(_root_path("R1"), f"/{ROOT_UUID}{_root_path('R1')}")
+    sch, pcb = _write_project(tmp_path, board)
+    report = check_instance_links(sch, pcb)
+    assert [(f.reference, f.category) for f in report.findings] == [("R1", "stale_path")]

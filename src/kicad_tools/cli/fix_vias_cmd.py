@@ -809,6 +809,7 @@ def _run_relocate_in_pad(
                 nets=nets,
                 dry_run=args.dry_run,
                 search_alternatives=getattr(args, "search_alternatives", False),
+                even_if_supported=args.even_if_supported,
             )
     except (ValueError, OSError) as exc:
         print(f"Error resolving relocation constraints: {exc}", file=sys.stderr)
@@ -943,6 +944,11 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--even-if-supported",
+        action="store_true",
+        help="With --relocate-in-pad, move vias off pads even when the selected profile offers via-in-pad.",
+    )
+    parser.add_argument(
         "--search-alternatives",
         action="store_true",
         help="With --relocate-in-pad, try up to 24 safe cardinal/45-degree alternatives when the preferred escape is blocked (default: disabled).",
@@ -958,6 +964,8 @@ Examples:
     )
 
     args = parser.parse_args(argv)
+    if args.even_if_supported and not args.relocate_in_pad:
+        parser.error("--even-if-supported requires --relocate-in-pad")
 
     # Validate input file
     pcb_path = Path(args.pcb)

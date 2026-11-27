@@ -27,7 +27,14 @@ from .format_options import add_format_flag
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("bundle", help="Tapeout bundle directory (contains manifest.json)")
     parser.add_argument("--board", required=True, help="Board .kicad_pcb the bundle was cut from")
-    parser.add_argument("--schematic", required=True, help="Schematic .kicad_sch (under board dir)")
+    parser.add_argument(
+        "--schematic",
+        required=True,
+        help=(
+            "Source .kicad_sch recorded in the signed readiness receipt for a declared project, "
+            "or under the board directory for a board-local project"
+        ),
+    )
     parser.add_argument("--quantity", type=int, default=1, help="Boards to order (default: 1)")
     parser.add_argument("--output", "-o", required=True, help="New directory for plan and review")
     parser.add_argument(

@@ -186,6 +186,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable BOM enrichment from .kct project spec",
     )
     parser.add_argument(
+        "--project-root",
+        metavar="DIR",
+        help="Root for project-relative export inputs (defaults to the PCB directory)",
+    )
+    parser.add_argument(
         "--spec",
         metavar="PATH",
         default=None,
@@ -317,6 +322,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include through-hole components in CPL (only needed for fabs whose CPL excludes them by default; JLCPCB includes them)",
     )
     parser.add_argument(
+        "--via-land-overlap",
+        action="store_true",
+        help=(
+            "Measure the shipped PCBA archive for plated via drills that overlap the "
+            "solder-mask opening, stencil opening and an SMD land on the same face; adds "
+            "the via_land_overlap preflight result to the JSON output and manifest "
+            "(Issue #10357)"
+        ),
+    )
+    parser.add_argument(
         "--format",
         dest="output_format",
         default="text",
@@ -346,6 +361,7 @@ def build_manufacturing_config(
     auto_lcsc: bool = True,
     no_spec: bool = False,
     spec_path: Path | None = None,
+    project_root: Path | None = None,
     merge_lcsc: bool = True,
     merge_lcsc_from: Path | None = None,
     bom_source: str = "schematic",
@@ -365,6 +381,7 @@ def build_manufacturing_config(
     keep_versions: bool = False,
     keep_build_artifacts: bool = False,
     silk_fix: bool = True,
+    via_land_overlap: bool = False,
 ) -> ManufacturingConfig:
     """Build the ``PreflightConfig`` + ``ManufacturingConfig`` ``kct export`` uses.
 
@@ -417,6 +434,7 @@ def build_manufacturing_config(
         auto_lcsc=auto_lcsc,
         no_spec=no_spec,
         spec_path=spec_path,
+        project_root=project_root,
         merge_lcsc=merge_lcsc,
         merge_lcsc_from=merge_lcsc_from,
         bom_source=bom_source,
@@ -428,6 +446,7 @@ def build_manufacturing_config(
         latest_report_only=not keep_versions,
         keep_build_artifacts=keep_build_artifacts,
         silk_fix=silk_fix,
+        via_land_overlap=via_land_overlap,
     )
 
 
@@ -463,6 +482,14 @@ def run_export(args: argparse.Namespace) -> int:
     else:
         pcb_path = input_path
 
+    root_arg = getattr(args, "project_root", None)
+    project_root = Path(root_arg).resolve() if root_arg else None
+    if project_root is not None and (
+        not project_root.is_dir() or not pcb_path.resolve().is_relative_to(project_root)
+    ):
+        print(f"Error: --project-root must be a directory containing {pcb_path}", file=sys.stderr)
+        return 1
+
     spec_arg = getattr(args, "spec", None)
     spec_path = Path(spec_arg) if spec_arg else None
     if spec_path is not None and not spec_path.is_file():
@@ -494,6 +521,7 @@ def run_export(args: argparse.Namespace) -> int:
         auto_lcsc=args.auto_lcsc and not args.no_auto_lcsc,
         no_spec=getattr(args, "no_spec", False),
         spec_path=spec_path,
+        project_root=project_root,
         merge_lcsc=not getattr(args, "no_merge_lcsc", False),
         merge_lcsc_from=merge_lcsc_from,
         bom_source=getattr(args, "bom_source", "schematic"),
@@ -513,6 +541,7 @@ def run_export(args: argparse.Namespace) -> int:
         keep_versions=getattr(args, "keep_versions", False),
         keep_build_artifacts=getattr(args, "keep_build_artifacts", False),
         silk_fix=not getattr(args, "no_silk_fix", False),
+        via_land_overlap=getattr(args, "via_land_overlap", False),
     )
 
     pkg = ManufacturingPackage(
@@ -528,13 +557,27 @@ def run_export(args: argparse.Namespace) -> int:
     if args.dry_run:
         result = pkg.export(output_dir, dry_run=True)
         if output_format == "json":
-            print(json.dumps({"dry_run": True, "files": [f.name for f in result.all_files]}))
+            print(
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "files": [f.name for f in result.all_files],
+                        "errors": result.errors,
+                    }
+                )
+            )
         else:
             print("Dry run -- the following files would be generated:")
             print(f"  Output directory: {result.output_dir}")
             for f in result.all_files:
                 print(f"  - {f.name}")
-        return 0
+        # A refusal the real run would raise (Issue #10431: an invalid
+        # purchasing row) must not hide behind a dry run's file listing.
+        if result.errors:
+            print(f"\n{len(result.errors)} error(s) during dry run:", file=sys.stderr)
+            for err in result.errors:
+                print(f"  - {err}", file=sys.stderr)
+        return 0 if result.success else 1
 
     # Normal run with progress output
     quiet = getattr(args, "global_quiet", False)
@@ -618,6 +661,14 @@ def run_export(args: argparse.Namespace) -> int:
                 print()
                 for line in enrichment.summary_lines():
                     print(f"  {line}")
+        # Issue #10431: the supplementary purchasing list, and what is still
+        # undecided in it, so an unresolved selection is never only in a file.
+        if result.purchasing_path:
+            print(f"  [ok] Purchasing list: {result.bundle_relpath(result.purchasing_path)}")
+            if result.purchasing_pending:
+                print(f"  {len(result.purchasing_pending)} purchasing selection(s) still pending:")
+                for description in result.purchasing_pending:
+                    print(f"    - {description}")
         if result.report_path:
             print(f"  [ok] Report: {result.report_path.name}")
         if result.project_zip_path:

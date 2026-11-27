@@ -40,21 +40,16 @@ if TYPE_CHECKING:
 
 
 def _hole_geometry(pad: Pad, footprint: Footprint):
-    """Actual round/slotted drill including its offset and absolute pad angle."""
+    """Round/slotted drill at the pad anchor. KiCad offsets move the copper land."""
     from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
     from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
     from .clearance import _transform_pad_position
 
     width = height = pad.drill
-    offset_x = offset_y = 0.0
     node = pad._sexp_node.find("drill") if pad._sexp_node is not None else None
-    if node is not None:
-        if node.get_string(0) == "oval":
-            width, height = node.get_float(1) or 0, node.get_float(2) or 0
-        offset = node.find("offset")
-        if offset is not None:
-            offset_x, offset_y = offset.get_float(0) or 0, offset.get_float(1) or 0
+    if node is not None and node.get_string(0) == "oval":
+        width, height = node.get_float(1) or 0, node.get_float(2) or 0
     if width <= 0 or height <= 0:
         return None
     radius = min(width, height) / 2
@@ -63,7 +58,7 @@ def _hole_geometry(pad: Pad, footprint: Footprint):
         ((-half_line, 0), (half_line, 0)) if width >= height else ((0, -half_line), (0, half_line))
     )
     geom = (LineString(ends) if half_line else Point(0, 0)).buffer(radius, quad_segs=64)
-    geom = rotate(translate(geom, offset_x, offset_y), -pad.rotation, origin=(0, 0))
+    geom = rotate(geom, -pad.rotation, origin=(0, 0))
     return translate(geom, *_transform_pad_position(pad, footprint))
 
 
@@ -158,12 +153,24 @@ def check_pth_hole_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
 
 
 def silk_pad_apertures(
-    footprints: Iterable[Footprint], default_margin: float | None
+    footprints: Iterable[Footprint],
+    default_margin: float | None,
+    *,
+    board_declared: bool = False,
+    board_version: int = 0,
 ) -> dict[str, list[tuple[Any, str]]]:
-    """Pad shapes measured by the clearance rule, in the footprints' coordinate frame."""
+    """Pad shapes measured by the clearance rule, in the footprints' coordinate frame.
+
+    ``default_margin`` is the board-level margin, the last resort of the
+    ``mask_geometry.pad_mask_margin`` precedence (pad, then footprint, then
+    board — Issue #10326). An unknown (``None``) board value behaves as the
+    native default of zero.
+    """
+    from ..mask_geometry import pad_mask_margin
     from .clearance import _pad_polygon
 
     by_side: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
+    board_margin = default_margin if default_margin is not None else 0.0
     for fp in footprints:
         for pad in fp.pads:
             if pad.type not in ("smd", "thru_hole", "connect"):
@@ -171,8 +178,8 @@ def silk_pad_apertures(
             copper = _pad_polygon(pad, fp)
             if copper is None or copper.is_empty:
                 continue
-            margin = (
-                pad.solder_mask_margin if pad.solder_mask_margin is not None else default_margin
+            margin, _source = pad_mask_margin(
+                pad, fp, board_margin, board_declared, board_version=board_version
             )
             for side in ("F", "B"):
                 if "*.Cu" not in pad.layers and f"{side}.Cu" not in pad.layers:
@@ -209,6 +216,7 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
     import shapely
     from shapely import STRtree
 
+    from ..mask_geometry import board_mask_margin
     from .silkscreen import (
         _board_frame_shift,
         _fp_transform,
@@ -229,8 +237,13 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
     strokes.extend(
         (graphic, board_xf, "board", to_board(_graphic_anchor(graphic))) for graphic in pcb.graphics
     )
-    margin = pcb.setup.pad_to_mask_clearance if pcb.setup is not None else 0
-    apertures_by_side = silk_pad_apertures(pcb.footprints, margin)
+    board_margin, board_declared = board_mask_margin(pcb)
+    apertures_by_side = silk_pad_apertures(
+        pcb.footprints,
+        board_margin,
+        board_declared=board_declared,
+        board_version=pcb._file_version(),
+    )
     trees: dict[str, Any] = {
         side: STRtree([geom for geom, _ in entries])
         for side, entries in apertures_by_side.items()

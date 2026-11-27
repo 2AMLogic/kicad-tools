@@ -14,8 +14,286 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-27
+
+- **PR #10508**: Report temporary disk exhaustion in native mask remediation
+- **PR #10456**: chore(boards): refresh datasheets on four maintained schematics
+- **PR #10426**: Recognize native root-relative footprint links in editable project handoffs
+- **Issue #10506** (closed): Report temporary disk exhaustion in native mask remediation
+- **Issue #10425** (closed): Editable project audit expects an extra schematic root UUID in native PCB footprint links
+
+### 2026-11-26
+
+- **PR #10509**: fix: report offline catalog stock provenance in parts alternatives
+- **Issue #10500** (closed): parts alternatives loses offline provenance for catalog stock counts
+- **Issue #10490** (closed): test flake: grid hole-clearance test times out again in the Test job
+- **Issue #10358** (closed): kct creepage --exceptions: docs say an unmatched selector is an error (it warns), and the gate summary double-counts a partially waived row
+- **PR #10462**: fix: count creepage exception rows by their final verdict
+- **Issue #10477** (closed): Reinforcement clearance: a second mask opening on an anchor makes a registered anchor read unverified_registration
+- **PR #10493**: fix: register reinforcement anchors beside a second mask opening
+- **Issue #10484** (closed): Analog review: compare routed divider-arm loading and identify gaps in the adjacent reference plane
+- **PR #10489**: feat: measure routed net coverage over adjacent zone fills
+- **Issue #10450** (closed): Reconcile Board 06 LVDS and LVTTL project widths and re-pin the assembled demo
+- **PR #10463**: fix(board06): declare LVTTL, LVDS and Power widths in source project
+- **Issue #10480** (closed): kct export: expose the declared project root for boards in a kicad subdirectory
+- **PR #10481**: Expose the project root for standalone manufacturing exports
+- **Issue #10431** (closed): Export a supplementary procurement list for accessories and off-board assembly parts
+- **PR #10444**: feat: export a supplementary purchasing list for off-board parts
+
+- **Issue #10419** (closed): kct pcb reinforce --clear writes the board before drop_wires fails on an unreadable sidecar envelope
+- **PR #10432**: fix: refuse reinforce --clear on an unreadable destination sidecar
+- **Issue #10409** (closed): Radial-capacitor hatch warnings return after clipping strokes to a round pad clearance
+- **PR #10410**: fix: recognize round pad cutouts in radial polarity artwork
+- **Issue #10391** (closed): Align JLCPCB silkscreen-over-copper findings on pads and untented vias with the native copper edge
+- **PR #10475**: fix: check JLCPCB silkscreen strokes at the exposed copper edge
+- **Issue #9406** (closed): Converge boards 06/07 DRC re-check into the single-sourced job scripts (latent local-gate --full failure)
+- **PR #10465**: ci: restore strict release DRC on regenerated Boards 06 and 07
+- **Issue #10393** (closed): Route links around non-plated mounting holes when a straight trace would cross the drill
+- **PR #10467**: fix(route-link): keep tracks clear of non-plated mounting holes
+- **Issue #10470** (closed): create-pcb reports the fitted grid pitch as the requested pitch in its auto-shrink warning
+- **PR #10471**: fix: show the original pitch in automatic placement warnings
+
+- **Issue #10458** (closed): Intermittent empty staged-board path in the lint-gate SIGTERM test
+- **PR #10464**: test: publish lint-gate readiness atomically before signaling
+- **Issue #10457** (closed): Coupling test misses the inner-layer widths published in the current-paths cases section
+- **PR #10460**: docs(reference): cover inner-layer widths and unevaluated cases
+- **Issue #10478** (closed): Verify the X2 %TO.N premise on the pinned KiCad image: a track reported plotted under a stale net attribute on 10.0.8
+- **Issue #10421** (closed): Board 01 release regeneration narrows nine Power tracks below its declared minimum trace width
+- **PR #10446**: fix(board01): author the Power net class so release cleanup keeps the 0.5 mm tracks
+- **Issue #10422** (closed): Export preflight: measure reinforcement mask strips against covered and exposed foreign copper in Gerbers
+- **PR #10443**: feat: measure reinforcement runs against the shipped Gerbers in export preflight
+- **Issue #10364** (closed): Identify verified reinforcement wire-end holes when reviewing native KiCad dangling-via warnings
+- **PR #10378**: feat: identify verified wire ends in native dangling-via reports
+- **Issue #10479** (closed): Loom role scripts exit 126: config-resolver.sh passes the 208 KB private defaults as a single jq --argjson argument
+- **Issue #10417** (closed): Pin-1 check misses the visible positive mark on stock radial electrolytics
+- **PR #10418**: fix: recognize visible pin-one marks at the rim of radial capacitors
+- **Issue #10461** (closed): create-pr.sh exits 126 on the dispatch host: private Loom defaults exceed the kernel's per-argument limit
+- **Issue #10442** (closed): Lock the radial positive-lead-mark exemption bounds with regression cases, and cite the issue in changelog.d/10411.fixed.md
+- **PR #10453**: test: pin radial lead-mark exemption bounds, fix fragment citation
+- **Issue #10436** (closed): Expose an exact package filter on live and offline parts search
+- **PR #10438**: feat: filter supplier search results by exact catalogue package
+- **Issue #10317** (closed): creepage: support reviewed per-pad-pair exceptions alongside the global same-footprint waiver
+- **PR #10320**: feat: add scoped per-pad-pair creepage exceptions to kct creepage
+- **Issue #10343** (closed): route-link should use conditional KiCad net-pair clearance rules while searching for a path
+- **PR #10344**: fix: respect project copper spacing in route-link search
+- **Issue #10386** (closed): Readiness evidence silently downgrades parts/stock verification when the producing host has no offline catalog
+- **PR #10414**: chore(board01): restore catalog-backed manufacturing evidence
+- **PR #10452**: fix(drc): slide an unclean swapped pad-edge elbow out along the pad lead
+- **Issue #10396** (closed): Document the current-paths sidecar's `cases` key in docs/reference/cli.md
+- **PR #10434**: docs(reference): document the current-paths sidecar's cases key
+- **Issue #9891** (closed): Board 06: repair the seed-42 recipe to reproduce its strict release DRC result
+- **Issue #10420** (closed): Differential skew check treats declared DC power terminals as a POS/NEG signal pair
+- **PR #10423**: Keep DC power terminal pairs out of differential-skew inference
+- **Issue #10294** (closed): Board 06: clear the J1/B2 USB3_TX2+ mask overlap at its connector exit
+- **PR #10298**: fix(board06): clear the USB3_TX2+ connector exit at J1/B2
+- **Issue #10321** (closed): Wire courtyard DRC treats copper-only legs of a partially wire-reinforced current path as fitted wire
+- **PR #10322**: fix: check fitted wire spans on mixed copper and wire paths
+- **Issue #10405** (closed): Bypass distance depends on footprint pad order for regulators with a repeated pin number
+- **PR #10406**: fix: measure bypass distance across repeated pin lands
+- **Issue #10401** (closed): kct pcb reinforce raises a raw traceback on a sidecar entry that is not an object
+- **PR #10439**: fix: refuse non-object entries in the reinforce wire-list sidecar
+- **Issue #10433** (closed): parts search --in-stock returns a live zero-stock charge indicator
+- **PR #10437**: Honor in-stock searches when the supplier returns zero-stock parts
+- **Issue #10345** (closed): Verify copper repairs against each selected operating-state voltage map
+- **PR #10363**: feat: verify mask repairs against named voltage maps
+- **Issue #10411** (closed): Silk overlap flags the two strokes of a radial capacitor positive-lead mark
+- **PR #10415**: fix: recognize radial capacitor positive-lead marks in silk overlap
+- **Issue #10440** (closed): Current-path graph: no test covers an offset via landing together with a bonded-cap joint
+- **Issue #10355** (closed): PCBA export preflight: correlate plated via drills with plotted mask and stencil openings
+- **Issue #10338** (closed): path_ampacity reports an open where a wide trace ends off-centre on a connected via
+- **PR #10339**: Fix false current-path opens at offset via landings
+- **Issue #10357** (closed): Report plated via overlaps with same-face assembly lands in PCBA exports
+- **PR #10403**: feat: add opt-in via land overlap measurement to kct export
+- **Issue #10441** (closed): create-issue.sh fails on this host: config-resolver.sh passes a 208 KB defaults.json as a single jq argument (E2BIG)
+- **Issue #10408** (closed): Readiness fails on a symlinked TMPDIR when staging the selected schematic
+- **PR #10413**: fix(readiness): resolve staging paths when TMPDIR is a symlink
+- **Issue #10404** (closed): fix-drc dry run describes unsupported and skipped candidates as repairable
+- **PR #10407**: fix: report unplanned findings in DRC repair previews
+- **Issue #10384** (closed): Untented via mask apertures ignore the board's declared pad_to_mask_clearance
+- **PR #10392**: fix: expand untented via mask openings by pad_to_mask_clearance
+- **Issue #10398** (closed): Reinforcement courtyard rule reads sidecar records without the isinstance guard its siblings use
+- **PR #10402**: fix: drop non-object entries from the read-only reinforcement sidecar loader
+- **Issue #10387** (closed): Recognize Kelvin sense taps that exit a through via on an inner layer
+- **PR #10400**: fix: recognise Kelvin sense taps leaving a through via on an inner layer
+- **Issue #10284** (closed): Report project DRC settings rewritten by manufacturing export
+- **PR #10286**: Report project DRC settings changed by manufacturing export
+- **Issue #10334** (closed): Hierarchical net names are qualified only on collision, so an unrelated sheet's label renames a net
+- **PR #10373**: fix: qualify sheet-local net names independently of sibling sheets
+- **Issue #10368** (closed): Summarize nominal Gerber mask exposure separately from near-pad fabrication findings
+- **PR #10381**: feat: report nominal mask exposure per plotted opening
+- **Issue #10362** (closed): Datasheet pitch extraction truncates a measurement when a letter follows the number or unit
+- **PR #10377**: fix: treat datasheet pitch tokens with an attached letter as ambiguous
+- **Issue #10299** (closed): Assembly preflight should compare through-hole lead dimensions with the finished plated hole
+- **PR #10309**: feat: compare through-hole lead dimensions with the finished hole in preflight
+- **PR #10289**: fix(drc): add orthogonal elbow fallback and refill-safe bend checks
+- **Issue #10325** (closed): Schematic generation shadows the library Datasheet with an empty instance field
+- **PR #10327**: Preserve datasheets on generated schematic instances
+- **Issue #10361** (closed): Support operating cases for simultaneous currents on copper shared by multiple declared paths
+- **PR #10374**: feat: judge simultaneous currents on copper shared by declared paths
+- **PR #10389**: fix: record where LCSC stock lookups reached in readiness evidence
+- **Issue #10333** (closed): Pin the router's escaped-literal netclass pattern shape in the native oracle corpus
+- **PR #10379**: test: pin router literal netclass patterns in the KiCad oracle
+- **Issue #10331** (closed): route-link recommends --order-thickness-mm but cannot accept it for standalone review layouts
+- **PR #10332**: fix(route-link): accept the order thickness for standalone layout checks
+- **Issue #10258** (closed): Board 06: clear eight USB2 mask findings at the J1 connector on the seed-42 fixture
+- **PR #10263**: fix: route Board 06 USB2 through clear connector escapes
+- **Issue #10367** (closed): Extend copper-gap repair to same-net trace shelves at routed branches
+- **PR #10380**: feat: rewrite same-net trace shelves at routed branches in copper-gap repair
+- **Issue #10107** (closed): Use the declared layout for receipt validation, render output and fabrication handoff
+- **PR #10232**: fix: follow the declared readiness layout through fabrication handoff
+- **Issue #10346** (closed): Silk repair and legalize ignore footprint mask margins, so a reported silk_pad_clearance error cannot be fixed
+- **PR #10382**: fix: honor inherited mask margins when repairing silkscreen
+- **Issue #10365** (closed): Report physical overlap of a reinforcement wire with a separate same-net component lead hole
+- **PR #10366**: Check fitted reinforcement wire against same-net component drills
+- **Issue #10369** (closed): test: lock the remaining _single_barrel_contact fail-closed guards (non-circular shape, both-ends-in-barrel)
+- **PR #10395**: test: cover _single_barrel_contact non-circular pad and two-end end-cap guards
+- **Issue #10359** (closed): Current-path proof counts an unused through-via barrel tail as an open branch
+- **PR #10360**: Accept unused through-via barrel ends after an inner-layer transfer
+- **Issue #10390** (closed): Untented via mask openings are modeled as squares, flagging silk outside the plotted round opening
+- **PR #10397**: fix: model untented via mask openings as disks in silk checks
+- **Issue #10340** (closed): Packed via row is rated as one barrel when its entry bends at the first via
+- **PR #10341**: Count the full transfer-via row at a bent feed entry
+- **Issue #10328** (closed): Bare P<digits> token is still read as a measured lead pitch in datasheet tables
+- **PR #10370**: fix: require a unit for bare P<digits> datasheet pitch tokens
+- **Issue #10356** (closed): Match exported plated Excellon hits to routed board vias
+- **PR #10372**: feat: match plated Excellon hits to routed board vias
+- **Issue #10337** (closed): Use branch current and layer copper weight when sizing route-link traces
+- **PR #10376**: feat: size route-link copper for declared current paths
+- **Issue #10342** (closed): Allow a diagnostic creepage run for explicitly selected net pairs and operating conditions
+- **PR #10371**: feat(creepage): add --pair selected-net diagnostic to kct creepage
+- **Issue #10394** (closed): Loom config resolver passes a 208 KB defaults.json to jq as one argv entry, breaking create-issue.sh with E2BIG
+- **Issue #10350** (closed): Hidden ref on an unpopulated NPTH mounting hole fails assembly silkscreen DRC
+- **PR #10352**: Accept unprinted references on unpopulated NPTH mounting holes
+- **Issue #10318** (closed): path_ampacity: wide copper covering a plated terminal can be reported disconnected
+- **PR #10319**: fix: recognize wide track ends covering a plated terminal
+- **PR #10335**: perf(router): skip drained Python fallback repeats after via-blocked verdicts
+- **Issue #10388** (closed): test_export_assembly_tier_omitted_and_jlcpcb fails at d074db893: board 03 preflight DRC report is not bound to the shipped PCB
+- **Issue #10347** (closed): Current-path fanout rejection omits the failing pad and a local copper witness
+- **PR #10348**: Identify the pad where current-path fanout proof fails
+- **Issue #10306** (closed): silk_over_copper flags clean concentric rings around round pad apertures
+- **PR #10307**: Use circular mask apertures for round pads in silkscreen checks
+- **Issue #10323** (closed): Mask assessment reports a shunt’s own land through its separate mask-only aperture
+- **PR #10324**: fix: identify copper lands beneath separate mask pads
+- **Issue #10269** (closed): Dangling branch tip is masked by the side of its own parent track
+- **Issue #10268** (closed): kct check misses dangling copper when a dead-end branch is duplicated in reverse
+- **PR #10271**: fix(drc): detect dangling branches hidden by overlapping copper
+- **Issue #10349** (closed): Adding global fiducials can put silkscreen across a fiducial and an existing pad
+- **PR #10351**: Keep global fiducials clear of printed silkscreen
+- **Issue #10280** (closed): silk_overlap reports 1,105 collisions inside one radial capacitor polarity marking
+- **PR #10283**: Recognize the painted polarity sector of KiCad radial capacitors
+- **Issue #10297** (closed): Board 06: clear three USB3_RX1 mask errors at J1/B10 and U2/B5
+- **PR #10305**: fix(board06): clear the USB3 RX1 connector and BGA mask openings
+- **Issue #10353** (closed): fix-vias: allow off-pad relocation on a via-in-pad capable fabrication profile
+- **PR #10354**: Allow off-pad via relocation with a via-in-pad capable profile
+- **Issue #10326** (closed): silk_pad_clearance misses or misreports gaps when a pad inherits its footprint mask margin
+- **PR #10330**: fix: resolve silk-pad aperture mask margin through pad/footprint/board precedence
+- **Issue #10277** (closed): Router-generated netclasses disappear from a fresh KiCad schematic netlist
+- **PR #10278**: Preserve router netclasses in KiCad schematic exports
+- **Issue #10189** (closed): router/optimize-traces: honour project netclass track widths on re-route
+- **PR #10193**: fix: honour project netclass widths in route and optimize-traces
+- **Issue #10290** (closed): Clear the USB3 transmitter mask errors at J1/A3 and U2/B3 on Board 06
+- **PR #10293**: fix(board06): clear the USB3 transmitter mask errors at both ends
+- **Issue #10301** (closed): Public kct datasheet CLI rejects extract-package and suggest-footprint
+- **PR #10302**: Expose the datasheet package commands in kct
+- **Issue #10310** (closed): kct sync loses or leaves stale purchasing fields when adding, swapping or changing a part
+- **PR #10311**: fix(sync): reconcile schematic purchasing fields on board footprints
+- **Issue #10240** (closed): schematic: get_net_for_pin and extract_netlist disagree with KiCad (and each other) when a rail carries two names
+- **PR #10252**: fix: resolve one net identity across schematic netlist APIs
+- **Issue #10267** (closed): Board 06 clear the six remaining power-net mask findings at U2 and U3
+- **PR #10273**: fix: clear Board 06 power-net mask errors at U2 and U3
+- **Issue #10303** (closed): Datasheet package extraction interprets the P48 in LQFP48 as a 48 mm lead pitch
+- **PR #10304**: Keep pin count and pitch separate in datasheet footprint suggestions
+- **Issue #10285** (closed): Clear the USB3 receive-pair mask openings at BGA pads U2/F5 and F6 on Board 06
+- **PR #10288**: fix(board06): clear both USB3 receiver BGA mask openings
+- **Issue #10281** (closed): fix-silkscreen --all cannot resolve the advertised jlcpcb-tier1 order profile
+- **PR #10282**: Resolve silk fixes against the registered order profile
+- **Issue #10295** (closed): Reinforcement checker crashes on an eligible trunk with two T junctions
+- **PR #10296**: Handle unsupported reinforcement trees in manufacturing checks
+- **PR #10251**: feat(router): trace how each Python fallback relates to earlier ones
+- **Issue #10276** (closed): Board 06 clear both J1 USB3 receive mask findings at A10 and A11
+- **PR #10279**: fix(board06): clear the J1 USB3 receive mask openings
+- **Issue #10308** (closed): Grade the final Board 06 manufacturing bundle in the full recipe
+- **PR #10313**: fix(board06): grade the delivered manufacturing bundle in the full recipe
+- **Issue #10314** (closed): Chain skew sums forked gate networks and accepts two links on one conductor
+- **PR #10315**: fix: validate series topology before reporting chain skew
+- **Issue #10300** (closed): Preserve plated-pad ampacity when a straight entry is split at a collinear vertex
+- **PR #10312**: fix: keep plated-terminal ampacity when a straight entry is split
+- **Issue #10270** (closed): Clear a pad-to-pad mask finding by distributing the straight part of an existing bend
+- **PR #10274**: fix: preserve trace length when clearing pad-to-pad mask bends
+- **Issue #10241** (closed): detect-mistakes --format json builds a second DecouplingCountCheck, parsing the schematic twice
+- **PR #10245**: perf(detect-mistakes): share one decoupling check run between findings and inventory
+- **Issue #10291** (closed): path_ampacity judges one layer of a doubled copper link when its first bend sits inside the plated terminal
+- **PR #10292**: Credit matched front/back entries at plated current-path terminals
+
 ### 2026-11-25
 
+- **Issue #10249** (closed): board04: repair_bypass_mask_escapes silently skips when the reviewed path is absent
+- **PR #10259**: fix(board04): verify reviewed mask openings before manufacturing export
+- **PR #10256**: fix(drc): preserve tangent contacts when extending mask escape tracks
+- **Issue #10264** (closed): Connect a directly bonded pad when moving its via clear of the solder-mask opening
+- **PR #10266**: fix: preserve direct pad connections when moving masked vias
+- **Issue #10239** (closed): Correct offline jlcparts tiers in part search and the 3D coverage report
+- **PR #10242**: fix(parts): recognize JLCPCB catalogue tiers before limiting offline search
+- **Issue #10244** (closed): kct sch re-annotate splits native multi-unit packages unless --pcb is passed
+- **PR #10246**: fix(schematic): keep native multi-unit packages together during reannotation
+- **Issue #10257** (closed): MCP placement parity test expects the old capacitor ordering diagnostic and blocks CI
+- **PR #10260**: test(mcp): cover designated capacitor ordering at equal distances
+- **Issue #10247** (closed): docs: cli.md prune narrative omits pour-redundant branch removal and the locked-via protection
+- **PR #10254**: docs(pcb): explain verified pour branch pruning
+- **Issue #10255** (closed): Board 06 USB2 save gate depends on the deprecated coupled_continuity_threshold
+- **Issue #10235** (closed): Repair the USB2 pad exits at U1.10 and U1.11 on Board 06
+- **PR #10237**: fix(boards): clear both USB2 transceiver pad exits on Board 06
+- **PR #10238**: fix: preserve reported track approaches when moving mask-adjacent vias
+- **Issue #10243** (closed): create-issue.sh is unusable on fleet hosts: config-resolver.sh passes a 137 KB config tier as one jq argv entry (E2BIG)
+- **Issue #10194** (closed): fix(board04): move C15/C16 decoupling caps beside U2 pin 1 and drop bypass_distance waivers
+- **PR #10214**: fix(board04): place C15/C16 beside U2 pin 1 and drop bypass_distance waivers
+- **Issue #10138** (closed): pcb prune: remove verified pour-redundant pad stubs and their terminal vias
+- **PR #10215**: feat(prune): remove verified pour-redundant pad branches and their vias
+- **Issue #10136** (closed): route: avoid power-plane stitches on SMD pads already bonded by filled copper
+- **PR #10167**: fix: skip power-plane stitches for SMD pads bonded to the plane by current fill
+- **Issue #10212** (closed): sch re-annotate: --pcb docstring and Phase 2b comment still claim the board is saved last
+- **Issue #10145** (closed): sch re-annotate: carry the renumbering mapping to the .kicad_pcb (--pcb)
+- **PR #10149**: feat: sync footprint references from sch re-annotate via --pcb
+- **Issue #10217** (closed): Pin the 0.25 mm disjoint pass-through slide bound and its chamfer arm with regression tests
+- **PR #10224**: test: guard the 0.25 mm pass-through slide clamp in mask-copper repair
+- **Issue #10108** (closed): Package a native KiCad project with a coherent basename and revision identity
+- **PR #10120**: fix(export): package the KiCad project under the root sheet's basename
+- **Issue #10134** (closed): check: report bypass capacitor count per power pin (redundant or missing decoupling)
+- **PR #10201**: feat(explain): inventory decoupling caps by schematic designation
+- **Issue #10143** (closed): schematic/blocks: take decoupling-cap counts from one place so blocks do not stack default caps on a shared rail
+- **PR #10157**: feat(schematic): report circuit block decoupling by supply net
+- **Issue #10131** (closed): placement: enforce schematic decoupling constraints in kct placement optimize
+- **Issue #10225** (closed): Enforce designated bypass-pad placement on both placement optimize save paths
+- **PR #10229**: fix: validate designated bypass pads before publishing optimized placements
+- **Issue #10219** (closed): optimize_placement MCP tool applies the schematic cap association but not the designated-cap side/radius gate
+- **PR #10227**: fix: validate designated capacitors on the MCP-selected placement
+- **Issue #10208** (closed): bypass_distance: restore the two regression guards PR #10186 dropped, and decide on association reach
+- **PR #10209**: test: pin board-03 unassociated bypass caps and guard Oscillator association
+- **Issue #10236** (closed): CI flake: CodeQL SARIF upload fails across three PRs during the GitHub service incident
+- **PR #10234**: fix(drc): flip a pad-edge elbow whose swapped corner stays beside the pad
+- **Issue #10097** (closed): Board 06: sharpen the PCIe taper authored-rule guard's keepout regression and its two fail-closed edges
+- **PR #10101**: test: harden board 06 PCIe taper guard's keepout regression and fail-closed edges
+- **Issue #10173** (closed): 0.1016 mm traces pass the jlcpcb profile; JLCDFM reports Danger at 0.1 mm
+- **PR #10178**: feat: warn on JLCPCB 4-layer outer tracks JLCDFM grades Danger
+- **Issue #10211** (closed): redundant_copper_pour_stub reports coverage 1 when only some candidate branches were evaluated
+- **PR #10213**: fix: disclose partially evaluated pour-stub candidates in the proof
+- **Issue #10228** (closed): Evolutionary placement fails while collecting wire-length metrics
+- **PR #10231**: fix: report wire length for the winning evolutionary placement
+- **Issue #10198** (closed): JLCPCB CPL: SOT-23-5 parts come out a quarter turn off (the "SOT-23*": 180 rotation entry is wrong for the 5-pin package)
+- **PR #10199**: fix(export): apply verified JLCPCB rotations by catalog part
+- **PR #10204**: fix(board06): center the U1 ground entry on its existing via
+- **PR #10206**: feat(router): split per-call route traces into native, fallback and other seconds
+- **PR #10216**: fix(board05): move unattended silkscreen references clear of routed drills
+- **Issue #10218** (closed): readiness: the 10106 retained-hold regression's "manufacturing" variant does not place the hold in the manufacturing directory
+- **PR #10223**: test: cover a retained hold inside the generated manufacturing and evidence directories
+- **Issue #10233** (closed): test flake: Board 06 permitted-width zone refill timed out on a pre-#10129 CI run
+- **Issue #10163** (closed): Readiness render exclusion is keyed on the literal name 'output', so a declared output_root with another name hashes renders as evidence
+- **PR #10222**: fix: exclude renders under any declared readiness output_root from hashed inputs
+- **Issue #10139** (closed): netclasses: check sidecar/project/track-width agreement and honour project class widths on re-route
+- **PR #10190**: feat(check): add netclass_agreement rule for sidecar/project/copper width agreement
+- **Issue #8962** (closed): Same-net slit population on fresh regens: repair-pass + route-side producers (stale fixture attribution from #8957)
+- **Issue #10125** (closed): test flake: Board 06 permitted-width rule-area refill reaches the 60-second bulk timeout
+- **PR #10129**: ci: run Board 06 rule-area tests in a serial lane with a 120 s budget
 - **Issue #10220** (closed): Board 03 mask repair aborted with "could not verify mask openings" on a second host — establish whether it is host-specific
 - **PR #10207**: fix(drc): slide a disjoint pass-through jog along its runs before recentring it
 - **Issue #10142** (closed): placement: use schematic cap-pin association as optimizer constraint
@@ -4150,12 +4428,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **PR #5742**: fix(merge-pr): route the #8248 freshness guard's stale-checks call through the #6074/#6752 credential ladder
 - **Issue #5741** (closed): merge-pr.sh: _check_required_check_freshness's stale-checks call bypasses the #6074/#6752 permission-escalation ladder
 - **PR #5740**: fix(router): keep late keep-outs hard against route-halo refinement
-
-### 2026-09-26
-
-- **PR #5735**: test(conformance): hard-gate the route-halo refinement against kicad-cli
-- **PR #5734**: fix: give the optimizer's grid collision checker an exact narrow phase
-- **Issue #5625** (closed): router/optimizer: GridCollisionChecker and VectorCollisionChecker disagree on near-threshold copper
 
 ### 2026-07-20 (evening)
 

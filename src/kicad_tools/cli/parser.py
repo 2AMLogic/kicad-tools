@@ -908,6 +908,52 @@ def _add_creepage_parser(subparsers) -> None:
             "audit manufacturing-readiness gate."
         ),
     )
+    # Scoped per-pad-pair exceptions (#10317): a reviewed, component-bound
+    # alternative to the all-footprint waiver.  One footprint + one unordered
+    # pad pair + one metric + a reason; everything else keeps failing.
+    creepage_parser.add_argument(
+        "--exceptions",
+        dest="exceptions",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a JSON file of reviewed per-pad-pair exceptions: "
+            '{"exceptions": [{"footprint": "R1", "pads": [1, 2], "metric": '
+            '"creepage", "reason": "why a reviewer accepted it"}]}.  Each '
+            "entry waives ONE metric (creepage or clearance) on ONE pad pair "
+            "of ONE named component: the other metric on the same pads, every "
+            "other package on the same nets (even when its gap is the closest "
+            "or ties), every other pad pair and every board-level approach "
+            "keep gating.  For affected net pairs the census reports each pad "
+            "pair as its own row (footprint, pads, exception, reason in table "
+            "and JSON) instead of the collapsed minimum, and the raw "
+            "measurements/verdicts stay in the JSON.  The exit code follows "
+            "the waiver-aware gate: exit 0 only when every un-waived metric "
+            "clears. Invalid or ambiguous selectors are errors. A valid selector "
+            "outside the audited pairs produces a warning and waives nothing. Composes with "
+            "--waive-same-footprint; does NOT affect the kct audit gate."
+        ),
+    )
+    # Selected-pair diagnostic (#10342): measure only the named pairs.
+    creepage_parser.add_argument(
+        "--pair",
+        dest="pairs",
+        nargs=2,
+        action="append",
+        metavar=("NET_A", "NET_B"),
+        default=None,
+        help=(
+            "Limited diagnostic: measure ONLY this exact, unordered conductor pair "
+            "(repeatable; a reversed duplicate is measured once).  Neither net needs "
+            "to be HV, and no census, board-edge row or implicit 0 V comparison is "
+            "made.  Combine with --voltage-map for one operating state: a selected "
+            "net absent from the map is reported as unmeasurable (an explicit 0 is "
+            "valid).  Unknown nets and pairs with no measurable path are named and "
+            "exit non-zero, as does a measured violation.  Table and JSON output are "
+            "marked as a limited diagnostic -- not a complete census and not release "
+            "evidence; omit --pair for the full board (as kct audit / readiness do)."
+        ),
+    )
     creepage_parser.add_argument(
         "--format",
         choices=["table", "json"],
@@ -5391,6 +5437,11 @@ def _add_fix_vias_parser(subparsers) -> None:
     )
     fix_vias_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_vias_parser.add_argument(
+        "--even-if-supported",
+        action="store_true",
+        help="With --relocate-in-pad, move vias off pads even when the selected profile offers via-in-pad.",
+    )
+    fix_vias_parser.add_argument(
         "--search-alternatives",
         action="store_true",
         help="With --relocate-in-pad, search safe alternate escapes if the preferred slide is blocked",
@@ -5725,9 +5776,12 @@ def _add_repair_creepage_parser(subparsers) -> None:
 
 def _add_fix_drc_parser(subparsers) -> None:
     """Add fix-drc subcommand parser."""
+    from .fix_drc_creepage import add_mask_creepage_args
+
     fix_drc_parser = subparsers.add_parser(
         "fix-drc", help="Automated DRC violation repair (clearance + drill)"
     )
+    add_mask_creepage_args(fix_drc_parser)
     fix_drc_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_drc_parser.add_argument(
         "--drc-report",
@@ -5891,6 +5945,9 @@ def _add_parts_parser(subparsers) -> None:
     parts_search.add_argument("query", help="Search query")
     parts_search.add_argument("--format", choices=["text", "json", "table"], default="table")
     parts_search.add_argument("--limit", type=int, default=20, help="Max results")
+    parts_search.add_argument(
+        "--package", help="Match the exact catalogue package (case-insensitive)"
+    )
     parts_search.add_argument("--in-stock", action="store_true", help="Only in-stock parts")
     parts_search.add_argument("--basic", action="store_true", help="Only JLCPCB basic parts")
 
@@ -6034,6 +6091,8 @@ def _add_parts_parser(subparsers) -> None:
 
 def _add_datasheet_parser(subparsers) -> None:
     """Add datasheet subcommand parser with its subcommands."""
+    from .commands.datasheet import add_package_parsers
+
     datasheet_parser = subparsers.add_parser(
         "datasheet", help="Datasheet search, download, and PDF parsing"
     )
@@ -6102,6 +6161,8 @@ def _add_datasheet_parser(subparsers) -> None:
     ds_info = datasheet_subparsers.add_parser("info", help="Show PDF information")
     ds_info.add_argument("pdf", help="Path to PDF file")
     ds_info.add_argument("--format", choices=["text", "json"], default="text")
+
+    add_package_parsers(datasheet_subparsers)
 
 
 def _add_decisions_parser(subparsers) -> None:
@@ -6902,6 +6963,10 @@ def _add_analyze_parser(subparsers) -> None:
     analyze_subparsers = analyze_parser.add_subparsers(
         dest="analyze_command", help="Analysis commands"
     )
+
+    from .reference_coverage import add_parser as add_reference_coverage_parser
+
+    add_reference_coverage_parser(analyze_subparsers)
 
     # analyze congestion
     congestion_parser = analyze_subparsers.add_parser(
@@ -7831,9 +7896,9 @@ def _add_readiness_parser(subparsers) -> None:
         default=None,
         help=(
             "Directory containing the board directory and every project dependency "
-            "(schematic hierarchy, sibling symbol/footprint libraries). Referenced "
-            "files outside the board directory but inside this root are collected "
-            "into the staged package and hashed; nothing outside it is ever read."
+            "(schematic hierarchy, sibling symbol/footprint libraries). With a declared "
+            "output root, dependencies must also be inside the declaring project. "
+            "Receipt paths are relative to that declaration."
         ),
     )
     rd_parser.add_argument(
@@ -8212,7 +8277,8 @@ def _add_render_parser(subparsers) -> None:
             "(boards/<id>/output/renders/{pcb-front,pcb-back}.svg and "
             "{3d-front,3d-back}.png). "
             "A bare .kicad_pcb file may also be given: it is rendered directly "
-            "to <pcb-dir>/renders/ (or -o/--output), skipping directory scanning. "
+            "to renders/ under the declared output root or PCB directory (or -o/--output), "
+            "skipping directory scanning. "
             "The routed PCB is preferred with graceful fallback to the unrouted "
             "PCB. 3D render requires KiCad 8.0.4+ and a display (xvfb on CI)."
         ),
@@ -8229,7 +8295,8 @@ def _add_render_parser(subparsers) -> None:
         default=None,
         help=(
             "Output directory for a single .kicad_pcb file "
-            "(default: <pcb-dir>/renders/). Ignored in directory/root scanning mode."
+            "(default: renders/ under the declared output root or the PCB directory). "
+            "Ignored in directory/root scanning mode."
         ),
     )
     render_parser.add_argument(
@@ -10675,6 +10742,12 @@ def _add_export_parser(subparsers) -> None:
         help="Disable BOM enrichment from .kct project spec",
     )
     export_parser.add_argument(
+        "--project-root",
+        dest="export_project_root",
+        metavar="DIR",
+        help="Root for project-relative export inputs (defaults to the PCB directory)",
+    )
+    export_parser.add_argument(
         "--spec",
         dest="export_spec",
         metavar="PATH",
@@ -10835,6 +10908,17 @@ def _add_export_parser(subparsers) -> None:
         dest="export_include_tht",
         action="store_true",
         help="Include through-hole components in CPL (only needed for fabs whose CPL excludes them by default; JLCPCB includes them)",
+    )
+    export_parser.add_argument(
+        "--via-land-overlap",
+        dest="export_via_land_overlap",
+        action="store_true",
+        help=(
+            "Measure the shipped PCBA archive for plated via drills that overlap the "
+            "solder-mask opening, stencil opening and an SMD land on the same face; adds "
+            "the via_land_overlap preflight result to the JSON output and manifest "
+            "(Issue #10357)"
+        ),
     )
     export_parser.add_argument(
         "--format",

@@ -343,6 +343,37 @@ def _layer_change_pcb(*, drill: float = 0.3) -> PCB:
     return pcb
 
 
+@pytest.mark.parametrize("fault", ["none", "feed", "via"])
+def test_recorded_back_wire_preserves_shared_front_feed_checks(fault):
+    from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+    from kicad_tools.validate.checker import DRCChecker
+
+    pcb = _t_network_pcb(trunk_width=5.5, sense_width=5.5)
+    pcb.segments[1].layer = "B.Cu"
+    pcb.add_via(60, 50, size=3, drill=2, net="NET1")
+    specs = [_trunk_spec(3), _sense_spec(3)]
+    plan = reinforce_net(
+        pcb, "NET1", layer="B.Cu", current_paths=specs, end_offset_mm=8, max_end_shift_mm=12
+    )
+    records = build_wire_records(plan, *pcb.board_origin)
+    assert any(r["layer"] == "B.Cu" and r["status"] == "full" for r in records)
+    if fault == "feed":
+        pcb.segments[0].width = 0.15
+    elif fault == "via":
+        pcb.vias[0].drill = 0.15
+
+    checker = DRCChecker(pcb, current_path_specs=specs, reinforcement_wires=records)
+    findings = [v.message for v in checker.check_path_ampacity()]
+    if fault == "none":
+        assert not findings
+    elif fault == "feed":
+        for path in ("TRUNK", "SENSE"):
+            assert any(path in m and "F.Cu too narrow" in m for m in findings)
+    else:
+        assert any("TRUNK" in m and "changes layer" in m for m in findings)
+        assert not any("SENSE" in m for m in findings)
+
+
 class TestLayerChangeVia:
     def test_undersized_via_is_error_for_force_path(self):
         res = PathAmpacityRule(specs=[_trunk_spec(), _sense_spec()]).check(
@@ -415,6 +446,46 @@ class TestSeriesVersusParallelVias:
         assert [c.count for c in res.layer_changes] == [1, 1]
         out = PathAmpacityRule(specs=[_trunk_spec(3.0)]).check(pcb, _design_rules_2oz())
         assert len([e for e in out.errors if "changes layer" in e.message]) == 2
+
+    @pytest.mark.parametrize("row_direction", [(1, 0), (0, 1), (-1, 0), (0, -1)])
+    @pytest.mark.parametrize("feed_offset", [(-10, -4), (0, -10)], ids=["bent", "right-angle"])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_packed_row_entered_at_a_bent_track_vertex(self, row_direction, feed_offset, reverse):
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        def position(along, across=0):
+            dx, dy = row_direction
+            return (40 + dx * along - dy * across, 50 + dy * along + dx * across)
+
+        pcb = PCB.create(layers=4)
+        source = position(*feed_offset)
+        sink = position(7)
+        _add_pad_footprint(pcb, ref="J1", x=source[0], y=source[1], net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=sink[0], y=sink[1], net="NET1")
+        pcb.add_trace(source, position(0), width=5.5, layer="F.Cu", net="NET1")
+        for layer in ("F.Cu", "B.Cu"):
+            pcb.add_trace(position(0), sink, width=3.75, layer=layer, net="NET1")
+        for along in (0, 1.53, 3.06, 4.59):
+            pcb.add_via(*position(along), size=1.65, drill=0.95, net="NET1")
+        if reverse:
+            for seg in pcb.segments:
+                seg.start, seg.end = seg.end, seg.start
+        path = resolve_current_path(pcb, _trunk_spec())
+        assert path.ok
+        (change,) = path.series_layer_changes
+        assert change.count == 4
+        assert 14 < change.current_capacity_a() < 15
+
+    def test_same_direction_tracks_do_not_prove_an_entry_to_a_row(self):
+        from kicad_tools.router.current_paths import _layer_changes
+
+        pcb = PCB.create(layers=4)
+        for layer in ("F.Cu", "B.Cu"):
+            pcb.add_trace((40, 50), (47, 50), width=3.75, layer=layer, net="NET1")
+        pcb.add_trace((40, 50), (45, 50), width=3.75, layer="F.Cu", net="NET1")
+        for x in (40, 41.53, 43.06, 44.59):
+            pcb.add_via(x, 50, size=1.65, drill=0.95, net="NET1")
+        assert [change.count for change in _layer_changes(pcb, "NET1", pcb.segments)] == [1] * 4
 
     def test_proved_via_array_meeting_capacity_is_not_flagged(self):
         from kicad_tools.router.current_paths import resolve_current_path
@@ -1529,3 +1600,312 @@ class TestButtressWireCreditFromReinforceNet:
         assert sorted(v.location[0] for v in underwidth if v.layer == "F.Cu") == (
             pytest.approx([21.479, 68.871], abs=0.01)
         )
+
+
+# --------------------------------------------------------------------------
+# Operating cases: simultaneous currents on shared copper (Issue #10361)
+# --------------------------------------------------------------------------
+
+
+def _case(name: str, *contributions: tuple[str, float], overlap: str | None = None):
+    from kicad_tools.router.current_paths import CaseContribution, OperatingCase
+
+    return OperatingCase(
+        name=name,
+        contributions=tuple(CaseContribution(path, amps) for path, amps in contributions),
+        pulse_overlap=overlap,
+    )
+
+
+def _case_check(pcb: PCB, cases, specs=None):
+    rule = PathAmpacityRule(specs=specs or [_trunk_spec(2), _sense_spec(2)], cases=cases)
+    return rule.check(pcb, _design_rules_2oz())
+
+
+def _shared_feed_pcb(*, reverse_feed: bool = False) -> PCB:
+    pcb = _t_network_pcb(trunk_width=0.60, sense_width=0.60)
+    if reverse_feed:
+        feed = pcb.segments[0]
+        feed.start, feed.end = feed.end, feed.start
+    return pcb
+
+
+class TestOperatingCases:
+    def test_no_cases_keeps_the_independent_result(self) -> None:
+        results = _case_check(_shared_feed_pcb(), None)
+        assert results.errors == []
+        assert results.warnings == []
+
+    @pytest.mark.parametrize("reverse_feed", [False, True])
+    def test_simultaneous_loads_fail_only_on_the_common_feed(self, reverse_feed: bool) -> None:
+        pcb = _shared_feed_pcb(reverse_feed=reverse_feed)
+        results = _case_check(pcb, [_case("both", ("TRUNK", 2.0), ("SENSE", 2.0))])
+        assert results.warnings == []
+        (error,) = results.errors
+        assert error.layer == "F.Cu"
+        assert error.location == pytest.approx((40.0, 50.0))
+        assert error.required_value == pytest.approx(1.016, abs=1e-3)
+        assert error.actual_value == pytest.approx(0.60)
+        assert set(error.items) == {"both", "TRUNK", "SENSE", "NET1"}
+        assert "TRUNK +2A" in error.message and "SENSE +2A" in error.message
+        assert "combined 4A" in error.message
+
+    def test_each_load_alone_passes(self) -> None:
+        cases = [_case("charge", ("TRUNK", 2.0)), _case("support", ("SENSE", 2.0))]
+        results = _case_check(_shared_feed_pcb(), cases)
+        assert results.errors == []
+        assert results.warnings == []
+
+    @pytest.mark.parametrize("reverse_feed", [False, True])
+    def test_equal_and_opposing_contributions_cancel_on_the_shared_span(
+        self, reverse_feed: bool
+    ) -> None:
+        pcb = _shared_feed_pcb(reverse_feed=reverse_feed)
+        results = _case_check(pcb, [_case("opposed", ("TRUNK", 2.0), ("SENSE", -2.0))])
+        assert results.errors == []
+        assert results.warnings == []
+
+    def test_opposing_unequal_contributions_leave_the_difference(self) -> None:
+        pcb = _t_network_pcb(trunk_width=0.60, sense_width=0.60)
+        pcb.segments[0].width = 0.20  # the shared feed
+        # Declared ratings are tiny, so only the case judges the copper:
+        # 2 A and -0.5 A leave 1.5 A on the feed, while each branch after the
+        # junction still carries its own current and passes.
+        specs = [_trunk_spec(0.1), _sense_spec(0.1)]
+        results = _case_check(pcb, [_case("net", ("TRUNK", 2.0), ("SENSE", -0.5))], specs=specs)
+        (error,) = [e for e in results.errors if "Operating case" in e.message]
+        assert error.location == pytest.approx((40.0, 50.0))
+        assert "combined 1.5A" in error.message
+
+    def test_reversing_endpoints_and_sign_together_is_the_same_physical_case(self) -> None:
+        pcb = _shared_feed_pcb()
+        reversed_sense = dataclasses.replace(
+            _sense_spec(2), source=PathEndpoint("U3", "1"), sink=PathEndpoint("J1", "1")
+        )
+        results = _case_check(
+            pcb,
+            [_case("both", ("TRUNK", 2.0), ("SENSE", -2.0))],
+            specs=[_trunk_spec(2), reversed_sense],
+        )
+        (error,) = results.errors
+        assert error.location == pytest.approx((40.0, 50.0))
+        assert "combined 4A" in error.message
+
+    def test_overlapping_declarations_alone_never_sum(self) -> None:
+        # Both paths are declared but no case lists them together.
+        results = _case_check(_shared_feed_pcb(), [_case("only-trunk", ("TRUNK", 2.0))])
+        assert results.errors == []
+
+    def test_cases_are_evaluated_independently(self) -> None:
+        cases = [
+            _case("a", ("TRUNK", 2.0)),
+            _case("both", ("TRUNK", 2.0), ("SENSE", 2.0)),
+            _case("b", ("SENSE", 2.0)),
+        ]
+        results = _case_check(_shared_feed_pcb(), cases)
+        assert [e.items[0] for e in results.errors] == ["both"]
+
+    @pytest.mark.parametrize(
+        ("cases", "fragment"),
+        [
+            ([_case("c", ("TRUNK", 2.0), ("NOPE", 1.0))], "unknown path 'NOPE'"),
+            ([_case("c", ("TRUNK", 2.0), ("TRUNK", 1.0))], "listed more than once"),
+            ([_case("c", ("TRUNK", 0.0))], "zero or non-finite"),
+            ([_case("c")], "lists no active path"),
+        ],
+    )
+    def test_bad_case_references_are_diagnosed_and_not_evaluated(self, cases, fragment) -> None:
+        results = _case_check(_shared_feed_pcb(), cases)
+        assert any(
+            fragment in e.message and "cannot be evaluated" in e.message for e in results.errors
+        )
+        # Never a verdict on a partial total.
+        assert not any("too narrow" in e.message for e in results.errors)
+
+    def test_ambiguous_path_name_is_diagnosed(self) -> None:
+        twin = dataclasses.replace(_sense_spec(2), name="TRUNK")
+        results = _case_check(
+            _shared_feed_pcb(), [_case("c", ("TRUNK", 2.0))], specs=[_trunk_spec(2), twin]
+        )
+        assert any("ambiguous" in e.message for e in results.errors)
+
+    def test_unresolved_member_is_visible_and_blocks_a_clean_verdict(self) -> None:
+        pcb = _shared_feed_pcb()
+        pcb.segments.pop(2)  # SENSE loses its copper
+        results = _case_check(pcb, [_case("both", ("TRUNK", 2.0), ("SENSE", 2.0))])
+        case_errors = [e for e in results.errors if "Operating case" in e.message]
+        assert len(case_errors) == 1
+        assert "'SENSE'" in case_errors[0].message and "unresolved" in case_errors[0].message
+        assert "too narrow" not in case_errors[0].message
+
+
+def _undetermined(results) -> list:
+    return [w for w in results.warnings if "NOT determined" in w.message]
+
+
+class TestOperatingCasePulses:
+    @staticmethod
+    def _pulsed(spec: CurrentPathSpec, duty: float | None) -> CurrentPathSpec:
+        return dataclasses.replace(spec, pulsed_a=4.0, duty_cycle=duty)
+
+    def test_two_pulsed_members_without_overlap_are_undetermined(self) -> None:
+        specs = [self._pulsed(_trunk_spec(0.1), 0.2), self._pulsed(_sense_spec(0.1), 0.2)]
+        results = _case_check(
+            _shared_feed_pcb(), [_case("pulses", ("TRUNK", 0.1), ("SENSE", 0.1))], specs=specs
+        )
+        (warning,) = _undetermined(results)
+        assert "RMS and peak" in warning.message
+        assert "pulse_overlap" in warning.message
+        assert set(warning.items) >= {"pulses", "TRUNK", "SENSE"}
+        assert not [e for e in results.errors if "Operating case" in e.message]
+
+    def test_existing_single_path_pulse_checks_still_run(self) -> None:
+        specs = [self._pulsed(_trunk_spec(0.1), None), _sense_spec(0.1)]
+        results = _case_check(
+            _shared_feed_pcb(), [_case("one", ("TRUNK", 0.1), ("SENSE", 0.1))], specs=specs
+        )
+        # The peak-as-continuous assumption is still disclosed per path.
+        assert any(v.severity == "info" and "TRUNK" in v.message for v in results.violations)
+        assert _undetermined(results) == []
+
+    def test_coincident_pulses_with_a_common_duty_are_determined(self) -> None:
+        specs = [self._pulsed(_trunk_spec(0.1), 0.5), self._pulsed(_sense_spec(0.1), 0.5)]
+        results = _case_check(
+            _shared_feed_pcb(),
+            [_case("together", ("TRUNK", 0.1), ("SENSE", 0.1), overlap="coincident")],
+            specs=specs,
+        )
+        # Peaks add to 8 A, base 0.2 A: RMS = sqrt(0.5*8**2 + 0.5*0.2**2) ~ 5.66 A.
+        (error,) = [e for e in results.errors if "Operating case" in e.message]
+        assert "combined" in error.message
+        assert error.required_value > 1.5
+        assert _undetermined(results) == []
+
+    def test_coincident_pulses_with_different_duty_leave_rms_undetermined(self) -> None:
+        specs = [self._pulsed(_trunk_spec(0.1), 0.5), self._pulsed(_sense_spec(0.1), 0.25)]
+        results = _case_check(
+            _shared_feed_pcb(),
+            [_case("together", ("TRUNK", 0.1), ("SENSE", 0.1), overlap="coincident")],
+            specs=specs,
+        )
+        (warning,) = _undetermined(results)
+        assert "combined RMS current" in warning.message
+        assert "peak" not in warning.message.split("missing")[0]
+        assert "common 'duty_cycle'" in warning.message
+
+    def test_disjoint_pulses_need_duty_cycles_summing_to_one_at_most(self) -> None:
+        specs = [self._pulsed(_trunk_spec(0.1), 0.7), self._pulsed(_sense_spec(0.1), 0.7)]
+        results = _case_check(
+            _shared_feed_pcb(),
+            [_case("alt", ("TRUNK", 0.1), ("SENSE", 0.1), overlap="disjoint")],
+            specs=specs,
+        )
+        (warning,) = _undetermined(results)
+        assert "summing to at most 1" in warning.message
+
+    def test_disjoint_pulses_with_valid_duty_are_determined(self) -> None:
+        specs = [self._pulsed(_trunk_spec(0.1), 0.3), self._pulsed(_sense_spec(0.1), 0.3)]
+        results = _case_check(
+            _shared_feed_pcb(),
+            [_case("alt", ("TRUNK", 0.1), ("SENSE", 0.1), overlap="disjoint")],
+            specs=specs,
+        )
+        assert _undetermined(results) == []
+
+
+def _series_via_pcb(*, drill: float, unrelated_via: bool = False) -> PCB:
+    """T network whose shared feed crosses F.Cu -> B.Cu through one series via."""
+    pcb = PCB.create(width=200, height=120, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="U3", x=60, y=70, net="NET1")
+    pcb.add_trace(("J1", "1"), (30, 50), width=3.0, layer="F.Cu", net="NET1")
+    pcb.add_via(30, 50, size=drill + 0.3, drill=drill, net="NET1")
+    pcb.add_trace((30, 50), (60, 50), width=3.0, layer="B.Cu", net="NET1")
+    pcb.add_trace((60, 50), ("J2", "1"), width=3.0, layer="B.Cu", net="NET1")
+    pcb.add_trace((60, 50), ("U3", "1"), width=3.0, layer="B.Cu", net="NET1")
+    if unrelated_via:
+        pcb.add_via(60, 60, size=drill + 0.3, drill=drill, net="NET1")
+    return pcb
+
+
+class TestOperatingCaseViaTransfer:
+    def test_series_via_between_individual_and_combined_demand(self) -> None:
+        # 0.8 mm drill carries ~3.17 A: enough for 2 A alone, not for 4 A.
+        pcb = _series_via_pcb(drill=0.8)
+        alone = _case_check(pcb, [_case("one", ("TRUNK", 2.0))])
+        assert alone.errors == [] and alone.warnings == []
+        both = _case_check(pcb, [_case("both", ("TRUNK", 2.0), ("SENSE", 2.0))])
+        transfers = [v for v in both.violations if "layer change" in v.message]
+        assert len(transfers) == 1  # identified once, not once per path
+        (transfer,) = transfers
+        assert transfer.required_value == pytest.approx(4.0)
+        assert transfer.actual_value == pytest.approx(3.165, abs=0.01)
+        assert set(transfer.items) >= {"both", "TRUNK", "SENSE"}
+        assert "F.Cu -> B.Cu" in transfer.message
+
+    @pytest.mark.parametrize(("amps", "expected"), [(-2, [4.0]), (2, [])])
+    def test_reversed_via_traversal(self, amps, expected):
+        sense = _sense_spec(2)
+        reverse = dataclasses.replace(sense, source=sense.sink, sink=sense.source)
+        result = _case_check(
+            _series_via_pcb(drill=0.8),
+            [_case("via", ("TRUNK", 2), ("SENSE", amps))],
+            [_trunk_spec(2), reverse],
+        )
+        assert [
+            v.required_value for v in result.violations if "layer change" in v.message
+        ] == expected
+
+    def test_shared_section_of_four_layer_barrel(self):
+        pcb = PCB.create(layers=4, width=200, height=120, center=False)
+        for ref, x, y in [("J1", 20, 50), ("J2", 120, 50), ("U3", 60, 70)]:
+            _add_pad_footprint(pcb, ref=ref, x=x, y=y, net="NET1")
+        for endpoint, layer in [("J1", "F.Cu"), ("J2", "B.Cu"), ("U3", "In1.Cu")]:
+            pcb.add_trace((30, 50), (endpoint, "1"), width=3.0, layer=layer, net="NET1")
+        pcb.add_via(30, 50, size=1.1, drill=0.8, net="NET1")
+        result = _case_check(pcb, [_case("via", ("TRUNK", 2), ("SENSE", 2))])
+        (error,) = result.errors
+        assert "F.Cu -> In1.Cu" in error.message
+        assert error.required_value == 4
+
+    def test_opposing_contributions_cancel_through_the_via(self) -> None:
+        results = _case_check(
+            _series_via_pcb(drill=0.8), [_case("opp", ("TRUNK", 2.0), ("SENSE", -2.0))]
+        )
+        assert results.errors == [] and results.warnings == []
+
+    def test_unrelated_same_net_via_gets_no_contribution(self) -> None:
+        pcb = _series_via_pcb(drill=0.8, unrelated_via=True)
+        results = _case_check(pcb, [_case("both", ("TRUNK", 2.0), ("SENSE", 2.0))])
+        transfers = [v for v in results.violations if "layer change" in v.message]
+        assert len(transfers) == 1
+        assert transfers[0].location == pytest.approx((30.0, 50.0))
+
+
+@pytest.mark.parametrize(
+    ("duty", "expected"), [(None, 3.9), (1, 2), (0.5, ((3.9**2 + 2**2) / 2) ** 0.5)]
+)
+def test_opposing_pulse_levels(duty, expected):
+    from kicad_tools.validate.rules.path_operating_cases import Wave, combine_waves
+
+    waves = [Wave("supply", 4), Wave("return", -0.1, -2, duty)]
+    assert combine_waves(waves, None).current_a == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("overlap", ["coincident", "disjoint"])
+def test_no_between_pulse_state_at_full_duty(overlap):
+    from kicad_tools.validate.rules.path_operating_cases import Wave, combine_waves
+
+    duty = 1 if overlap == "coincident" else 0.5
+    waves = [Wave("supply", 6), Wave("A", -0.1, -2, duty), Wave("B", -0.1, -2, duty)]
+    expected = 2 if overlap == "coincident" else 3.9
+    assert combine_waves(waves, overlap).current_a == pytest.approx(expected)
+
+
+def test_many_unknown_directions_bound_mixed_contributions():
+    from kicad_tools.validate.rules.path_operating_cases import Member, _extremes
+
+    members = [(Member(_trunk_spec(2), 2 if i % 2 else -2), 0) for i in range(11)]
+    low, high = _extremes(members, None)
+    assert (low.current_a, high.current_a) == (0, 22)

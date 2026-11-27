@@ -297,6 +297,8 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "datasheet convert": ["{dir}/missing.pdf"],
     "datasheet extract-images": ["{dir}/missing.pdf", "-o", "{dir}/images"],
     "datasheet extract-tables": ["{dir}/missing.pdf"],
+    "datasheet extract-package": ["{fixtures}/package-table.pdf"],
+    "datasheet suggest-footprint": ["{fixtures}/package-table.pdf"],
     "datasheet info": ["{dir}/missing.pdf"],
     # -- decisions / placement ---------------------------------------------
     "decisions show": ["{pcb}"],
@@ -317,6 +319,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "validate": ["--sync", "{pro}"],
     "analyze congestion": ["{pcb}"],
     "analyze trace-lengths": ["{pcb}"],
+    "analyze reference-coverage": ["{pcb}", "--pair", "VIN", "NET1"],
     "analyze signal-integrity": ["{pcb}"],
     "analyze thermal": ["{pcb}"],
     "analyze complexity": ["{pcb}"],
@@ -714,10 +717,33 @@ def _check_zones_fill_doc(doc: dict) -> None:
     assert doc.get("filled") is True, doc
 
 
+@pytest.mark.parametrize(
+    ("command", "key"), [("extract-package", "packages"), ("suggest-footprint", "results")]
+)
+def test_datasheet_json_with_no_packages(command, key, tmp_path):
+    # Page 2 of the fixture is blank.
+    pdf = str(FIXTURES / "package-table.pdf")
+    argv = ["datasheet", command, pdf, "--pages", "2", "--format", "json"]
+    doc = _assert_single_json_document(f"datasheet {command}", argv, tmp_path)
+    assert doc == {"source": pdf, key: []}
+
+
+def _check_package_doc(doc: dict) -> None:
+    assert [pkg["name"] for pkg in doc["packages"]] == ["SOIC8"]
+
+
+def _check_footprint_suggestions_doc(doc: dict) -> None:
+    (result,) = doc["results"]
+    assert result["package"]["name"] == "SOIC8"
+    assert result["matches"]
+
+
 # Leaves whose JSON payload must prove the real output path ran (#9803
 # acceptance): an early error, a dry-run, or a narrowed argv that silently
 # stopped generating output would otherwise still parse as one document.
 _CONTENT_CHECKS: dict[str, Callable[[dict], None]] = {
+    "datasheet extract-package": _check_package_doc,
+    "datasheet suggest-footprint": _check_footprint_suggestions_doc,
     "render": _check_render_doc,
     "zones fill": _check_zones_fill_doc,
 }

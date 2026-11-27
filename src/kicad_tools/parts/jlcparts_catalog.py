@@ -51,7 +51,9 @@ import struct
 import zipfile
 import zlib
 from datetime import datetime
+from enum import IntEnum
 from pathlib import Path
+from typing import Literal, NamedTuple
 
 from .cache import get_default_cache_path
 from .lcsc import (
@@ -75,6 +77,37 @@ CATALOG_FILENAME = "jlcparts.sqlite3"
 #   PK\x03\x04 -- local file header that begins each archive member.
 _SPANNING_MARKER = b"PK\x07\x08"
 _LOCAL_FILE_HEADER = b"PK\x03\x04"
+
+
+class CatalogTier(IntEnum):
+    """JLCPCB assembly tiers, in offline search preference order."""
+
+    BASIC = 0
+    PREFERRED = 1
+    EXTENDED = 2
+
+
+def catalog_tier(library_type: object, preferred: object = None) -> CatalogTier:
+    """Decode both source-db-v2 and legacy library tier encodings."""
+    kind = str(library_type).lower()
+    if kind in ("base", "basic"):
+        return CatalogTier.BASIC
+    if kind == "preferred" or (kind == "expand" and preferred in (1, "1")):
+        return CatalogTier.PREFERRED
+    return CatalogTier.EXTENDED
+
+
+#: What became of one exact catalog lookup (issue #10386).  ``hit`` and
+#: ``miss`` mean the query ran; ``missing`` and ``unreadable`` mean it never
+#: could, so the catalog's contents say nothing about the part.
+CatalogLookupStatus = Literal["hit", "miss", "missing", "unreadable"]
+
+
+class CatalogLookup(NamedTuple):
+    """One exact catalog lookup: the part found (if any) and the query's fate."""
+
+    part: Part | None
+    status: CatalogLookupStatus
 
 
 def get_catalog_path() -> Path:
@@ -147,14 +180,34 @@ class JlcpartsCatalog:
 
         Returns:
             A translated :class:`Part` if found, otherwise ``None`` (including
-            when the catalog file does not exist).
+            when the catalog file does not exist).  Use
+            :meth:`lookup_with_status` to tell those outcomes apart.
+        """
+        return self.lookup_with_status(lcsc_part).part
+
+    def lookup_with_status(self, lcsc_part: str) -> CatalogLookup:
+        """Look up a single part, reporting what became of the catalog search.
+
+        :meth:`lookup` answers ``None`` both for a part the catalog does not
+        list and for a catalog file it could not read.  This method separates
+        the two (issue #10386), so evidence derived from a lookup can tell a
+        host without a usable catalog from a catalog that was searched and
+        holds no such row.
+
+        Args:
+            lcsc_part: LCSC part number (e.g. ``"C123456"``). The numeric
+                portion is matched against the ``lcsc`` column.
+
+        Returns:
+            The translated :class:`Part` with status ``hit``, or ``None``
+            with the status that explains its absence.
         """
         if not self.available:
-            return None
+            return CatalogLookup(None, "missing")
 
         lcsc_id = _normalize_lcsc_id(lcsc_part)
         if lcsc_id is None:
-            return None
+            return CatalogLookup(None, "miss")
 
         try:
             with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as conn:
@@ -166,12 +219,12 @@ class JlcpartsCatalog:
                 row = cursor.fetchone()
         except sqlite3.Error as e:
             logger.warning(f"jlcparts catalog read failed for {lcsc_part}: {e}")
-            return None
+            return CatalogLookup(None, "unreadable")
 
         if row is None:
-            return None
+            return CatalogLookup(None, "miss")
 
-        return self._part_from_row(row)
+        return CatalogLookup(self._part_from_row(row), "hit")
 
     def lookup_many(self, lcsc_parts: list[str]) -> dict[str, Part]:
         """Look up multiple parts by exact LCSC number.
@@ -291,19 +344,18 @@ class JlcpartsCatalog:
             params.append(min_stock)
 
         where_clause = " AND ".join(conditions)
-        sql = (
-            "SELECT * FROM jlc_components "
-            f"WHERE {where_clause} "
-            "ORDER BY CASE library_type "
-            "WHEN 'basic' THEN 0 WHEN 'preferred' THEN 1 ELSE 2 END, "
-            "stock DESC "
-            "LIMIT ?"
-        )
         params.append(int(limit))
 
         try:
             with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as conn:
                 conn.row_factory = sqlite3.Row
+                columns = {r["name"] for r in conn.execute("PRAGMA table_info(jlc_components)")}
+                preferred = "preferred" if "preferred" in columns else "NULL"
+                conn.create_function("catalog_tier", 2, catalog_tier, deterministic=True)
+                sql = (
+                    f"SELECT * FROM jlc_components WHERE {where_clause} "
+                    f"ORDER BY catalog_tier(library_type, {preferred}), stock DESC LIMIT ?"
+                )
                 cursor = conn.execute(sql, params)
                 rows = cursor.fetchall()
         except sqlite3.Error as e:
@@ -390,7 +442,7 @@ def _row_to_part(row: sqlite3.Row) -> Part:
 
     description = col_str("description")
     package = col_str("package")
-    library_type = col_str("library_type").lower()
+    tier = catalog_tier(col("library_type"), col("preferred"))
 
     prices = _parse_price_column(col("price"))
 
@@ -405,8 +457,8 @@ def _row_to_part(row: sqlite3.Row) -> Part:
         stock=col_int("stock", 0),
         min_order=col_int("min_order", 1),
         prices=prices,
-        is_basic=library_type == "basic",
-        is_preferred=library_type == "preferred",
+        is_basic=tier == CatalogTier.BASIC,
+        is_preferred=tier == CatalogTier.PREFERRED,
         datasheet_url=col_str("datasheet"),
         product_url=f"https://jlcpcb.com/partdetail/{lcsc_part}" if lcsc_part else "",
         stock_source="offline_catalog",
