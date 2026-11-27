@@ -38,6 +38,19 @@ def is_declared_copper_layer(name: str, layer_type: str) -> bool:
     return name in COPPER_LAYER_ORDER and layer_type in ("signal", "power", "mixed", "jumper")
 
 
+def pad_copper_layers(layers: Iterable[str], copper: list[str]) -> frozenset[str]:
+    """Expand pad layer tokens against the copper layers enabled on this board."""
+    out: set[str] = set()
+    for layer in layers:
+        if layer == "*.Cu":
+            out.update(copper)
+        elif layer == "F&B.Cu":
+            out.update(name for name in ("F.Cu", "B.Cu") if name in copper)
+        elif layer in copper:
+            out.add(layer)
+    return frozenset(out)
+
+
 def validate_copper_layer(layer: str, available_layers: Iterable[str]) -> None:
     """Reject a layer that is not a real, board-enabled copper layer.
 

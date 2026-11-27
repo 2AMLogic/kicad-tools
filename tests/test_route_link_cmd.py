@@ -11,6 +11,7 @@ pytest.importorskip("shapely")
 
 from kicad_tools.cli import main  # noqa: E402
 from kicad_tools.cli.route_link_cmd import LinkSpecError, parse_link_spec  # noqa: E402
+from kicad_tools.native_concurrency import configured_limit, slot_wait_ceiling  # noqa: E402
 from kicad_tools.schema.pcb import PCB  # noqa: E402
 
 # R1.1 (110,110) and R2.1 (120,110) are on SIG.  A foreign F.Cu+B.Cu-free wall
@@ -36,6 +37,16 @@ BOARD = """(kicad_pcb
 )
 """
 LINK = "SIG R1.1 R2.1"
+
+# Tests that launch kicad-cli through `_native_plane_link` queue for one of the
+# Test job's two native permits.  The job's 60 s default (`--timeout=60`) was
+# measured at 57.72 s / 46.42 s for these tests and cannot absorb the queue, so
+# the budget is composed like tests/test_route_partial_placement_cli.py: the
+# test's own work plus the gate's fail-open queue bound, only when the gate is
+# configured (local runs keep the tight historical bound).
+_NATIVE_WORK_SECONDS = 60.0
+_NATIVE_QUEUE_CEILING_SECONDS = slot_wait_ceiling() if configured_limit() is not None else 0.0
+native_launching = pytest.mark.timeout(_NATIVE_WORK_SECONDS + _NATIVE_QUEUE_CEILING_SECONDS)
 
 
 @pytest.fixture
@@ -131,6 +142,43 @@ class TestCommit:
         rc, _ = _run(capsys, str(board), "--link", LINK, "-o", str(out))
         assert rc == 0 and board.read_bytes() == before and out.exists()
 
+    @pytest.mark.parametrize(
+        ("lower_edge", "status"),
+        [("109.900001", "unroutable"), ("109.9", "rolled-back")],
+    )
+    def test_refused_corridor_preserves_existing_output(
+        self, plane_board, capsys, monkeypatch, lower_edge, status
+    ):
+        from kicad_tools.cli import route_link_cmd
+        from kicad_tools.router.plane_corridor import PlaneCheckError
+
+        out = plane_board.with_name("output.kicad_pcb")
+        original = plane_board.read_bytes() + b"\n"
+        out.write_bytes(original)
+
+        def veto(*args):
+            raise PlaneCheckError("stranded island")
+
+        monkeypatch.setattr(route_link_cmd, "_native_refill", PCB.load)
+        monkeypatch.setattr(route_link_cmd, "_verify_corridor_candidate", veto)
+        rc, doc = _run(
+            capsys,
+            str(plane_board),
+            "-o",
+            str(out),
+            "--link",
+            LINK,
+            "--link-layers",
+            "In1.Cu",
+            "--plane-corridor",
+            f"In1.Cu=109,{lower_edge},121,110.1",
+        )
+        assert rc == 1 and doc["written"] is None
+        assert doc["links"][0]["status"] == status
+        if status == "rolled-back":
+            assert doc["links"][0]["reason"] == "stranded island"
+        assert out.read_bytes() == original
+
     def test_via_at_forces_waypoint(self, board, capsys):
         rc, doc = _run(capsys, str(board), "--link", LINK, "--via-at", "112,114", "--probe")
         assert rc == 0, doc
@@ -156,3 +204,364 @@ class TestCommit:
     def test_no_link_is_error(self, board, capsys):
         rc, doc = _run(capsys, str(board))
         assert rc == 1 and not doc["ok"]
+
+
+@pytest.fixture
+def plane_board(tmp_path):
+    """Plated SIG terminals span a partial inner pour bonded to a remote pad."""
+    text = BOARD.replace('(31 "B.Cu"', '(1 "In1.Cu" power) (2 "In2.Cu" signal) (31 "B.Cu"')
+    text = text.replace("smd rect", "thru_hole circle").replace(
+        '(layers "F.Cu" "F.Paste" "F.Mask")', '(drill 0.4) (layers "*.Cu" "*.Mask")'
+    )
+    # The remote connection sits north of the corridor. The baseline pour's
+    # southern edge exactly touches the authorized rectangle.
+    pts = "(pts (xy 106 104) (xy 124 104) (xy 124 109.85) (xy 106 109.85))"
+    extra = f"""
+    (footprint "R" (layer "F.Cu") (at 115 106)
+      (fp_text reference "J3" (at 0 -1) (layer "F.SilkS"))
+      (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.4)
+        (layers "*.Cu" "*.Mask") (net 2 "FOE")))
+    (zone (net 2) (net_name "FOE") (layer "In1.Cu")
+      (uuid "00000000-0000-0000-0000-000000000011")
+      (hatch edge 0.5) (connect_pads yes (clearance 0.5)) (min_thickness 0.1)
+      (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+      (polygon {pts}) (filled_polygon (layer "In1.Cu") {pts}))
+    """
+    path = tmp_path / "partial.kicad_pcb"
+    path.write_text(text.rstrip()[:-1] + extra + ")\n")
+    return path
+
+
+def test_plane_corridor_probe_is_per_link_and_contains_full_track(plane_board, capsys):
+    original = plane_board.read_bytes()
+    args = ("--link", LINK, "--link-layers", "In1.Cu")
+    rc, doc = _run(
+        capsys,
+        str(plane_board),
+        "--probe",
+        *args,
+        "--plane-corridor",
+        "In1.Cu=109,109.9,121,110.1",
+        *args,
+        "--plane-corridor",
+        "In1.Cu=109,109.900001,121,110.1",
+        *args,
+    )
+    assert rc == 1
+    ok, narrow, default = doc["links"]
+    assert ok["routable"] and ok["layers"] == ["In1.Cu"]
+    assert not narrow["routable"] and "corridor" in narrow["reason"]
+    assert not default["routable"]
+    assert plane_board.read_bytes() == original
+
+
+def _native_plane_link(capsys, board, *args):
+    from kicad_tools.cli.kicad_toolchain import PINNED_KICAD_VERSION, version_number
+    from kicad_tools.cli.runner import find_kicad_cli, get_kicad_version
+
+    cli = find_kicad_cli()
+    if cli is None or version_number(get_kicad_version(cli) or "") != PINNED_KICAD_VERSION:
+        pytest.skip(f"native plane refill requires KiCad {PINNED_KICAD_VERSION}")
+    return _run(
+        capsys,
+        str(board),
+        "--link",
+        LINK,
+        "--link-layers",
+        "In1.Cu",
+        "--plane-corridor",
+        "In1.Cu=109,109.9,121,110.1",
+        *args,
+    )
+
+
+def test_native_plane_refill_requires_a_bounded_save(plane_board, monkeypatch):
+    from math import isfinite
+
+    from kicad_tools.cli import runner
+    from kicad_tools.cli.route_link_cmd import _native_refill
+
+    def timed_out(path, output, cli, *, timeout):
+        assert isfinite(timeout) and timeout > 0
+        return runner.KiCadCLIResult(success=False, stderr="refill timed out")
+
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("kicad-cli"))
+    monkeypatch.setattr(runner, "_run_fill_zones_via_drc", timed_out)
+    with pytest.raises(RuntimeError, match="refill timed out"):
+        _native_refill(plane_board)
+
+
+@pytest.fixture
+def project_plane_board(plane_board):
+    plane_board.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "meta": {"version": 3},
+                "net_settings": {
+                    "meta": {"version": 3},
+                    "classes": [{"name": "Default", "clearance": 0.8}],
+                },
+            }
+        )
+    )
+    return plane_board
+
+
+@native_launching
+def test_plane_commit_reports_gap_to_saved_project_refill(project_plane_board, capsys):
+    original = project_plane_board.read_bytes()
+    out = project_plane_board.with_name("routed.kicad_pcb")
+    rc, doc = _native_plane_link(capsys, project_plane_board, "-o", str(out))
+    assert rc == 0, doc
+    gap = doc["links"][0]["min_plane_gap_mm"]
+    assert 0.8 <= gap < 0.81  # project floor exceeds zone (0.5) and CLI (0.2)
+    assert project_plane_board.read_bytes() == original
+    pcb = PCB.load(out)
+    assert [s.layer for s in pcb.segments if pcb.nets[s.net_number].name == "SIG"] == ["In1.Cu"]
+    assert pcb.zones[0].filled_polygons
+
+
+@native_launching
+def test_plane_commit_vetoes_clearance_above_native_setback(project_plane_board, capsys):
+    original = project_plane_board.read_bytes()
+    rc, doc = _native_plane_link(capsys, project_plane_board, "--net-clearance", "FOE=1.5")
+    assert rc == 1 and "requires 1.5 mm" in doc["links"][0]["reason"]
+    assert project_plane_board.read_bytes() == original
+
+
+@native_launching
+@pytest.mark.parametrize("second_pad", [True, False])
+def test_plane_commit_rolls_back_stranded_island(plane_board, capsys, second_pad):
+    # The SIG track now crosses the entire pour. With a pad in the severed
+    # half native KiCad keeps both islands. Without it native removes that half.
+    text = plane_board.read_text().replace("(xy 106 ", "(xy 112 ").replace("(xy 124 ", "(xy 118 ")
+    text = text.replace("109.85)", "116)")
+    if second_pad:
+        text = (
+            text.rstrip()[:-1]
+            + """
+        (footprint "R" (layer "F.Cu") (at 114 114)
+          (fp_text reference "J4" (at 0 -1) (layer "F.SilkS"))
+          (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.4)
+            (layers "*.Cu" "*.Mask") (net 2 "FOE"))))
+        """
+        )
+    plane_board.write_text(text)
+    rc, doc = _native_plane_link(capsys, plane_board)
+    assert rc == 1, doc
+    link = doc["links"][0]
+    assert link["status"] == "rolled-back" and link["failed_check"] == "plane-corridor"
+    assert "stranded FOE island on In1.Cu" in link["reason"]
+    assert plane_board.read_text() == text
+
+
+@pytest.mark.parametrize(
+    "corridor",
+    [
+        "F.Cu=1,2,3,4",
+        "In1.Cu=nan,2,3,4",
+        "In1.Cu=3,2,1,4",
+        "In1.Cu=1,2,3",
+    ],
+)
+def test_invalid_plane_corridor_is_rejected(board, corridor):
+    with pytest.raises(SystemExit):
+        main(["route-link", str(board), "--link", LINK, "--plane-corridor", corridor])
+
+
+class TestCorridorPublish:
+    """Corridor commits keep the destination's mode and the input project's context."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_gate(self, monkeypatch):
+        import contextlib
+        from collections import Counter
+
+        from kicad_tools.cli import kicad_toolchain, route_link_cmd
+
+        monkeypatch.setattr(
+            kicad_toolchain, "evidence_toolchain", lambda *a, **k: contextlib.nullcontext()
+        )
+        monkeypatch.setattr(route_link_cmd, "_gate_state", lambda path, args: (Counter(), None))
+        monkeypatch.setattr(route_link_cmd, "_native_refill", PCB.load)
+        monkeypatch.setattr(
+            route_link_cmd, "_verify_corridor_candidate", lambda path, before, *a: (before, 0.0)
+        )
+
+    def _link(self, capsys, board, *extra):
+        return _run(
+            capsys,
+            str(board),
+            *extra,
+            "--link",
+            LINK,
+            "--link-layers",
+            "In1.Cu",
+            "--plane-corridor",
+            "In1.Cu=109,109.9,121,110.1",
+        )
+
+    def test_read_only_destination_is_refused_untouched(self, plane_board, capsys):
+        import os
+
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses file modes")
+        original = plane_board.read_bytes()
+        plane_board.chmod(0o444)
+        rc, _ = self._link(capsys, plane_board)
+        assert rc == 2
+        assert plane_board.read_bytes() == original
+        assert plane_board.stat().st_mode & 0o777 == 0o444
+
+    @pytest.mark.parametrize("in_place", [True, False])
+    def test_private_mode_survives_publish(self, plane_board, capsys, in_place):
+        original = plane_board.read_bytes()
+        target = plane_board
+        extra: tuple[str, ...] = ()
+        if not in_place:
+            target = plane_board.with_name("out.kicad_pcb")
+            target.write_bytes(original)
+            extra = ("-o", str(target))
+        target.chmod(0o600)
+        rc, doc = self._link(capsys, plane_board, *extra)
+        assert rc == 0 and doc["links"][0]["status"] == "committed"
+        assert target.read_bytes() != original
+        assert target.stat().st_mode & 0o777 == 0o600
+
+    def test_stage_carries_project_libraries_and_input_rules(self, tmp_path):
+        from kicad_tools.cli.route_link_cmd import _stage_project_files
+
+        src = tmp_path / "proj"
+        src.mkdir()
+        board = src / "b.kicad_pcb"
+        board.write_text("")
+        (src / "b.kicad_dru").write_text("(version 1)\n(rule a)")
+        (src / "fp-lib-table").write_text(
+            '(fp_lib_table (lib (name "P")(type "KiCad")(uri "${KIPRJMOD}/P.pretty")(options "")))'
+        )
+        private = tmp_path / "private"
+        private.mkdir()
+        staged = _stage_project_files(board, private / "b.kicad_pcb")
+        assert (private / "b.kicad_dru").read_text() == "(version 1)\n(rule a)"
+        table = (private / "fp-lib-table").read_text()
+        assert f'(uri "{src.resolve()}/P.pretty")' in table and "KIPRJMOD" not in table
+        assert len(staged) == 2
+
+    @pytest.mark.parametrize("corridor_second", [True, False])
+    def test_second_link_keeps_first_in_separate_output(self, plane_board, capsys, corridor_second):
+        text = plane_board.read_text().rstrip()[:-1]
+        for ref, x in (("R3", 110), ("R4", 120)):
+            text += f"""
+  (footprint "R" (layer "F.Cu") (at {x} 114)
+    (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS"))
+    (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.4)
+      (layers "*.Cu" "*.Mask") (net 1 "SIG")))"""
+        plane_board.write_text(text + ")\n")
+        out = plane_board.with_name("out.kicad_pcb")
+        out.write_bytes(plane_board.read_bytes())
+        second = ["--link", "SIG R3.1 R4.1"]
+        if corridor_second:
+            second += ["--link-layers", "In1.Cu", "--plane-corridor", "In1.Cu=109,113.9,121,114.1"]
+        rc, doc = self._link(capsys, plane_board, "-o", str(out), *second)
+        assert rc == 0, doc
+        assert [e["status"] for e in doc["links"]] == ["committed", "committed"]
+        ys = {round(s.start[1]) for s in PCB.load(out).segments if s.net_number == 1}
+        assert {10, 14} <= ys  # board-origin relative
+
+    def test_stage_handles_bare_uri(self, tmp_path):
+        from kicad_tools.cli.route_link_cmd import _stage_project_files
+
+        src = tmp_path / "proj"
+        src.mkdir()
+        board = src / "b.kicad_pcb"
+        board.write_text("")
+        (src / "fp-lib-table").write_text(
+            "(fp_lib_table (lib (name local)(type KiCad)(uri ${KIPRJMOD}/local.pretty)))"
+        )
+        private = tmp_path / "private"
+        private.mkdir()
+        _stage_project_files(board, private / "b.kicad_pcb")
+        table = (private / "fp-lib-table").read_text()
+        assert f'(uri "{src.resolve()}/local.pretty")' in table and "KIPRJMOD" not in table
+
+    def test_publish_stages_beside_resolved_destination(self, plane_board, capsys, monkeypatch):
+        import os
+
+        real = plane_board.parent / "elsewhere"
+        real.mkdir()
+        dest = real / "target.kicad_pcb"
+        dest.write_bytes(plane_board.read_bytes())
+        link = plane_board.with_name("out.kicad_pcb")
+        link.symlink_to(dest)
+        sibling = dest.with_name(f".publish-{dest.name}")
+        sibling.write_bytes(b"independent sibling")
+        seen = []
+        orig = os.replace
+        monkeypatch.setattr(
+            os,
+            "replace",
+            lambda a, b: (
+                seen.append(Path(a).parent) if Path(b) == dest else None,
+                orig(a, b),
+            )[1],
+        )
+        rc, doc = self._link(capsys, plane_board, "-o", str(link))
+        assert rc == 0, doc
+        assert seen and all(directory.parent == real.resolve() for directory in seen)
+        assert sibling.read_bytes() == b"independent sibling"
+        assert link.is_symlink()
+        assert dest.read_bytes() != plane_board.read_bytes()
+
+    def test_symlink_output_mounts_cover_native_boards(self, plane_board, capsys, monkeypatch):
+        from collections import Counter
+        from contextlib import contextmanager
+
+        from kicad_tools.cli import kicad_toolchain, route_link_cmd
+
+        link = plane_board.parent / "links" / "out.kicad_pcb"
+        dest = plane_board.parent / "targets" / "target.kicad_pcb"
+        source = plane_board.parent / "project" / plane_board.name
+        for path in (source, link, dest):
+            path.parent.mkdir()
+        plane_board.rename(source)
+        dest.write_bytes(source.read_bytes())
+        link.symlink_to(dest)
+
+        active_mounts = []
+        boards = []
+
+        @contextmanager
+        def toolchain(*, mounts):
+            active_mounts.extend(mounts)
+            yield
+
+        def gate(path, args):
+            boards.append(path)
+            return Counter(), None
+
+        monkeypatch.setattr(kicad_toolchain, "evidence_toolchain", toolchain)
+        monkeypatch.setattr(route_link_cmd, "_gate_state", gate)
+        rc, doc = self._link(capsys, source, "-o", str(link))
+        assert rc == 0, doc
+        assert len(set(boards)) == 2  # baseline and routed candidate
+        assert all(any(path.is_relative_to(root) for root in active_mounts) for path in boards)
+
+    def test_baseline_uses_input_rules_not_output_sidecars(self, plane_board, capsys, monkeypatch):
+        from kicad_tools.cli import route_link_cmd
+
+        plane_board.with_suffix(".kicad_dru").write_text("(version 1)\n(rule input)")
+        out = plane_board.with_name("out.kicad_pcb")
+        out.write_bytes(plane_board.read_bytes())
+        out_dru = out.with_suffix(".kicad_dru")
+        out_dru.write_text("(version 1)")
+        seen = {}
+
+        def capture(*args):
+            baseline = args[10]
+            seen["dru"] = baseline.with_suffix(".kicad_dru").read_text()
+            return None, None
+
+        monkeypatch.setattr(route_link_cmd, "_commit_links_gated", capture)
+        self._link(capsys, plane_board, "-o", str(out))
+        assert seen["dru"] == "(version 1)\n(rule input)"
+        assert out_dru.read_text() == "(version 1)"
