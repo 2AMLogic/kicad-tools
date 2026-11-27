@@ -247,3 +247,23 @@ class TestSubResolutionSliverNotWritten:
     def test_genuine_short_segment_kept(self):
         assert len(self._written([(188.98, 69.0, 189.0, 69.0, "F.Cu")])) == 1
         assert len(self._written([(188.98, 69.0, 188.99, 69.0, "F.Cu")])) == 1
+
+
+def test_plane_corridor_allows_vias_from_external_endpoints():
+    from kicad_tools.router.link_router import PlaneCorridor
+
+    layer = "In1.Cu"
+    corridor = PlaneCorridor(layer, 11, 9.8, 13, 10.2)
+    # Only the outer layers have a wall. The pour is remote from the
+    # rectangle, so even an entirely copper-free corridor requires opt-in.
+    wall = _Item(2, {l: box(11.9, 0, 12.1, 20) for l in ("F.Cu", "B.Cu")})
+    model = _model(["F.Cu", layer, "B.Cu"], [wall], {layer: [(2, box(2, 2, 5, 5))]})
+    a, b = _term("a", 10, 10), _term("b", 14, 10)
+    route = route_link(None, 1, "SIG", a, b, RULES, model=model, plane_corridor=corridor)
+    assert route is not None and len(route.vias) == 2
+    assert any(s[-1] == layer for s in route.segments)
+    assert corridor.covers_route(route)
+    # The inner-layer wall could be bypassed on the open grid, but that
+    # detour would take the track outside the authorized strip.
+    model.items.append(_Item(3, {layer: box(11.9, 9.6, 12.1, 10.4)}))
+    assert route_link(None, 1, "SIG", a, b, RULES, model=model, plane_corridor=corridor) is None

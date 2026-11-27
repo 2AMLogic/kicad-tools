@@ -14,8 +14,13 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Sequence
+import os
+import shutil
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from kicad_tools.pcb.reinforce import LEG_COPY, STRATEGY_PARALLEL, STRATEGY_WIRE
@@ -26,8 +31,400 @@ SIDECAR_SUFFIX = ".reinforcement.json"
 
 
 def sidecar_path(board: Path) -> Path:
-    """Sidecar location for a board: ``<board>.reinforcement.json``."""
+    """Find the board's wire record, including boards reached through a symlink."""
+    if board.is_symlink():
+        named = board.with_name(board.name + SIDECAR_SUFFIX)
+        if os.path.lexists(named):
+            return named  # Keep a record explicitly paired with the alias.
+        board = board.resolve()
     return board.with_name(board.name + SIDECAR_SUFFIX)
+
+
+def board_lock_path(path: Path) -> Path:
+    target = path.resolve()
+    return target.with_name(f".{target.name}.center.lock")
+
+
+def _file_version(path: Path) -> tuple[int, int, int, int, int] | None:
+    """Detect replacement, creation, removal or an in-place edit during a read."""
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+@contextmanager
+def board_stream_lock(fd: int, board: Path, *, writing: bool) -> Iterator[None]:
+    """Coordinate ordinary in-place text writes without creating a sibling in a read-only directory."""
+    from kicad_tools.core.package_publication import publication_lock
+
+    try:
+        import fcntl
+    except ImportError:  # Windows uses the same sibling reservation as PCB.save.
+        if writing:
+            with publication_lock(board_lock_path(board)):
+                yield
+        else:
+            yield
+        return
+
+    mode = fcntl.LOCK_EX if writing else fcntl.LOCK_SH
+    try:
+        fcntl.flock(fd, mode | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise ValueError(f"Another operation is publishing the input: {board}") from exc
+    try:
+        if writing and board_lock_path(board).exists():
+            raise ValueError(f"Another operation is publishing the output: {board}")
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def board_versions(board: Path):
+    record = sidecar_path(board)
+    return board.resolve(), record.resolve(), _file_version(board), _file_version(record)
+
+
+@contextmanager
+def reinforce_publication(source: Path, output: Path) -> Iterator[Callable[[], None]]:
+    """Reserve the output before reading geometry. Check a distinct input again before saving."""
+    from kicad_tools.core.package_publication import publication_lock
+
+    versions = board_versions(source)
+    # A save can replace the output symlink itself. Reserve its name as well
+    # as the physical board and either possible inventory.
+    locks = {
+        output.parent.resolve() / f".{output.name}.center.lock",
+        board_lock_path(output),
+        board_lock_path(sidecar_path(output)),
+        board_lock_path(saved_record_path(output, True)),
+    }
+    source_locks = {board_lock_path(source), board_lock_path(sidecar_path(source))}
+
+    def verify() -> None:
+        if versions != board_versions(source) or any(
+            lock.exists() for lock in source_locks - locks
+        ):
+            raise ValueError(f"PCB or reinforcement record changed while reinforcing: {source}")
+
+    with ExitStack() as stack:
+        for lock in sorted(locks):
+            stack.enter_context(publication_lock(lock))
+        # On Windows the sibling reservation also guards recordless moves.
+        # Keeping an open board handle there would block PCB.save's rename.
+        if os.name != "nt":
+            for path in {source.resolve(), output.resolve()}:
+                if path.is_file():
+                    stream = stack.enter_context(path.open("rb"))
+                    stack.enter_context(board_stream_lock(stream.fileno(), path, writing=False))
+        verify()
+        yield verify
+
+
+def edit_seed_record(input_board: Path, output_board: Path) -> Path:
+    """The inventory the PCB being saved to ``output_board`` starts from.
+
+    Through a board symlink the unsaved name resolves to the alias target's
+    record. That is the saved PCB's inventory only when the alias is the board
+    being edited. For a distinct input the saved PCB is the edited input, so it
+    starts from the input's own inventory, never the alias target's or a record
+    that happens to sit beside the alias name.
+    """
+    if output_board.is_symlink() and not _same_board(input_board, output_board):
+        return sidecar_path(input_board)
+    return sidecar_path(output_board)
+
+
+def alias_export_conflict(
+    input_board: Path, output_board: Path, will_save: bool, writes_records: bool
+) -> str | None:
+    """Why an export through a board symlink must be refused, or ``None``.
+
+    Checked before anything is written. ``output_board`` being a symlink to a
+    board other than ``input_board`` means the wire list could land in the
+    other board's record (Issue #10250):
+
+    * nothing is saved but wire records would be written: they would describe
+      a PCB that is not written and pair with the alias target;
+    * a PCB is saved and a record already sits beside the alias name with a
+      different inventory than the edited input's: the saved PCB cannot have
+      both.
+    """
+    if not output_board.is_symlink() or _same_board(input_board, output_board):
+        return None
+    if not will_save:
+        if writes_records:
+            return (
+                f"{output_board} is a symlink to a different board and nothing would be "
+                "saved, so its wire records cannot be paired with a PCB; refusing before "
+                "writing. Point -o at a plain path or at the input board."
+            )
+        return None
+    beside = output_board.with_name(output_board.name + SIDECAR_SUFFIX)
+    if not os.path.lexists(beside):
+        return None
+    seed = sidecar_path(input_board)
+    try:
+        if beside.resolve() == seed.resolve():
+            return None
+        if seed.is_file() and beside.is_file() and beside.read_bytes() == seed.read_bytes():
+            return None
+    except OSError:
+        pass
+    return (
+        f"{beside} already holds a different wire list than the input board's; saving "
+        f"through the symlink {output_board} would pair the wrong inventory with the "
+        "saved PCB. Move or remove it, or point -o at a plain path."
+    )
+
+
+def _same_board(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
+
+
+def saved_record_path(board: Path, will_save: bool) -> Path:
+    """The record that pairs with ``board`` once a save has replaced it.
+
+    A save through a board symlink replaces the alias with its own file, so
+    the wire list must sit beside that file, not beside the unchanged target.
+    """
+    if will_save and board.is_symlink():
+        return board.with_name(board.name + SIDECAR_SUFFIX)
+    return sidecar_path(board)
+
+
+def _restrict_to_creation_mode(path: Path, wanted: int) -> None:
+    """Give a just-created ``path`` the permissions of ``wanted`` it may keep.
+
+    ``path`` was created under the process umask; never widen that, so a
+    private umask still yields a private record.
+    """
+    path.chmod(wanted & (path.stat().st_mode & 0o7777))
+
+
+def carry_record(seed: Path, dest: Path, detach: bool = False) -> None:
+    """Give ``dest`` the inventory ``seed`` held.
+
+    When they are the same file this is a no-op, except with ``detach`` (the
+    board was a symlink that a save has replaced) and ``dest`` is itself a
+    symlink into the original board's inventory: it is then replaced by an
+    independent copy so edits cannot reach the original board's wire list.
+    A new file keeps the seed's permissions only as far as the creation mask
+    allows.
+    """
+    if dest == seed:
+        if detach and dest.is_symlink() and dest.is_file():
+            data = dest.read_bytes()
+            mode = dest.stat().st_mode & 0o7777
+            dest.unlink()
+            dest.write_bytes(data)
+            _restrict_to_creation_mode(dest, mode)
+        return
+    if not seed.is_file():
+        return
+    if dest.is_symlink():
+        dest.unlink()
+    elif dest.exists():
+        return  # an inventory already paired with the saved board wins
+    mode = seed.stat().st_mode & 0o7777
+    dest.write_bytes(seed.read_bytes())
+    _restrict_to_creation_mode(dest, mode)
+
+
+@dataclass(frozen=True)
+class PreparedRecordUpdate:
+    """In-memory reinforcement sidecar update ready to stage and publish."""
+
+    dest: Path
+    content: bytes | None
+    seed_mode: int | None = None
+    replace_symlink: bool = False
+    dropped: int = 0
+
+
+def _parse_wires(raw: bytes, path: Path) -> list[dict[str, Any]]:
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict) or data.get("version") != SIDECAR_VERSION:
+        raise ValueError(f"{path}: not a version {SIDECAR_VERSION} reinforcement sidecar")
+    wires = data.get("wires")
+    if not isinstance(wires, list):
+        raise ValueError(f"{path}: missing 'wires' list")
+    check_wire_records(path, wires)
+    return wires
+
+
+def prepare_record_update(
+    seed: Path,
+    dest: Path,
+    *,
+    carry: bool = False,
+    detach: bool = False,
+    drop: tuple[str, list[tuple[float, float]], list[tuple[Any, ...]]] | None = None,
+    new_wires: list[dict[str, Any]] | None = None,
+) -> PreparedRecordUpdate:
+    """Compute the final sidecar bytes in memory without touching disk.
+
+    Combines carrying/detaching ``seed`` into ``dest``, dropping cleared wire
+    records, and merging ``new_wires`` so validation errors fail before any
+    PCB or sidecar file changes.
+    """
+    source_path: Path | None = None
+    source_bytes: bytes | None = None
+    seed_mode: int | None = None
+    replace_symlink = False
+    dirty = False
+
+    if carry:
+        if dest == seed:
+            if detach and dest.is_symlink():
+                replace_symlink = True
+                if dest.is_file():
+                    source_path = dest
+                    source_bytes = dest.read_bytes()
+                    seed_mode = dest.stat().st_mode & 0o7777
+                    dirty = True
+            elif dest.is_file():
+                source_path = dest
+        elif seed.is_file():
+            if dest.is_symlink():
+                source_path = seed
+                source_bytes = seed.read_bytes()
+                seed_mode = seed.stat().st_mode & 0o7777
+                replace_symlink = True
+                dirty = True
+            elif dest.exists():
+                if dest.is_file():
+                    source_path = dest
+            else:
+                source_path = seed
+                source_bytes = seed.read_bytes()
+                seed_mode = seed.stat().st_mode & 0o7777
+                dirty = True
+        elif detach and dest.is_symlink():
+            replace_symlink = True
+        elif dest.is_file():
+            source_path = dest
+    elif dest.is_file():
+        source_path = dest
+
+    current_wires: list[dict[str, Any]] | None = None
+    content: bytes | None = None
+    dropped = 0
+
+    if drop is not None:
+        net, removed, removed_copies = drop
+        if (removed or removed_copies) and source_path is not None:
+            raw = source_bytes if source_bytes is not None else source_path.read_bytes()
+            wires = _parse_wires(raw, source_path)
+            gone = wires_with_anchors(wires, net, removed)
+            keys = set(removed_copies)
+            gone += [w for w in wires_for_net(wires, net) if is_parallel(w) and wire_key(w) in keys]
+            dropped = len(gone)
+            if dropped:
+                gone_ids = {id(w) for w in gone}
+                current_wires = sort_wires([w for w in wires if id(w) not in gone_ids])
+                content = render_sidecar(current_wires).encode("utf-8")
+                dirty = True
+            else:
+                current_wires = wires
+
+    if new_wires:
+        if current_wires is None:
+            if source_path is not None:
+                raw = source_bytes if source_bytes is not None else source_path.read_bytes()
+                current_wires = _parse_wires(raw, source_path)
+            else:
+                current_wires = []
+        merged = merge_wires(current_wires, new_wires)
+        content = render_sidecar(merged).encode("utf-8")
+        dirty = True
+
+    if dirty and content is None:
+        content = source_bytes
+
+    return PreparedRecordUpdate(
+        dest=dest,
+        content=content,
+        seed_mode=seed_mode,
+        replace_symlink=replace_symlink,
+        dropped=dropped,
+    )
+
+
+@contextmanager
+def stage_record_update(
+    plan: PreparedRecordUpdate,
+    *,
+    pcb_output: Path | None = None,
+) -> Iterator[Callable[[], None]]:
+    """Stage ``plan`` into a sibling file and publish it atomically on commit.
+
+    No target sidecar is created, modified, or unlinked before the returned
+    ``commit`` callback runs, so a failed PCB save leaves the prior PCB,
+    symlink, and wire inventory intact. If ``commit`` itself fails after a
+    PCB save to ``pcb_output``, ``pcb_output`` is restored to its pre-save
+    entry (regular file, symlink, or absent).
+    """
+    if plan.content is None:
+        yield lambda: None
+        return
+
+    write_target = (
+        plan.dest if (plan.replace_symlink or not plan.dest.is_symlink()) else plan.dest.resolve()
+    )
+    if write_target.is_dir() and not plan.replace_symlink:
+        raise IsADirectoryError(f"{write_target} is a directory")
+    replacing_regular = (
+        not plan.replace_symlink and write_target.exists() and not write_target.is_symlink()
+    )
+    if replacing_regular:
+        with write_target.open("ab"):
+            pass
+
+    with ExitStack() as stack:
+        tmpdir = Path(
+            stack.enter_context(TemporaryDirectory(prefix=".reinforce-", dir=write_target.parent))
+        )
+        candidate = tmpdir / "record"
+        with candidate.open("wb") as stream:
+            stream.write(plan.content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if replacing_regular:
+            shutil.copymode(write_target, candidate)
+        elif plan.seed_mode is not None:
+            _restrict_to_creation_mode(candidate, plan.seed_mode)
+
+        pcb_backup: Path | None = None
+        if pcb_output is not None and os.path.lexists(pcb_output):
+            if pcb_output.parent.resolve() == write_target.parent.resolve():
+                backup_dir = tmpdir
+            else:
+                backup_dir = Path(
+                    stack.enter_context(
+                        TemporaryDirectory(prefix=".reinforce-pcb-", dir=pcb_output.parent)
+                    )
+                )
+            pcb_backup = backup_dir / "original_pcb"
+            shutil.copy2(pcb_output, pcb_backup, follow_symlinks=False)
+
+        def commit() -> None:
+            try:
+                os.replace(candidate, write_target)
+            except BaseException:
+                if pcb_output is not None:
+                    if pcb_backup is not None and os.path.lexists(pcb_backup):
+                        os.replace(pcb_backup, pcb_output)
+                    else:
+                        pcb_output.unlink(missing_ok=True)
+                raise
+
+        yield commit
 
 
 def _pt(x: float, y: float) -> dict[str, float]:
@@ -236,6 +633,51 @@ def load_wires(path: Path) -> list[dict[str, Any]]:
     return wires
 
 
+def _shift_pt(pt: dict[str, float], dx_mm: float, dy_mm: float) -> dict[str, float]:
+    """A copy of point ``pt`` moved by (dx, dy), rounded to the sidecar precision."""
+    return _pt(pt["x"] + dx_mm, pt["y"] + dy_mm)
+
+
+def translate_sidecar_wires(
+    wires: list[dict[str, Any]], dx_mm: float, dy_mm: float
+) -> list[dict[str, Any]]:
+    """Wire records rigidly translated by (``dx_mm``, ``dy_mm``) (Issue #10250).
+
+    Only the sheet-absolute coordinate points move: ``leg_start``,
+    ``leg_end``, ``anchors`` and, on parallel-copy records, ``polyline``,
+    ``copy_segments[].start/.end`` and ``stitch_vias``. Lengths, gauges, nets
+    and every other field are translation-invariant and copied unchanged.
+    The input is not modified; the result is re-sorted like every sidecar
+    write.
+    """
+    out: list[dict[str, Any]] = []
+    for wire in wires:
+        moved = dict(wire)
+        for key in ("leg_start", "leg_end"):
+            if isinstance(wire.get(key), dict):
+                moved[key] = _shift_pt(wire[key], dx_mm, dy_mm)
+        for key in ("anchors", "polyline", "stitch_vias"):
+            if isinstance(wire.get(key), list):
+                moved[key] = [_shift_pt(p, dx_mm, dy_mm) for p in wire[key]]
+        if isinstance(wire.get("copy_segments"), list):
+            moved["copy_segments"] = [
+                {
+                    **seg,
+                    "start": _shift_pt(seg["start"], dx_mm, dy_mm),
+                    "end": _shift_pt(seg["end"], dx_mm, dy_mm),
+                }
+                for seg in wire["copy_segments"]
+            ]
+        out.append(moved)
+    return sort_wires(out)
+
+
+def render_sidecar(wires: list[dict[str, Any]]) -> str:
+    """The deterministic sidecar file text for ``wires``."""
+    text = json.dumps({"version": SIDECAR_VERSION, "wires": wires}, indent=2, sort_keys=True)
+    return text + "\n"
+
+
 def load_wires_if_present(board: Path) -> list[dict[str, Any]]:
     """Wires of the board's sidecar; empty when absent or unreadable (#8746).
 
@@ -254,14 +696,14 @@ def load_wires_if_present(board: Path) -> list[dict[str, Any]]:
         return []
 
 
-def write_sidecar(board: Path, new_wires: list[dict[str, Any]]) -> Path:
+def write_sidecar(board: Path, new_wires: list[dict[str, Any]], record: Path | None = None) -> Path:
     """Merge ``new_wires`` into the board's sidecar and write it deterministically.
 
     An existing sidecar is read with :func:`load_wire_records`: one that holds
     an entry which is not a JSON object raises ``ValueError`` and is left as
     it is (Issue #10401), rather than being rewritten without the entry.
     """
-    path = sidecar_path(board)
+    path = record if record is not None else sidecar_path(board)
     existing = load_wire_records(path) if path.is_file() else []
     wires = merge_wires(existing, new_wires)
     text = json.dumps({"version": SIDECAR_VERSION, "wires": wires}, indent=2, sort_keys=True)

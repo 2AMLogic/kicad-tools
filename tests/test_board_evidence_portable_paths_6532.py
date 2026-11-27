@@ -269,11 +269,17 @@ def test_readiness_rewrites_portable_kct_check_path_board_relative(
         return run
 
     fake.kct_check = kct_check
+    monkeypatch.setattr(
+        "kicad_tools.cli.silk_default_pass.run_default_silk_pass",
+        lambda pcb, **kwargs: {"applied": True, "board": str(pcb)},
+    )
     monkeypatch.chdir(board.parent if cwd_kind == "board_parent" else tmp_path_factory.mktemp("x"))
     rc = readiness_cmd.main([str(board), "--mfr", "jlcpcb", "--generate"], engines=fake.bundle())
     assert rc == 0
     evidence = json.loads((board / "output/readiness/kct-check.json").read_text())
     assert evidence["file"] == "output/demo_routed.kicad_pcb"
+    receipt = json.loads((board / "output/readiness.json").read_text())
+    assert receipt["metrics"]["silk_fix"]["board"] == evidence["file"]
 
 
 # ---------------------------------------------------------------------------

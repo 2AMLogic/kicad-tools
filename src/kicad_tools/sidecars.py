@@ -50,7 +50,8 @@ Accordingly this module imports **stdlib only**.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 __all__ = [
@@ -198,28 +199,42 @@ def copy_project_sidecars(src_pcb: Path | str, dst_pcb: Path | str) -> list[Path
 
     Returns the destination paths that were written.
     """
-    import shutil
-    import sys
-
     src, dst = Path(src_pcb), Path(dst_pcb)
     if src.resolve().with_suffix("") == dst.resolve().with_suffix(""):
         return []
+    with carry_project_rules(src, dst) as written:
+        return written
+
+
+@contextmanager
+def carry_project_rules(src: Path, dst: Path) -> Iterator[list[Path]]:
+    """Carry rules to the saved board name, undoing new copies if publication fails."""
+    import shutil
+    import sys
+
     written: list[Path] = []
-    for suffix in PROJECT_SIDECAR_SUFFIXES:
-        s, d = src.with_suffix(suffix), dst.with_suffix(suffix)
-        if not s.is_file():
-            continue
-        if d.exists() or d.is_symlink():
-            if d.is_file() and d.read_bytes() != s.read_bytes():
-                print(
-                    f"note: kept existing {d} (differs from {s}); not overwritten",
-                    file=sys.stderr,
-                )
-            continue
-        d.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(s, d)
-        written.append(d)
-    return written
+    if src.parent.resolve() / src.stem == dst.parent.resolve() / dst.stem:
+        yield written
+        return
+    with ExitStack() as rollback:
+        for suffix in PROJECT_SIDECAR_SUFFIXES:
+            s, d = src.with_suffix(suffix), dst.with_suffix(suffix)
+            if not s.is_file():
+                continue
+            if d.exists() or d.is_symlink():
+                if d.is_file() and d.read_bytes() != s.read_bytes():
+                    print(
+                        f"note: kept existing {d} (differs from {s}); not overwritten",
+                        file=sys.stderr,
+                    )
+                continue
+            d.parent.mkdir(parents=True, exist_ok=True)
+            with s.open("rb") as source, d.open("xb") as output:
+                rollback.callback(d.unlink, missing_ok=True)
+                shutil.copyfileobj(source, output)
+            written.append(d)
+        yield written
+        rollback.pop_all()
 
 
 class MissingProjectRulesError(ValueError):
