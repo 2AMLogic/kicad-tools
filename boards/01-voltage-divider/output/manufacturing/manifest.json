@@ -23,8 +23,8 @@
       },
       "optimize_traces": {
         "copper_oz": 1.0,
-        "corners_after": 5,
-        "corners_before": 5,
+        "corners_after": 4,
+        "corners_before": 4,
         "layers": 2,
         "segments_after": 9,
         "segments_before": 9,
@@ -43,15 +43,15 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "9e736d66dec3cd22b7126a2b582234235dba15a1621db99862b0696204f2d57c",
-      "size": 2212
+      "sha256": "ecc4ceae5e06c5728c06053648a9c631535bb4043b097d32ed9dcb8287c764bc",
+      "size": 2420
     },
     "assembly-back.pdf": {
-      "sha256": "1c801bf620d1e96256a24e29613121d2956cbbc87180788bd9d3ae3868ce0e97",
+      "sha256": "83b951fbe28c9f33bf071517cfc55cf751b4df54a434be67e0c7487b2b2444f9",
       "size": 8804
     },
     "assembly-front.pdf": {
-      "sha256": "43301204060dbcb20b8a14275c548cd2255a4f255a38ba1c5bdb3636f0b10b12",
+      "sha256": "1c279385d6a7c3e1776eee5601497fb9c444fd88a843174ce94c8fe048a4f88f",
       "size": 18775
     },
     "bom_jlcpcb.csv": {
@@ -59,8 +59,8 @@
       "size": 175
     },
     "check-report.json": {
-      "sha256": "203f0b14982e87ebc5978dfd6cb831738bd8f2d3b720d241b8cf8df354a5a10d",
-      "size": 116216
+      "sha256": "5a5562690534425ee1210e48b09690004b81d137ad7a83b87fb6abec13d539ce",
+      "size": 116944
     },
     "cpl_jlcpcb.csv": {
       "sha256": "847457252c291c9086804931f5016de06f78dc1aa1020d4a0068bc98ddd89c36",
@@ -99,8 +99,8 @@
       "size": 118129
     },
     "kicad_project.zip": {
-      "sha256": "ffcd5532e27916285632d2751ea29a6e2e6b80bd209e2ef80c35e556a727222e",
-      "size": 15828
+      "sha256": "1c47363d5dacdf776b6bf0e11fed89209584abd0cd1dc3131522d3913cc46657",
+      "size": 16876
     },
     "native-drc.json": {
       "sha256": "c2f690f878ac5005ac87651f4abbbf73331371de3adc1a8ac4257388415256a9",
@@ -111,19 +111,19 @@
       "size": 13488
     },
     "report.md": {
-      "sha256": "224d474d3de57a9e91381970303e32e144187f0944a160adf9a6a88247397768",
+      "sha256": "bf599350c4d789b2dc9e4f6f2c00d3554aae89a0a63b254f0712edfea37c6019",
       "size": 2464
     },
     "report.pdf": {
-      "sha256": "09eaef7c0646509948966b7972318a75f19b578fe41fb2165aa4b9f1f9a45f81",
-      "size": 903813
+      "sha256": "0216430676d4f88f0606e828e2cb8420505978a3df252363e84c4f178e439e86",
+      "size": 903712
     },
     "schematic.pdf": {
-      "sha256": "ed9f515150d83a921b65c55b9d439e0c2e792f8541a5811cc902ed20ab12f791",
+      "sha256": "71fc8be3238eec96820d5f8cd666990d4cc511d10ca2aa41b8057cd4c01d075e",
       "size": 47852
     }
   },
-  "generated_at": "2026-11-27T01:36:15Z",
+  "generated_at": "2026-11-27T19:00:00+00:00",
   "kicad_tools_version": "0.29.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -197,7 +197,8 @@
             "pad": "1",
             "reason": "no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ",
             "reference": "J2",
-            "status": "unassessed"
+            "status": "unassessed",
+            "wire": null
           },
           {
             "hole": {
@@ -209,7 +210,8 @@
             "pad": "2",
             "reason": "no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ",
             "reference": "J2",
-            "status": "unassessed"
+            "status": "unassessed",
+            "wire": null
           },
           {
             "hole": {
@@ -221,7 +223,8 @@
             "pad": "1",
             "reason": "no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ",
             "reference": "J1",
-            "status": "unassessed"
+            "status": "unassessed",
+            "wire": null
           },
           {
             "hole": {
@@ -233,7 +236,8 @@
             "pad": "2",
             "reason": "no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ",
             "reference": "J1",
-            "status": "unassessed"
+            "status": "unassessed",
+            "wire": null
           }
         ],
         "summary": {
@@ -243,12 +247,107 @@
           "pads": 4,
           "tolerance_unassessed": 0,
           "unassessed": 4
-        }
+        },
+        "wire_terminations_not_applied": []
       },
       "details": "J1 pad 1 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ\nJ1 pad 2 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ\nJ2 pad 1 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ\nJ2 pad 2 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ\nAssessment covers centred geometric fit only (not lead pitch or placement tolerances).",
-      "message": "Through-hole lead fit unverified: 4 pad(s) unassessed (no verified lead dimensions or unsupported geometry); no failures",
+      "message": "Through-hole lead fit unverified: 4 pad(s) unassessed (no verified lead or prepared wire dimensions, or unsupported geometry); no failures",
       "name": "assembly_lead_fit",
       "status": "WARN"
+    },
+    {
+      "data": {
+        "components": [
+          {
+            "expected": null,
+            "footprint": "Resistor_SMD:R_0805_2012Metric",
+            "measured": {
+              "outer_span_mm": 3.0,
+              "pads": [
+                {
+                  "depth_mm": 1.0,
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "width_mm": 1.3
+                },
+                {
+                  "depth_mm": 1.0,
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0
+            },
+            "mismatched_fields": [],
+            "mpn": "0805W8F1002T5E",
+            "reason": "no verified SMD land pattern declared for MPN 0805W8F1002T5E",
+            "reference": "R1",
+            "source": null,
+            "status": "unassessed"
+          },
+          {
+            "expected": null,
+            "footprint": "Resistor_SMD:R_0805_2012Metric",
+            "measured": {
+              "outer_span_mm": 3.0,
+              "pads": [
+                {
+                  "depth_mm": 1.0,
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "width_mm": 1.3
+                },
+                {
+                  "depth_mm": 1.0,
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0
+            },
+            "mismatched_fields": [],
+            "mpn": "0805W8F1002T5E",
+            "reason": "no verified SMD land pattern declared for MPN 0805W8F1002T5E",
+            "reference": "R2",
+            "source": null,
+            "status": "unassessed"
+          }
+        ],
+        "summary": {
+          "components": 2,
+          "failed": 0,
+          "passed": 0,
+          "unassessed": 2
+        },
+        "tolerance_mm": 0.001
+      },
+      "details": "R1 [0805W8F1002T5E]: unassessed: no verified SMD land pattern declared for MPN 0805W8F1002T5E (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nR2 [0805W8F1002T5E]: unassessed: no verified SMD land pattern declared for MPN 0805W8F1002T5E (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nDimensional comparison tolerance: +/-0.001 mm (two-terminal SMD copper pads; placement rotation and mirroring undone).",
+      "message": "SMD land pattern unverified: 2 two-terminal SMD component(s) unassessed (missing MPN, source, or usable geometry); no failures",
+      "name": "assembly_smd_land_pattern",
+      "status": "WARN"
+    },
+    {
+      "data": {
+        "diameters": [],
+        "invalid_declarations": [],
+        "pitch": [],
+        "summary": {
+          "failed": 0,
+          "finished_hole_tolerance_mm": null,
+          "finished_hole_tolerance_source": null,
+          "finished_hole_tolerance_upper_mm": null,
+          "holes": 0,
+          "invalid_declarations": 0,
+          "order_unassessed": 0,
+          "pitch_pairs": 0,
+          "unassessed": 0
+        }
+      },
+      "message": "No placed references with a mounting-hole declaration; mounting-hole fit not applicable",
+      "name": "assembly_mounting_hole_fit",
+      "status": "OK"
     },
     {
       "message": "No usable stackup copper to reconcile; profile default copper applies",
@@ -279,50 +378,30 @@
       "status": "OK"
     },
     {
-      "message": "4 of 4 assigned item(s) verified against offline catalog and parts cache; no LCSC value/package mismatches",
+      "details": "unverified: J1 -> C7501260, R1 -> C17414, R2 -> C17414, J2 -> C7501260",
+      "message": "0 of 4 assigned item(s) verified (no source); 4 unverifiable (not in parts cache or offline catalog)",
       "name": "bom_lcsc_values",
-      "status": "OK"
+      "status": "WARN"
     },
     {
       "data": {
         "inventory_covered": [],
         "order_boards": 5,
-        "parts": [
-          {
-            "age_days": 0,
-            "lcsc": "C17414",
-            "per_board": 2,
-            "refs": [
-              "R1",
-              "R2"
-            ],
-            "source": "live",
-            "stock": 43570611,
-            "verified": true
-          },
-          {
-            "age_days": null,
-            "lcsc": "C7501260",
-            "per_board": 2,
-            "refs": [
-              "J1",
-              "J2"
-            ],
-            "source": "offline_catalog",
-            "stock": 27339,
-            "verified": false
-          }
-        ],
+        "parts": [],
         "sources": {
-          "offline_catalog": "hit",
-          "parts_cache": "hit"
+          "offline_catalog": "missing",
+          "parts_cache": "miss"
         },
         "strict": false,
-        "unresolved": []
+        "unresolved": [
+          "C17414",
+          "C7501260"
+        ]
       },
-      "message": "2 LCSC part(s) have recorded stock for 5 board(s)",
+      "details": "C17414, C7501260",
+      "message": "Stock not verified: 2 assigned LCSC number(s) found in neither the parts cache nor the offline catalog; parts cache searched, no matching row; offline catalog not available on the generating host (no catalog file)",
       "name": "bom_lcsc_stock",
-      "status": "OK"
+      "status": "WARN"
     },
     {
       "message": "BOM and PCB references match (4 components)",
