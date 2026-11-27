@@ -722,6 +722,39 @@ def test_anchor_opening_smaller_than_its_copper_is_still_registered(tmp_path: Pa
         assert opening(report, "PGND_WIRE", kind, face, anchor)["status"] == "complete"
 
 
+def test_second_opening_on_an_anchor_keeps_it_registered(tmp_path: Path):
+    """A second, off-centre mask opening reaching the anchor leaves it registered."""
+    mask = mask_back()
+    mask.region([(9.0, 9.0), (21.0, 9.0), (21.0, 11.0), (9.0, 11.0)])
+    path = write_archive(tmp_path / "gerbers.zip", members({"B.Mask": mask}))
+    report = measure_reinforcement_clearance(path, [wire()]).to_dict()
+
+    back1 = opening(report, "PGND_WIRE", "anchor", "B", 1)
+    assert back1["status"] == "complete", back1["reason"]
+    assert report["coverage"] == "complete"
+    assert back1["all_copper"]["distance_mm"] == pytest.approx(0.7, abs=1e-4)
+    assert back1["all_copper"]["net"] == "SCAP_POS"
+    assert back1["exposed"]["distance_mm"] == pytest.approx(3.2, abs=1e-4)
+    assert (back1["exposed"]["net"], back1["exposed"]["pad"]) == ("PGOOD", "J3/1")
+    front1 = opening(report, "PGND_WIRE", "anchor", "F", 1)
+    assert front1["all_copper"]["distance_mm"] == pytest.approx(0.6, abs=1e-4)
+
+
+def test_second_opening_does_not_register_a_shifted_mask(tmp_path: Path):
+    """A second opening never stands in for a concentric one."""
+    mask = mask_back(shift_x=0.4)
+    mask.region([(9.0, 9.0), (21.0, 9.0), (21.0, 11.0), (9.0, 11.0)])
+    path = write_archive(tmp_path / "gerbers.zip", members({"B.Mask": mask}))
+    report = measure_reinforcement_clearance(path, [wire()]).to_dict()
+
+    assert report["coverage"] == "incomplete"
+    for kind, anchor in (("anchor", 1), ("anchor", 2), ("span", None)):
+        back = opening(report, "PGND_WIRE", kind, "B", anchor)
+        assert back["reason"] == "unverified_registration"
+        assert back["all_copper"]["distance_mm"] is None
+    assert opening(report, "PGND_WIRE", "anchor", "F", 1)["status"] == "complete"
+
+
 @pytest.mark.parametrize("origin", [(100.0, 50.0), (0.4, 0.0)])
 def test_mismatched_plot_origin_is_unverified(archive, origin):
     report = measure_reinforcement_clearance(archive, [wire()], plot_origin_mm=origin).to_dict()

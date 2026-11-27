@@ -390,7 +390,11 @@ def test_kicad_named_boards_keep_byte_identical_sidecars(tmp_path, capsys, board
         return [line for line in text.splitlines() if b"isCoupledDiffPair" in line]
 
     committed = router_rules((src / f"{stem}.kicad_dru").read_bytes())
-    assert committed and set(router_rules(after[1])) <= set(committed)
+    regenerated = router_rules(after[1])
+    if regenerated:
+        assert committed and set(regenerated) <= set(committed)
+    else:
+        assert not committed, "router-class rules are committed that a rewrite no longer emits"
 
 
 # ------------------------------------------------- idempotent and stale-safe
