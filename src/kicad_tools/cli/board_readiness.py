@@ -224,7 +224,8 @@ def readiness_input_hash(rel_name: str, raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _input_hash_matches(name: str, raw: bytes, expected: object) -> bool:
+def readiness_input_hash_matches(name: str, raw: bytes, expected: object) -> bool:
+    """Check the recorded input digest, including older raw manufacturing-manifest hashes."""
     if readiness_input_hash(name, raw) == expected:
         return True
     # Receipts written before #8580 pinned the raw manifest bytes; they stay
@@ -308,7 +309,7 @@ def read_readiness(board_dir: Path, *, layout: ReadinessLayout | None = None) ->
             target = (root / path).resolve()
             if not target.is_relative_to(root):
                 raise ValueError("input path leaves board directory")
-            if not _input_hash_matches(name, target.read_bytes(), expected):
+            if not readiness_input_hash_matches(name, target.read_bytes(), expected):
                 raise ValueError(f"Evidence is stale: {name} changed")
         external = data.get("external_inputs")
         if external is not None:

@@ -40,6 +40,9 @@ class HandoffEngines(FakeEngines):
         (output_dir / f"bom_{mfr}.csv").write_text(
             "Comment,Designator,Footprint,LCSC Part #\n1k,R1,Package,C17630\n"
         )
+        render_dir = output_dir / "renders"
+        render_dir.mkdir(exist_ok=True)
+        (render_dir / "pcb-front.svg").write_text("<svg/>")
         return result
 
 
@@ -178,10 +181,30 @@ def test_relocated_declared_release_requires_its_declaration(project, location, 
 
 @pytest.mark.parametrize("location", ["readiness.json", "readiness-verification/readiness.json"])
 def test_release_signoff_and_dry_run_use_relocated_bundle(project, location, monkeypatch):
+    from kicad_tools.cli import main as kct
+
     pcb = project / "kicad/board.kicad_pcb"
     output = project / "fabrication"
     bundle = output / "manufacturing"
-    sign_off_bundle(bundle, pcb, "local test", readiness=output / location)
+    receipt = output / location
+    inputs = json.loads(receipt.read_bytes())["inputs"]
+    assert "fabrication/manufacturing/renders/pcb-front.svg" not in inputs
+    assert "fabrication/manufacturing/manifest.json" in inputs
+    assert (
+        kct(
+            [
+                "tapeout-sign-off",
+                str(bundle),
+                "--board",
+                str(pcb),
+                "--readiness",
+                str(receipt),
+                "--reviewer",
+                "local test",
+            ]
+        )
+        == 0
+    )
     assert read_readiness(pcb)["status"] == "ready"
     _no_browser(monkeypatch)
     _stock(monkeypatch, {"C17630": 100})
