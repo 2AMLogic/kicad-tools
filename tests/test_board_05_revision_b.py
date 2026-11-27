@@ -254,6 +254,21 @@ def test_package_checks_42_placements_with_board_only_fiducials(tmp_path, hardwa
         package.verify_placements(routed, [*refs, "U2"])
 
 
+def test_reissued_reports_identify_the_routed_board_revision():
+    import pdfplumber
+    import yaml
+
+    output = SOURCE.parent / "output"
+    revision = PCB.load(output / "bldc_controller_routed.kicad_pcb").revision
+    assert revision
+    with zipfile.ZipFile(output / "manufacturing.zip") as bundle:
+        front_matter = bundle.read("report.md").decode().split("---", 2)[1]
+        date = yaml.safe_load(front_matter)["date"]
+        assert date.partition(" | ")[0] == f"Rev {revision}"
+        with pdfplumber.open(io.BytesIO(bundle.read("report.pdf"))) as pdf:
+            assert date in (pdf.pages[0].extract_text() or "").splitlines()
+
+
 def test_reissued_editable_project_preserves_motor_width_rules():
     output = SOURCE.parent / "output"
     with zipfile.ZipFile(output / "manufacturing.zip") as bundle:
