@@ -583,6 +583,7 @@ def test_conditional_exemption_in_check_cleanup_and_fill(
 def test_unresolved_clearance_is_advisory_only(tmp_path, gap):
     from kicad_tools.optim.pour_slot_cleanup import cleanup_pour_slots
     from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+    from kicad_tools.validate.copper_refs import board_origin
     from kicad_tools.validate.rules.pour_slot import PourSlotRule
 
     pcb = _control_p(tmp_path, gap=gap)
@@ -597,7 +598,7 @@ def test_unresolved_clearance_is_advisory_only(tmp_path, gap):
     rules = BoardClearanceRules.from_board(board)
     rule = PourSlotRule(rules)
     (pair,) = rule.iter_pairs(pcb)
-    finding = rule._violation(pair)
+    finding = rule._violation(pair, board_origin(pcb))
     assert "possible" in finding.message.lower()
     assert "Long" in finding.message and finding.required_value is None
     before = [(s.start, s.end, s.width) for s in pcb.segments]
