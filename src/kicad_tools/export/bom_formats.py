@@ -482,7 +482,11 @@ def apply_existing_lcsc_assignments(
             parts_cache, lcsc, item.value, item.reference, footprint=item.footprint
         )
         part = parts_cache.get(lcsc, ignore_expiry=True) if parts_cache else None
-        problem = mismatch.describe() if mismatch else sourcing_problem(item, part)
+        problem = (
+            mismatch.describe()
+            if mismatch
+            else sourcing_problem(item, part, require_evidence=parts_cache is not None)
+        )
         if problem:
             rejected.add(sourcing_key)
             logger.warning(

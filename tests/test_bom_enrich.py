@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from kicad_tools.export.bom_enrich import EnrichmentReport, enrich_bom_lcsc
 from kicad_tools.parts.cache import PartsCache
 from kicad_tools.schema.bom import BOMItem
@@ -43,6 +45,20 @@ def _make_suggester_mock(mock_instance: MagicMock) -> None:
     mock_client = MagicMock()
     mock_client.cache = None
     mock_instance._get_client.return_value = mock_client
+
+
+def _put_resistor_part(cache: PartsCache, lcsc: str = "C25744", package: str = "0402") -> None:
+    """Seed the catalogue record that positively establishes a chip resistor's package."""
+    from kicad_tools.parts.models import Part
+
+    cache.put(
+        Part(
+            lcsc_part=lcsc,
+            mfr_part="RC0402FR-0710KL",
+            description=f"10kΩ ±1% 62.5mW {package}",
+            package=package,
+        )
+    )
 
 
 def _mock_suggestion(lcsc_part: str, is_basic: bool = True, confidence: float = 0.8):
@@ -589,6 +605,7 @@ class TestEnrichBomLcscCacheFallback:
         # Create a real PartsCache with pre-populated enrichment matches
         with tempfile.TemporaryDirectory() as tmp:
             cache = PartsCache(db_path=Path(tmp) / "test.db")
+            _put_resistor_part(cache)
             cache.put_enrichment_match(
                 "10k",
                 "Resistor_SMD:R_0402_1005Metric",
@@ -637,6 +654,7 @@ class TestEnrichBomLcscCacheFallback:
         with tempfile.TemporaryDirectory() as tmp:
             cache = PartsCache(db_path=Path(tmp) / "test.db")
             # Only cache the resistor, not the capacitor
+            _put_resistor_part(cache)
             cache.put_enrichment_match(
                 "10k",
                 "Resistor_SMD:R_0402_1005Metric",
@@ -699,6 +717,7 @@ class TestEnrichBomLcscCacheFallback:
         with tempfile.TemporaryDirectory() as tmp:
             # Create cache with very short TTL so entries expire immediately
             cache = PartsCache(db_path=Path(tmp) / "test.db", ttl_days=0)
+            _put_resistor_part(cache)
             cache.put_enrichment_match(
                 "10k",
                 "Resistor_SMD:R_0402_1005Metric",
@@ -764,6 +783,7 @@ class TestEnrichBomLcscDeterminism:
 
     def _seed_cache(self, cache: PartsCache) -> None:
         """Populate the enrichment cache with a known set of matches."""
+        _put_resistor_part(cache)
         cache.put_enrichment_match(
             "10k",
             "Resistor_SMD:R_0402_1005Metric",
@@ -815,6 +835,11 @@ class TestEnrichBomLcscDeterminism:
 
             # @dataclass generates field-by-field __eq__, so this asserts
             # same entries, sources, lcsc_part values, confidences, order.
+            # ``inventory.read_at`` stamps the wall-clock read of the seeded
+            # catalogue record; every other field must be identical.
+            for report in (report1, report2):
+                for entry in report.entries:
+                    entry.inventory.pop("read_at", None)
             assert report1.entries == report2.entries
             assert report1 == report2
 
@@ -1183,6 +1208,16 @@ def test_cached_guess_needs_evidence_for_explicit_tolerance(MockSuggester, tmp_p
     from kicad_tools.parts.lcsc import LCSCForbiddenError
 
     cache = PartsCache(db_path=tmp_path / "parts.db")
+    from kicad_tools.parts.models import Part
+
+    cache.put(
+        Part(
+            lcsc_part="C125845",
+            mfr_part="RC1206FR-073K3L",
+            description="3.3kΩ ±1% 1206",
+            package="1206",
+        )
+    )
     cache.put_enrichment_match("3.3k 0.1%", "R_1206", "C125845", confidence=0.9, part_type="Ext")
     mock = MockSuggester.return_value
     _make_suggester_mock(mock)
@@ -1240,3 +1275,161 @@ def test_previous_csv_checks_explicit_rating_properties_and_melf_body(tmp_path):
     merged, refs = apply_existing_lcsc_assignments([r1, r2, r5], existing, parts_cache=cache)
     assert (merged, refs) == (1, {"R2"})
     assert r2.lcsc == "C17902" and not r1.lcsc and not r5.lcsc
+
+
+# --- Review round 3 (#10424): per-receiver acceptance, positive evidence, ratings ---
+
+_CHIP_1206 = "Resistor_SMD:R_1206_3216Metric"
+
+
+def _precision_item(ref: str):
+    item = _make_item(ref, "10k", _CHIP_1206)
+    item.properties = {"Tolerance": "0.1%", "Power": "250 mW"}
+    return item
+
+
+def _plain_1206_part(lcsc: str = "C17902", **overrides):
+    from kicad_tools.parts.models import Part
+
+    fields = dict(
+        lcsc_part=lcsc,
+        mfr_part="1206W4F1002T5E",
+        description="10kΩ ±1% 125mW 1206",
+        package="1206",
+    )
+    fields.update(overrides)
+    return Part(**fields)
+
+
+def _suggestion_for(part):
+    from kicad_tools.cost.suggest import PartSuggestion, SuggestedPart
+
+    best = SuggestedPart(
+        lcsc_part=part.lcsc_part,
+        mfr_part=part.mfr_part,
+        description=part.description,
+        package=part.package,
+        stock=5000,
+        is_basic=True,
+        is_preferred=False,
+        unit_price=0.001,
+        confidence=0.9,
+        tolerance=part.tolerance,
+        power_rating=part.power_rating,
+    )
+    return PartSuggestion(
+        reference="R1",
+        value="10k",
+        footprint=_CHIP_1206,
+        package="1206",
+        existing_lcsc=None,
+        suggestions=[best],
+        best_suggestion=best,
+    )
+
+
+@pytest.mark.parametrize("precision_first", [True, False])
+@patch("kicad_tools.export.bom_enrich.PartSuggester")
+def test_search_checks_each_receiver_in_both_orders(MockSuggester, precision_first, tmp_path):
+    cache = PartsCache(db_path=tmp_path / "parts.db")
+    mock = MockSuggester.return_value
+    _make_suggester_mock(mock)
+    mock._get_client.return_value.cache = cache
+    mock.suggest_for_component.return_value = _suggestion_for(_plain_1206_part())
+    r1, r2 = _make_item("R1", "10k", _CHIP_1206), _precision_item("R2")
+    report = enrich_bom_lcsc([r2, r1] if precision_first else [r1, r2])
+    assert r1.lcsc == "C17902" and not r2.lcsc
+    assert any(e.references == ["R2"] and e.source == "unmatched" for e in report.entries)
+    assert cache.get_enrichment_match("10k", _CHIP_1206)["lcsc_part"] == "C17902"
+
+
+@pytest.mark.parametrize("precision_first", [True, False])
+@patch("kicad_tools.export.bom_enrich.PartSuggester")
+def test_cache_fallback_checks_each_receiver_in_both_orders(
+    MockSuggester, precision_first, tmp_path
+):
+    from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+    cache = PartsCache(db_path=tmp_path / "parts.db")
+    cache.put(_plain_1206_part())
+    cache.put_enrichment_match("10k", _CHIP_1206, "C17902", confidence=0.9, part_type="Basic")
+    mock = MockSuggester.return_value
+    _make_suggester_mock(mock)
+    mock._get_client.return_value.cache = cache
+    mock.suggest_for_component.side_effect = LCSCForbiddenError("fixture")
+    r1, r2 = _make_item("R1", "10k", _CHIP_1206), _precision_item("R2")
+    enrich_bom_lcsc([r2, r1] if precision_first else [r1, r2])
+    assert r1.lcsc == "C17902" and not r2.lcsc
+    assert cache.get_enrichment_match("10k", _CHIP_1206, ignore_expiry=True) is not None
+
+
+@pytest.mark.parametrize("precision_first", [True, False])
+@patch("kicad_tools.export.bom_enrich.PartSuggester")
+def test_explicit_code_does_not_reach_incompatible_sibling(
+    MockSuggester, precision_first, tmp_path
+):
+    cache = PartsCache(db_path=tmp_path / "parts.db")
+    cache.put(_plain_1206_part())
+    mock = MockSuggester.return_value
+    _make_suggester_mock(mock)
+    mock._get_client.return_value.cache = cache
+    r1, r2 = _make_item("R1", "10k", _CHIP_1206), _precision_item("R2")
+    r1.lcsc = "C17902"
+    enrich_bom_lcsc([r2, r1] if precision_first else [r1, r2])
+    assert r1.lcsc == "C17902" and not r2.lcsc
+
+
+@pytest.mark.parametrize("precision_first", [True, False])
+def test_previous_csv_checks_each_receiver_in_both_orders(precision_first, tmp_path):
+    from kicad_tools.export.bom_formats import apply_existing_lcsc_assignments
+
+    cache = PartsCache(db_path=tmp_path / "parts.db")
+    cache.put(_plain_1206_part())
+    r1, r2 = _make_item("R1", "10k", _CHIP_1206), _precision_item("R2")
+    apply_existing_lcsc_assignments(
+        [r2, r1] if precision_first else [r1, r2],
+        {("10k", _CHIP_1206): "C17902"},
+        parts_cache=cache,
+    )
+    assert r1.lcsc == "C17902" and not r2.lcsc
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"package": "Axial", "description": "10kΩ ±0.1% 250mW"},
+        {"package": "", "description": "10kΩ ±0.1% 250mW", "mfr_part": "ABC"},
+    ],
+)
+@patch("kicad_tools.export.bom_enrich.PartSuggester")
+def test_chip_package_needs_positive_evidence(MockSuggester, overrides, tmp_path):
+    from kicad_tools.export.bom_formats import apply_existing_lcsc_assignments
+
+    part = _plain_1206_part(tolerance="0.1%", power_rating="250 mW", **overrides)
+    cache = PartsCache(db_path=tmp_path / "parts.db")
+    cache.put(part)
+    mock = MockSuggester.return_value
+    _make_suggester_mock(mock)
+    mock._get_client.return_value.cache = cache
+    mock.suggest_for_component.return_value = _suggestion_for(part)
+    item = _make_item("R1", "10k", _CHIP_1206)
+    enrich_bom_lcsc([item])
+    assert not item.lcsc
+    csv_item = _make_item("R1", "10k", _CHIP_1206)
+    apply_existing_lcsc_assignments([csv_item], {("10k", _CHIP_1206): "C17902"}, parts_cache=cache)
+    assert not csv_item.lcsc
+    # A cached mapping with no catalogue record at all is not positive evidence either.
+    empty = PartsCache(db_path=tmp_path / "empty.db")
+    bare = _make_item("R1", "10k", _CHIP_1206)
+    apply_existing_lcsc_assignments([bare], {("10k", _CHIP_1206): "C17902"}, parts_cache=empty)
+    assert not bare.lcsc
+
+
+def test_ratings_come_from_the_catalogue_record():
+    from kicad_tools.export.lcsc_value_check import sourcing_problem
+
+    item = _precision_item("R2")
+    pulse = _plain_1206_part(description="10kΩ ±0.1% pulse power 1 W, rated power 125 mW 1206")
+    assert sourcing_problem(item, pulse)
+    structured = _plain_1206_part(description="10kΩ 1206", tolerance="0.1%", power_rating="250 mW")
+    assert sourcing_problem(item, structured) is None

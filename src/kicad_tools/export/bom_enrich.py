@@ -27,6 +27,7 @@ from .lcsc_value_check import (
     find_value_mismatch,
     is_wire_landing,
     sourcing_problem,
+    stated_ratings,
 )
 
 if TYPE_CHECKING:
@@ -141,6 +142,52 @@ class EnrichmentReport:
         return lines
 
 
+def _requirements(item: BOMItem) -> tuple[str | None, float | None]:
+    """The stated rating requirements an LCSC code must satisfy for ``item``."""
+    tolerance, power = stated_ratings(item)
+    return (tolerance[0] if tolerance else None, power)
+
+
+def _partition_receivers(
+    group_items: list[BOMItem], part: object, shared_problem: str | None
+) -> tuple[list[BOMItem], list[tuple[BOMItem, str]]]:
+    """Split a group into references that accept ``part`` and those that do not.
+
+    ``shared_problem`` (a value/package mismatch) rejects every receiver; the
+    per-reference sourcing checks (MPN, package evidence, ratings) are
+    evaluated for each reference individually.
+    """
+    accepted: list[BOMItem] = []
+    rejected: list[tuple[BOMItem, str]] = []
+    for it in group_items:
+        problem = shared_problem or sourcing_problem(it, part)  # type: ignore[arg-type]
+        if problem:
+            rejected.append((it, problem))
+        else:
+            accepted.append(it)
+    return accepted, rejected
+
+
+def _rejected_entries(
+    value: str, footprint: str, rejected: list[tuple[BOMItem, str]], prefix: str
+) -> list[EnrichmentEntry]:
+    """One unmatched entry per distinct rejection reason."""
+    by_reason: dict[str, list[str]] = {}
+    for it, reason in rejected:
+        by_reason.setdefault(reason, []).append(it.reference)
+    return [
+        EnrichmentEntry(
+            value=value,
+            footprint=footprint,
+            references=refs,
+            lcsc_part="",
+            source="unmatched",
+            error=prefix + reason,
+        )
+        for reason, refs in by_reason.items()
+    ]
+
+
 def enrich_bom_lcsc(
     items: list[BOMItem],
     *,
@@ -224,11 +271,12 @@ def enrich_bom_lcsc(
         footprint: str,
         refs: list[str],
         group_items: list[BOMItem],
-    ) -> EnrichmentEntry:
+    ) -> list[EnrichmentEntry]:
         """Attempt to resolve a part from the enrichment cache.
 
-        Returns an ``EnrichmentEntry`` with ``source="cache"`` on hit,
-        or ``source="unmatched"`` on miss.
+        Returns ``EnrichmentEntry`` objects with ``source="cache"`` for the
+        references that accept the cached part and ``source="unmatched"`` for
+        the rest (acceptance is evaluated per receiving reference).
         """
         if cache is not None:
             match = cache.get_enrichment_match(value, footprint, ignore_expiry=True)
@@ -245,14 +293,17 @@ def enrich_bom_lcsc(
                     cache, lcsc, value, first_ref, footprint=footprint
                 )
                 cached_part = cache.get(lcsc, ignore_expiry=True)
-                problem = (
-                    mismatch.describe()
-                    if mismatch
-                    else sourcing_problem(group_items[0], cached_part)
+                if mismatch:
+                    # Value/package poison is a property of the (value,
+                    # footprint) entry itself; rating or package-evidence
+                    # rejections are per receiver and must not evict an
+                    # entry a sibling reference legitimately uses.
+                    cache.delete_enrichment_match(value, footprint)
+                accepted, rejected = _partition_receivers(
+                    group_items, cached_part, mismatch.describe() if mismatch else None
                 )
-                if problem:
-                    if mismatch or not group_items[0].mpn:
-                        cache.delete_enrichment_match(value, footprint)
+                if not accepted:
+                    problem = rejected[0][1]
                     logger.warning(
                         "Rejecting cached LCSC match %s for %s [%s]: %s",
                         lcsc,
@@ -260,15 +311,15 @@ def enrich_bom_lcsc(
                         footprint,
                         problem,
                     )
-                    return EnrichmentEntry(
-                        value=value,
-                        footprint=footprint,
-                        references=refs,
-                        lcsc_part="",
-                        source="unmatched",
-                        error=(f"cached match {lcsc} rejected: {problem}"),
+                    return _rejected_entries(
+                        value, footprint, rejected, f"cached match {lcsc} rejected: "
                     )
 
+                entries = _rejected_entries(
+                    value, footprint, rejected, f"cached match {lcsc} rejected: "
+                )
+                group_items = accepted
+                refs = [it.reference for it in accepted]
                 for it in group_items:
                     it.lcsc = lcsc
                 # WARNING, not INFO: ignore_expiry=True is a degraded
@@ -280,24 +331,31 @@ def enrich_bom_lcsc(
                     footprint,
                     lcsc,
                 )
-                return EnrichmentEntry(
-                    inventory=cached_part.inventory_provenance() if cached_part is not None else {},
-                    value=value,
-                    footprint=footprint,
-                    references=refs,
-                    lcsc_part=lcsc,
-                    source="cache",
-                    confidence=match["confidence"],
-                    part_type=match["part_type"],
+                entries.append(
+                    EnrichmentEntry(
+                        inventory=(
+                            cached_part.inventory_provenance() if cached_part is not None else {}
+                        ),
+                        value=value,
+                        footprint=footprint,
+                        references=refs,
+                        lcsc_part=lcsc,
+                        source="cache",
+                        confidence=match["confidence"],
+                        part_type=match["part_type"],
+                    )
                 )
-        return EnrichmentEntry(
-            value=value,
-            footprint=footprint,
-            references=refs,
-            lcsc_part="",
-            source="unmatched",
-            error=forbidden_error,
-        )
+                return entries
+        return [
+            EnrichmentEntry(
+                value=value,
+                footprint=footprint,
+                references=refs,
+                lcsc_part="",
+                source="unmatched",
+                error=forbidden_error,
+            )
+        ]
 
     with PartSuggester(
         prefer_basic=prefer_basic,
@@ -361,9 +419,30 @@ def enrich_bom_lcsc(
 
             existing_lcsc = next((it.lcsc for it in group_items if it.lcsc), "")
             if existing_lcsc:
+                holder = next(it for it in group_items if it.lcsc)
+                sibling_part = None
+                blocked: list[tuple[BOMItem, str]] = []
                 for it in group_items:
-                    if not it.lcsc:
-                        it.lcsc = existing_lcsc
+                    if it.lcsc:
+                        continue
+                    # A sibling with the same stated requirements as the
+                    # holder inherits the code; one with different ratings
+                    # needs the catalogue record to establish them.
+                    if _requirements(it) != _requirements(holder):
+                        if sibling_part is None and cache is not None:
+                            sibling_part = cache.get(existing_lcsc, ignore_expiry=True)
+                        reason = sourcing_problem(it, sibling_part)
+                        if reason:
+                            blocked.append((it, reason))
+                            continue
+                    it.lcsc = existing_lcsc
+                if blocked:
+                    report.entries.extend(
+                        _rejected_entries(
+                            value, footprint, blocked, f"assigned {existing_lcsc} rejected: "
+                        )
+                    )
+                group_items = [it for it in group_items if it.lcsc]
 
                 # A shared value/footprint does not confer spec provenance.
                 # Also preserve/report different already-assigned LCSC IDs.
@@ -399,7 +478,7 @@ def enrich_bom_lcsc(
             # If the API is known to be forbidden, try the cache before
             # marking as unmatched.
             if api_forbidden:
-                report.entries.append(
+                report.entries.extend(
                     _try_cache_fallback(cache, value, footprint, refs, group_items)
                 )
                 continue
@@ -434,7 +513,7 @@ def enrich_bom_lcsc(
                     "falling back to enrichment cache for remaining groups. "
                     "Use --no-auto-lcsc to suppress."
                 )
-                report.entries.append(
+                report.entries.extend(
                     _try_cache_fallback(cache, value, footprint, refs, group_items)
                 )
                 continue
@@ -462,30 +541,28 @@ def enrich_bom_lcsc(
                     mismatch = check_lcsc_against_cache(
                         cache, lcsc, value, first_ref, footprint=footprint
                     )
-                problem = (
-                    mismatch.describe() if mismatch else sourcing_problem(group_items[0], best)
+                accepted, rejected = _partition_receivers(
+                    group_items, best, mismatch.describe() if mismatch else None
                 )
-                if problem:
+                if rejected:
                     logger.warning(
                         "Rejecting LCSC auto-match %s for %s [%s]: %s",
                         lcsc,
                         value,
                         footprint,
-                        problem,
+                        rejected[0][1],
                     )
-                    report.entries.append(
-                        EnrichmentEntry(
-                            value=value,
-                            footprint=footprint,
-                            references=refs,
-                            lcsc_part="",
-                            source="unmatched",
-                            error=(f"auto-match {lcsc} rejected: {problem}"),
+                    report.entries.extend(
+                        _rejected_entries(
+                            value, footprint, rejected, f"auto-match {lcsc} rejected: "
                         )
                     )
+                if not accepted:
                     continue
+                group_items = accepted
+                refs = [it.reference for it in accepted]
 
-                # Write back to all items in the group
+                # Write back to every accepting reference
                 for it in group_items:
                     it.lcsc = lcsc
 

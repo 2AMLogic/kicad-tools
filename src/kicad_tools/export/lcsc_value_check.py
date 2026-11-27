@@ -622,21 +622,85 @@ def stated_ratings(item: BOMItem) -> tuple[re.Match[str] | None, float | None]:
     return tolerance, (max(powers) if powers else None)
 
 
-def sourcing_problem(item: BOMItem, part: SuggestedPart | Part | None) -> str | None:
-    """Check specifications a broad nominal-value search can lose."""
+_RATED_POWER = re.compile(r"(?:rated\s+power|power\s+rating|rated)\s*[:=]?\s*", re.I)
+
+
+def _candidate_tolerance(part: object) -> float | None:
+    """Tolerance (percent) the catalogue record establishes, or None.
+
+    The structured ``tolerance`` field wins; otherwise the description is used
+    only when it states a single distinct percentage.
+    """
+    structured = _PERCENT.search(str(getattr(part, "tolerance", "") or ""))
+    if structured:
+        return float(structured[1])
+    found = {float(m[1]) for m in _PERCENT.finditer(getattr(part, "description", "") or "")}
+    return found.pop() if len(found) == 1 else None
+
+
+def _candidate_power(part: object) -> float | None:
+    """Rated power (W) the catalogue record establishes, or None.
+
+    Structured ``power_rating`` wins; then an explicit "rated power" phrase in
+    the description (so "pulse power 1 W, rated power 125 mW" reads 125 mW);
+    then a description with exactly one distinct wattage.
+    """
+    structured = _watts(str(getattr(part, "power_rating", "") or ""))
+    if structured is not None:
+        return structured
+    description = getattr(part, "description", "") or ""
+    for rated in _RATED_POWER.finditer(description):
+        match = _WATTS.match(description, rated.end())
+        if match is not None:
+            return _watts(match[0])
+    values = {w for m in _WATTS.finditer(description) if (w := _watts(m[0])) is not None}
+    return values.pop() if len(values) == 1 else None
+
+
+def sourcing_problem(
+    item: BOMItem, part: SuggestedPart | Part | None, *, require_evidence: bool = True
+) -> str | None:
+    """Check specifications a broad nominal-value search can lose.
+
+    For resistors a catalogue record must *positively* establish the chip
+    package of a chip footprint and any stated tolerance / power rating; an
+    unknown or undecodable record leaves the row unresolved.  A caller with no
+    catalogue at all passes ``require_evidence=False`` so the package check is
+    skipped for a missing record (stated ratings still need a record).
+    """
     mpn = getattr(item, "mpn", "")
     if mpn and (part is None or (part.mfr_part or "").casefold() != mpn.casefold()):
         return f"catalogue MPN does not match {mpn}"
     if not re.fullmatch(r"R\d+[A-Z]*", item.reference, re.I):
         return None
-    description = (part.description or "") if part else ""
+    requested = extract_package_from_footprint(item.footprint)
+    if requested in CHIP_PACKAGES and (part is not None or require_evidence):
+        structured = (getattr(part, "package", "") or "").strip()
+        if structured and _PKG_FIELD_CHIP_RE.search(structured) is None:
+            # A stated non-chip package is authoritative; never fall back to
+            # decoding the MPN or description around it.
+            return f"catalogue package {structured} is not the {requested} chip package"
+        found_package = (
+            _extract_part_chip_package(
+                getattr(part, "package", "") or "",
+                getattr(part, "description", "") or "",
+                getattr(part, "mfr_part", "") or "",
+                allow_mpn=True,
+            )
+            if part is not None
+            else None
+        )
+        if found_package is None or found_package[0] != requested:
+            return f"catalogue does not establish the {requested} package"
     tolerance, power = stated_ratings(item)
+    if part is None and not (tolerance or power is not None):
+        return None
     if tolerance:
-        found = _PERCENT.search(description)
-        if not found or float(found[1]) > float(tolerance[1]):
+        found = _candidate_tolerance(part)
+        if found is None or found > float(tolerance[1]):
             return f"catalogue does not establish {tolerance[0]} resistor tolerance"
     if power is not None:
-        found_power = _watts(description)
+        found_power = _candidate_power(part)
         if found_power is None or found_power < power:
             return f"catalogue does not establish the required {power:g} W rating"
     return None
