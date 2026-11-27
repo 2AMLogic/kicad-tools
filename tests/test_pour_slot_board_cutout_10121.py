@@ -71,12 +71,14 @@ def test_material_keeps_nested_curved_island_and_disconnected_exterior():
 @pytest.mark.parametrize("remove_all", [False, True], ids=["open", "missing"])
 def test_uncertifiable_outline_keeps_the_advisory_and_leaves_copper_alone(remove_all):
     pcb = _board(0.7)
+    pcb.add_trace((10, 11.8), (20, 11.8), width=0.2, layer="F.Cu", net="C")
     edges = pcb._sexp.find_children("gr_line")
     assert len(edges) == 4
     for edge in edges if remove_all else edges[:1]:
         pcb._sexp.remove(edge)
-    assert len(list(iter_pour_slot_pairs(pcb))) == 1
+    assert len(list(iter_pour_slot_pairs(pcb))) == 2
     before = [(s.start, s.end) for s in pcb.segments]
     result = cleanup_pour_slots(pcb, referee=lambda _pcb: pytest.fail("uncertified outline"))
-    assert result.left_alone == 1 and "Edge.Cuts" in result.left_alone_reasons[0]
+    assert result.left_alone == 2
+    assert result.left_alone_by_reason == {"could not establish board material from Edge.Cuts": 2}
     assert [(s.start, s.end) for s in pcb.segments] == before

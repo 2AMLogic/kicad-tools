@@ -484,7 +484,9 @@ def cleanup_pour_slots(
 
     if board_material_geometry(pcb) is None:
         result.left_alone = len(pairs)
-        result.left_alone_reasons.append("could not establish board material from Edge.Cuts")
+        result.left_alone_reasons = ["could not establish board material from Edge.Cuts"] * len(
+            pairs
+        )
         return result
 
     baseline = referee(pcb) if any(not p.unresolved_rules for p in pairs) else {}
