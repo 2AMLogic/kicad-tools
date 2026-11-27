@@ -933,8 +933,8 @@ def _add_creepage_parser(subparsers) -> None:
             "and JSON) instead of the collapsed minimum, and the raw "
             "measurements/verdicts stay in the JSON.  The exit code follows "
             "the waiver-aware gate: exit 0 only when every un-waived metric "
-            "clears.  An invalid, ambiguous or unmatched selector is an error "
-            "-- it can never silently waive a finding.  Composes with "
+            "clears. Invalid or ambiguous selectors are errors. A valid selector "
+            "outside the audited pairs produces a warning and waives nothing. Composes with "
             "--waive-same-footprint; does NOT affect the kct audit gate."
         ),
     )
@@ -6967,6 +6967,10 @@ def _add_analyze_parser(subparsers) -> None:
     analyze_subparsers = analyze_parser.add_subparsers(
         dest="analyze_command", help="Analysis commands"
     )
+
+    from .reference_coverage import add_parser as add_reference_coverage_parser
+
+    add_reference_coverage_parser(analyze_subparsers)
 
     # analyze congestion
     congestion_parser = analyze_subparsers.add_parser(
