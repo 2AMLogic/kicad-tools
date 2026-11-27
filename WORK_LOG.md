@@ -16,6 +16,28 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10582** (closed): Reject terminal landings outside a purchasing row’s declared references
+- **PR #10583**: fix: reject purchasing terminal landings outside the row's declared refs
+- **Issue #10492** (closed): Offer an export mode that verifies reviewed copper before publishing manufacturing artwork
+- **PR #10545**: feat: add kct export --verify-reviewed-copper to publish only reviewed copper
+- **Issue #10476** (closed): Assembly preflight: check snap-in mounting-hole limits against both finished-hole tolerances
+- **PR #10498**: feat: check declared mounting holes against their drawing and finished-hole interval
+- **Issue #10577** (closed): Preserve Board 05 sourcing fields and no-connect identities in the editable KiCad project
+- **PR #10580**: fix(board05): preserve sourcing and unused pad identities in the editable project
+- **PR #10576**: fix(board03): stage the two USB project widths for the coordinated reissue
+- **Issue #10130** (closed): route: GND pads inside a same-net pour still get a stub trace and via (60 of 64 pads on a consumer board)
+- **Issue #10261** (closed): Fill the routed board before optional power-plane stitching on mixed-signal layouts
+- **PR #10262**: fix(route): stitch power planes after the routed copper is refilled
+- **Issue #10556** (closed): tests: board05 staged fixture is module-scoped under xdist --dist load, so it rebuilds per worker and its cost lands on a 60s-capped test
+- **PR #10560**: ci: group Board 05 recipe staging on one worker
+- **Issue #10514** (closed): Manufacturing handoff: map PCB wire landings to the purchased panel part’s terminals
+- **PR #10537**: feat: carry purchasing-row terminal maps into the assembly handoff
+- **Issue #10527** (closed): Check simulated analog pin ranges across the driven waveform and supply states
+- **PR #10536**: feat: check simulated analog pin voltages against supply-state limits
+- **Issue #10564** (closed): Cover the untested branches of assembly_smd_land_pattern
+- **PR #10573**: test: cover remaining branches of the SMD land-pattern check
+- **Issue #10428** (closed): Preserve native schematic instance links on the footprints placed by create-pcb
+- **PR #10429**: Write native symbol links when creating a PCB from a schematic
 - **Issue #10565** (closed): ci: keep shared Slow Tests fixtures on one worker with the pinned pytest toolchain
 - **PR #10572**: ci: schedule Slow Tests with --dist loadscope so scoped fixtures build once
 - **Issue #10559** (closed): Reinforcement sidecar consumers raise raw TypeError on a malformed nested coordinate point

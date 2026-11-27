@@ -742,6 +742,335 @@ class TestBOMEntryLeadDeclarations:
         assert spec.requirements.manufacturing.finished_hole_tolerance_mm == pytest.approx(-0.08)
 
 
+class TestFinishedHoleToleranceUpper:
+    """Optional upper bound of the fabricator's finished-hole tolerance (Issue #10476)."""
+
+    def test_declared_alongside_the_lower_tolerance(self):
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(
+            finished_hole_tolerance_mm=-0.08,
+            finished_hole_tolerance_upper_mm=0.13,
+            finished_hole_tolerance_source="JLCPCB capabilities, through-hole tolerances",
+        )
+        assert mfg.finished_hole_tolerance_mm == -0.08
+        assert mfg.finished_hole_tolerance_upper_mm == 0.13
+
+    def test_may_be_declared_without_a_lower_tolerance(self):
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(
+            finished_hole_tolerance_upper_mm=0.13,
+            finished_hole_tolerance_source="fab quote 2026-11-25",
+        )
+        assert mfg.finished_hole_tolerance_mm is None
+        assert mfg.finished_hole_tolerance_upper_mm == 0.13
+
+    def test_zero_is_allowed(self):
+        """Zero (hole never larger than nominal) is a valid upper tolerance."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(
+            finished_hole_tolerance_upper_mm=0.0, finished_hole_tolerance_source="fab quote"
+        )
+        assert mfg.finished_hole_tolerance_upper_mm == 0.0
+
+    def test_requires_source(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        with pytest.raises(ValidationError, match="finished_hole_tolerance_source"):
+            ManufacturingRequirements(finished_hole_tolerance_upper_mm=0.13)
+        with pytest.raises(ValidationError, match="finished_hole_tolerance_source"):
+            ManufacturingRequirements(
+                finished_hole_tolerance_upper_mm=0.13, finished_hole_tolerance_source=" "
+            )
+
+    def test_negative_rejected(self):
+        """The sign convention is upper/positive; a negative value belongs to the lower bound."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        with pytest.raises(ValidationError):
+            ManufacturingRequirements(
+                finished_hole_tolerance_upper_mm=-0.08, finished_hole_tolerance_source="misread"
+            )
+
+    def test_unset_by_default(self):
+        from kicad_tools.spec.schema import BOMEntry, ManufacturingRequirements
+
+        mfg = ManufacturingRequirements()
+        assert mfg.finished_hole_tolerance_upper_mm is None
+        assert mfg.finished_hole_guarantees is None
+        assert BOMEntry(ref="C1", part="LGU2E471MELB").mounting_holes is None
+
+
+class TestMountingHoleDeclaration:
+    """A sourced mounting drawing on a BOM entry (Issue #10476)."""
+
+    def test_pads_limits_and_source_parse(self):
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        declaration = MountingHoleDeclaration(
+            pads=["1", "2"],
+            hole_diameter={"min_mm": 1.90, "max_mm": 2.10},
+            pitch={"min_mm": 9.90, "max_mm": 10.10},
+            source="Nichicon LGU drawing, p. 1",
+        )
+        assert declaration.pads == ["1", "2"]
+        assert declaration.hole_diameter.min_mm == pytest.approx(1.90)
+        assert declaration.hole_diameter.max_mm == pytest.approx(2.10)
+        assert declaration.pitch is not None
+        assert declaration.pitch.min_mm == pytest.approx(9.90)
+        assert declaration.pitch.max_mm == pytest.approx(10.10)
+        assert declaration.source == "Nichicon LGU drawing, p. 1"
+
+    def test_integer_pad_numbers_normalize(self):
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        declaration = MountingHoleDeclaration(
+            pads=[1, 2], hole_diameter={"min_mm": 1.9, "max_mm": 2.1}, source="drawing"
+        )
+        assert declaration.pads == ["1", "2"]
+
+    def test_requires_exactly_two_pads(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        limits = {"min_mm": 1.9, "max_mm": 2.1}
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(pads=["1"], hole_diameter=limits, source="drawing")
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(pads=["1", "2", "3"], hole_diameter=limits, source="drawing")
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(pads="1 2", hole_diameter=limits, source="drawing")
+
+    def test_requires_two_distinct_pads(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(
+                pads=["1", "1"], hole_diameter={"min_mm": 1.9, "max_mm": 2.1}, source="drawing"
+            )
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(
+                pads=["1", " "], hole_diameter={"min_mm": 1.9, "max_mm": 2.1}, source="drawing"
+            )
+
+    def test_requires_hole_diameter_limits(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(pads=["1", "2"], source="drawing")
+
+    def test_pitch_limits_are_optional(self):
+        """A drawing without a pitch tolerance declares only the hole diameter."""
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        declaration = MountingHoleDeclaration(
+            pads=["1", "2"], hole_diameter={"min_mm": 1.9, "max_mm": 2.1}, source="drawing"
+        )
+        assert declaration.pitch is None
+
+    def test_requires_source(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        limits = {"min_mm": 1.9, "max_mm": 2.1}
+        with pytest.raises(ValidationError, match="source"):
+            MountingHoleDeclaration(pads=["1", "2"], hole_diameter=limits)
+        with pytest.raises(ValidationError, match="source"):
+            MountingHoleDeclaration(pads=["1", "2"], hole_diameter=limits, source="   ")
+
+    def test_limits_must_be_ordered(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        with pytest.raises(ValidationError, match="min_mm <= max_mm"):
+            MountingHoleDeclaration(
+                pads=["1", "2"],
+                hole_diameter={"min_mm": 2.1, "max_mm": 1.9},
+                source="drawing",
+            )
+        with pytest.raises(ValidationError, match="min_mm <= max_mm"):
+            MountingHoleDeclaration(
+                pads=["1", "2"],
+                hole_diameter={"min_mm": 1.9, "max_mm": 2.1},
+                pitch={"min_mm": 10.1, "max_mm": 9.9},
+                source="drawing",
+            )
+
+    def test_limits_must_be_positive(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleDeclaration
+
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(
+                pads=["1", "2"], hole_diameter={"min_mm": 0, "max_mm": 2.1}, source="drawing"
+            )
+        with pytest.raises(ValidationError):
+            MountingHoleDeclaration(
+                pads=["1", "2"],
+                hole_diameter={"min_mm": 1.9, "max_mm": 2.1},
+                pitch={"min_mm": 9.9, "max_mm": -10.1},
+                source="drawing",
+            )
+
+    def test_parses_from_spec(self, tmp_path):
+        from kicad_tools.spec.parser import load_spec
+
+        spec_file = tmp_path / "project.kct"
+        spec_file.write_text(
+            "kct_version: '1.0'\n"
+            "project:\n"
+            "  name: T\n"
+            "bom_entries:\n"
+            "  - ref: C1-C2\n"
+            "    part: LGU2E471MELB\n"
+            "    mounting_holes:\n"
+            "      pads: ['1', '2']\n"
+            "      hole_diameter: {min_mm: 1.90, max_mm: 2.10}\n"
+            "      pitch: {min_mm: 9.90, max_mm: 10.10}\n"
+            "      source: Nichicon LGU drawing, p. 1\n"
+        )
+        spec = load_spec(spec_file)
+        assert spec.bom_entries is not None
+        declaration = spec.bom_entries[0].mounting_holes
+        assert declaration is not None
+        assert declaration.pads == ["1", "2"]
+        assert declaration.hole_diameter.min_mm == pytest.approx(1.90)
+        assert declaration.pitch is not None
+        assert declaration.pitch.max_mm == pytest.approx(10.10)
+        assert declaration.source == "Nichicon LGU drawing, p. 1"
+        # A mounting declaration is independent of a lead profile.
+        assert spec.bom_entries[0].lead is None
+
+    def test_round_trip(self, tmp_path):
+        """save_spec -> load_spec preserves the mounting declaration verbatim."""
+        from kicad_tools.spec.parser import load_spec, save_spec
+        from kicad_tools.spec.schema import (
+            BOMEntry,
+            MountingHoleDeclaration,
+            ProjectMetadata,
+            ProjectSpec,
+        )
+
+        spec = ProjectSpec(
+            project=ProjectMetadata(name="T"),
+            bom_entries=[
+                BOMEntry(
+                    ref="C1",
+                    part="LGU2E471MELB",
+                    mounting_holes=MountingHoleDeclaration(
+                        pads=["1", "2"],
+                        hole_diameter={"min_mm": 1.9, "max_mm": 2.1},
+                        pitch={"min_mm": 9.9, "max_mm": 10.1},
+                        source="Nichicon LGU drawing, p. 1",
+                    ),
+                )
+            ],
+        )
+        path = tmp_path / "project.kct"
+        save_spec(spec, path)
+        loaded = load_spec(path)
+        assert loaded.bom_entries is not None
+        assert loaded.bom_entries[0].mounting_holes == spec.bom_entries[0].mounting_holes
+
+
+class TestFinishedHoleGuarantee:
+    """Order-specific finished-hole interval guaranteed for selected holes (Issue #10476)."""
+
+    def test_declared(self):
+        from kicad_tools.spec.schema import FinishedHoleGuarantee
+
+        guarantee = FinishedHoleGuarantee(
+            refs=["C1"],
+            min_mm=1.90,
+            max_mm=2.10,
+            source="JLCPCB order 48210 engineering confirmation",
+        )
+        assert guarantee.refs == ["C1"]
+        assert guarantee.min_mm == pytest.approx(1.90)
+        assert guarantee.max_mm == pytest.approx(2.10)
+
+    def test_single_reference_string_accepted(self):
+        from kicad_tools.spec.schema import FinishedHoleGuarantee
+
+        guarantee = FinishedHoleGuarantee(refs="C1", min_mm=1.9, max_mm=2.1, source="fab note")
+        assert guarantee.refs == ["C1"]
+
+    def test_requires_references(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import FinishedHoleGuarantee
+
+        with pytest.raises(ValidationError):
+            FinishedHoleGuarantee(refs=[], min_mm=1.9, max_mm=2.1, source="fab note")
+        with pytest.raises(ValidationError):
+            FinishedHoleGuarantee(refs=[""], min_mm=1.9, max_mm=2.1, source="fab note")
+
+    def test_requires_source(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import FinishedHoleGuarantee
+
+        with pytest.raises(ValidationError, match="source"):
+            FinishedHoleGuarantee(refs=["C1"], min_mm=1.9, max_mm=2.1)
+        with pytest.raises(ValidationError, match="source"):
+            FinishedHoleGuarantee(refs=["C1"], min_mm=1.9, max_mm=2.1, source="  ")
+
+    def test_interval_must_be_ordered_and_positive(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import FinishedHoleGuarantee
+
+        with pytest.raises(ValidationError, match="min_mm <= max_mm"):
+            FinishedHoleGuarantee(refs=["C1"], min_mm=2.1, max_mm=1.9, source="fab note")
+        with pytest.raises(ValidationError):
+            FinishedHoleGuarantee(refs=["C1"], min_mm=0, max_mm=2.1, source="fab note")
+
+    def test_parses_from_spec(self, tmp_path):
+        from kicad_tools.spec.parser import load_spec
+
+        spec_file = tmp_path / "project.kct"
+        spec_file.write_text(
+            "kct_version: '1.0'\n"
+            "project:\n"
+            "  name: T\n"
+            "requirements:\n"
+            "  manufacturing:\n"
+            "    finished_hole_tolerance_mm: -0.08\n"
+            "    finished_hole_tolerance_upper_mm: 0.13\n"
+            "    finished_hole_tolerance_source: JLCPCB capabilities, through-hole tolerances\n"
+            "    finished_hole_guarantees:\n"
+            "      - refs: [C1]\n"
+            "        min_mm: 1.90\n"
+            "        max_mm: 2.10\n"
+            "        source: JLCPCB order 48210 engineering confirmation\n"
+        )
+        spec = load_spec(spec_file)
+        assert spec.requirements is not None
+        assert spec.requirements.manufacturing is not None
+        mfg = spec.requirements.manufacturing
+        assert mfg.finished_hole_tolerance_upper_mm == pytest.approx(0.13)
+        assert mfg.finished_hole_guarantees is not None
+        (guarantee,) = mfg.finished_hole_guarantees
+        assert guarantee.refs == ["C1"]
+        assert guarantee.min_mm == pytest.approx(1.90)
+        assert guarantee.max_mm == pytest.approx(2.10)
+        assert guarantee.source == "JLCPCB order 48210 engineering confirmation"
+
+
 class TestWireTerminationDeclarations:
     """Soldered wire or ferrule landings declared without a component MPN (Issue #10473)."""
 
@@ -1200,6 +1529,211 @@ class TestPurchasingEntries:
             "    mpn: SYN-CART-AC\n"
         )
         assert [row.refs for row in self._load(tmp_path, rows).purchasing] == [["F1"], ["F1"]]
+
+    SWITCH_ROW = (
+        "purchasing:\n"
+        "  - description: Panel toggle switch\n"
+        "    quantity: 1\n"
+        "    refs: [SW1]\n"
+        "    manufacturer: Example Switch Co\n"
+        "    mpn: SYN-TOGGLE-1\n"
+    )
+    TERMINAL_MAP = (
+        "    terminals:\n"
+        "      - terminal: 3\n"
+        "        ref: SW1\n"
+        "        pad: 1\n"
+        "        net: VDD_CTRL\n"
+        "      - terminal: 2\n"
+        "        ref: SW1\n"
+        "        pad: 2\n"
+        "        net: ARMED_3V3\n"
+        "      - terminal: 1\n"
+        "        unused: true\n"
+    )
+
+    def test_terminal_map_parses_and_round_trips(self, tmp_path):
+        """A panel switch (Issue #10514) wired to a two-pad landing unlike its terminals.
+
+        A terminal or pad number may be a bare integer, and an unused terminal
+        is a declaration with no landing.
+        """
+        from kicad_tools.spec.parser import load_spec, save_spec
+
+        (switch,) = self._load(tmp_path, self.SWITCH_ROW + self.TERMINAL_MAP).purchasing
+        arm, common, spare = switch.terminals
+        assert (arm.terminal, arm.ref, arm.pad, arm.net, arm.unused) == (
+            "3",
+            "SW1",
+            "1",
+            "VDD_CTRL",
+            False,
+        )
+        assert (common.terminal, common.ref, common.pad, common.net) == (
+            "2",
+            "SW1",
+            "2",
+            "ARMED_3V3",
+        )
+        assert (spare.terminal, spare.ref, spare.pad, spare.net, spare.unused) == (
+            "1",
+            None,
+            None,
+            None,
+            True,
+        )
+        assert arm.landing == ("SW1", "1", "VDD_CTRL") and spare.landing is None
+
+        path = tmp_path / "project.kct"
+        for exclude_none in (True, False):
+            spec = self._load(tmp_path, self.SWITCH_ROW + self.TERMINAL_MAP)
+            save_spec(spec, path, exclude_none=exclude_none)
+            assert load_spec(path).purchasing == [switch]
+
+    @pytest.mark.parametrize(
+        ("terminals", "message"),
+        [
+            (
+                "    terminals:\n"
+                "      - {terminal: 2, ref: SW1, pad: 1, net: VDD_CTRL}\n"
+                "      - {terminal: 2, ref: SW1, pad: 2, net: ARMED_3V3}\n",
+                "terminal '2' is declared more than once: SW1 pad 1 (VDD_CTRL) and "
+                "SW1 pad 2 (ARMED_3V3)",
+            ),
+            (
+                "    terminals:\n"
+                "      - {terminal: 3, ref: SW1, pad: 1, net: VDD_CTRL}\n"
+                "      - {terminal: 3, unused: true}\n",
+                "terminal '3' is declared more than once: SW1 pad 1 (VDD_CTRL) and unused",
+            ),
+            (
+                "    terminals:\n"
+                "      - {terminal: 3, ref: SW1, pad: 1, net: VDD_CTRL, unused: true}\n",
+                "terminal '3' is both mapped to a landing and unused",
+            ),
+            ("    terminals:\n      - {terminal: 3, ref: SW1, pad: 1}\n", "needs ref, pad and net"),
+            ("    terminals:\n      - {terminal: 3, unused: false}\n", "needs ref, pad and net"),
+            ("    terminals:\n      - {ref: SW1, pad: 1, net: VDD_CTRL}\n", "Field required"),
+            (
+                "    terminals:\n      - {terminal: '  ', ref: SW1, pad: 1, net: VDD_CTRL}\n",
+                "terminal must be non-blank",
+            ),
+            (
+                "    terminals:\n      - {terminal: 3, ref: SW1, pad: '', net: VDD_CTRL}\n",
+                "pad must be",
+            ),
+            (
+                "    terminals:\n      - {terminal: 3, ref: SW1, pad: 1.5, net: VDD_CTRL}\n",
+                "valid string",
+            ),
+            (
+                "    terminals:\n      - {terminal: true, ref: SW1, pad: 1, net: VDD_CTRL}\n",
+                "valid string",
+            ),
+            ("    terminals: []\n", "at least one terminal"),
+        ],
+        ids=[
+            "one-terminal-two-landings",
+            "mapped-and-unused",
+            "mapped-and-unused-in-one-entry",
+            "landing-without-net",
+            "neither-mapped-nor-unused",
+            "no-terminal-number",
+            "blank-terminal",
+            "blank-pad",
+            "fractional-pad",
+            "boolean-terminal",
+            "empty-map",
+        ],
+    )
+    def test_terminal_map_that_contradicts_itself_is_refused(self, tmp_path, terminals, message):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError) as refused:
+            self._load(tmp_path, self.SWITCH_ROW + terminals)
+
+        assert "purchasing.0.terminals" in str(refused.value)
+        assert message in str(refused.value)
+
+    @pytest.mark.parametrize(
+        ("refs", "landing"),
+        [
+            ("[SW1]", "R1"),
+            ("[ SW1 ]", "SW9"),
+            ("[R2]", "R1"),
+        ],
+        ids=["unrelated-reference", "whitespace-normalized-list", "other-footprint"],
+    )
+    def test_terminal_landing_outside_the_rows_refs_is_refused(self, tmp_path, refs, landing):
+        """A mapped ``ref`` must be a designator the row declares (Issue #10582)."""
+        from pydantic import ValidationError
+
+        row = self.SWITCH_ROW.replace("refs: [SW1]", f"refs: {refs}")
+        terminals = (
+            f"    terminals:\n      - {{terminal: 3, ref: {landing}, pad: 1, net: VDD_CTRL}}\n"
+        )
+        with pytest.raises(ValidationError) as refused:
+            self._load(tmp_path, row + terminals)
+
+        message = str(refused.value)
+        declared = ", ".join(r.strip(" []") for r in [refs])
+        assert "purchasing.0" in message
+        assert (
+            f"terminal '3' maps to {landing}, which is not among the row's declared refs" in message
+        )
+        assert f"({declared})" in message
+        assert f"add {landing} to refs" in message
+
+    def test_terminals_may_land_on_any_declared_reference(self, tmp_path):
+        """Every wired footprint is listed once; extra refs and unused terminals need no landing."""
+        rows = (
+            "purchasing:\n"
+            "  - description: Panel switch bridging two landings\n"
+            "    quantity: 1\n"
+            "    refs: [SW1, SW2, J9]\n"
+            "    manufacturer: Example Switch Co\n"
+            "    mpn: SYN-TOGGLE-1\n"
+            "    terminals:\n"
+            "      - {terminal: 3, ref: SW1, pad: 1, net: VDD_CTRL}\n"
+            "      - {terminal: 2, ref: SW2, pad: 1, net: ARMED_3V3}\n"
+            "      - {terminal: 1, unused: true}\n"
+        )
+        (switch,) = self._load(tmp_path, rows).purchasing
+        assert switch.refs == ["SW1", "SW2", "J9"]
+        assert [a.landing for a in switch.terminals] == [
+            ("SW1", "1", "VDD_CTRL"),
+            ("SW2", "1", "ARMED_3V3"),
+            None,
+        ]
+
+        only_unused = rows.split("    terminals:\n")[0] + (
+            "    terminals:\n      - {terminal: 1, unused: true}\n"
+        ).replace("[SW1, SW2, J9]", "[SW1]")
+        assert self._load(tmp_path, only_unused).purchasing[0].terminals[0].unused
+
+    @pytest.mark.parametrize("refs", ["    refs: []\n", ""], ids=["empty-list", "omitted"])
+    def test_undeclared_refs_leave_the_terminal_map_to_the_board_check(self, tmp_path, refs):
+        row = self.SWITCH_ROW.replace("    refs: [SW1]\n", refs)
+        (switch,) = self._load(tmp_path, row + self.TERMINAL_MAP).purchasing
+        assert not switch.refs
+        assert switch.terminals[0].ref == "SW1"
+
+    def test_row_without_a_terminal_map_still_loads_with_any_refs(self, tmp_path):
+        (switch,) = self._load(tmp_path, self.SWITCH_ROW).purchasing
+        assert switch.refs == ["SW1"] and switch.terminals is None
+
+    def test_pending_row_must_not_declare_a_terminal_map(self, tmp_path):
+        from pydantic import ValidationError
+
+        pending = self.SWITCH_ROW.replace(
+            "    manufacturer: Example Switch Co\n    mpn: SYN-TOGGLE-1\n",
+            "    pending: the switch is not chosen yet\n",
+        )
+        with pytest.raises(ValidationError) as refused:
+            self._load(tmp_path, pending + self.TERMINAL_MAP)
+
+        assert "a pending row must not declare terminals" in str(refused.value)
+        assert "purchasing.0" in str(refused.value)
 
 
 class TestMountingHoleGroupSpec:

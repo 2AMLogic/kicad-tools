@@ -49,6 +49,7 @@ import re
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from decimal import Decimal, localcontext
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -117,6 +118,9 @@ _MIN_TAIL_MM = 0.005
 _SLIDE_STEP_MM = 0.005
 _RUN_AXIS_TOLERANCE_MM = 0.0002
 _MIN_RUN_MM = 0.05
+# Step of the slide that carries an escape stopped on its pad's edge on into the
+# pad (issue #9939).
+_EXTEND_STEP_MM = 0.005
 # Longest slide tried for a *disjoint* pass-through jog or chamfer (mm). Such a
 # track only needs to gain the last few hundredths of a millimetre of mask gap,
 # so a slide that has to travel further is crowding another net; the smaller
@@ -132,7 +136,7 @@ _ALIGNED_TAIL_DIRS = ((1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0))
 class MaskRepairAction:
     """One applied (or, in a dry run, predicted) segment-end move."""
 
-    action: str  # "recentre" or "pull_in" (issue #9891)
+    action: str  # "recentre", "pull_in" (issue #9891) or "extend_entry" (issue #9939)
     uuid: str  # the segment's uuid
     pad_uuid: str
     pad_ref: str
@@ -316,6 +320,24 @@ def _num(node: SExp | None) -> float:
 
 def _bare(value: object) -> str:
     return str(value).strip().strip('"')
+
+
+def _coord_displacement_within(
+    a: tuple[float, float], b: tuple[float, float], limit: float
+) -> tuple[bool, float]:
+    """Compare and measure board-coordinate Euclidean distance without binary64 drift."""
+    if limit < 0 or math.isnan(limit):
+        return False, math.dist(a, b)
+    with localcontext() as ctx:
+        ctx.prec = 50
+        dx = Decimal(str(b[0])) - Decimal(str(a[0]))
+        dy = Decimal(str(b[1])) - Decimal(str(a[1]))
+        dist_sq = dx * dx + dy * dy
+        dist = float(dist_sq.sqrt())
+        if math.isinf(limit):
+            return True, dist
+        lim = Decimal(str(limit))
+        return dist_sq <= lim * lim, dist
 
 
 def mask_copper_violations(violations: list[DRCViolation]) -> list[DRCViolation]:
@@ -1066,6 +1088,23 @@ class MaskCopperRepairer(CopperGapRepairer):
                     dry_run,
                     clearance_mm,
                 )
+            if reason in ("would_violate_clearance", "exceeds_max_displacement"):
+                # Issue #9939: an escape that stops on its pin's edge cannot be
+                # recentred without crowding the neighbouring pin (or without
+                # moving farther than allowed).  Carry it on
+                # along its own line until its whole width ends on the pad.
+                reason = self._extend_entry_one(
+                    seg,
+                    conductor,
+                    openings[0],
+                    pads,
+                    result,
+                    max_displacement,
+                    dry_run,
+                    clearance_mm,
+                    violation.required_value_mm,
+                    reason,
+                )
             if reason is not None:
                 result.skip(reason, violation, conductor)
             else:
@@ -1369,6 +1408,171 @@ class MaskCopperRepairer(CopperGapRepairer):
             if not keep:
                 for node, children in original:
                     node.children[:] = children
+        result.actions.append(action)
+        self.modified |= keep
+        result.repaired += 1
+        return None
+
+    def _extend_entry_one(
+        self,
+        seg: SExp,
+        seg_uuid: str,
+        pad_uuid: str,
+        pads: dict,
+        result: MaskRepairResult,
+        max_displacement: float,
+        dry_run: bool,
+        clearance_mm: float | None,
+        required_gap_mm: float | None,
+        declined: str,
+    ) -> str | None:
+        """Carry an escape that stops on its pad's edge on along its own line.
+
+        The recentre aims such an end at the pad centre, a line that can crowd
+        the neighbouring pin (issue #9939, Board 03 U1/17).  Here the end keeps
+        its direction and slides on, away from the far end, by the shortest
+        multiple of ``_EXTEND_STEP_MM`` (never more than the track width) that leaves the whole track width ending
+        on the pad and the mask rule's own verdict on the track a clean entry.
+        Nothing else moves: the old end lies on the extended copper, so every
+        track or via that met it still touches.  Returns ``None`` on success,
+        else the junction veto or the original refusal reason.
+        """
+        from kicad_tools.router.quantize import is_45_aligned
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        from ..validate.mask_copper import clean_own_pad_entry
+
+        poly, _centre, pad_layers, pad_net, pad_ref, shape = pads[pad_uuid]
+        net_name = self._net_name(seg)
+        layer_node = seg.find("layer")
+        layer = _bare(layer_node.get_first_atom()) if layer_node else ""
+        aperture = self._pad_mask_openings.get((pad_uuid, layer))
+        if (
+            shape == "unsupported"
+            or aperture is None
+            or required_gap_mm is None
+            or not net_name
+            or net_name != pad_net
+            or self._locks.is_locked(seg)
+            or self._locks.is_generator_owned(seg)
+            or self._board_rules.dru_error
+        ):
+            return declined
+        start_node, end_node = seg.find("start"), seg.find("end")
+        start, end = self._xy(start_node), self._xy(end_node)
+        width = _num(seg.find("width"))
+        if start is None or end is None or width <= 0:
+            return declined
+        grown = poly.buffer(_INSIDE_EPS_MM)
+        start_in, end_in = grown.contains(Point(start)), grown.contains(Point(end))
+        if start_in == end_in:
+            return declined
+        inside, outside = (start, end) if start_in else (end, start)
+        inside_node = start_node if start_in else end_node
+        # Only an end that stops on the pad's edge qualifies: the mask rule
+        # counts an end strictly inside the pad as an entry, so sliding one
+        # that is already there cannot clear the finding.
+        if poly.buffer(-_MASK_UNCERTAINTY_MM).contains(Point(inside)):
+            return declined
+        _, blocked = self._junction(layer, inside, seg_uuid, net_name)
+        if blocked:
+            return "junction_at_moved_end"
+        run = math.dist(inside, outside)
+        if run < 1e-9:
+            return declined
+        unit = ((inside[0] - outside[0]) / run, (inside[1] - outside[1]) / run)
+        aligned = is_45_aligned(inside[0] - outside[0], inside[1] - outside[1])
+
+        required = clearance_mm if clearance_mm is not None else 0.0
+        old_shape = LineString([outside, inside]).buffer(width / 2, quad_segs=16)
+        new = None
+        new_shape = old_shape
+        moved_dist = 0.0
+        # An end that merely stops on the edge needs at most about one track
+        # width (0.7 of it at 45 degrees) to put its whole cap on the pad; a
+        # longer slide is a different repair (a chamfer, a lead) not this one.
+        limit = min(max_displacement, width)
+        if not (limit > 0):
+            return declined
+        steps = int(limit / _EXTEND_STEP_MM + 1e-9)
+        for index in range(1, steps + 1):
+            step = index * _EXTEND_STEP_MM
+            # Quantize the extension relative to the endpoint, preserving
+            # its original offset at KiCad's nanometre coordinate precision.
+            candidate = (
+                round(inside[0] + round(unit[0] * step, 4), 6),
+                round(inside[1] + round(unit[1] * step, 4), 6),
+            )
+            within_limit, candidate_dist = _coord_displacement_within(inside, candidate, limit)
+            if not within_limit:
+                break
+            if not grown.contains(Point(candidate)):
+                break
+            copper = LineString([outside, candidate]).buffer(width / 2, quad_segs=16)
+            if not poly.covers(Point(candidate).buffer(width / 2, quad_segs=16)):
+                continue
+            if aligned and not is_45_aligned(candidate[0] - outside[0], candidate[1] - outside[1]):
+                continue
+            if clean_own_pad_entry(
+                aperture.geometry,
+                copper,
+                poly,
+                f"pad:{shape}",
+                width,
+                (outside, candidate),
+                clearance_mm=required_gap_mm,
+                uncertainty_mm=_MASK_UNCERTAINTY_MM,
+                margin_mm=aperture.margin_mm,
+            ):
+                new, new_shape, moved_dist = candidate, copper, candidate_dist
+                break
+        if new is None:
+            return declined
+
+        # The added copper must keep the clearance the track already had.
+        for obstacle in self._other_net_obstacles(layer, net_name, seg_uuid, pads):
+            new_d = new_shape.distance(obstacle)
+            if new_d < required - 1e-6 and new_d < old_shape.distance(obstacle) - 1e-6:
+                return declined
+        pcb = PCB(self.doc)
+        if self._pull_in_crowds_pad(pcb, layer, net_name, pads, [(old_shape, new_shape)]):
+            return declined
+        net = pcb.get_net_by_name(net_name)
+        if net is None or inside_node is None:
+            return declined
+
+        action = MaskRepairAction(
+            action="extend_entry",
+            uuid=seg_uuid,
+            pad_uuid=pad_uuid,
+            pad_ref=pad_ref,
+            net_name=net_name,
+            layer=layer,
+            old_x=inside[0],
+            old_y=inside[1],
+            new_x=new[0],
+            new_y=new[1],
+            displacement_mm=moved_dist,
+            detail=(
+                f"carried track end {moved_dist:.4f}mm on along its own "
+                "line until its width ends on the pad"
+            ),
+            end_tag="start" if inside_node is start_node else "end",
+        )
+        previous = ConnectivityValidator(pcb)._contact_graph(net.number)
+        original = list(inside_node.children)
+        keep = False
+        try:
+            inside_node.set_value(0, new[0])
+            inside_node.set_value(1, new[1])
+            current = ConnectivityValidator(PCB(self.doc))._contact_graph(net.number)
+            if not current.preserves_connections(previous):
+                return declined
+            keep = not dry_run
+        finally:
+            if not keep:
+                inside_node.children[:] = original
         result.actions.append(action)
         self.modified |= keep
         result.repaired += 1

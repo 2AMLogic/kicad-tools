@@ -73,6 +73,9 @@ ATTACH_ZONE_RULE_PREFIX = "kct attach zone - "
 #: These pads retain the zone's authored clearance inside an attach exemption.
 PAD_ZONE_CLEARANCES_META_KEY = "kct_pad_zone_clearances"
 
+#: Project-declared nets that must retain the full clearance inside courtyards.
+ATTACH_ZONE_EXCLUDED_NETS_META_KEY = "kct_attach_zone_excluded_nets"
+
 #: KiCad's "this pad exists on every copper layer" wildcard.
 ALL_COPPER_LAYERS = "*.Cu"
 
@@ -173,6 +176,13 @@ def eligible_net_names(project: dict | None, net_names: Iterable[str]) -> set[st
     names = set(net_names)
     if project is None:
         return names
+    meta = project.get("meta", {})
+    if not isinstance(meta, dict):
+        return set()
+    excluded = meta.get(ATTACH_ZONE_EXCLUDED_NETS_META_KEY, [])
+    if not isinstance(excluded, list) or not all(isinstance(name, str) for name in excluded):
+        return set()
+    names.difference_update(excluded)
     from kicad_tools.core.project_clearance import (
         ProjectClearanceError,
         authored_netclass_clearances,

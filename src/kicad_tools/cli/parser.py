@@ -20,7 +20,11 @@ from kicad_tools import __version__
 from kicad_tools.benchmark.cases import Difficulty
 from kicad_tools.cli.check_categories import CHECK_CATEGORIES
 from kicad_tools.cli.copper_weight import add_check_copper_argument
-from kicad_tools.cli.export_cmd import STACKUP_ID_CHOICES, STACKUP_ID_HELP
+from kicad_tools.cli.export_cmd import (
+    STACKUP_ID_CHOICES,
+    STACKUP_ID_HELP,
+    VERIFY_REVIEWED_COPPER_HELP,
+)
 from kicad_tools.cli.format_options import add_format_flag
 from kicad_tools.cli.placement_options import add_decoupling_radius_argument
 from kicad_tools.manufacturers import get_all_manufacturer_names
@@ -10941,6 +10945,12 @@ def _add_export_parser(subparsers) -> None:
             "the via_land_overlap preflight result to the JSON output and manifest "
             "(Issue #10357)"
         ),
+    )
+    export_parser.add_argument(
+        "--verify-reviewed-copper",
+        dest="export_verify_reviewed_copper",
+        action="store_true",
+        help=VERIFY_REVIEWED_COPPER_HELP,
     )
     export_parser.add_argument(
         "--format",

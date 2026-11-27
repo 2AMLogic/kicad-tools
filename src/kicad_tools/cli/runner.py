@@ -1263,13 +1263,19 @@ def _fill_and_remediate_zones(
         def _carve(path: Path) -> None:
             carve_on_disk[0] = bool(_apply_foreign_pad_clearance(path))
 
+        saved_fill_stale = [False]
         settled_report = _remediate_starved_thermal(
             result.output_path,
             kicad_cli,
             settle=None if native_clearance else _carve,
             skip_first_refill=already_freshly_refilled,
+            saved_fill_stale=saved_fill_stale,
             **remediation_kwargs,
         )
+        if saved_fill_stale[0]:
+            # Issue #10261: remediation edited a pad and its refill did not
+            # complete, so the copper on disk predates the board's settings.
+            result.refill_saved = False
         if carve_on_disk[0]:
             verify_affordable = True
             if time_left is not None:
@@ -1330,6 +1336,7 @@ def _remediate_starved_thermal(
     time_left: Callable[[], float | None] | None = None,
     refill_cost_estimate: float = 0.0,
     revisit_solid: bool = False,
+    saved_fill_stale: list[bool] | None = None,
 ) -> dict | None:
     """Remediate the pads KiCad's DRC flags (Issue #3729).
 
@@ -1380,6 +1387,13 @@ def _remediate_starved_thermal(
             left as the last completed step wrote it.
         refill_cost_estimate: Seconds of one KiCad refill of this board
             (the caller's measured fill).  Measured passes replace it.
+        saved_fill_stale: Issue #10261.  One-element out-parameter.  Set to
+            ``True`` whenever a pad setting was written to ``pcb_path`` and
+            cleared only by a later refill that KiCad completed for those
+            settings.  A ``True`` on return means the saved copper predates
+            the board's current pad settings (the next refill failed, was
+            unaffordable, or the pass budget ended first), so the caller must
+            not report the fill as freshly saved.
 
     Returns:
         Issue #8053: the read-only DRC report of the settled geometry when
@@ -1400,13 +1414,22 @@ def _remediate_starved_thermal(
         return None
 
     def _run_drc(refill: bool) -> dict | None:
-        return _kicad_drc_report(pcb_path, kicad_cli, refill=refill)
+        return _kicad_drc_report(
+            pcb_path,
+            kicad_cli,
+            refill=refill,
+            require_save=bool(refill and saved_fill_stale and saved_fill_stale[0]),
+        )
 
     def _settle() -> None:
         if settle is not None:
             settle(pcb_path)
 
     pass_costs: list[float] = []
+
+    def _set_stale(value: bool) -> None:
+        if saved_fill_stale:
+            saved_fill_stale[0] = value
 
     def _affordable(kicad_runs: int) -> bool:
         if time_left is None:
@@ -1423,6 +1446,7 @@ def _remediate_starved_thermal(
             revisit_doc = parse_file(pcb_path)
             if revisit_solid_pad_overrides(revisit_doc):
                 save_pcb(revisit_doc, pcb_path)
+                _set_stale(True)
             skip_first_refill = False  # overrides changed: pass 0 must refill
         for pass_num in range(max_passes):
             if not _affordable(2):
@@ -1436,6 +1460,7 @@ def _remediate_starved_thermal(
             if not (skip_first_refill and pass_num == 0):
                 if _run_drc(refill=True) is None:
                     return None
+                _set_stale(False)
             _settle()
             report = _run_drc(refill=False)
             if report is None:
@@ -1452,11 +1477,13 @@ def _remediate_starved_thermal(
                 # is already on disk and we cannot improve it; stop here.
                 return report
             save_pcb(doc, pcb_path)
+            _set_stale(True)  # Issue #10261: the saved fill predates this edit
             pass_costs.append(_monotonic() - pass_started)
             # Next pass refills (reverting the carve), re-applies it, re-checks.
         # Pass budget exhausted with overrides still pending: do a final
         # refill + carve so the shipped copper reflects both.
         if _affordable(1) and _run_drc(refill=True) is not None:
+            _set_stale(False)
             _settle()
         return None
     except ModuleNotFoundError:
@@ -1469,11 +1496,15 @@ def _remediate_starved_thermal(
         return None
 
 
-def _kicad_drc_report(pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict | None:
+def _kicad_drc_report(
+    pcb_path: Path, kicad_cli: Path, *, refill: bool, require_save: bool = False
+) -> dict | None:
     """Run DRC on ``pcb_path`` and return the parsed report (or ``None``).
 
     ``refill`` adds ``--refill-zones --save-board`` so the run also refills
-    and persists the zones.  The default (all) severity is used so
+    and persists the zones. With ``require_save``, a report is usable only
+    when the native refill succeeded and rewrote the board.
+    The default (all) severity is used so
     ``isolated_copper`` *warnings* are visible alongside ``starved_thermal``
     *errors*; ``--schematic-parity`` is omitted because the fill output may
     lack a paired schematic.  The input net table is snapshotted and
@@ -1514,7 +1545,8 @@ def _kicad_drc_report(pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict 
         # unless the probe *definitively* said "no" -- and retrying once
         # without them when kicad-cli rejects the option -- is exactly
         # run_kicad_drc_command's policy (Issue #6775), so reuse it.
-        proc, _refilled = run_kicad_drc_command(
+        before = (pcb_path.read_bytes(), pcb_path.stat().st_mtime_ns) if require_save else None
+        proc, refilled = run_kicad_drc_command(
             build_cmd,
             kicad_cli,
             refill_zones=refill,
@@ -1523,7 +1555,18 @@ def _kicad_drc_report(pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict 
                 pcb_path, input_net_nodes, input_element_nets
             ),
         )
-        _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
+        # Check before net restoration, which can itself rewrite the file.
+        # This command omits --exit-code-violations, so a failed save is an error
+        # even if KiCad produced a complete violations report.
+        try:
+            if before is not None and (
+                not refilled
+                or proc.returncode != 0
+                or (pcb_path.read_bytes(), pcb_path.stat().st_mtime_ns) == before
+            ):
+                return None
+        finally:
+            _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
         # Issue #6724: a killed kicad-cli (negative status) or a missing,
         # empty or truncated report is "no report", never an empty one.
         if proc.returncode < 0:
