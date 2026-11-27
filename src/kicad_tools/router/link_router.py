@@ -314,8 +314,14 @@ class LinkRoute:
 
 
 def _copper_layer_names(pcb: PCB) -> list[str]:
-    layers = pcb.copper_layers
-    names = [getattr(layer, "name", str(layer)) for layer in layers]
+    from kicad_tools.core.layers import COPPER_LAYER_ORDER, is_declared_copper_layer
+
+    declared = {
+        layer.name
+        for layer in pcb.layers.values()
+        if is_declared_copper_layer(layer.name, layer.type)
+    }
+    names = [name for name in COPPER_LAYER_ORDER if name in declared]
     return names or ["F.Cu", "B.Cu"]
 
 
@@ -394,7 +400,7 @@ class _BoardModel:
     #: Issue #10486: copper accepted earlier in this invocation, as the track and
     #: via objects a later ``--join-track`` link may join (see ``_commit_to_model``).
     extra_segments: list[Any] = field(default_factory=list)
-    extra_vias: list[tuple[float, float, float]] = field(default_factory=list)
+    extra_vias: list[tuple[float, float, float, int]] = field(default_factory=list)
 
 
 def _build_model(pcb: PCB) -> _BoardModel:
@@ -618,8 +624,8 @@ def _merge_nodes(nodes: list[dict[str, Any]], copper: list[str]) -> list[dict[st
 def _via_span(layers: list[str], copper: list[str]) -> list[str]:
     """Copper layers a via with these end layers actually touches (blind/buried aware)."""
     idx = [copper.index(layer) for layer in layers if layer in copper]
-    if len(idx) < 2:
-        return list(copper)
+    if len(idx) != 2 or len(layers) != 2:
+        return []
     return copper[min(idx) : max(idx) + 1]
 
 
@@ -633,10 +639,24 @@ def _join_island(pcb: PCB, model: _BoardModel, net_number: int, pad: LinkTermina
     """
     from shapely.geometry import LineString, Point
 
+    from kicad_tools.geometry.copper import pad_copper_outline, pad_outline_is_exact
+
     copper = model.copper
-    nodes: list[dict[str, Any]] = [
-        dict(it.layers) for it in model.items if it.net == net_number and it.is_pad
-    ]
+    nodes: list[dict[str, Any]] = []
+    destination = None
+    for fp in pcb.footprints:
+        for pin in fp.pads:
+            if pin.net_number != net_number or not pad_outline_is_exact(pin):
+                continue
+            geom = pad_copper_outline(pin, fp.position, fp.rotation)
+            if geom is None:
+                continue
+            layers = _pad_layers(pin.layers, copper)
+            nodes.append(dict.fromkeys(layers, geom))
+            if f"{fp.reference}.{pin.number}" == pad.label and destination is None:
+                destination = nodes[-1]
+    if not destination:
+        return None
     for seg in [*pcb.segments, *model.extra_segments]:
         if seg.net_number != net_number or seg.layer not in copper:
             continue
@@ -654,7 +674,9 @@ def _join_island(pcb: PCB, model: _BoardModel, net_number: int, pad: LinkTermina
         if via.net_number == net_number:
             disk = Point(via.position).buffer((via.size or 0.0) / 2)
             nodes.append(dict.fromkeys(_via_span(list(via.layers or []), copper), disk))
-    for vx, vy, size in model.extra_vias:
+    for vx, vy, size, via_net in model.extra_vias:
+        if via_net != net_number:
+            continue
         nodes.append(dict.fromkeys(copper, Point(vx, vy).buffer(size / 2)))
     for layer, fills in model.fills.items():
         nodes.extend({layer: poly} for net, poly in fills if net == net_number)
@@ -663,7 +685,8 @@ def _join_island(pcb: PCB, model: _BoardModel, net_number: int, pad: LinkTermina
             comp
             for comp in _merge_nodes(nodes, copper)
             if any(
-                layer in comp and comp[layer].intersects(geom) for layer, geom in pad.layers.items()
+                layer in comp and comp[layer].intersects(geom)
+                for layer, geom in destination.items()
             )
         ),
         None,
@@ -1255,7 +1278,17 @@ def junction_sites(
     return sites
 
 
-def _branch_clears_pad(route: LinkRoute, pad: LinkTerminal) -> bool:
+def _written_point(x: float, y: float, origin: tuple[float, float]) -> tuple[float, float]:
+    """Board-relative point after the writer rounds absolute coordinates."""
+    from kicad_tools.sexp.builders import fmt
+
+    ox, oy = origin
+    return fmt(x + ox) - ox, fmt(y + oy) - oy
+
+
+def _branch_clears_pad(
+    route: LinkRoute, pad: LinkTerminal, origin: tuple[float, float] = (0.0, 0.0)
+) -> bool:
     """True when no branch segment, at its written width, runs through ``pad``.
 
     Issue #10486: a branch that ends on a track but crosses the destination
@@ -1264,13 +1297,15 @@ def _branch_clears_pad(route: LinkRoute, pad: LinkTerminal) -> bool:
     """
     from shapely.geometry import LineString, Point
 
+    from kicad_tools.sexp.builders import fmt
+
     for x1, y1, x2, y2, layer in route.segments:
         geom = pad.layers.get(layer)
         if geom is None:
             continue
-        a, b = (round(x1, 4), round(y1, 4)), (round(x2, 4), round(y2, 4))
+        a, b = _written_point(x1, y1, origin), _written_point(x2, y2, origin)
         line = LineString([a, b]) if a != b else Point(a)
-        if line.distance(geom) < route.width_for(layer) / 2 - 1e-6:
+        if line.distance(geom) < fmt(route.width_for(layer)) / 2 - 1e-9:
             return False
     return True
 
@@ -1325,6 +1360,9 @@ def route_link_junction(
         return None
     source_reach = max(g.hausdorff_distance(Point(source.point)) for g in source.layers.values())
     best: tuple[tuple[int, float], LinkRoute] | None = None
+    from kicad_tools.sexp.builders import fmt
+
+    origin = pcb.board_origin
     for dist, seg, raw in sites:
         if best is not None and not best[1].vias and dist - source_reach > best[0][1]:
             break
@@ -1335,6 +1373,14 @@ def route_link_junction(
             if math.dist(site, end) <= _JUNCTION_END_TOL:
                 site = end
                 break
+        written = _written_point(*site, origin)
+        if site in (seg.start, seg.end) and math.dist(site, written) > 1e-9:
+            continue
+        cap = Point(written)
+        if any(
+            cap.distance(g) < fmt(rules.width_for(seg.layer)) / 2 - 1e-9 for g in model.pad_geoms
+        ):
+            continue
         target = LinkTerminal(f"junction {seg.layer}", site, {seg.layer: Point(site)})
         route = route_link(
             pcb,
@@ -1349,8 +1395,8 @@ def route_link_junction(
         )
         if route is None or not route.segments or route.segments[-1][2:] != (*site, seg.layer):
             continue
-        if not _branch_clears_pad(route, pad) or not _branch_clears_pad(
-            collapse_link_route(route), pad
+        if not _branch_clears_pad(route, pad, origin) or not _branch_clears_pad(
+            collapse_link_route(route), pad, origin
         ):
             continue
         route.junction = LinkJunction(site, seg.layer, seg.start, seg.end, seg.width, seg.uuid)

@@ -463,17 +463,78 @@ def _joined(capsys, board: Path, *extra: str) -> dict:
 
 
 class TestJoinTrackReview:
-    def test_blind_via_does_not_connect_the_far_layer(self, tmp_path, capsys):
+    @pytest.mark.parametrize("layer_type", ["signal", "power", "mixed", "jumper"])
+    def test_blind_via_does_not_connect_the_far_layer(self, tmp_path, capsys, layer_type):
         board = _tee(
             tmp_path,
             _via('"F.Cu" "In1.Cu"', kind="blind"),
             '(segment (start 5 14) (end 11 9) (width 0.25) (layer "B.Cu") (net 1) '
             '(uuid "00000000-0000-0000-0000-000000000050"))',
         )
-        board.write_text(board.read_text().replace(_TWO_LAYERS, FOUR_LAYERS))
+        layers = FOUR_LAYERS.replace('"In1.Cu" signal', f'"In1.Cu" {layer_type}')
+        board.write_text(board.read_text().replace(_TWO_LAYERS, layers))
         _p3_through_hole(board)
         link = _joined(capsys, board, "--join-track", "--probe")
         assert "junction" not in link and link["join_track_skipped"]
+
+    def test_track_near_a_rounded_corner_is_isolated(self, tmp_path, capsys):
+        board = _tee(tmp_path, TEE_TRACK.replace("5 4", "5.96 13.04").replace("5 14", "11 9"))
+        text = board.read_text()
+        prefix, p2 = text.split('(fp_text reference "P2"')
+        p2 = p2.replace("smd rect", "smd roundrect", 1).replace(
+            "(size 1 1)", "(size 2 2) (roundrect_rratio 0.5)", 1
+        )
+        board.write_text(prefix + '(fp_text reference "P2"' + p2)
+        link = _joined(capsys, board, "--join-track", "--probe")
+        assert link["routable"] and "junction" not in link
+
+    def test_fractional_origin_cannot_move_a_reused_endpoint(self, tmp_path, capsys):
+        board = _tee(tmp_path, TEE_TRACK.replace("start 5 4", "start 5.125 9.125"))
+        board.write_text(
+            board.read_text()
+            .replace("start 1 1", "start 1.125 1.125")
+            .replace("(at 12 9)", "(at 12 8)")
+        )
+        link = _joined(capsys, board, "--join-track", "--probe")
+        assert link["routable"] and "junction" not in link
+
+    def test_written_branch_clears_destination_at_fractional_origin(self, tmp_path, capsys):
+        board = _tee(tmp_path, TEE_TRACK)
+        board.write_text(
+            board.read_text()
+            .replace("start 1 1", "start 1 1.007")
+            .replace("(at 5 14)", "(at 5 14.003)")
+            .replace("(at 12 9)", "(at 12 13.377)")
+        )
+        link = _joined(capsys, board, "--join-track", "--probe")
+        assert link["routable"] and "junction" not in link
+
+    def test_written_end_cap_clears_an_intermediate_pad(self, tmp_path, capsys):
+        board = _tee(tmp_path, TEE_TRACK, extra_pads=TEE_PAD4.replace("(at 2 12)", "(at 5 9)"))
+        link = _joined(capsys, board, "--join-track", "--probe")
+        junction = link.get("junction")
+        assert link["routable"]
+        assert junction is None or abs(junction["y"] - 9) >= 0.625
+
+    @pytest.mark.parametrize("via_net,connected", [(1, True), (2, False)])
+    def test_only_prior_same_net_vias_connect_fills(self, tmp_path, via_net, connected):
+        from shapely.geometry import box
+
+        from kicad_tools.cli.route_link_cmd import _commit_to_model
+        from kicad_tools.router.link_router import _build_model, _join_island, terminal_for_pad
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(_tee(tmp_path, TEE_TRACK_B)))
+        model = _build_model(pcb)
+        ox, oy = pcb.board_origin
+        fill = box(3 - ox, 10 - oy, 8 - ox, 15 - oy)
+        model.fills = {layer: [(1, fill)] for layer in ("F.Cu", "B.Cu")}
+        via = LinkRoute(
+            via_net, "SENSE" if connected else "FOE", 0.25, 0.6, 0.3, vias=[(4 - ox, 12 - oy)]
+        )
+        _commit_to_model(model, via, via_net)
+        island = _join_island(pcb, model, 1, terminal_for_pad(pcb, "P2", "1"))
+        assert ("B.Cu" in island) == connected
 
     def test_arc_is_followed_not_its_chords(self, tmp_path, capsys):
         board = _tee(
@@ -529,7 +590,8 @@ class TestJoinTrackReview:
         j = link.get("junction")
         assert j is None or (j["x"], j["y"]) != (5.0, 9.0)
 
-    def test_allowed_layers_apply_to_the_junction_not_the_pad(self, tmp_path, capsys):
+    @pytest.mark.parametrize("suffix", ["", "@B.Cu"])
+    def test_allowed_layers_apply_to_the_junction_not_the_pad(self, tmp_path, capsys, suffix):
         board = _tee(
             tmp_path,
             _via('"F.Cu" "B.Cu"'),
@@ -537,8 +599,18 @@ class TestJoinTrackReview:
             '(uuid "00000000-0000-0000-0000-000000000070"))',
         )
         _p3_through_hole(board)
-        link = _joined(capsys, board, "--join-track", "--probe", "--link-layers", "B.Cu")
-        assert link["routable"] and link["junction"]["layer"] == "B.Cu"
+        rc, doc = _run(
+            capsys,
+            str(board),
+            "--link",
+            f"SENSE P3.1 P2.1{suffix}",
+            *TEE_TUNE,
+            "--join-track",
+            "--probe",
+            "--link-layers",
+            "B.Cu",
+        )
+        assert rc == 0 and doc["links"][0]["junction"]["layer"] == "B.Cu"
 
     def test_split_of_a_legacy_tstamp_segment_has_unique_ids(self, tmp_path):
         board = _tee(tmp_path, TEE_TRACK.replace("(uuid ", "(tstamp "))

@@ -691,7 +691,7 @@ def _commit_to_model(model: Any, route: Any, net_number: int) -> None:
         disk = Point(vx, vy).buffer(route.via_size / 2)
         model.items.append(_Item(net_number, dict.fromkeys(model.copper, disk)))
         model.drills.append((vx, vy, route.via_drill))
-        model.extra_vias.append((vx, vy, route.via_size))
+        model.extra_vias.append((vx, vy, route.via_size, net_number))
 
 
 def _junction_report(junction: Any, origin: tuple[float, float]) -> dict[str, Any]:
@@ -752,7 +752,8 @@ def _route_one(
         entry["reason"] = "--join-track needs a pad as the destination and no --via-at"
         return entry, None
     ta, why = _resolve_end(pcb, spec.a, net_number, spec.net, origin)
-    tb, why_b = _resolve_end(pcb, spec.b, net_number, spec.net, origin)
+    destination = replace(spec.b, layer=None) if spec.join_track else spec.b
+    tb, why_b = _resolve_end(pcb, destination, net_number, spec.net, origin)
     if ta is None or tb is None:
         entry["reason"] = why or why_b
         return entry, None
@@ -792,6 +793,11 @@ def _route_one(
         )
         if route is None:
             entry["join_track_skipped"] = skipped["reason"]
+            if spec.b.layer is not None:
+                tb, why_b = _resolve_end(pcb, spec.b, net_number, spec.net, origin)
+                if tb is None:
+                    entry["reason"] = why_b
+                    return entry, None
             why_layers = _no_allowed_copper((("B", tb),))
             if why_layers is not None:
                 entry["reason"] = why_layers
