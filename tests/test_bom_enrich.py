@@ -1291,12 +1291,12 @@ def _precision_item(ref: str):
 def _plain_1206_part(lcsc: str = "C17902", **overrides):
     from kicad_tools.parts.models import Part
 
-    fields = dict(
-        lcsc_part=lcsc,
-        mfr_part="1206W4F1002T5E",
-        description="10kΩ ±1% 125mW 1206",
-        package="1206",
-    )
+    fields = {
+        "lcsc_part": lcsc,
+        "mfr_part": "1206W4F1002T5E",
+        "description": "10kΩ ±1% 125mW 1206",
+        "package": "1206",
+    }
     fields.update(overrides)
     return Part(**fields)
 
