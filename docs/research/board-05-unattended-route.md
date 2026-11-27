@@ -537,12 +537,14 @@ DRC and ERC returned zero findings, and both copper and label LVS passed.
 
 Measured on Linux x86_64 with C++ router build 79 and pinned kicad-cli
 10.0.6 (`KCT_KICAD_DOCKER=1`). Other work shared the host throughout
-(1-minute load 11 to 28 during the routes).
+(1-minute load 11 to 28 during the first routes, up to 53 on the re-run).
 
-On `origin/main` @ `73575b4dd` (seed 42 only) the unattended board passed
-the route and every native check and carried **18 `mask_to_copper` errors,
-101 warnings and 252 infos** in the full JLCPCB check, and 0 errors / 97
-warnings in the nightly rule set. Fourteen of the 18 errors are track
+On `origin/main` @ `73575b4dd`, and again at `0a3c4eb6c` with the same board
+bytes (SHA-256 `b5d0e180347327366495b3fb7955e0860066ac48b7fb5e156d7a63d179610716`),
+seed 42 passed the route and every native check and carried **18
+`mask_to_copper` errors, 101 warnings and 252 infos** in the full JLCPCB
+check, and 0 errors / 97 warnings in the nightly rule set. Fourteen of the 18
+errors are track
 segments against openings of their own net. Five are a leg whose rounded end
 comes within the 0.09 mm mask clearance of an opening it does not touch
 (HALL_A at J3/3 0.0575 mm, nFAULT at U1/14 0.020 mm, GND_SENSE at U2/7
@@ -579,7 +581,9 @@ The saved boards are byte-identical (SHA-256
 `6c50088c0656a808c019fee1f9bb13c4831eacef40a858d75ad16d4374875357`), and no
 route log carries a `per-net wall clock bound` or `stage deadline fired`
 line. `kct check` took 12.6 s with the mask pass skipped and 43.2 to 48.3 s
-with it.
+with it. The three seeds were routed again on the merged head (`0a3c4eb6c`
+plus this change): the same board bytes and counts, walls 384.7, 293.3 and
+270.8 s.
 
 Against the seed-42 baseline four errors are gone: HALL_A at J3/3, nFAULT
 at U1/14, EN_C at U1/12 (an off-centre exit hugging the pad's side) and
