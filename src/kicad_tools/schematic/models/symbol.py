@@ -1057,7 +1057,7 @@ class SymbolInstance:
                     value = prop_value
                 elif prop_name == "Footprint":
                     footprint = prop_value
-                elif prop_name == "Datasheet":
+                else:
                     properties[prop_name] = prop_value
 
         # Get or create SymbolDef

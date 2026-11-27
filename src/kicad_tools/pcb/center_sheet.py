@@ -42,11 +42,23 @@ Used by ``kct pcb center-on-sheet``.
 
 from __future__ import annotations
 
+import os
+import shutil
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from kicad_tools.core.package_publication import publication_lock
 from kicad_tools.pcb.models3d import _find_matching_paren, _skip_string
+from kicad_tools.pcb.reinforcement_sidecar import (
+    board_lock_path,
+    board_stream_lock,
+    board_versions,
+    sidecar_path,
+)
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS
 
 __all__ = [
@@ -445,6 +457,11 @@ class CenterReport:
     dy_mm: float
     translated_items: int
     usable_area: tuple[float, float, float, float]
+    #: Reinforcement sidecar that was (or, in a dry run, would be) written
+    #: alongside the PCB (Issue #10250); ``None`` when the board has none.
+    sidecar: Path | None = None
+    #: Actual destination written by the file command, including an already-centered copy.
+    output: Path | None = None
 
     @property
     def paper_changed(self) -> bool:
@@ -608,6 +625,97 @@ def center_pcb_text(
     return new_text, report
 
 
+def _same_file(first: Path, second: Path) -> bool:
+    return first.resolve() == second.resolve() or (
+        first.exists() and second.exists() and first.samefile(second)
+    )
+
+
+def _centering_sidecar(board: Path) -> Path:
+    """Refuse to move one board with two different wire inventories."""
+    record = sidecar_path(board)
+    if board.is_symlink():
+        canonical = sidecar_path(board.resolve())
+        # Replacing one of two hard-link names would leave the other on the old inode.
+        if os.path.lexists(canonical) and record.resolve() != canonical.resolve():
+            raise ValueError(
+                f"Board alias has two different reinforcement records: {record}, {canonical}"
+            )
+    return record
+
+
+def _record_publication_paths(board: Path, record: Path) -> tuple[Path, Path | None]:
+    """Return the record to replace and any second name that needs a link."""
+    target = record.resolve()
+    canonical = sidecar_path(board.resolve())
+    if target == canonical.resolve():
+        return target, None
+    # Only the alias has an inventory. Keep an explicit sidecar symlink's
+    # chosen target. An old regular record moves beside the physical board.
+    if record.is_symlink():
+        return target, canonical
+    return canonical, record
+
+
+def _staged_path(stack: ExitStack, dest: Path) -> Path:
+    directory = stack.enter_context(TemporaryDirectory(prefix=".center-", dir=dest.parent))
+    return Path(directory) / "new"
+
+
+def _stage_centered_file(
+    stack: ExitStack, dest: Path, content: bytes, mode_from: Path | None = None
+) -> Path:
+    """Prepare a sibling replacement.
+
+    An existing destination keeps its permissions; a new one gets the creation
+    mask's mode, never the source's (a private umask must not be widened).
+    ``mode_from`` names an existing file whose permissions a *new* destination
+    inherits: used only when an existing record moves to a new pathname.
+    """
+    replacing = dest.exists()
+    if replacing:
+        # A rename alone would bypass the access check of the original in-place writer.
+        with dest.open("r+b"):
+            pass
+    candidate = _staged_path(stack, dest)
+    with candidate.open("wb") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    if replacing:
+        shutil.copymode(dest, candidate)
+    elif mode_from is not None:
+        shutil.copymode(mode_from, candidate)
+    return candidate
+
+
+def _stage_record_link(stack: ExitStack, name: Path, target: Path) -> Path:
+    if name.exists():
+        with name.open("r+b"):
+            pass
+    link = _staged_path(stack, name)
+    parent = name.parent.resolve()
+    link.symlink_to(os.path.relpath(target, parent) if target.anchor == parent.anchor else target)
+    return link
+
+
+@contextmanager
+def _install_centered_record(candidate: Path, target: Path) -> Iterator[None]:
+    """Undo this replacement if publishing the other record name or PCB fails."""
+    backup = candidate.with_name("original")
+    if os.path.lexists(target):
+        shutil.copy2(target, backup, follow_symlinks=False)
+    os.replace(candidate, target)
+    try:
+        yield
+    except BaseException:
+        if os.path.lexists(backup):
+            os.replace(backup, target)
+        else:
+            target.unlink()
+        raise
+
+
 def center_on_sheet(
     pcb_path: Path | str,
     *,
@@ -623,14 +731,152 @@ def center_on_sheet(
 
     See :func:`center_pcb_text` for parameter semantics.  When *dry_run* is
     True nothing is written; otherwise the result is written to
-    *output_path* (default: in place) only if something changed.
+    *output_path* (default: in place). An in-place no-op leaves the PCB alone.
+
+    A ``<board>.reinforcement.json`` sidecar beside the input holds
+    sheet-absolute wire coordinates, so it is translated by the same (dx, dy)
+    and written beside the output (Issue #10250).  Both files are staged
+    before either is replaced and a failure restores the previous state, so
+    the PCB and its record never disagree.  An unreadable sidecar raises
+    before anything is written. When the output names a board symlink with a
+    legacy record beside it, both board names are bound to one inventory.
     """
-    pcb_path = Path(pcb_path)
-    text = pcb_path.read_text()
-    new_text, report = center_pcb_text(
-        text, paper=paper, margin=margin, title_block=title_block, slack=slack, grid=grid
+    from kicad_tools.pcb.reinforcement_sidecar import (
+        check_wire_records,
+        load_wires,
+        render_sidecar,
+        translate_sidecar_wires,
     )
-    if report.changed and not dry_run:
-        dest = Path(output_path) if output_path is not None else pcb_path
-        dest.write_text(new_text)
+
+    pcb_path = Path(pcb_path)
+    src_sidecar = _centering_sidecar(pcb_path)
+    source_pair = (pcb_path, src_sidecar)
+    source_versions = board_versions(pcb_path)
+    # A writer can pause between the record and PCB replacements. Check its locks
+    # after observing both versions, then verify both again after reading the pair.
+    # An export from a read-only directory requires no lock file in the input.
+    if any(os.path.lexists(board_lock_path(path)) for path in source_pair):
+        raise ValueError(f"Another operation is publishing the input: {pcb_path}")
+    source_bytes = pcb_path.read_bytes()
+    new_text, report = center_pcb_text(
+        source_bytes.decode("utf-8"),
+        paper=paper,
+        margin=margin,
+        title_block=title_block,
+        slack=slack,
+        grid=grid,
+    )
+    dest = Path(output_path) if output_path is not None else pcb_path
+    dest_versions = board_versions(dest)
+    dest_sidecar = _centering_sidecar(dest)
+    if not any(
+        os.path.lexists(record)
+        for record in (src_sidecar, dest_sidecar, sidecar_path(dest.resolve()))
+    ):
+        # An unchanged board writes nothing. Update an existing file through its
+        # inode so a write-only output or a hard-linked board still works.
+        if report.changed and not dry_run:
+
+            def verify_recordless() -> None:
+                if source_versions != board_versions(pcb_path) or os.path.lexists(
+                    sidecar_path(dest)
+                ):
+                    raise ValueError(
+                        f"PCB or reinforcement record changed while centering: {pcb_path}"
+                    )
+
+            with ExitStack() as files:
+                try:
+                    fd = os.open(dest, os.O_WRONLY)
+                except FileNotFoundError:
+                    files.enter_context(publication_lock(board_lock_path(dest)))
+                    verify_recordless()
+                    with dest.resolve().open("x") as output:
+                        output.write(new_text)
+                else:
+                    stream = files.enter_context(os.fdopen(fd, "w"))
+                    files.enter_context(board_stream_lock(fd, dest, writing=True))
+                    verify_recordless()
+                    if not os.path.samestat(os.fstat(fd), dest.stat()):
+                        raise ValueError(f"PCB changed while centering: {dest}")
+                    stream.truncate(0)
+                    stream.write(new_text)
+                    stream.flush()
+            report.output = dest
+        return report
+    record_target, record_link = _record_publication_paths(dest, dest_sidecar)
+    copying = (dest.parent.resolve(), dest.name) != (pcb_path.parent.resolve(), pcb_path.name)
+    if _same_file(dest, dest_sidecar) or (
+        copying
+        and any(
+            _same_file(out, inp) for out in (dest, dest_sidecar) for inp in (pcb_path, src_sidecar)
+        )
+    ):
+        raise ValueError("PCB and reinforcement input/output paths overlap")
+    if not report.changed and not copying and record_link is None:
+        return report
+
+    board_target = dest.resolve()
+    with ExitStack() as files:
+        if not dry_run:
+            files.enter_context(publication_lock(board_lock_path(board_target)))
+            if board_versions(dest) != dest_versions:
+                raise ValueError(f"PCB or reinforcement record changed while centering: {dest}")
+            if record_link is not None:
+                if os.path.lexists(sidecar_path(board_target)):
+                    raise ValueError(f"Reinforcement record changed while centering: {dest}")
+                files.enter_context(publication_lock(board_lock_path(record_link)))
+            writes_record = copying or report.dx_mm or report.dy_mm or record_link is not None
+            if writes_record and os.path.lexists(src_sidecar):
+                files.enter_context(publication_lock(board_lock_path(record_target)))
+
+        record: bytes | None = None
+        if os.path.lexists(src_sidecar):
+            wires = load_wires(src_sidecar)
+            if report.dx_mm or report.dy_mm:
+                check_wire_records(src_sidecar, wires)
+                record = render_sidecar(
+                    translate_sidecar_wires(wires, report.dx_mm, report.dy_mm)
+                ).encode()
+            elif copying or record_link is not None:
+                record = src_sidecar.read_bytes()
+        elif os.path.lexists(dest_sidecar):
+            raise ValueError(
+                f"Output has a reinforcement record but the input has none: {dest_sidecar}"
+            )
+        if record is not None:
+            report.sidecar = sidecar_path(board_target) if record_link is not None else dest_sidecar
+        if source_versions != board_versions(pcb_path) or (pcb_path.read_bytes() != source_bytes):
+            raise ValueError(f"PCB or reinforcement record changed while centering: {pcb_path}")
+        if dry_run:
+            return report
+
+        pcb_tmp = None
+        if report.changed or copying:
+            pcb_tmp = _stage_centered_file(files, board_target, new_text.encode())
+        if record is not None:
+            # Migrating the input's own inventory to a new name keeps its mode
+            # (a private 0600 record stays private); a new export does not.
+            # A distinct output whose own regular legacy record moves to the
+            # canonical name keeps that record's mode too.
+            mode_from: Path | None = None
+            if not copying and os.path.lexists(src_sidecar):
+                mode_from = src_sidecar
+            elif (
+                copying
+                and record_link is not None
+                and dest_sidecar.is_file()
+                and not dest_sidecar.is_symlink()
+            ):
+                mode_from = dest_sidecar
+            record_tmp = _stage_centered_file(files, record_target, record, mode_from)
+            replacements = [(record_tmp, record_target)]
+            if record_link is not None:
+                link_tmp = _stage_record_link(files, record_link, record_target)
+                replacements.append((link_tmp, record_link))
+            for candidate, target in replacements:
+                files.enter_context(_install_centered_record(candidate, target))
+        if pcb_tmp is not None:
+            os.replace(pcb_tmp, board_target)
+            report.output = dest
     return report

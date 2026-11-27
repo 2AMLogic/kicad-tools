@@ -206,13 +206,39 @@ def test_no_credentials_in_outputs(monkeypatch, tmp_path, capsys):
     assert "STM32F103C8T6" in out.out
 
 
-def test_cli_json_shape(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("public_entry", [False, True])
+def test_cli_json_shape(monkeypatch, tmp_path, capsys, public_entry):
+    from kicad_tools.cli import main
+
     monkeypatch.setenv("MOUSER_API_KEY", SECRET)
     s = both_session()
     monkeypatch.setattr("kicad_tools.parts.distributors.service._default_session", lambda: s)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    assert parts_cmd.main(["stock", "STM32F103C8T6", "-q", "100", "--format", "json"]) == 0
+    args = [
+        "stock",
+        "STM32F103C8T6",
+        "-q",
+        "100",
+        "--format",
+        "json",
+        "--no-cache",
+        "--cache-ttl-minutes",
+        "15",
+    ]
+    assert (main(["parts", *args]) if public_entry else parts_cmd.main(args)) == 0
     data = json.loads(capsys.readouterr().out)
     o = data["offers"][0]
     assert o["distributor"] == "mouser" and o["unit_price"] == 6.25
     assert o["region"] and o["fetched_at"] and o["currency"] == "USD"
+
+
+def test_public_stock_command_without_credentials(capsys, tmp_path, monkeypatch):
+    from kicad_tools.cli import main
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    assert (
+        main(["parts", "stock", "AP63203WU-7", "RHC2512FT4K70", "-q", "5", "--format", "json"]) == 1
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["command"] == "stock" and result["quantity"] == 5
+    assert not result["success"] and not result["offers"] and result["notices"]

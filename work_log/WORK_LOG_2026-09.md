@@ -2,6 +2,12 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-27
+
+- **PR #5742**: fix(merge-pr): route the #8248 freshness guard's stale-checks call through the #6074/#6752 credential ladder
+- **Issue #5741** (closed): merge-pr.sh: _check_required_check_freshness's stale-checks call bypasses the #6074/#6752 permission-escalation ladder
+- **PR #5740**: fix(router): keep late keep-outs hard against route-halo refinement
+
 ### 2026-09-26
 
 - **PR #5735**: test(conformance): hard-gate the route-halo refinement against kicad-cli

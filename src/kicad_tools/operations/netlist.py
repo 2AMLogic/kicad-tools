@@ -84,10 +84,21 @@ class NetlistComponent:
 
         # Parse properties
         for prop in sexp.find_all("property"):
-            prop_name = prop.get_string(0)
-            prop_value = prop.get_string(1)
-            if prop_name and prop_value:
+            if name := prop.find("name"):
+                prop_name = name.get_string(0)
+                value_node = prop.find("value")
+                prop_value = value_node.get_string(0) if value_node else None
+            else:
+                prop_name = prop.get_string(0)
+                prop_value = prop.get_string(1)
+            if prop_name and prop_value is not None:
                 properties[prop_name] = prop_value
+
+        # KiCad serializes custom symbol fields as (field (name "LCSC") "C123").
+        if fields := sexp.find("fields"):
+            for item in fields.find_all("field"):
+                if (name := item.find("name")) and (field_name := name.get_string(0)):
+                    properties[field_name] = item.get_string(1) or ""
 
         return cls(
             reference=ref,
@@ -787,6 +798,7 @@ def _collect_sheet_nets(
             lib_id=lib_id,
             sheet_path=sheet_path,
             symbol_path=symbol_path,
+            properties=dict(sym.properties),
             pins=[ComponentPin(pin.number, pin.name, pin.pin_type) for pin in sym.symbol_def.pins]
             if include_symbol_pins
             else [],

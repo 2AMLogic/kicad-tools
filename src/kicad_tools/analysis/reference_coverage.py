@@ -178,6 +178,22 @@ def _estimator(stack: Stackup) -> Estimate:
 
 
 def _reference_summary(side: str, paths: list[Report], known: bool) -> Report:
+    """Summarize one adjacent reference side of a layer.
+
+    ``coverage`` takes one of five states:
+
+    - ``"not_applicable"``: the fill is known, but no centerline length was
+      measured on this layer (the net only passes through on a via), so both
+      distances are ``0.0``.
+    - ``"none"``: routed copper of positive length, none of it over this reference.
+    - ``"partial"``: some routed length over this reference and some over void.
+    - ``"complete"``: every routed length is over this reference.
+    - ``"unknown"``: a zone declared on this side has no saved fill, so every
+      measurement is ``None``.
+
+    Unreferenced copper is ``"none"`` alone; ``"not_applicable"`` rows carry
+    no routed length to judge.
+    """
     if not known:
         return {
             "coverage": "unknown",
@@ -209,8 +225,16 @@ def _reference_summary(side: str, paths: list[Report], known: bool) -> Report:
                     voids.append(
                         {"path": path_index, "start_mm": span["start_mm"], "end_mm": span["end_mm"]}
                     )
+    if not covered and not uncovered:
+        coverage = "not_applicable"
+    elif not covered:
+        coverage = "none"
+    elif uncovered:
+        coverage = "partial"
+    else:
+        coverage = "complete"
     return {
-        "coverage": "none" if not covered else "partial" if uncovered else "complete",
+        "coverage": coverage,
         "void_spans": voids,
         "covered_mm": round(covered, 9),
         "uncovered_mm": round(uncovered, 9),
