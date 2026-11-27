@@ -2767,9 +2767,9 @@ def load_pads_for_analysis(
     # Split by footprint for easier parsing
     from kicad_tools.schema.pcb import PCB as IdentityPCB
     from kicad_tools.schema.physical_identity import footprint_keys
-    from kicad_tools.sexp import parse_string as parse_identity_document
+    from kicad_tools.sexp import parse_string
 
-    identity_document = IdentityPCB(parse_identity_document(pcb_text))
+    identity_document = IdentityPCB(parse_string(pcb_text))
     source_keys = footprint_keys(identity_document.footprints)
     footprint_sections = _footprint_source_sections(pcb_text, identity_document.footprints)
     for section, component_id, footprint in zip(
@@ -2841,6 +2841,7 @@ def load_pads_for_analysis(
             if "B.Cu" in pad_block and "F.Cu" not in pad_block:
                 layer = Layer.B_CU
 
+            pad_node = parse_string(pad_block)
             pads.append(
                 PadObj(
                     x=abs_x,
@@ -2859,10 +2860,10 @@ def load_pads_for_analysis(
                     footprint_origin=(fp_x, fp_y),
                     rotation=pad_rotation,
                     shape=pad_shape,
-                    roundrect_rratio=_pad_rratio_from_block(pad_block, pad_shape),
-                    chamfered_outline=_pad_chamfered_outline(pad_block),
-                    authored_layers=_pad_authored_layers_from_block(pad_block),
-                    copper_offset=_pad_copper_offset_from_block(pad_block, pad_rot),
+                    roundrect_rratio=_pad_radius_ratio(pad_node, pad_shape),
+                    **_chamfered_outlines(pad_node),
+                    authored_layers=_pad_authored_layers(pad_node),
+                    copper_offset=_pad_copper_offset(pad_node, pad_rot),
                 )
             )
 
@@ -5003,6 +5004,7 @@ def route_pcb(
                     "shape": pad.get("shape", "rect"),
                     "roundrect_rratio": pad.get("roundrect_rratio"),
                     "chamfered_outline": pad.get("chamfered_outline", ()),
+                    "mask_chamfered_outline": pad.get("mask_chamfered_outline", ()),
                     "authored_layers": pad.get("authored_layers", ()),
                     "copper_offset": pad.get("copper_offset", (0.0, 0.0)),
                     "height": pad.get("height", 0.5),
@@ -5110,22 +5112,9 @@ def _pad_shape_from_block(
     )
 
 
-def _pad_rratio_from_block(pad_block: str, shape: str) -> float | None:
-    """The file's ``(roundrect_rratio X)`` for a ``roundrect`` pad (issue #6718).
-
-    Returns ``None`` for any other shape, and for a roundrect whose block
-    carries no parseable ratio -- the clearance kernel then measures it as its
-    rectangle (conservative) rather than assuming KiCad's 0.25 default.
-    """
-    if shape != "roundrect":
-        return None
-    match = re.search(r"\(roundrect_rratio\s+([-+\d.eE]+)\s*\)", pad_block)
-    if match is None:
-        return None
-    try:
-        return float(match.group(1))
-    except ValueError:
-        return None
+def _pad_radius_ratio(node: SExp, shape: str) -> float | None:
+    ratio = node.find_child("roundrect_rratio")
+    return ratio.get_float(0) if shape == "roundrect" and ratio is not None else None
 
 
 def _schema_pad_rratio(pad) -> float | None:
@@ -5147,33 +5136,24 @@ def _schema_pad_shape(pad, ref: str) -> str:
     )
 
 
-def _pad_authored_layers_from_block(block: str) -> tuple[str, ...]:
-    """Read the layer names and wildcards declared by a pad."""
-    match = re.search(r"\(layers\s+([^()]*)\)", block)
-    return tuple(token.strip('"') for token in match[1].split()) if match else ()
+def _pad_authored_layers(node: SExp) -> tuple[str, ...]:
+    layers = node.find_child("layers")
+    return tuple(str(item.value) for item in layers.children) if layers is not None else ()
 
 
-def _pad_copper_offset_from_block(block: str, rotation: float) -> tuple[float, float]:
-    """KiCad stores the copper displacement in pad-local axes under ``drill``."""
-    if "(offset" not in block:
-        return (0.0, 0.0)
-    from kicad_tools.sexp import parse_string
-
-    drill = parse_string(block).find_child("drill")
+def _pad_copper_offset(node: SExp, rotation: float) -> tuple[float, float]:
+    """KiCad stores the copper displacement in pad-local axes under drill."""
+    drill = node.find_child("drill")
     offset = drill.find_child("offset") if drill is not None else None
     if offset is None:
         return (0.0, 0.0)
     return rotate_pad_offset(offset.get_float(0) or 0.0, offset.get_float(1) or 0.0, rotation)
 
 
-def _pad_chamfered_outline(source: str | SExp | None) -> tuple[tuple[float, float], ...]:
-    """Copper of a mixed chamfered/rounded pad, relative to its centre in board axes."""
-    from kicad_tools.sexp import parse_string
-
-    if isinstance(source, str):
-        if "(chamfer" not in source:
-            return ()
-        source = parse_string(source)
+def _pad_chamfered_outline(
+    source: SExp | None, default_ratio: float
+) -> tuple[tuple[float, float], ...]:
+    """Boundary of a mixed chamfered/rounded pad, relative to its centre in board axes."""
     if source is None or (corners := source.find_child("chamfer")) is None:
         return ()
     ratio = source.find_child("chamfer_ratio")
@@ -5187,7 +5167,7 @@ def _pad_chamfered_outline(source: str | SExp | None) -> tuple[tuple[float, floa
         return ()
     rounding = source.find_child("roundrect_rratio")
     rratio = rounding.get_float(0) if rounding is not None else None
-    rounded = (0.5 if rratio is None else max(0.0, min(0.5, rratio))) * short
+    rounded = (default_ratio if rratio is None else max(0.0, min(0.5, rratio))) * short
     at = source.find_child("at")
     rotation = (at.get_float(2) or 0.0) if at is not None else 0.0
     selected = {item.value for item in corners.children}
@@ -5212,13 +5192,21 @@ def _pad_chamfered_outline(source: str | SExp | None) -> tuple[tuple[float, floa
     return tuple(vertices)
 
 
+def _chamfered_outlines(node: SExp | None) -> dict:
+    contact = _pad_chamfered_outline(node, 0.5)
+    mask: tuple[tuple[float, float], ...] = ()
+    if contact and node is not None and node.find_child("roundrect_rratio") is None:
+        mask = _pad_chamfered_outline(node, 0.25)
+    return {"chamfered_outline": contact, "mask_chamfered_outline": mask}
+
+
 def _schema_pad_shape_fields(pad, ref: str) -> dict:
     """Geometry shared by the schema-based router entry points."""
     offset_x, offset_y = pad.drill_offset
     return {
         "shape": _schema_pad_shape(pad, ref),
         "roundrect_rratio": _schema_pad_rratio(pad),
-        "chamfered_outline": _pad_chamfered_outline(getattr(pad, "_sexp_node", None)),
+        **_chamfered_outlines(getattr(pad, "_sexp_node", None)),
         "authored_layers": tuple(pad.layers),
         "copper_offset": rotate_pad_offset(offset_x, offset_y, pad.rotation),
     }
@@ -5416,6 +5404,7 @@ def _install_fine_pitch_regions_from_components(
                         shape=pad_info.get("shape", "rect"),
                         roundrect_rratio=pad_info.get("roundrect_rratio"),
                         chamfered_outline=pad_info.get("chamfered_outline", ()),
+                        mask_chamfered_outline=pad_info.get("mask_chamfered_outline", ()),
                         copper_offset=pad_info.get("copper_offset", (0.0, 0.0)),
                     )
                 )
@@ -5823,9 +5812,9 @@ def load_pcb_for_routing(
     # Split by footprint for easier parsing
     from kicad_tools.schema.pcb import PCB as IdentityPCB
     from kicad_tools.schema.physical_identity import footprint_keys, validate_netlist_selectors
-    from kicad_tools.sexp import parse_string as parse_identity_document
+    from kicad_tools.sexp import parse_string
 
-    identity_document = IdentityPCB(parse_identity_document(pcb_text))
+    identity_document = IdentityPCB(parse_string(pcb_text))
     source_keys = footprint_keys(identity_document.footprints)
     validate_netlist_selectors(identity_document.footprints, netlist or {})
     footprint_sections = _footprint_source_sections(pcb_text, identity_document.footprints)
@@ -5918,7 +5907,8 @@ def load_pcb_for_routing(
             # For thru-hole pads: (layers "*.Cu" "*.Paste" "*.Mask") - means all copper layers
             # We need to find the copper layer name (*.Cu pattern)
             pad_layer = Layer.F_CU  # Default to top layer
-            authored_layers = _pad_authored_layers_from_block(pad_block)
+            pad_node = parse_string(pad_block)
+            authored_layers = _pad_authored_layers(pad_node)
             first_copper = next((name for name in authored_layers if name.endswith(".Cu")), None)
             if first_copper and first_copper != "*.Cu":
                 with contextlib.suppress(ValueError):
@@ -6038,10 +6028,10 @@ def load_pcb_for_routing(
                     "side": fp_side,
                     "rotation": pad_rotation,
                     "shape": pad_shape,
-                    "roundrect_rratio": _pad_rratio_from_block(pad_block, pad_shape),
-                    "chamfered_outline": _pad_chamfered_outline(pad_block),
+                    "roundrect_rratio": _pad_radius_ratio(pad_node, pad_shape),
+                    **_chamfered_outlines(pad_node),
                     "authored_layers": authored_layers,
-                    "copper_offset": _pad_copper_offset_from_block(pad_block, pad_rot),
+                    "copper_offset": _pad_copper_offset(pad_node, pad_rot),
                 }
             )
 

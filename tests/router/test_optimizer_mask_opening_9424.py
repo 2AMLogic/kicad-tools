@@ -371,3 +371,66 @@ def test_equivalent_mask_margins_resolve_to_same_guard(tmp_path, token):
     board = tmp_path / "margin.kicad_pcb"
     board.write_text(f"(kicad_pcb (setup (pad_to_mask_clearance {token})))")
     assert _resolve_route_mask_guard("jlcpcb", board) == (JLCPCB_MASK_CLEARANCE, 0.2)
+
+
+def _file_shortcut(tmp_path, pad_fields, points, width, *, minimum=None):
+    from pathlib import Path
+
+    from kicad_tools.router.io import load_pcb_for_routing
+
+    fixture = Path(__file__).parents[1] / "fixtures" / "mask_pass_through_via_contact.kicad_pcb"
+    text = fixture.read_text()
+    start = text.index('(pad "1" smd rect')
+    end = text.index('(net 1 "N1")', start)
+    text = text[:start] + '(pad "1" smd ' + pad_fields + "\n" + text[end:]
+    if minimum:
+        text = text.replace("(pad_to_mask_clearance 0)", minimum)
+    start = text.index("\t(segment")
+    tracks = "".join(
+        f'(segment (start {x1} {y1}) (end {x2} {y2}) (width {width}) (layer "F.Cu") (net 1))\n'
+        for (x1, y1), (x2, y2) in zip(points, points[1:], strict=False)
+    )
+    board = tmp_path / "shortcut.kicad_pcb"
+    board.write_text(text[:start] + tracks + text[text.index("\t(gr_rect", start) :])
+    router, _ = load_pcb_for_routing(
+        str(board), validate_drc=False, force_python=True, load_existing_routes=True
+    )
+    router.routes, router.existing_routes = router.existing_routes, []
+    guard = _resolve_route_mask_guard("jlcpcb", board)
+    _optimize_traces(router, argparse.Namespace(_mfr_mask_guard=guard), quiet=True)
+    return guard, _points(router.routes[0])
+
+
+@pytest.mark.parametrize("radius", ["", "(roundrect_rratio 0.25)"])
+def test_file_chamfer_retains_plotted_round_corners(tmp_path, radius):
+    points = [(98.85, 103), (99.85, 104), (104, 99.85), (103, 98.85)]
+    pad = f'roundrect (at 0 0) (size 2 2) (chamfer_ratio 0.2) (chamfer top_left) {radius} (layers "F.Cu" "F.Mask")'
+    from shapely.geometry import LineString, box
+
+    guard, result = _file_shortcut(tmp_path, pad, points, 0.10)
+    assert guard == GUARD
+    # The nearest (bottom-right) corner is a 0.5 mm arc around the inset box.
+    gap = LineString(result).distance(box(99.5, 99.5, 100.5, 100.5)) - 0.5 - 0.05
+    assert gap == pytest.approx(1.465255, abs=0.001)
+
+
+@pytest.mark.parametrize("space", ["", " "])
+@pytest.mark.parametrize("setting", ["layers", "solder_mask_margin", "solder_mask_min_width"])
+def test_file_mask_fields_accept_equivalent_whitespace(tmp_path, space, setting):
+    points = [(91, 99.35), (92.7, 101.05), (106, 101.05), (107.7, 99.35), (109, 99.35)]
+    pad = f'rect (at 0 0) (size 2 1) ({space}layers "F.Cu" "F.Mask")'
+    minimum = None
+    if setting == "solder_mask_margin":
+        pad += f" ({space}solder_mask_margin -0.2)"
+    elif setting == "solder_mask_min_width":
+        minimum = f"({space}solder_mask_min_width 0.65)"
+    guard, result = _file_shortcut(tmp_path, pad, points, 0.20, minimum=minimum)
+    if setting == "layers":
+        assert guard == GUARD
+        from shapely.geometry import LineString, box
+
+        gap = LineString(result).distance(box(99, 99.5, 101, 100.5)) - 0.10
+        assert gap == pytest.approx(0.45)
+    else:
+        assert guard is None
+        assert result == [points[0], points[-1]]

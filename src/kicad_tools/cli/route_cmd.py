@@ -12444,9 +12444,6 @@ def _sub_floor_net_class_widths(net_class_map, floor: float) -> list[tuple[str, 
     return sorted(worst.items(), key=lambda kv: (kv[1], kv[0]))
 
 
-_MASK_MARGIN_OVERRIDE = "(solder_mask_margin"
-
-
 def _uniform_board_mask_margin(pcb_path) -> float | None:
     """The board's solder-mask expansion when no pad overrides it, else ``None``.
 
@@ -12463,9 +12460,10 @@ def _uniform_board_mask_margin(pcb_path) -> float | None:
     from kicad_tools.validate.mask_geometry import board_mask_margin_from_sexp
 
     try:
-        text = Path(pcb_path).read_text(errors="replace")
-        minimum = re.search(r"\(solder_mask_min_width\s+([^()\s]+)\s*\)", text)
-        if minimum and float(minimum[1]) != 0:
+        board = parse_string(Path(pcb_path).read_text(errors="replace"))
+        setup = board.find_child("setup")
+        minimum = setup.find_child("solder_mask_min_width") if setup is not None else None
+        if minimum is not None and minimum.get_float(0) != 0:
             return None
         project = Path(pcb_path).with_suffix(".kicad_pro")
         if project.is_file():
@@ -12476,12 +12474,12 @@ def _uniform_board_mask_margin(pcb_path) -> float | None:
                 for key in ("solder_mask_min_width", "solder_mask_clearance")
             ):
                 return None
-        if _MASK_MARGIN_OVERRIDE in text:
+        if board.find("solder_mask_margin") is not None:
             return None
         rules = Path(pcb_path).with_suffix(".kicad_dru")
         if rules.is_file() and "solder_mask" in rules.read_text(errors="replace"):
             return None
-        margin, _ = board_mask_margin_from_sexp(parse_string(text))
+        margin, _ = board_mask_margin_from_sexp(board)
         return margin
     except (OSError, ValueError, AttributeError):
         return None
