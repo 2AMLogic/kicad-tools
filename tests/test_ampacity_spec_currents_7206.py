@@ -14,6 +14,7 @@ import re
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZipFile
 
 import pytest
 
@@ -168,8 +169,9 @@ class TestCheckCli:
         assert data["summary"]["errors"] == 0
 
 
-def test_board05_publishes_ampacity_target_on_motor_power():
-    ncm = json.loads((BOARD05.parent / "redesign" / "net_class_map.json").read_text())
+@pytest.mark.parametrize("directory", ["redesign", "output"])
+def test_board05_publishes_ampacity_target_on_motor_power(directory):
+    ncm = json.loads((BOARD05.parent / directory / "net_class_map.json").read_bytes())
     motor = {
         n: c
         for n, c in ncm.items()
@@ -177,6 +179,10 @@ def test_board05_publishes_ampacity_target_on_motor_power():
     }
     assert set(motor) == {"VIN", "FUSED", "VM", "PHASE_A", "PHASE_B", "PHASE_C", "GND_SENSE"}
     assert all(c["target_ampacity"] == 0.5 and c["neck_trace_width"] == 0.3 for c in motor.values())
-    assert (BOARD05 / "net_class_map.json").read_text() == (
-        BOARD05.parent / "redesign" / "net_class_map.json"
-    ).read_text()
+
+
+def test_board05_released_map_matches_its_packaged_source():
+    with ZipFile(BOARD05 / "manufacturing/design-source.zip") as archive:
+        assert (BOARD05 / "net_class_map.json").read_bytes() == archive.read(
+            "redesign/net_class_map.json"
+        )

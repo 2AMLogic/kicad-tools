@@ -16,6 +16,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **PR #10524**: Report missing order codes on partially verified stock reviews
+- **PR #10248**: fix(fix-drc): guard mask-copper repairs against new warnings
+- **Issue #10523** (closed): Keep unresolved BOM lines visible in a partially verified stock preflight
+- **PR #10538**: test: return ManufacturingResult from export CLI dry-run stub
+- **PR #10469**: fix(board04): finalize silkscreen before binding manufacturing DRC
+- **Issue #10535** (closed): test_export_cmd::test_project_root_reaches_manufacturing_package fails on main: dry-run stub has no errors attribute
+- **Issue #10449** (closed): Finalize Board 04 silkscreen before binding the manufacturing DRC report
 - **PR #10508**: Report temporary disk exhaustion in native mask remediation
 - **PR #10456**: chore(boards): refresh datasheets on four maintained schematics
 - **PR #10426**: Recognize native root-relative footprint links in editable project handoffs

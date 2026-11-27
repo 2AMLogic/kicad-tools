@@ -13,9 +13,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -84,15 +86,20 @@ def make_board(
     return board
 
 
+def run_phase(name: str, command: list[str], **kwargs) -> None:
+    started = time.monotonic()
+    print(f"Starting {name} ({shlex.join(command)})", flush=True)
+    subprocess.run(command, capture_output=True, text=True, check=True, **kwargs)
+    print(f"Completed {name} in {time.monotonic() - started:.3f} s", flush=True)
+
+
 def refill(board: Path, cli: str) -> dict:
     report = board.parent / "native.json"
-    subprocess.run(
+    run_phase(
+        f"native refill of {board.name}",
         [cli, "pcb", "drc", str(board), "--refill-zones", "--save-board", "--format", "json"]
         + ["-o", str(report)],
-        capture_output=True,
-        text=True,
         timeout=180,
-        check=True,
     )
     return json.loads(report.read_text())
 
@@ -208,16 +215,14 @@ def test_stale_fill_with_pad_connection_disabled_earns_no_skip(tmp_path, native_
 
 def route_and_refill(board: Path, native_cli: str) -> tuple[int, int]:
     routed = board.with_name("routed.kicad_pcb")
-    subprocess.run(
+    run_phase(
+        "power-plane routing",
         [sys.executable, "-m", "kicad_tools.cli", "route", str(board)]
         + ["--layers", "4", "--stitch-power-planes", "--via-diameter", "0.6"]
         + ["--via-drill", "0.3", "--clearance", "0.2", "-o", str(routed)],
-        capture_output=True,
-        text=True,
         timeout=240,
         cwd=board.parent,
         env={**os.environ, "PYTHONPATH": str(SRC)},
-        check=True,
     )
     probe = board.with_name("after.kicad_pcb")
     shutil.copy2(routed, probe)
