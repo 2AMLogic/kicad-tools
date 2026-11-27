@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime
 
 import pytest
 
@@ -22,6 +23,16 @@ ROWS = [
     (200, "BASIC-10K", "0603", "basic", "10kΩ 1% 0603", 100, "1-:0.0020"),
     (201, "BASIC-10K-CHEAP", "0603", "basic", "10kΩ 5% 0603", 100, "1-:0.0010"),
 ]
+STOCK_BY_LCSC = {f"C{r[0]}": r[5] for r in ROWS}
+ROW_KEYS = {
+    "lcsc",
+    "mfr_part",
+    "package",
+    "library_type",
+    "stock",
+    "unit_price",
+    "inventory",
+}
 
 
 @pytest.fixture
@@ -76,27 +87,53 @@ def test_rank_limit_and_empty():
     assert len(rank_alternatives(src, cands, 3)) == 3
 
 
+def _assert_offline_catalog_provenance(row):
+    inventory = row["inventory"]
+    assert set(inventory) == set(Part(lcsc_part="C0").inventory_provenance())
+    assert inventory["source"] == "offline_catalog"
+    assert inventory["observed_at"] is None
+    assert inventory["snapshot_revision"] is None
+    assert inventory["snapshot_at"] is None
+    assert inventory["from_cache"] is False
+    assert inventory["stock_verified"] is False
+    assert inventory["verification_max_age_hours"] == 24
+    assert inventory["read_at"] is not None
+    datetime.fromisoformat(inventory["read_at"])
+
+
 def test_cli_json(catalog_db, capsys):
     assert parts_cmd.main(["alternatives", "C100", "--format", "json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["source"]["lcsc"] == "C100"
     ids = [a["lcsc"] for a in data["alternatives"]]
     assert ids == ["C101", "C102", "C103"]
-    assert set(data["alternatives"][0]) == {
-        "lcsc",
-        "mfr_part",
-        "package",
-        "library_type",
-        "stock",
-        "unit_price",
-    }
+    for item in (data["source"], *data["alternatives"]):
+        assert set(item) == ROW_KEYS
+        assert type(item["stock"]) is int
+        assert item["stock"] == STOCK_BY_LCSC[item["lcsc"]]
+        _assert_offline_catalog_provenance(item)
     assert data["alternatives"][0]["library_type"] == "basic"
+
+
+def test_cli_json_source_provenance_without_alternatives(catalog_db, capsys):
+    assert parts_cmd.main(["alternatives", "C201", "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["alternatives"] == []
+    assert set(data["source"]) == ROW_KEYS
+    assert data["source"]["stock"] == STOCK_BY_LCSC["C201"]
+    _assert_offline_catalog_provenance(data["source"])
 
 
 def test_cli_text_and_limit(catalog_db, capsys):
     assert parts_cmd.main(["alternatives", "C100", "--limit", "1"]) == 0
     out = capsys.readouterr().out
     assert "C101" in out and "C102" not in out
+    _, header, _, c101 = out.splitlines()
+    heading = "Offline catalog stock"
+    assert heading in header
+    stock_end = header.index(heading) + len(heading)
+    assert c101[:stock_end].endswith(str(STOCK_BY_LCSC["C101"]))
+    assert c101[stock_end:].strip() == "$0.0050"
 
 
 def test_cli_basic_source_no_better(catalog_db, capsys):
