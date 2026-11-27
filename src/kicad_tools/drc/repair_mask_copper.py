@@ -60,6 +60,7 @@ from shapely.geometry import LineString, Point, box  # type: ignore[import-untyp
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 from shapely.ops import nearest_points, unary_union  # type: ignore[import-untyped]
 
+from ..router.quantize import is_45_aligned, off_angle_degrees
 from ..schema.pcb import Arc
 from ..sexp import SExp
 from .mask_trace_angles import MaskTraceAngleError, MaskTraceBend, off_angle_tracks
@@ -121,8 +122,9 @@ _MIN_RUN_MM = 0.05
 # Verdict of ``_bridge_aligned_pads`` for a topology it does not apply to; the
 # finding then keeps its ordinary ``not_own_pad_entry`` decline.
 _NOT_A_BRIDGE = "not_a_bridge"
-# Perpendicular offset (mm) within which a second pad's centre counts as on the
-# line through the first pad's centre.
+# Perpendicular offset (mm) within which a second pad's centre is treated as a
+# near-aligned bridge candidate; ``is_45_aligned`` then gates the pad-to-pad
+# angle before any copper is moved (issue #10601).
 _BRIDGE_AXIS_TOLERANCE_MM = 0.001
 # Step of the slide that carries an escape stopped on its pad's edge on into the
 # pad (issue #9939).
@@ -2938,7 +2940,7 @@ class MaskCopperRepairer(CopperGapRepairer):
             if n_far is None or m_far is None or n_width_node is None or m_width_node is None:
                 continue
             # The second pad: same net, on this layer, with the lead ending at its
-            # centre and its centre on the line through the first pad's centre.
+            # centre and its centre near the line through the first pad's centre.
             b_uuid = next(
                 (
                     uid
@@ -2982,6 +2984,15 @@ class MaskCopperRepairer(CopperGapRepairer):
                 continue
 
             # A topology match: from here on a failure is a declined candidate.
+            start_ab, end_ab = (centre_a, centre_b) if b_tag == "end" else (centre_b, centre_a)
+            bridge_dx = round(end_ab[0], 6) - round(start_ab[0], 6)
+            bridge_dy = round(end_ab[1], 6) - round(start_ab[1], 6)
+            if not is_45_aligned(bridge_dx, bridge_dy):
+                off_deg = off_angle_degrees(bridge_dx, bridge_dy)
+                return (
+                    "pad_centres_not_aligned",
+                    f"{pad_ref} and {pads[b_uuid][4]} centres off 45-degree axis by {off_deg:.4f} deg",
+                )
             if any(
                 self._locks.is_locked(node) or self._locks.is_generator_owned(node)
                 for node in (n_node, m_node)
