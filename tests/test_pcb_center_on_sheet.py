@@ -415,3 +415,585 @@ class TestTranslatePcbText:
         # fixture segment is exactly 45 deg: (105,110)->(110.05,115.05)
         assert "(start 108.35 102.85)" in moved
         assert "(end 113.4 107.9)" in moved
+
+
+# --------------------------------------------------------------------------
+# Reinforcement sidecar follows the board (Issue #10250)
+# --------------------------------------------------------------------------
+
+import json  # noqa: E402
+import re  # noqa: E402
+
+from kicad_tools.pcb.reinforcement_sidecar import (  # noqa: E402
+    load_wires,
+    render_sidecar,
+    sidecar_path,
+    translate_sidecar_wires,
+)
+
+
+def _pt(x: float, y: float) -> dict[str, float]:
+    return {"x": x, "y": y}
+
+
+def _wires() -> list[dict]:
+    """One plain wire anchored on the fixture via, one parallel-copy record."""
+    return [
+        {
+            "net": "GND",
+            "layer": "F.Cu",
+            "kind": "run",
+            "paths": [],
+            "leg_start": _pt(105.0, 110.0),
+            "leg_end": _pt(110.05, 115.05),
+            "anchors": [_pt(105.0, 110.0), _pt(110.05, 115.05)],
+            "length_mm": 7.1418,
+            "straight_line_mm": 7.1418,
+            "wire_gauge_awg": 30,
+            "bare_diameter_mm": 0.255,
+            "mask_opening": None,
+            "status": "ok",
+            "reason": "",
+        },
+        {
+            "net": "GND",
+            "layer": "F.Cu",
+            "kind": "run",
+            "strategy": "parallel",
+            "copy_layer": "B.Cu",
+            "leg_start": _pt(101.0, 101.0),
+            "leg_end": _pt(102.0, 101.0),
+            "anchors": [],
+            "polyline": [_pt(101.0, 101.0), _pt(102.0, 101.0)],
+            "copy_segments": [
+                {"start": _pt(101.0, 102.0), "end": _pt(102.0, 102.0), "width_mm": 0.3}
+            ],
+            "stitch_vias": [_pt(101.5, 102.0)],
+            "stitch_via_size_mm": 0.6,
+            "length_mm": 1.0,
+        },
+    ]
+
+
+def _write_reinforced(tmp_path: Path, name: str = "board.kicad_pcb") -> Path:
+    pcb = tmp_path / name
+    pcb.write_text(make_pcb())
+    sidecar_path(pcb).write_text(render_sidecar(_wires()))
+    return pcb
+
+
+def _via_xy(pcb_text: str) -> tuple[float, float]:
+    m = re.search(r"\(via\s*\(at ([-\d.]+) ([-\d.]+)\)", pcb_text)
+    assert m is not None
+    return float(m.group(1)), float(m.group(2))
+
+
+class TestReinforcementSidecar:
+    @pytest.mark.parametrize(
+        ("bad", "kind"),
+        [(None, "null"), ("wire", "a string"), (7, "a number"), ([["net", "GND"]], "an array")],
+    )
+    def test_refuses_non_object_before_translating(self, tmp_path: Path, bad, kind):
+        pcb = _write_reinforced(tmp_path)
+        record = sidecar_path(pcb)
+        data = json.loads(record.read_bytes())
+        data["wires"][1] = bad
+        record.write_text(json.dumps(data))
+        original_pcb = pcb.read_bytes()
+        original_record = record.read_bytes()
+
+        with pytest.raises(ValueError) as error:
+            center_on_sheet(pcb)
+
+        assert str(error.value) == f"{record}: wires[1] is {kind}, not a JSON object"
+        assert pcb.read_bytes() == original_pcb
+        assert record.read_bytes() == original_record
+
+    def test_anchor_matches_moved_via(self, tmp_path: Path):
+        pcb = _write_reinforced(tmp_path)
+        report = center_on_sheet(pcb)
+        assert (report.dx_mm, report.dy_mm) == (33.5, -22.5)
+        assert report.sidecar == sidecar_path(pcb)
+        via = _via_xy(pcb.read_text())
+        assert via == (143.55, 92.55)
+        wires = load_wires(sidecar_path(pcb))
+        plain = next(w for w in wires if "strategy" not in w)
+        assert (plain["anchors"][1]["x"], plain["anchors"][1]["y"]) == via
+
+    def test_non_coordinate_fields_unchanged_and_format_kept(self, tmp_path: Path):
+        pcb = _write_reinforced(tmp_path)
+        before = {w["leg_start"]["x"]: w for w in load_wires(sidecar_path(pcb))}
+        center_on_sheet(pcb)
+        raw = sidecar_path(pcb).read_text()
+        assert raw == json.dumps(json.loads(raw), indent=2, sort_keys=True) + "\n"
+        after = load_wires(sidecar_path(pcb))
+        assert len(after) == len(before)
+        coord_keys = {
+            "leg_start", "leg_end", "anchors", "polyline", "copy_segments", "stitch_vias",
+        }  # fmt: skip
+        for w in after:
+            orig = before[round(w["leg_start"]["x"] - 33.5, 4)]
+            for key, value in orig.items():
+                if key not in coord_keys:
+                    assert w[key] == value, key
+
+    def test_parallel_record_coordinates_translate(self, tmp_path: Path):
+        moved = translate_sidecar_wires(_wires(), 33.5, -22.5)
+        par = next(w for w in moved if w.get("strategy") == "parallel")
+        assert par["polyline"][0] == _pt(134.5, 78.5)
+        assert par["copy_segments"][0]["start"] == _pt(134.5, 79.5)
+        assert par["copy_segments"][0]["end"] == _pt(135.5, 79.5)
+        assert par["copy_segments"][0]["width_mm"] == 0.3
+        assert par["stitch_vias"] == [_pt(135.0, 79.5)]
+
+    def test_translate_is_pure_and_handles_empty(self):
+        wires = _wires()
+        snapshot = json.dumps(wires, sort_keys=True)
+        translate_sidecar_wires(wires, 1.0, 2.0)
+        assert json.dumps(wires, sort_keys=True) == snapshot
+        assert translate_sidecar_wires([], 1.0, 2.0) == []
+
+    def test_output_path_pair(self, tmp_path: Path):
+        pcb = _write_reinforced(tmp_path)
+        out = tmp_path / "out.kicad_pcb"
+        pcb_blob, side_blob = pcb.read_bytes(), sidecar_path(pcb).read_bytes()
+        report = center_on_sheet(pcb, output_path=out)
+        assert pcb.read_bytes() == pcb_blob
+        assert sidecar_path(pcb).read_bytes() == side_blob
+        assert report.sidecar == sidecar_path(out)
+        plain = next(w for w in load_wires(sidecar_path(out)) if "strategy" not in w)
+        assert (plain["anchors"][1]["x"], plain["anchors"][1]["y"]) == _via_xy(out.read_text())
+
+    def test_export_between_the_two_source_replacements(self, tmp_path: Path, monkeypatch):
+        import os
+
+        pcb = _write_reinforced(tmp_path)
+        record = sidecar_path(pcb)
+        out = _write_reinforced(tmp_path, "out.kicad_pcb")
+        original = (out.read_bytes(), sidecar_path(out).read_bytes())
+        replace = os.replace
+        attempts = []
+
+        def export_after_record(src, dst):
+            replace(src, dst)
+            if Path(dst) == record:
+                # The live record has moved, while the live PCB still has the old vias.
+                with pytest.raises(ValueError, match="publishing the input"):
+                    center_on_sheet(pcb, output_path=out)
+                attempts.append((out.read_bytes(), sidecar_path(out).read_bytes()))
+
+        monkeypatch.setattr(os, "replace", export_after_record)
+        center_on_sheet(pcb)
+        assert attempts == [original]
+        center_on_sheet(pcb, output_path=out)
+        assert out.read_bytes() == pcb.read_bytes()
+        assert sidecar_path(out).read_bytes() == record.read_bytes()
+        plain = next(w for w in load_wires(record) if "strategy" not in w)
+        assert plain["anchors"][1] == _pt(*_via_xy(out.read_text()))
+
+    def test_record_replaced_during_copy_preserves_destination(self, tmp_path, monkeypatch):
+        from kicad_tools.pcb import reinforcement_sidecar
+
+        pcb = _write_reinforced(tmp_path)
+        out = _write_reinforced(tmp_path, "out.kicad_pcb")
+        original = (out.read_bytes(), sidecar_path(out).read_bytes())
+        record = sidecar_path(pcb)
+        replacement = tmp_path / "replacement.json"
+        replacement.write_text(render_sidecar([]))
+        translate = reinforcement_sidecar.translate_sidecar_wires
+
+        def edit_after_read(wires, dx, dy):
+            replacement.replace(record)
+            return translate(wires, dx, dy)
+
+        monkeypatch.setattr(reinforcement_sidecar, "translate_sidecar_wires", edit_after_read)
+        with pytest.raises(ValueError, match="record changed"):
+            center_on_sheet(pcb, output_path=out)
+        assert load_wires(record) == []
+        assert (out.read_bytes(), sidecar_path(out).read_bytes()) == original
+
+    def test_export_from_read_only_input_directory(self, tmp_path):
+        source_dir = tmp_path / "inputs"
+        source_dir.mkdir()
+        pcb = _write_reinforced(source_dir)
+        original = (pcb.read_bytes(), sidecar_path(pcb).read_bytes())
+        source_dir.chmod(0o555)
+        try:
+            out = tmp_path / "out.kicad_pcb"
+            center_on_sheet(pcb, output_path=out)
+        finally:
+            source_dir.chmod(0o755)
+        assert (pcb.read_bytes(), sidecar_path(pcb).read_bytes()) == original
+        plain = next(w for w in load_wires(sidecar_path(out)) if "strategy" not in w)
+        assert plain["anchors"][1] == _pt(*_via_xy(out.read_text()))
+
+    def test_dry_run_reports_but_writes_nothing(self, tmp_path: Path):
+        pcb = _write_reinforced(tmp_path)
+        pcb_blob, side_blob = pcb.read_bytes(), sidecar_path(pcb).read_bytes()
+        report = center_on_sheet(pcb, dry_run=True)
+        assert report.sidecar == sidecar_path(pcb)
+        assert pcb.read_bytes() == pcb_blob
+        assert sidecar_path(pcb).read_bytes() == side_blob
+        assert not list(tmp_path.glob("*.tmp-*"))
+
+    @pytest.mark.parametrize("bad", ["{not json", '{"version": 99, "wires": []}'])
+    def test_bad_sidecar_fails_before_writing(self, tmp_path: Path, bad: str):
+        pcb = _write_reinforced(tmp_path)
+        sidecar_path(pcb).write_text(bad)
+        pcb_blob = pcb.read_bytes()
+        for dry in (False, True):
+            with pytest.raises(ValueError):
+                center_on_sheet(pcb, dry_run=dry)
+        assert pcb.read_bytes() == pcb_blob
+        assert sidecar_path(pcb).read_text() == bad
+
+    def test_pcb_write_failure_restores_sidecar(self, tmp_path: Path, monkeypatch):
+        import os
+
+        pcb = _write_reinforced(tmp_path)
+        pcb_blob, side_blob = pcb.read_bytes(), sidecar_path(pcb).read_bytes()
+        real_replace = os.replace
+
+        def flaky(src, dst):
+            if Path(dst) == pcb:
+                raise OSError("disk full")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", flaky)
+        with pytest.raises(OSError):
+            center_on_sheet(pcb)
+        assert pcb.read_bytes() == pcb_blob
+        assert sidecar_path(pcb).read_bytes() == side_blob
+        assert not list(tmp_path.glob("*.tmp-*"))
+
+    def test_already_centered_leaves_sidecar_alone(self, tmp_path: Path):
+        pcb = _write_reinforced(tmp_path)
+        center_on_sheet(pcb)
+        side_blob = sidecar_path(pcb).read_bytes()
+        mtime = sidecar_path(pcb).stat().st_mtime_ns
+        report = center_on_sheet(pcb)
+        assert not report.changed
+        assert report.sidecar is None
+        assert sidecar_path(pcb).read_bytes() == side_blob
+        assert sidecar_path(pcb).stat().st_mtime_ns == mtime
+
+    def test_no_sidecar_creates_none(self, tmp_path: Path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(make_pcb())
+        report = center_on_sheet(pcb)
+        assert report.changed
+        assert report.sidecar is None
+        assert not sidecar_path(pcb).exists()
+
+    def test_plain_input_cannot_inherit_existing_output_wires(self, tmp_path: Path):
+        pcb = tmp_path / "plain.kicad_pcb"
+        pcb.write_text(make_pcb())
+        out = _write_reinforced(tmp_path, "out.kicad_pcb")
+        before = (out.read_bytes(), sidecar_path(out).read_bytes())
+        with pytest.raises(ValueError, match="reinforcement"):
+            center_on_sheet(pcb, output_path=out)
+        assert (out.read_bytes(), sidecar_path(out).read_bytes()) == before
+
+    @pytest.mark.parametrize("alias", ["input-record", "output-record", "hardlink"])
+    def test_output_alias_keeps_input_pair_intact(self, tmp_path: Path, alias: str):
+        pcb = _write_reinforced(tmp_path)
+        out = tmp_path / "out.kicad_pcb"
+        if alias == "input-record":
+            out = sidecar_path(pcb)
+        elif alias == "output-record":
+            sidecar_path(out).symlink_to(pcb)
+        else:
+            out.hardlink_to(sidecar_path(pcb))
+        before = (pcb.read_bytes(), sidecar_path(pcb).read_bytes())
+        with pytest.raises(ValueError, match="overlap"):
+            center_on_sheet(pcb, output_path=out)
+        assert (pcb.read_bytes(), sidecar_path(pcb).read_bytes()) == before
+
+    @pytest.mark.parametrize("fail_second_write", [False, True])
+    def test_in_place_links_and_private_modes_survive(
+        self, tmp_path: Path, monkeypatch, fail_second_write: bool
+    ):
+        import os
+        from stat import S_IMODE
+
+        pcb = _write_reinforced(tmp_path)
+        side = sidecar_path(pcb)
+        alias = tmp_path / "alias.kicad_pcb"
+        alias.symlink_to(pcb)
+        alias_record = tmp_path / "alias.kicad_pcb.reinforcement.json"
+        alias_record.symlink_to(side)
+        pcb.chmod(0o600)
+        side.chmod(0o640)
+        before = (pcb.read_bytes(), side.read_bytes())
+        if fail_second_write:
+            replace = os.replace
+
+            def fail_board(src, dst):
+                if Path(dst).resolve() == pcb:
+                    raise OSError("forced PCB write failure")
+                return replace(src, dst)
+
+            monkeypatch.setattr(os, "replace", fail_board)
+            with pytest.raises(OSError, match="forced PCB"):
+                center_on_sheet(alias)
+            assert (pcb.read_bytes(), side.read_bytes()) == before
+        else:
+            center_on_sheet(alias)
+            assert pcb.read_bytes() != before[0]
+            assert side.read_bytes() != before[1]
+        assert alias.is_symlink() and alias_record.is_symlink()
+        assert (S_IMODE(pcb.stat().st_mode), S_IMODE(side.stat().st_mode)) == (0o600, 0o640)
+
+    def test_paper_only_change_validates_existing_sidecar(self, tmp_path: Path):
+        pcb = _write_reinforced(tmp_path)
+        center_on_sheet(pcb, paper="A3")
+        pcb.write_text(pcb.read_text().replace('(paper "A3")', '(paper "A4")'))
+        sidecar_path(pcb).write_text('{"version": 99, "wires": []}')
+        before = pcb.read_bytes()
+        with pytest.raises(ValueError):
+            center_on_sheet(pcb, paper="A3")
+        assert pcb.read_bytes() == before
+
+    def test_centering_board_link_uses_its_canonical_record(self, tmp_path: Path):
+        pcb = _write_reinforced(tmp_path)
+        alias = tmp_path / "alias.kicad_pcb"
+        alias.symlink_to(pcb.name)
+        before = sidecar_path(pcb).read_bytes()
+        report = center_on_sheet(alias)
+        assert alias.is_symlink() and report.sidecar == sidecar_path(pcb)
+        assert sidecar_path(pcb).read_bytes() != before
+        assert not (tmp_path / "alias.kicad_pcb.reinforcement.json").exists()
+
+    def test_distinct_hard_link_record_names_cannot_diverge(self, tmp_path):
+        pcb = _write_reinforced(tmp_path)
+        alias = tmp_path / "alias.kicad_pcb"
+        alias.symlink_to(pcb.name)
+        record = sidecar_path(pcb)
+        alias_record = tmp_path / "alias.kicad_pcb.reinforcement.json"
+        alias_record.hardlink_to(record)
+        original = (pcb.read_bytes(), record.read_bytes())
+        with pytest.raises(ValueError, match="two different reinforcement records"):
+            center_on_sheet(alias)
+        assert (alias.read_bytes(), alias_record.read_bytes()) == original
+        assert alias_record.samefile(record)
+
+    @pytest.mark.parametrize("fail_at", ["canonical record", "alias record", "board"])
+    def test_legacy_output_publish_failure_restores_files(self, tmp_path, monkeypatch, fail_at):
+        import os
+        from stat import S_IMODE
+
+        source = _write_reinforced(tmp_path)
+        board = _write_reinforced(tmp_path, "working.kicad_pcb")
+        alias = tmp_path / "review.kicad_pcb"
+        alias.symlink_to(board.name)
+        canonical = sidecar_path(board)
+        legacy = tmp_path / "review.kicad_pcb.reinforcement.json"
+        canonical.rename(legacy)
+        legacy.write_text(render_sidecar([]))
+        legacy.chmod(0o600)
+        before = (source.read_bytes(), sidecar_path(source).read_bytes(), board.read_bytes())
+        old_record = legacy.read_bytes()
+        target = {"canonical record": canonical, "alias record": legacy, "board": board}[fail_at]
+        replace = os.replace
+
+        def fail_write(src, dst):
+            if dst == target:
+                raise OSError("forced publication failure")
+            return replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", fail_write)
+        with pytest.raises(OSError, match="forced publication failure"):
+            center_on_sheet(source, output_path=alias)
+        assert (
+            source.read_bytes(),
+            sidecar_path(source).read_bytes(),
+            board.read_bytes(),
+        ) == before
+        assert alias.is_symlink() and not legacy.is_symlink()
+        assert not os.path.lexists(canonical)
+        assert legacy.read_bytes() == old_record and S_IMODE(legacy.stat().st_mode) == 0o600
+        assert not list(tmp_path.glob(".center-*"))
+
+    @pytest.mark.parametrize("linked_record", [False, True])
+    def test_legacy_input_is_bound_only_when_published_in_place(self, tmp_path, linked_record):
+        pcb = _write_reinforced(tmp_path)
+        center_on_sheet(pcb)
+        original = pcb.stat().st_mtime_ns
+        canonical = sidecar_path(pcb)
+        record_bytes = canonical.read_bytes()
+        alias = tmp_path / "review.kicad_pcb"
+        alias.symlink_to(pcb.name)
+        legacy = tmp_path / "review.kicad_pcb.reinforcement.json"
+        storage = tmp_path / "shared-wires.json" if linked_record else legacy
+        canonical.rename(storage)
+        if linked_record:
+            legacy.symlink_to(storage.name)
+
+        copy = tmp_path / "copy.kicad_pcb"
+        center_on_sheet(alias, output_path=copy)
+        assert sidecar_path(copy).read_bytes() == record_bytes
+        assert center_on_sheet(alias, dry_run=True).sidecar == canonical
+        assert not canonical.exists() and legacy.is_symlink() == linked_record
+        assert storage.read_bytes() == record_bytes and pcb.stat().st_mtime_ns == original
+
+        report = center_on_sheet(alias)
+        assert not report.changed and report.output is None and report.sidecar == canonical
+        assert pcb.stat().st_mtime_ns == original
+        assert canonical.samefile(legacy) and canonical.read_bytes() == record_bytes
+        assert canonical.is_symlink() == linked_record
+        assert legacy.is_symlink()
+        center_on_sheet(pcb, paper="A3")
+        assert legacy.read_bytes() == canonical.read_bytes() != record_bytes
+        if linked_record:
+            assert canonical.samefile(storage)
+
+    @pytest.mark.parametrize("existing_record", [False, True])
+    def test_list_wires_through_requested_output_alias(self, tmp_path, capsys, existing_record):
+        from kicad_tools.cli import main
+
+        pcb = _write_reinforced(tmp_path)
+        target = tmp_path / "canonical.kicad_pcb"
+        target.write_text(make_pcb())
+        if existing_record:
+            sidecar_path(target).write_text(render_sidecar([]))
+        alias = tmp_path / "review.kicad_pcb"
+        alias.symlink_to(target.name)
+        assert main(["pcb", "center-on-sheet", str(pcb), "-o", str(alias), "--format", "json"]) == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["output"] == str(alias)
+        assert report["sidecar"] == str(sidecar_path(target))
+        for path in (report["output"], str(target)):
+            assert main(["pcb", "reinforce", path, "--list-wires", "--format", "json"]) == 0
+            inventory = json.loads(capsys.readouterr().out)
+            assert inventory["wires"] == load_wires(sidecar_path(target))
+            plain = next(w for w in inventory["wires"] if "strategy" not in w)
+            assert plain["anchors"][1] == _pt(*_via_xy(target.read_text()))
+
+    def test_already_centered_copy_writes_both_files(self, tmp_path: Path):
+        pcb = _write_reinforced(tmp_path)
+        center_on_sheet(pcb)
+        out = tmp_path / "copy.kicad_pcb"
+        report = center_on_sheet(pcb, output_path=out)
+        assert not report.changed and report.output == out and report.sidecar == sidecar_path(out)
+        assert pcb.read_bytes() == out.read_bytes()
+        assert sidecar_path(pcb).read_bytes() == sidecar_path(out).read_bytes()
+
+    def test_cli_json_lists_sidecar(self, tmp_path: Path, capsys):
+        from kicad_tools.cli.pcb_center_on_sheet import run_center_on_sheet
+
+        pcb = _write_reinforced(tmp_path)
+        assert run_center_on_sheet(pcb, dry_run=True, output_format="json") == 0
+        assert json.loads(capsys.readouterr().out)["sidecar"] == str(sidecar_path(pcb))
+        plain = tmp_path / "plain.kicad_pcb"
+        plain.write_text(make_pcb())
+        assert run_center_on_sheet(plain, dry_run=True, output_format="json") == 0
+        assert json.loads(capsys.readouterr().out)["sidecar"] is None
+
+
+def test_new_export_honors_private_umask(tmp_path):
+    import os
+
+    from kicad_tools.cli import main
+
+    src = _write_reinforced(tmp_path, "source.kicad_pcb")
+    src.chmod(0o644)
+    sidecar_path(src).chmod(0o644)
+    out = tmp_path / "out.kicad_pcb"
+    old = os.umask(0o077)
+    try:
+        assert main(["pcb", "center-on-sheet", str(src), "--paper", "keep", "-o", str(out)]) == 0
+    finally:
+        os.umask(old)
+    assert out.stat().st_mode & 0o777 == 0o600
+    assert sidecar_path(out).stat().st_mode & 0o777 == 0o600
+
+
+def test_in_place_alias_migration_keeps_private_record_mode(tmp_path):
+    import os
+
+    from kicad_tools.cli import main
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(make_pcb())
+    alias = tmp_path / "review.kicad_pcb"
+    alias.symlink_to(board)
+    legacy = alias.with_name(alias.name + ".reinforcement.json")
+    legacy.write_text(render_sidecar(_wires()))
+    legacy.chmod(0o600)
+    old = os.umask(0o022)
+    try:
+        assert main(["pcb", "center-on-sheet", str(alias), "--paper", "keep"]) == 0
+    finally:
+        os.umask(old)
+    assert sidecar_path(board).stat().st_mode & 0o777 == 0o600
+    assert alias.with_name(alias.name + ".reinforcement.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_distinct_output_alias_migration_keeps_private_destination_record_mode(tmp_path):
+    import os
+
+    from kicad_tools.cli import main
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from kicad_tools.pcb.reinforcement_sidecar import sidecar_path
+    from tests.test_pcb_reinforce_sidecar import _args, _two_net_pcb
+
+    src = tmp_path / "src.kicad_pcb"
+    other = tmp_path / "other.kicad_pcb"
+    for path in (src, other):
+        _two_net_pcb().save(path)
+        assert run_pcb_command(_args(path, "NET_A")) == 0
+    out = tmp_path / "review.kicad_pcb"
+    out.symlink_to(other)
+    legacy = out.with_name(out.name + ".reinforcement.json")
+    canonical = sidecar_path(other)
+    legacy.write_bytes(canonical.read_bytes())
+    canonical.unlink()  # only the alias-side legacy record remains
+    legacy.chmod(0o600)
+    old = os.umask(0o022)
+    try:
+        assert main(["pcb", "center-on-sheet", str(src), "--paper", "A3", "-o", str(out)]) == 0
+    finally:
+        os.umask(old)
+    assert sidecar_path(out).stat().st_mode & 0o777 == 0o600
+
+
+def _off_center_pcb(tmp_path: Path, name: str = "plain.kicad_pcb") -> Path:
+    pcb = tmp_path / name
+    pcb.write_text(make_pcb())
+    return pcb
+
+
+def test_recordless_noop_keeps_a_different_existing_output(tmp_path):
+    """No record on either side: an already-centered input must not rewrite -o."""
+    src = _off_center_pcb(tmp_path)
+    center_on_sheet(src)  # now centered
+    other = tmp_path / "other.kicad_pcb"
+    other.write_text(make_pcb(extra='(net 9 "OUTPUT_ONLY")'))
+    before = other.read_bytes()
+    report = center_on_sheet(src, output_path=other)
+    assert report.changed is False
+    assert other.read_bytes() == before
+    fresh = tmp_path / "fresh.kicad_pcb"
+    center_on_sheet(src, output_path=fresh)
+    assert not fresh.exists()
+
+
+def test_recordless_move_needs_no_lock_file_and_keeps_hard_links(tmp_path):
+    """No record: plain in-place write, no lock file, hard-linked names stay one inode."""
+    pcb = _off_center_pcb(tmp_path)
+    twin = tmp_path / "twin.kicad_pcb"
+    twin.hardlink_to(pcb)
+    report = center_on_sheet(pcb)
+    assert report.changed is True
+    assert pcb.read_bytes() == twin.read_bytes()
+    assert pcb.samefile(twin)
+    assert not list(tmp_path.glob(".*.center.lock"))
+
+
+def test_recordless_move_in_read_only_directory(tmp_path):
+    pcb = _off_center_pcb(tmp_path)
+    tmp_path.chmod(0o555)
+    try:
+        assert center_on_sheet(pcb).changed
+    finally:
+        tmp_path.chmod(0o755)
