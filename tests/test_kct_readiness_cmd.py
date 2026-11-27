@@ -227,6 +227,7 @@ class FakeEngines:
         inventory_covered: frozenset[str] | None = None,
         schematic: Path | None = None,
         project_root: Path | None = None,
+        net_class_map: Path | None = None,
     ) -> EngineRun:
         self.calls.append("export")
         self.export_kwargs = {"quantity": quantity, "inventory_covered": inventory_covered}
