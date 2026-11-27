@@ -1,8 +1,8 @@
 ---
 title: "bldc_controller_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.27.0"
-date: "Rev 1 | 2026-11-04 | jlcpcb"
+author: "kicad-tools 0.29.0"
+date: "Rev B | 2026-11-27 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,10 +18,10 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
-| Footprints | 42 (36 SMD, 6 THT, 0 other) |
-| Nets | 37 |
-| Traces | 697 segments |
-| Vias | 137 |
+| Footprints | 45 (39 SMD, 6 THT, 0 other) |
+| Nets | 46 |
+| Traces | 473 segments |
+| Vias | 133 |
 | Board Size | 70.0 x 90.0 mm |
 
 ## Stackup
@@ -142,7 +142,7 @@ Sensored BLDC Controller
 | 56k | R_0805_2012Metric | 1 | R2 | 0805W8F5602T5E | C17756 |
 | ATmega328P-AU | TQFP-32_7x7mm_P0.8mm | 1 | U1 | ATMEGA328P-AU | C14877 |
 | DRV8313PWPR | TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias | 1 | U2 | DRV8313PWPR | C92482 |
-| TPS7A1650DGNR | HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias | 1 | U3 | TPS7A1650DGNR | C468238 |
+| TPS7A1650DGNR | TI_DGN0008C_Lands1.4x0.45_EP1.57x1.89_ThermalVias | 1 | U3 | TPS7A1650DGNR | C468238 |
 
 
 \newpage
@@ -159,6 +159,11 @@ Sensored BLDC Controller
 
 **Status**: PASS
 
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| single_pad_net | 9 |
 
 
 
@@ -184,8 +189,9 @@ Sensored BLDC Controller
 |--------|-------|
 | Signal Net Completion | 100.0% (35/35) |
 | Overall Completion | 100.0% |
-| Complete Nets | 37 / 37 |
+| Complete Nets | 46 / 46 |
 | Zone-Connected Nets | 2 |
+| Single-Pad Nets | 9 (no routing needed) |
 | Incomplete Nets | 0 |
 | Unconnected Pads | 0 |
 
@@ -194,15 +200,19 @@ Sensored BLDC Controller
 - +5V
 - GND
 
+### Single-Pad Nets
+
+9 single-pad nets (no routing needed) -- not listed individually.
+
 
 ## Cost Estimate
 
 | Metric | Per Board (estimated) |
 |--------|-------|
 | PCB Fabrication | ~3.26 USD |
-| Components (estimated) | ~2.23 USD |
-| Assembly (estimated) | ~2.19 USD |
-| **Total (estimated)** | **~7.67 USD** |
+| Components (estimated) | ~2.26 USD |
+| Assembly (estimated) | ~2.21 USD |
+| **Total (estimated)** | **~7.72 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~38.36 USD |
+| Batch Total (estimated) | ~38.61 USD |
 

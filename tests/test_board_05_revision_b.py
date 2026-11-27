@@ -1,16 +1,19 @@
 """Real revision-B component pinout, procurement and copper provenance guards."""
 
 import importlib.util
+import io
 import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+import zipfile
 from collections import Counter
 from pathlib import Path
 
 import pytest
 
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.sidecars import net_class_map_sidecar_names
 
 SOURCE = Path(__file__).resolve().parents[1] / "boards/05-bldc-motor-controller/redesign"
 
@@ -229,6 +232,71 @@ def test_thermal_vias_keep_real_smt_ics_in_cpl(hardware):
         is_through_hole_footprint(pcb.get_footprint(ref))
         for ref in ["J1", "J2", "J3", "J4", "J5", "RV1"]
     )
+
+
+def test_package_checks_42_placements_with_board_only_fiducials(tmp_path, hardware, monkeypatch):
+    from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+    monkeypatch.setitem(sys.modules, "hardware", hardware)
+    package = load("package")
+    routed = tmp_path / "board.kicad_pcb"
+    hardware.build_pcb().save(routed)
+    assert run_add_fiducials(routed, sides="populated") == 0
+    assert len(PCB.load(routed).footprints) == 45
+
+    refs = [part.ref for part in hardware.parts()]
+    package.verify_placements(routed, refs)
+    with pytest.raises(
+        ValueError, match=r"CPL placement mismatch.*missing \['J1'\].*extra \['FID1'\]"
+    ):
+        package.verify_placements(routed, ["FID1" if ref == "J1" else ref for ref in refs])
+    with pytest.raises(ValueError, match=r"CPL placement mismatch.*extra \['U2'\]"):
+        package.verify_placements(routed, [*refs, "U2"])
+
+
+def test_reissued_editable_project_preserves_motor_width_rules():
+    output = SOURCE.parent / "output"
+    with zipfile.ZipFile(output / "manufacturing.zip") as bundle:
+        project_bytes = bundle.read("kicad_project.zip")
+    with zipfile.ZipFile(io.BytesIO(project_bytes)) as project:
+        names = net_class_map_sidecar_names("bldc_controller")
+        (map_member,) = [name for name in project.namelist() if name in names]
+        assert project.read(map_member) == (output / "net_class_map.json").read_bytes()
+        rules = project.read("bldc_controller.kicad_dru")
+        assert rules == (output / "bldc_controller_routed.kicad_dru").read_bytes()
+        assert rules.count(b"Ampacity Min Width") == 2
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "bldc_controller_routed.kicad_pcb",
+        "bldc_controller_routed.kicad_pro",
+        "bldc_controller_routed.kicad_dru",
+        "net_class_map.json",
+    ],
+)
+def test_export_rejects_a_late_change_to_checked_inputs(tmp_path, hardware, monkeypatch, filename):
+    import json
+
+    from kicad_tools.drc.report_binding import sha256_file
+
+    monkeypatch.setitem(sys.modules, "hardware", hardware)
+    package = load("package")
+    routed = tmp_path / "bldc_controller_routed.kicad_pcb"
+    for suffix in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
+        routed.with_suffix(suffix).write_text("checked input")
+    (tmp_path / "net_class_map.json").write_text("checked map")
+    evidence = tmp_path / "readiness"
+    evidence.mkdir()
+    (evidence / "kct-check.json").write_text(json.dumps({"pcb_sha256": sha256_file(routed)}))
+
+    def change_input(*args, **kwargs):
+        (tmp_path / filename).write_text("changed during export")
+
+    monkeypatch.setattr(package.subprocess, "run", change_input)
+    with pytest.raises(RuntimeError, match="export changed the checked Board 05 input"):
+        package.export_package(tmp_path)
 
 
 def test_unrouted_board_carries_silk_dfm_corrections(hardware):
