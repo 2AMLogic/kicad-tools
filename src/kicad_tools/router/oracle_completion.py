@@ -1444,6 +1444,14 @@ class PourLinkCloser:
     #: receive it unconditionally -- harmless there, since a via-in-pad seat
     #: is one copper union (``gap <= 0``) the band accepts anyway.
     same_net_pad_gap_mm: float = 0.0
+    #: Issue #10627: ``run_stitch``'s ``same_net_trace_gap_mm`` -- the fab-view
+    #: same-net via-annulus/leg-vs-TRACE slit-band edge (the caller-resolved
+    #: ``DesignRules.same_net_trace_gap_band_edge_mm``).  Full class-width weld
+    #: stubs are wide enough that two same-net stubs or a stub and a via
+    #: annulus can land 0.05-0.10 mm apart (``physical_copper_gap`` /
+    #: ``mask_to_copper`` on Board 07), so the weld keeps them out of the
+    #: band.  ``0`` disables the guard.
+    same_net_trace_gap_mm: float = 0.0
     #: Issue #8027: the router's ``PairwiseClearanceTable`` (``--voltage-map``).
     #: ``pair_clearance(P, N)`` is raised to ``table.required_clearance(P, N)``
     #: so oracle copper keeps the same HV ΔV gap as the lattice search.  ``None``
@@ -1981,6 +1989,7 @@ class PourLinkCloser:
                 # same-net pad slit band (off when the caller resolved no
                 # stackup edge).
                 same_net_pad_gap_mm=self.same_net_pad_gap_mm,
+                same_net_trace_gap_mm=self.same_net_trace_gap_mm,
             )
 
         force: frozenset[str] = frozenset()

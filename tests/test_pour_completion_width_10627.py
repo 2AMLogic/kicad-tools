@@ -189,6 +189,15 @@ class TestWeldDispatch:
         assert len(calls) == 1
         assert calls[0]["nets"] == ["A", "B"] and calls[0]["trace_width"] == 0.2
 
+    def test_trace_gap_band_reaches_every_width_group(self, tmp_path, calls):
+        """Full-width stubs keep the same-net trace slit band (Board 07 gaps)."""
+        board = tmp_path / "b.kicad_pcb"
+        shutil.copy(WELD_FIXTURE, board)
+        closer = _closer(0.2, _classes(VCC=0.5), same_net_trace_gap_mm=0.1016)
+        closer._weld_pads(board, {"VCC": {"U1.1"}, "OTHER": {"R2.1"}}, ClosureAttempt())
+        assert len(calls) == 2
+        assert all(c["same_net_trace_gap_mm"] == pytest.approx(0.1016) for c in calls)
+
     def test_exhausted_pads_are_kept_per_group(self, tmp_path, monkeypatch):
         from kicad_tools.cli import stitch_cmd
 

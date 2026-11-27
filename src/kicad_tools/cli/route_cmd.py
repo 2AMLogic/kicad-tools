@@ -11482,6 +11482,12 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             same_net_pad_gap_mm=float(
                 getattr(getattr(router, "rules", None), "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
             ),
+            # Issue #10627: full class-width weld stubs keep the fab-view
+            # same-net trace slit band too.
+            same_net_trace_gap_mm=float(
+                getattr(getattr(router, "rules", None), "same_net_trace_gap_band_edge_mm", 0.0)
+                or 0.0
+            ),
             # Issue #8027: oracle copper keeps the --voltage-map pairwise gaps.
             pairwise_table=(
                 getattr(getattr(router, "rules", None), "pairwise_clearance", None)
