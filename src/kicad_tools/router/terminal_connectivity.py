@@ -23,11 +23,11 @@ if TYPE_CHECKING:
     from .primitives import Pad, Route, Segment, Via
 
 
-def _contact_outline(pad: Pad):
+def _contact_outline(pad: Pad, *, plotted: bool = False):
     """Copper a conductor may touch to connect ``pad``, never larger than the pad.
 
     Use the authored corner radius for a roundrect. When the radius is
-    missing, KiCad's maximum ratio of 0.5 gives the stadium contained in
+    missing, connectivity uses 0.5 for the stadium contained in
     every roundrect of those dimensions (issue #6371).
     """
     dx, dy = pad.copper_offset
@@ -35,9 +35,10 @@ def _contact_outline(pad: Pad):
         outline = _pad_outline(pad, contact=True)
         return translate(outline, dx, dy) if dx or dy else outline
     cx, cy = pad.x + dx, pad.y + dy
-    if pad.chamfered_outline:
-        return shapely.Polygon([(cx + x, cy + y) for x, y in pad.chamfered_outline])
-    ratio = pad.roundrect_rratio if pad.roundrect_rratio is not None else 0.5
+    chamfer = (pad.mask_chamfered_outline if plotted else ()) or pad.chamfered_outline
+    if chamfer:
+        return shapely.Polygon([(cx + x, cy + y) for x, y in chamfer])
+    ratio = pad.roundrect_rratio if pad.roundrect_rratio is not None else (0.25 if plotted else 0.5)
     shape = pad_gate_polygon(cx, cy, pad.width, pad.height, pad.shape, pad.rotation, ratio)
     return shape if shape is not None else shapely.Polygon()
 
