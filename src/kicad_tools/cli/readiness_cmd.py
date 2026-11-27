@@ -46,6 +46,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -976,7 +977,6 @@ class ReadinessOptions:
     include_tht: bool = False
     archive: bool = True
     net_class_map: Path | None = None
-    net_class_map_explicit: bool = False
     hv_net_class: str = "HV"
     hv_min: float | None = None
     hv_standard: str | None = None
@@ -1053,6 +1053,8 @@ class ReadinessOptions:
     # Receipt and archive paths remain relative to the directory containing
     # the output declaration when an explicit --project-root narrows source access.
     declared_project_root: Path | None = None
+    # The checker discovers implicit maps itself. Record a path only for an explicit selection.
+    net_class_map_implicit: bool = False
 
     @property
     def root(self) -> Path:
@@ -1379,7 +1381,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             include_tht=bool(args.include_tht),
             archive=not args.no_archive,
             net_class_map=net_class_map,
-            net_class_map_explicit=bool(args.net_class_map),
+            net_class_map_implicit=not args.net_class_map,
             hv_net_class=args.hv_net_class,
             hv_min=args.hv_min,
             hv_standard=args.hv_standard,
@@ -1878,14 +1880,9 @@ def _gate_kct_check(
     right after the cleanup and still blocking here -- and points at
     ``--skip-cleanup``.  No new gate: only the blocker message changes.
     """
-    invocation_args = list(options.check_args)
-    if options.schematic is not None:
-        invocation_args.extend(
-            ["--schematic", options.schematic.relative_to(options.project_base).as_posix()]
-        )
-    invocation = " ".join(
-        ["kct", "check", "<pcb>", "--mfr", options.manufacturer, *invocation_args]
-    )
+    invocation_args = ["--mfr", options.manufacturer]
+    invocation_args.extend(_current_board_check_args(options, relative_to=options.project_base))
+    invocation = f"kct check <pcb> {shlex.join(invocation_args)}"
     outcome, report = _gate_kct_check_run(options, engines)
     if outcome.status == FAILED and pre_cleanup is not None and post_cleanup is not None:
         introduced = _cleanup_introduced_errors(options, engines, pre_cleanup, post_cleanup, report)
@@ -1979,10 +1976,20 @@ def _cleanup_introduced_errors(
     ]
 
 
-def _current_board_check_args(options: ReadinessOptions) -> list[str]:
+def _current_board_check_args(
+    options: ReadinessOptions, *, relative_to: Path | None = None
+) -> list[str]:
+    """Use staged paths for checking and project-relative paths for the recorded invocation."""
     extra = list(options.check_args)
-    if options.schematic is not None:
-        extra.extend(["--schematic", str(options.schematic)])
+    for flag, path in (
+        ("--schematic", options.schematic),
+        ("--net-class-map", None if options.net_class_map_implicit else options.net_class_map),
+    ):
+        if path is not None:
+            value = (
+                path.relative_to(relative_to).as_posix() if relative_to is not None else str(path)
+            )
+            extra.extend([flag, value])
     return extra
 
 
@@ -4607,7 +4614,7 @@ def build_report(
         _rel(options, path): readiness_input_hash(_rel(options, path), path.read_bytes())
         for path in sorted(hashed)
     }
-    if options.net_class_map_explicit and options.net_class_map is not None:
+    if options.net_class_map is not None and not options.net_class_map_implicit:
         # Board refresh must preserve the explicit selection across staging.
         report["selected_net_class_map"] = os.path.relpath(options.net_class_map, options.board_dir)
     # Issue #7277: record which source bytes each report readiness itself

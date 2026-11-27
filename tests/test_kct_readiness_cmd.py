@@ -332,6 +332,69 @@ def run(board: Path, fake: FakeEngines, *extra: str) -> tuple[int, dict]:
     return code, report
 
 
+@pytest.mark.parametrize("map_in_board", [True, False], ids=["board", "project-root"])
+def test_generation_checks_the_staged_explicit_net_class_map(tmp_path, map_in_board):
+    board = make_board(tmp_path)
+    root = board if map_in_board else tmp_path
+    relative = Path("rule-inputs/approved-current.json")
+    selected = root / relative
+    selected.parent.mkdir()
+    selected.write_text('{"LED_ANODE": {"name": "Digital", "target_ampacity": 30}}')
+    (board / "output/net_class_map.json").write_text("{}")
+    checked_maps = []
+
+    class MapEngines(FakeEngines):
+        def kct_check(self, pcb, mfr, report_path, extra):
+            if "--net-class-map" in extra:
+                path = Path(extra[extra.index("--net-class-map") + 1])
+                staged_sch = Path(extra[extra.index("--schematic") + 1])
+                staged_board = staged_sch.parent.parent
+                staged_root = staged_board if map_in_board else staged_board.parent
+                checked_maps.append((path, staged_root / relative, path.read_bytes()))
+            return super().kct_check(pcb, mfr, report_path, extra)
+
+    code, report = run(
+        board,
+        MapEngines(board, drc_status="FAILED"),
+        "--project-root",
+        str(root),
+        "--net-class-map",
+        str(selected),
+    )
+
+    assert code == 1
+    assert check_status(report, "kct_check") == "failed"
+    # The candidate and both cleanup comparisons use the same staged rules.
+    assert len(checked_maps) == 3
+    for path, expected, content in checked_maps:
+        assert path == expected
+        assert path != selected
+        assert content == selected.read_bytes()
+    detail = next(check["detail"] for check in report["checks"] if check["name"] == "kct_check")
+    assert "--net-class-map rule-inputs/approved-current.json" in detail
+    assert str(checked_maps[0][0]) not in detail
+
+
+@pytest.mark.parametrize("has_sibling", [True, False])
+def test_generation_leaves_implicit_net_class_map_discovery_to_checker(tmp_path, has_sibling):
+    from kicad_tools.cli.check_cmd import _discover_net_class_map_sidecar
+
+    board = make_board(tmp_path)
+    if has_sibling:
+        (board / "output/net_class_map.json").write_text("{}")
+
+    class MapEngines(FakeEngines):
+        def kct_check(self, pcb, mfr, report_path, extra):
+            assert "--net-class-map" not in extra
+            expected = pcb.parent / "net_class_map.json" if has_sibling else None
+            assert _discover_net_class_map_sidecar(pcb) == expected
+            return super().kct_check(pcb, mfr, report_path, extra)
+
+    code, report = run(board, MapEngines(board))
+    assert code == 0, report
+    assert check_status(report, "kct_check") == "passed"
+
+
 def test_child_sheet_is_hashed_and_its_edit_stales_the_receipt(tmp_path):
     """Issue #10107: a sub-sheet edit must not leave the release marked ready."""
     board = make_board(tmp_path)
