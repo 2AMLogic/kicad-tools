@@ -20,6 +20,14 @@ links route against the board as it really is.  Exit 1 if any link was rolled
 back or unroutable; exit 2 (nothing written) when the pinned kicad-cli is
 unavailable.
 
+``--join-track`` (Issue #10486) opts one link in to end on a track that is
+already electrically connected to the destination pad, at a junction outside
+every pad, instead of entering the pad -- a second track entering a pad corner
+leaves slivers at the pad's mask opening.  The exact-endpoint default is kept
+for intentional routes such as Kelvin sensing.  The chosen junction and its
+layer are reported per link, the host track is split there when the link is
+committed, and the ordinary pad route is kept when no such branch routes.
+
 Coordinates on the command line are the board file's (absolute) millimetres,
 as KiCad shows them.
 """
@@ -55,6 +63,7 @@ __all__ = [
     "LinkAction",
     "ViaAtAction",
     "LinkLayersAction",
+    "JoinTrackAction",
     "PlaneCorridorAction",
     "NetClearanceAction",
     "add_route_link_arguments",
@@ -90,6 +99,9 @@ class LinkSpec:
     b: EndSpec
     via_at: tuple[float, float] | None = None
     layers: list[str] | None = None
+    #: ``--join-track`` (Issue #10486): end B names a pad whose electrically
+    #: connected track the link joins, outside every pad, instead of the pad.
+    join_track: bool = False
     #: ``--net-clearance NET=MM`` entries that follow this ``--link`` (Issue #8546).
     net_clearance: list[str] = field(default_factory=list)
     text: str = field(default="", compare=False)
@@ -209,6 +221,13 @@ class LinkLayersAction(_ModifierAction):
         link.layers = layers
 
 
+class JoinTrackAction(_ModifierAction):
+    """``--join-track``: the preceding ``--link`` ends on a track joined to its pad."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        self._last(parser, namespace, option_string).join_track = True
+
+
 class PlaneCorridorAction(_ModifierAction):
     def __call__(self, parser, namespace, values, option_string=None):
         from kicad_tools.router.link_router import PlaneCorridor
@@ -263,8 +282,8 @@ def add_route_link_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "A link to route: 'NET REF.PAD|x,y[@layer] REF.PAD|x,y[@layer]'. "
             "Repeatable; links are routed in the order given. An x,y end must "
-            "lie on same-net copper (a via or track). --via-at and "
-            "--link-layers apply to the --link before them."
+            "lie on same-net copper (a via or track). --via-at, --link-layers "
+            "and --join-track apply to the --link before them."
         ),
     )
     parser.add_argument(
@@ -280,6 +299,18 @@ def add_route_link_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="LAYERS",
         default=None,
         help="Comma-separated copper layers the preceding --link may use (e.g. F.Cu).",
+    )
+    parser.add_argument(
+        "--join-track",
+        action=JoinTrackAction,
+        nargs=0,
+        default=False,
+        help=(
+            "End the preceding --link on a straight track electrically connected "
+            "to its destination pad, at a junction outside every pad, instead of "
+            "in the pad; the track is split there. The junction is reported; the "
+            "pad route is kept when no such branch routes."
+        ),
     )
     parser.add_argument(
         "--plane-corridor",
@@ -661,7 +692,7 @@ def _resolve_end(
     pcb: Any, end: EndSpec, net_number: int, net: str, origin: tuple[float, float]
 ) -> tuple[Any, str | None]:
     """The :class:`LinkTerminal` for ``end``, or ``(None, why)``."""
-    from kicad_tools.router.link_router import LinkTerminal, terminal_at_copper, terminal_for_pad
+    from kicad_tools.router.link_router import terminal_at_copper, terminal_for_pad
 
     if end.xy is None:
         assert end.ref is not None and end.pad is not None
@@ -683,7 +714,7 @@ def _resolve_end(
     if end.layer is not None:
         if end.layer not in term.layers:
             return None, f"{end.describe()} has no copper on layer {end.layer}"
-        term = LinkTerminal(term.label, term.point, {end.layer: term.layers[end.layer]})
+        term = replace(term, layers={end.layer: term.layers[end.layer]})
     return term, None
 
 
@@ -691,19 +722,35 @@ def _route_length(route: Any) -> float:
     return sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2, _ in route.segments)
 
 
-def _commit_to_model(model: Any, route: Any, net_number: int) -> None:
-    """Make later links see ``route``'s copper (mirrors the oracle's commit)."""
+def _commit_to_model(model: Any, route: Any, net_number: int, origin: tuple[float, float]) -> None:
+    """Make later links see the same copper they would reload from the file."""
     from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
-    from kicad_tools.router.link_router import _Item
+    from kicad_tools.router.link_router import _Item, _written_point
+    from kicad_tools.schema.pcb import Segment
+    from kicad_tools.sexp.builders import fmt
 
     for x1, y1, x2, y2, layer in route.segments:
-        line = LineString([(x1, y1), (x2, y2)]) if (x1, y1) != (x2, y2) else Point(x1, y1)
-        model.items.append(_Item(net_number, {layer: line.buffer(route.width_for(layer) / 2)}))
+        start = _written_point(x1, y1, origin, route.coordinate_digits)
+        end = _written_point(x2, y2, origin, route.coordinate_digits)
+        if start == end:
+            continue
+        width = fmt(route.width_for(layer))
+        model.extra_segments.append(Segment(start, end, width, layer, net_number))
+        model.items.append(_Item(net_number, {layer: LineString([start, end]).buffer(width / 2)}))
     for vx, vy in route.vias:
-        disk = Point(vx, vy).buffer(route.via_size / 2)
+        vx, vy = _written_point(vx, vy, origin, route.coordinate_digits)
+        size = fmt(route.via_size)
+        disk = Point(vx, vy).buffer(size / 2)
         model.items.append(_Item(net_number, dict.fromkeys(model.copper, disk)))
-        model.drills.append((vx, vy, route.via_drill))
+        model.drills.append((vx, vy, fmt(route.via_drill)))
+        model.extra_vias.append((vx, vy, size, net_number))
+
+
+def _junction_report(junction: Any, origin: tuple[float, float]) -> dict[str, Any]:
+    """The junction in the board file's millimetres, as the writer will keep them."""
+    x, y = junction.file_point(origin)
+    return {"x": x, "y": y, "layer": junction.layer}
 
 
 def _route_one(
@@ -720,6 +767,7 @@ def _route_one(
         _via_site_blocker,
         explain_link_failure,
         route_link,
+        route_link_junction,
         route_link_via,
     )
 
@@ -748,23 +796,68 @@ def _route_one(
             entry["reason"] = f"unknown copper layer(s) {', '.join(bad)}"
             return entry, None
         allowed = spec.layers
+    if spec.join_track and (spec.b.xy is not None or spec.via_at is not None):
+        entry["reason"] = "--join-track needs a pad as the destination and no --via-at"
+        return entry, None
     corridor = spec.relative_corridor(origin)
     if corridor is not None and corridor.layer not in model.copper:
         entry["reason"] = f"unknown corridor layer {corridor.layer}"
         return entry, None
     ta, why = _resolve_end(pcb, spec.a, net_number, spec.net, origin)
-    tb, why_b = _resolve_end(pcb, spec.b, net_number, spec.net, origin)
+    destination = replace(spec.b, layer=None) if spec.join_track else spec.b
+    tb, why_b = _resolve_end(pcb, destination, net_number, spec.net, origin)
     if ta is None or tb is None:
         entry["reason"] = why or why_b
         return entry, None
-    if allowed is not None:
-        for label, term in (("A", ta), ("B", tb)):
+
+    def _no_allowed_copper(ends: tuple[tuple[str, Any], ...]) -> str | None:
+        if allowed is None:
+            return None
+        for label, term in ends:
             if not any(layer in allowed for layer in term.layers):
-                entry["reason"] = (
-                    f"endpoint {label} has no copper on the allowed layers {','.join(allowed)}"
-                )
+                return f"endpoint {label} has no copper on the allowed layers {','.join(allowed)}"
+        return None
+
+    # Issue #10486: a joined track may reach the destination pad on a layer
+    # the pad itself lacks, so its own layers are checked only if the pad
+    # route is what is left.
+    why_layers = _no_allowed_copper((("A", ta),) if spec.join_track else (("A", ta), ("B", tb)))
+    if why_layers is not None:
+        entry["reason"] = why_layers
+        return entry, None
+    route = None
+    if spec.join_track:
+        # Issue #10486: join a track connected to the destination pad.  Without
+        # a clearance-legal branch the ordinary pad route below is kept, and
+        # a junction is reported only when one was selected.
+        skipped: dict[str, str] = {}
+        route = route_link_junction(
+            pcb,
+            net_number,
+            spec.net,
+            ta,
+            tb,
+            rules,
+            endpoint_layer=spec.b.layer,
+            allowed_layers=allowed,
+            model=model,
+            plane_corridor=corridor,
+            failure=skipped,
+        )
+        if route is None:
+            entry["join_track_skipped"] = skipped["reason"]
+            if spec.b.layer is not None:
+                tb, why_b = _resolve_end(pcb, spec.b, net_number, spec.net, origin)
+                if tb is None:
+                    entry["reason"] = why_b
+                    return entry, None
+            why_layers = _no_allowed_copper((("B", tb),))
+            if why_layers is not None:
+                entry["reason"] = why_layers
                 return entry, None
-    if spec.via_at is not None:
+        else:
+            entry["junction"] = _junction_report(route.junction, origin)
+    if route is None and spec.via_at is not None:
         site = (spec.via_at[0] - origin[0], spec.via_at[1] - origin[1])
         site_why = _via_site_blocker(model, net_number, site, rules)
         if site_why is not None:
@@ -787,7 +880,7 @@ def _route_one(
         if failure:
             entry.update(failure)
             return entry, None
-    else:
+    elif route is None:
         route = route_link(
             pcb,
             net_number,
@@ -1390,6 +1483,8 @@ def _commit_links_gated(
                 route = candidate
                 break
         if failed is not None:
+            # The board does not hold this link; it holds no junction of its own.
+            entry.pop("junction", None)
             if path == baseline:
                 path.write_bytes(snapshot)
             entry.update(routable=False, status="rolled-back", failed_check=failed, reason=reason)
@@ -1402,7 +1497,7 @@ def _commit_links_gated(
             entry["min_plane_gap_mm"] = gap
             accepted = (refilled, *_refilled_routing_inputs(args, refilled))
         else:
-            _commit_to_model(model, route, net_ids[spec.net])
+            _commit_to_model(model, route, net_ids[spec.net], origin)
         if path != out_path:
             destination = out_path.resolve()
             # Stage beside the resolved destination: a symlink may cross filesystems.
@@ -1479,7 +1574,7 @@ def run_route_link_command(args: argparse.Namespace) -> int:
                 entries.append(entry)
                 if route is not None:
                     # Later probes must see this copper.
-                    _commit_to_model(model, route, net_ids[spec.net])
+                    _commit_to_model(model, route, net_ids[spec.net], origin)
         else:
             from .kicad_toolchain import KiCadEnvironmentError, evidence_toolchain
 
@@ -1529,6 +1624,9 @@ def run_route_link_command(args: argparse.Namespace) -> int:
                         f"{layer} {e['widths_mm'][layer]:.2f} mm" for layer in e["layers"]
                     )
                     print(f"    {e['current_path']}: {sizes}")
+                if "junction" in e:
+                    j = e["junction"]
+                    print(f"    junction: {j['x']:g},{j['y']:g} on {j['layer']}")
             else:
                 print(f"  UNROUTABLE: {e['link']}: {e['reason']}")
                 b = e.get("blocker")
@@ -1538,6 +1636,8 @@ def run_route_link_command(args: argparse.Namespace) -> int:
                         f"{b['distance_mm']:.3f} mm from the straight line; needs "
                         f">= {b['required_mm']:.3f} mm"
                     )
+            if "join_track_skipped" in e:
+                print(f"    --join-track skipped: {e['join_track_skipped']}")
         if not args.probe:
             print(f"route-link: creepage census: {census_mode}")
         if written:
