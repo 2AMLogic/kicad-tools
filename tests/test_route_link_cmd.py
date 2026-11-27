@@ -585,6 +585,22 @@ class TestCommit:
         # 2 x 2 mm octagon, 0.14 * 2 = 0.28 mm cuts: 4 - 4 * 0.28**2 / 2.
         assert land.area == pytest.approx(4 - 4 * 0.28**2 / 2, abs=1e-6)
 
+    def test_single_corner_chamfer_terminal_excludes_the_cut_corner(self, tmp_path):
+        from kicad_tools.router.link_router import terminal_for_pad
+
+        pads = dict(self._DIAGONAL_PADS)
+        pads["single"] = pads["chamfered"].replace(
+            "(chamfer top_left top_right bottom_left bottom_right)", "(chamfer top_left)"
+        )
+        old_pads, type(self)._DIAGONAL_PADS = type(self)._DIAGONAL_PADS, pads
+        try:
+            pcb = PCB.load(str(self._diagonal_board(tmp_path, "single")))
+        finally:
+            type(self)._DIAGONAL_PADS = old_pads
+        land = terminal_for_pad(pcb, "P2", "1").layers["F.Cu"]
+        # One 0.28 mm cut removes a single 0.28**2 / 2 triangle from the 2 x 2 box.
+        assert land.area == pytest.approx(4 - 0.28**2 / 2, abs=1e-6)
+
     @pytest.mark.parametrize("order", ["P3.1 P2.1", "P2.1 P3.1"])
     @pytest.mark.parametrize("kind", ["chamfered", "trapezoid"])
     def test_offset_approximated_pad_on_a_diagonal_link(self, tmp_path, capsys, kind, order):

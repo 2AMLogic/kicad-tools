@@ -646,6 +646,23 @@ def _uniform_pad_lands(fp: Any, pad: Any, layers: Collection[str]) -> dict[str, 
     return dict.fromkeys(layers, outline) if outline is not None else {}
 
 
+def _pad_has_cut_corner(pad: Any) -> bool:
+    """True when a ``roundrect`` pad cuts at least one corner (``chamfer`` list).
+
+    Unlike ``copper._pad_has_chamfer`` (which keeps a single selected corner on
+    the shared exact outline), this admits a one-corner list, so the named-pad
+    terminal lands on the cut copper too (Issue #10604).
+    """
+    node = getattr(pad, "_sexp_node", None)
+    if node is None or (getattr(pad, "shape", "") or "").lower() != "roundrect":
+        return False
+    ratio, corners = node.find("chamfer_ratio"), node.find("chamfer")
+    if ratio is None or corners is None:
+        return False
+    value = ratio.get_float(0)
+    return bool(value) and value > 0 and bool(getattr(corners, "children", None))
+
+
 def _approximated_pad_box(fp: Any, pad: Any, geom: Any) -> Any:
     """Offset-aware conservative land for a pad the outline models only roughly.
 
@@ -662,11 +679,7 @@ def _approximated_pad_box(fp: Any, pad: Any, geom: Any) -> Any:
     """
     from shapely.geometry import Polygon
 
-    from kicad_tools.geometry.copper import (
-        _pad_has_chamfer,
-        custom_pad_board_outline,
-        pad_board_center,
-    )
+    from kicad_tools.geometry.copper import custom_pad_board_outline, pad_board_center
 
     center = pad_board_center(pad, fp.position, fp.rotation)
     w, h = pad.size
@@ -675,7 +688,7 @@ def _approximated_pad_box(fp: Any, pad: Any, geom: Any) -> Any:
     node = getattr(pad, "_sexp_node", None)
     shape = (getattr(pad, "shape", "") or "").lower()
     local: list[tuple[float, float]]
-    if shape == "roundrect" and _pad_has_chamfer(pad):
+    if node is not None and shape == "roundrect" and _pad_has_cut_corner(pad):
         short = min(w, h)
         ratio = node.find("chamfer_ratio").get_float(0) or 0.0
         cut = max(0.0, min(0.5, ratio)) * short
@@ -736,7 +749,7 @@ def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None
             geom = pad_copper_outline(pad, fp.position, fp.rotation)
             if geom is None:
                 return None
-            if not pad_outline_is_exact(pad):
+            if not pad_outline_is_exact(pad) or _pad_has_cut_corner(pad):
                 geom = _approximated_pad_box(fp, pad, geom)
             c = geom.centroid
             stack = _padstack_lands(fp, pad, layers)
