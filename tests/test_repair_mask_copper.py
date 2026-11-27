@@ -5792,6 +5792,76 @@ def test_fix_drc_attributes_foreign_net_disconnection_to_joint_via_action(
     assert _segments(board) == before_segs
 
 
+def test_joint_via_jog_run_undo_restores_the_runs_own_endpoint(tmp_path):
+    # n2-l ends 0.0057 mm from the jog endpoint (inside the junction tolerance):
+    # the move and undo record must carry the run's own coordinate.
+    off = _seg("n2-l", (98.4, 98.17), (98.804, 98.574), net=2, width=0.2, layer="F.Cu")
+    board = _joint_via_jog_board(tmp_path)
+    board.write_text(
+        board.read_text().replace(
+            _seg("n2-l", (98.4, 98.17), (98.8, 98.57), net=2, width=0.2, layer="F.Cu"), off
+        )
+    )
+    before = _segments(board)
+    assert before["n2-l"][1] == (98.804, 98.574)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair(
+        [_joint_via_finding()],
+        max_displacement=0.5,
+        clearance_mm=0.127,
+        warning_clearance_mm=0.15,
+    )
+    assert result.repaired == 1
+    repairer.save(board)
+    reloaded = MaskCopperRepairer(board)
+    assert reloaded.undo_action(result.actions[0])
+    reloaded.save(board)
+    assert _segments(board)["n2-l"] == before["n2-l"]
+
+
+def test_joint_via_tail_fallback_leaves_generator_owned_approach_alone(tmp_path):
+    board = _joint_via_jog_board(tmp_path)
+    text = board.read_text()
+    board.write_text(
+        text.rstrip().rstrip(")")
+        + '\n  (generated (uuid gen-1) (type tuning_pattern) (members "b-arm"))\n)\n'
+    )
+    before = _segments(board)
+    result = MaskCopperRepairer(board).repair(
+        [_joint_via_finding()],
+        max_displacement=0.5,
+        clearance_mm=0.127,
+        warning_clearance_mm=0.15,
+    )
+    assert result.repaired == 0
+    assert _segments(board) == before
+
+
+def test_joint_via_jog_selection_does_not_depend_on_hash_seed(tmp_path):
+    # Three blockers (both jog copies and n2-l); only the jog copies parse as a
+    # jog covering the whole set.  Sampling an arbitrary blocker used to decline
+    # under some PYTHONHASHSEED values; every blocker must be tried in turn.
+    board = _joint_via_jog_board(tmp_path)
+    text = board.read_text()
+    for uid in ("n2-jog-a", "n2-jog-b"):
+        text = text.replace(
+            _seg(uid, (98.8, 98.57), (100.4, 98.57), net=2, width=0.2, layer="F.Cu"),
+            _seg(uid, (99.7, 98.57), (100.4, 98.57), net=2, width=0.2, layer="F.Cu"),
+        )
+    text = text.replace(
+        _seg("n2-l", (98.4, 98.17), (98.8, 98.57), net=2, width=0.2, layer="F.Cu"),
+        _seg("n2-l", (99.3, 98.17), (99.7, 98.57), net=2, width=0.2, layer="F.Cu"),
+    )
+    board.write_text(text)
+    result = MaskCopperRepairer(board).repair(
+        [_joint_via_finding()],
+        max_displacement=0.25,
+        clearance_mm=0.127,
+        warning_clearance_mm=0.15,
+    )
+    assert result.repaired == 1 and not result.unrepaired
+
+
 def test_bridge_is_declined_early_when_pad_centres_exceed_angle_tolerance(tmp_path):
     from kicad_tools.router.quantize import segment_angle_census
 

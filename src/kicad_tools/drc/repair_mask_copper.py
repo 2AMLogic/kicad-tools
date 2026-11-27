@@ -4329,13 +4329,24 @@ class MaskCopperRepairer(CopperGapRepairer):
             if blocked_by_fixed or not blocking_tracks:
                 continue
 
-            sample_uid = next(iter(blocking_tracks))
-            if sample_uid not in jog_cache:
-                jog_cache[sample_uid] = self._parse_foreign_jog(
-                    sample_uid, pads, touched_by_action | via_moved_uuids
-                )
-            jog = jog_cache[sample_uid]
-            if jog is None or jog.net == net_name or not (blocking_tracks <= jog.moved_uuids):
+            # Try every blocker in a stable order (set iteration order depends on
+            # PYTHONHASHSEED): the first parsed jog that covers the whole blocker
+            # set wins, so one unparseable blocker cannot hide a valid jog.
+            jog: _ForeignJog | None = None
+            for sample_uid in sorted(blocking_tracks):
+                if sample_uid not in jog_cache:
+                    jog_cache[sample_uid] = self._parse_foreign_jog(
+                        sample_uid, pads, touched_by_action | via_moved_uuids
+                    )
+                cand_jog = jog_cache[sample_uid]
+                if (
+                    cand_jog is not None
+                    and cand_jog.net != net_name
+                    and blocking_tracks <= cand_jog.moved_uuids
+                ):
+                    jog = cand_jog
+                    break
+            if jog is None:
                 continue
 
             ux, uy = jog.axis
@@ -4835,7 +4846,10 @@ class MaskCopperRepairer(CopperGapRepairer):
             if elbow_applied:
                 continue
 
-            # 3. Fallback: kept-line slide + aligned in-land tail.
+            # 3. Fallback: kept-line slide + aligned in-land tail. It moves the
+            # approach's own endpoint, so a generator-owned member is off limits.
+            if any(self._locks.is_generator_owned(n) for _, n, *_ in bucket):
+                return None
             tail_plan = self._via_tail_plan(bucket, centre, size, max_displacement)
             if tail_plan is None:
                 return None
@@ -4959,7 +4973,13 @@ class MaskCopperRepairer(CopperGapRepairer):
                 if math.dist(other, opposite) < _TOLERANCE_MM:
                     copies_dict[uid] = node
                     continue
-                raw_runs.append((uid, node, tag, point, other))
+                # Record the run's own endpoint, not the jog's: they agree only
+                # to within the junction tolerance, and the move/undo record
+                # must restore the coordinate the file actually holds.
+                run_joint = self._xy(node.find(tag))
+                if run_joint is None:
+                    return None
+                raw_runs.append((uid, node, tag, run_joint, other))
                 count += 1
             sides.append(count)
         if min(sides) == 0:
