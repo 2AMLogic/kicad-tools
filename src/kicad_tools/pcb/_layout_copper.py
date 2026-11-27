@@ -22,7 +22,7 @@ rejecting.  Zones are not checked: they are refilled around new copper.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -31,6 +31,7 @@ from kicad_tools.core.geometry import (
     rotate_pad_offset,
     segment_to_segment_distance,
 )
+from kicad_tools.core.layers import pad_copper_layers
 
 if TYPE_CHECKING:
     from kicad_tools.router.board_clearance_rules import BoardClearanceRules
@@ -136,18 +137,6 @@ def via_layers(pair: Sequence[str], copper: list[str]) -> frozenset[str]:
     return frozenset(copper[i : j + 1])
 
 
-def _pad_copper(layers: Iterable[str], copper: list[str]) -> frozenset[str]:
-    out: set[str] = set()
-    for layer in layers:
-        if layer == "*.Cu":
-            out.update(copper)
-        elif layer == "F&B.Cu":
-            out.update(name for name in ("F.Cu", "B.Cu") if name in copper)
-        elif layer in copper:
-            out.add(layer)
-    return frozenset(out)
-
-
 def board_pads(
     pcb: PCB,
     moves: dict[str, tuple[float, float, float]],
@@ -158,7 +147,7 @@ def board_pads(
     for fp in pcb.footprints:
         x, y, rot = moves.get(fp.reference, (fp.position[0], fp.position[1], fp.rotation))
         for pad in fp.pads:
-            layers = _pad_copper(pad.layers, copper)
+            layers = pad_copper_layers(pad.layers, copper)
             if not layers:
                 continue
             ox, oy = rotate_pad_offset(pad.position[0], pad.position[1], rot)

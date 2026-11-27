@@ -34,7 +34,7 @@ from ..core.board_outline import (
     outline_polygon_points,
     outline_rect_points,
 )
-from ..core.layers import is_declared_copper_layer
+from ..core.layers import is_declared_copper_layer, pad_copper_layers
 from ..core.outline_tessellation import DegenerateArcError, tessellate_arc, tessellate_cubic
 from ..core.schematic_uuids import UuidMinter
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
@@ -7874,6 +7874,8 @@ class PCB:
         net: str | int | None = None,
         waypoints: list[tuple[float, float]] | None = None,
         dedupe: bool = True,
+        *,
+        require_pad_layer: bool = False,
     ) -> list[Segment]:
         """
         Add a trace (one or more segments) between two points or pads.
@@ -7896,6 +7898,10 @@ class PCB:
                 accumulating exact-duplicate copper.  Set False only if you
                 deliberately need identical-geometry duplicates.
 
+            require_pad_layer: Require named endpoints to declare copper on the
+                requested layer. Use coordinates for intentional transitions
+                through vias. This check leaves coordinate endpoints alone.
+
         Returns:
             List of Segment objects that were created (skipped duplicates are
             excluded, so this may be shorter than the number of point-pairs).
@@ -7911,6 +7917,27 @@ class PCB:
             >>> pcb.add_trace((50, 30), (60, 30), waypoints=[(55, 35)])
             >>> pcb.save("board.kicad_pcb")
         """
+        if require_pad_layer:
+            copper = [
+                v.name for v in self.layers.values() if is_declared_copper_layer(v.name, v.type)
+            ]
+            for endpoint in (start, end):
+                if not isinstance(endpoint[0], str):
+                    continue
+                ref, number = endpoint
+                fp = self.get_footprint(ref)
+                endpoint_pad = (
+                    next((p for p in fp.pads if p.number == number), None) if fp else None
+                )
+                if endpoint_pad is None:
+                    raise ValueError(f"Cannot find pad {number} on footprint {ref}")
+                available = pad_copper_layers(endpoint_pad.layers, copper)
+                if layer not in available:
+                    raise ValueError(
+                        f"Pad {ref}.{number} has no declared copper on {layer}; "
+                        f"available copper: {', '.join(sorted(available)) or 'none'}"
+                    )
+
         # Resolve start position
         if isinstance(start[0], str):
             ref, pad = start[0], start[1]

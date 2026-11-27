@@ -252,7 +252,8 @@ def narrow_track_board(tmp_path: Path) -> Path:
 
     0.11 mm sits between JLCPCB's 4-layer (0.1016 mm) and 2-layer (0.127 mm)
     minimum trace widths, so it fails only when the board's real layer count
-    is used (Issue #7260 repro 2).
+    is used (Issue #7260 repro 2).  The board's two LED_ANODE tracks are
+    0.127 mm wide (Issue #10448).
     """
     if not BOARD_00.is_dir():
         pytest.skip("boards/00-simple-led/output not present")
@@ -266,8 +267,8 @@ def narrow_track_board(tmp_path: Path) -> Path:
         shutil.copy2(BOARD_00 / name, tmp_path / name)
     pcb = tmp_path / "simple_led_routed.kicad_pcb"
     text = pcb.read_text()
-    assert text.count("(width 0.2)") == 2
-    pcb.write_text(text.replace("(width 0.2)", "(width 0.11)"))
+    assert text.count("(width 0.127)") == 2
+    pcb.write_text(text.replace("(width 0.127)", "(width 0.11)"))
     return pcb
 
 

@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.29.0",
-  "generated_at": "2026-11-26T20:34:46+00:00",
+  "generated_at": "2026-11-27T01:36:26+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -13,19 +13,19 @@
       "size": 1057
     },
     "assembly-back.pdf": {
-      "sha256": "2761199c5b871f5dc5f2bd59240be7dffafd03eacdf38d26a7f53194534ece5d",
-      "size": 22379
+      "sha256": "bdfba533556ec8349f4ebfabc3d8859e0b3bbb231c7caa0af56c21c03b200116",
+      "size": 22651
     },
     "assembly-front.pdf": {
-      "sha256": "2e7ff85dccb62492fb13b6f12b953e660822dfe65e9faa4e861abaee9b2bb638",
-      "size": 66841
+      "sha256": "e55d5eef9b27d90d4028c2fd70919841bcca292615217755f48c308d76bc40f4",
+      "size": 67113
     },
     "bom_jlcpcb.csv": {
       "sha256": "22f4f6e0ae921146268a6a0c94e0267283a7a8d64f24d90be807bb449873b27f",
       "size": 640
     },
     "check-report.json": {
-      "sha256": "3f6c9221d6d539419263d693792eb9c9bf372a8867532117e8764e75441e5a4a",
+      "sha256": "599c1b104fff9c76f13a213c681673939f83aedbf485d2141cb24903d6911c2f",
       "size": 17242
     },
     "cpl_jlcpcb.csv": {
@@ -61,8 +61,8 @@
       "size": 33
     },
     "gerbers/gerbers.zip": {
-      "sha256": "37790e2616d2d8b7c6d3a771dc5c668767bf1b33d048282a39e336aad657b329",
-      "size": 56474
+      "sha256": "4b63be87bd440764a330b0c5d0e22c19d36eca84c755a46ab8afabe81760939e",
+      "size": 56473
     },
     "images/assembly.png": {
       "sha256": "b745a452747f74c91b83ef93e4bb89780498b7b3455047f73f9b5038b8c6286f",
@@ -93,8 +93,8 @@
       "size": 279454
     },
     "kicad_project.zip": {
-      "sha256": "dd8fb68cc3bb4f290c402b0574e151f3f6206863577ed7a9fc90ba86ab8262d2",
-      "size": 73773
+      "sha256": "de0cd5bcb7bd1662f79281ffa33e6183fd1a6c572938af76531a3f1562cc82c3",
+      "size": 73927
     },
     "manufacturing-requirements.json": {
       "sha256": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
@@ -117,12 +117,12 @@
       "size": 3329
     },
     "report.md": {
-      "sha256": "ae8df9b9662e8f9cd9e210687e02db0267d88223dc9ff502527c8af8b71e9b82",
+      "sha256": "f2ffdd5ee89cd1822cbc575da50b7573d19f8eb20f7f9909e573a62916d66de6",
       "size": 3490
     },
     "report.pdf": {
-      "sha256": "4a1403d9f41bae4257faf89a517f2d557551bee505a78aef22fd21ff05528728",
-      "size": 1381051
+      "sha256": "63d2c1b63788e1762aa70f964437076de3a6014b6ed8276b24ddc9ad4ec59d29",
+      "size": 1381049
     }
   },
   "board": {

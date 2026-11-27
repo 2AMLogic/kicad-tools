@@ -300,7 +300,7 @@ INSTANCE_LOCK_WARNING = (
 )
 
 
-def _export_with_native_stderr(tmp_path, monkeypatch, *, stderr, returncode=0):
+def _export_with_native_stderr(tmp_path, monkeypatch, *, stderr, returncode=0, command=None):
     """Run a full export against a synthetic kicad-cli with a chosen stderr."""
     import subprocess
 
@@ -320,7 +320,46 @@ def _export_with_native_stderr(tmp_path, monkeypatch, *, stderr, returncode=0):
         return subprocess.CompletedProcess(command, returncode, "", stderr)
 
     monkeypatch.setattr(module.subprocess, "run", run)
-    return module.inspect_exported_mask_geometry(path, native_command=["fake-kicad-cli"])
+    return module.inspect_exported_mask_geometry(path, native_command=command or ["fake-kicad-cli"])
+
+
+DOCKER_PLATFORM_NOTICE = (
+    "WARNING: The requested image's platform (linux/amd64) does not match the detected "
+    "host platform (linux/arm64/v8) and no specific platform was requested"
+)
+
+
+def test_docker_platform_notice_retained_in_successful_export(tmp_path, monkeypatch):
+    result = _export_with_native_stderr(
+        tmp_path,
+        monkeypatch,
+        stderr=DOCKER_PLATFORM_NOTICE,
+        command=["/usr/local/bin/docker", "run", "--rm", "test-image", "kicad-cli"],
+    )
+    assert result.complete
+    assert result.export_identity["suppressed_stderr"] == [
+        {"pattern": "docker-platform-notice", "line": DOCKER_PLATFORM_NOTICE}
+    ]
+    assert result.export_identity["stderr"] == DOCKER_PLATFORM_NOTICE
+
+
+@pytest.mark.parametrize(
+    "command,stderr,returncode",
+    [
+        (["fake-kicad-cli"], DOCKER_PLATFORM_NOTICE, 0),
+        (["docker", "run"], DOCKER_PLATFORM_NOTICE + "\nWarning: failed to plot F.Mask", 0),
+        (["docker", "run"], DOCKER_PLATFORM_NOTICE + ": export incomplete", 0),
+        (["docker", "run"], DOCKER_PLATFORM_NOTICE, 1),
+    ],
+)
+def test_docker_notice_never_hides_export_failures(
+    tmp_path, monkeypatch, command, stderr, returncode
+):
+    result = _export_with_native_stderr(
+        tmp_path, monkeypatch, stderr=stderr, command=command, returncode=returncode
+    )
+    assert not result.complete
+    assert any(f["feature"] == "native-export" for f in result.unsupported)
 
 
 @pytest.mark.parametrize(
