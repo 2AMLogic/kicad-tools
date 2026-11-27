@@ -479,7 +479,19 @@ makes every pass that reads the list as records -- one that records wires,
 `--clear`, `--replace`, `--adopt`, and `--list-wires` in text or with `--net`
 -- exit 1 with `<sidecar>: wires[<i>] is <type>, not a JSON object` and write
 nothing, the `-o` output board included; `--list-wires --format json` without
-`--net` still prints the file as it stands (#10401).
+`--net` still prints the file as it stands (#10401). A record whose coordinate
+data is malformed -- an anchor, leg end, `polyline` point, stitching via or
+`copy_segments` endpoint that is not an object with numeric `x` and `y` (a
+boolean is not a number here), or a point list that is not an array -- is
+refused the same way by every pass that reads the coordinates: one that
+records wires, `--clear`, `--replace`, `--adopt`, `--list-wires` in text, and
+`kct pcb center-on-sheet` before a nonzero move. The
+message is `<sidecar>: wires[<i>].<field> is <type>, expected <shape>`, naming
+the entry's position in the file and the exact field or element, for example
+`wires[1].anchors[0] is a string, expected an object with numeric 'x' and 'y'`
+or `wires[0].leg_start has no 'y', expected a number` (#10559). Read-only
+consumers and `--list-wires --format json`, with or without `--net`, still pass
+such a record through unchanged.
 
 `kct pcb reinforce BOARD --adopt [--net NET] [--dry-run]` records wires that are
 already on the board (e.g. hand-adjusted after a Gerber review) without moving

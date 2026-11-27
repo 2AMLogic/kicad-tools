@@ -13,12 +13,16 @@ import pytest
 from kicad_tools.cli import main
 from kicad_tools.cli.commands.pcb import run_pcb_command
 from kicad_tools.pcb.reinforcement_sidecar import (
+    check_wire_records,
+    drop_wires,
     is_parallel,
+    load_wire_records,
     load_wires,
     load_wires_if_present,
     merge_wires,
     sidecar_path,
     wire_key,
+    write_sidecar,
 )
 from kicad_tools.physics.wire_gauge import bare_copper_diameter_mm
 from kicad_tools.schema.pcb import PCB
@@ -1374,3 +1378,502 @@ def test_center_between_reinforcement_board_and_record_writes(tmp_path, monkeypa
     anchors = {(a["x"], a["y"]) for w in load_wires(sidecar_path(board)) for a in w["anchors"]}
     assert len(anchors) == 4
     assert anchors == vias
+
+
+# --------------------- malformed coordinate data in a record (Issue #10559)
+
+_ABSENT = object()
+_POINT = "an object with numeric 'x' and 'y'"
+_SEGMENT = "an object with 'start' and 'end' points"
+
+_BAD_POINTS = [
+    pytest.param(
+        ("anchors", "not-a-point"),
+        ".anchors is a string, expected an array of points",
+        id="anchors-string",
+    ),
+    pytest.param(
+        ("anchors", {"x": 20.0, "y": 70.0}),
+        ".anchors is an object, expected an array of points",
+        id="anchors-object",
+    ),
+    pytest.param(
+        ("anchors", None), ".anchors is null, expected an array of points", id="anchors-null"
+    ),
+    pytest.param(
+        ("anchors", _ABSENT), " has no 'anchors', expected an array of points", id="no-anchors"
+    ),
+    pytest.param(
+        ("anchors.0", "not-a-point"),
+        f".anchors[0] is a string, expected {_POINT}",
+        id="anchor-string",
+    ),
+    pytest.param(
+        ("anchors.1", [20.0, 70.0]),
+        f".anchors[1] is an array, expected {_POINT}",
+        id="anchor-pair-array",
+    ),
+    pytest.param(
+        ("anchors.1", None),
+        f".anchors[1] is null, expected {_POINT}",
+        id="anchor-null",
+    ),
+    pytest.param(
+        ("anchors.0.x", "20.0"), ".anchors[0].x is a string, expected a number", id="x-string"
+    ),
+    pytest.param(
+        ("anchors.0.x", True), ".anchors[0].x is a boolean, expected a number", id="x-boolean"
+    ),
+    pytest.param(("anchors.0.y", _ABSENT), ".anchors[0] has no 'y', expected a number", id="no-y"),
+    pytest.param(
+        ("anchors.0.y", {"x": 1.0}),
+        ".anchors[0].y is an object, expected a number",
+        id="y-object",
+    ),
+    pytest.param(
+        ("leg_start", [20.0, 70.0]),
+        f".leg_start is an array, expected {_POINT}",
+        id="leg-start-array",
+    ),
+    pytest.param(
+        ("leg_start.x", "oops"), ".leg_start.x is a string, expected a number", id="leg-x-string"
+    ),
+    pytest.param(
+        ("leg_start.y", _ABSENT), ".leg_start has no 'y', expected a number", id="leg-no-y"
+    ),
+    pytest.param(
+        ("leg_end", _ABSENT),
+        f" has no 'leg_end', expected {_POINT}",
+        id="no-leg-end",
+    ),
+    pytest.param(
+        ("leg_end.y", False), ".leg_end.y is a boolean, expected a number", id="leg-y-boolean"
+    ),
+]
+
+_BAD_COPY_POINTS = [
+    pytest.param(
+        ("polyline", "oops"),
+        ".polyline is a string, expected an array of points",
+        id="polyline-string",
+    ),
+    pytest.param(
+        ("polyline", {"x": 1.0}),
+        ".polyline is an object, expected an array of points",
+        id="polyline-object",
+    ),
+    pytest.param(
+        ("polyline.1", {"x": 1.0}), ".polyline[1] has no 'y', expected a number", id="polyline-no-y"
+    ),
+    pytest.param(
+        ("polyline.0.x", [1.0]),
+        ".polyline[0].x is an array, expected a number",
+        id="polyline-x-array",
+    ),
+    pytest.param(
+        ("stitch_vias", 3),
+        ".stitch_vias is a number, expected an array of points",
+        id="stitches-number",
+    ),
+    pytest.param(
+        ("stitch_vias.0", None),
+        f".stitch_vias[0] is null, expected {_POINT}",
+        id="stitch-null",
+    ),
+    pytest.param(
+        ("stitch_vias.0.x", "5"),
+        ".stitch_vias[0].x is a string, expected a number",
+        id="stitch-x-string",
+    ),
+    pytest.param(
+        ("copy_segments", "x"),
+        ".copy_segments is a string, expected an array of segments with 'start' and 'end' points",
+        id="segments-string",
+    ),
+    pytest.param(
+        ("copy_segments.0", 7),
+        f".copy_segments[0] is a number, expected {_SEGMENT}",
+        id="segment-number",
+    ),
+    pytest.param(
+        ("copy_segments.0", {"start": {"x": 1.0, "y": 2.0}}),
+        f".copy_segments[0] has no 'end', expected {_POINT}",
+        id="segment-no-end",
+    ),
+    pytest.param(
+        ("copy_segments.0.start", "nope"),
+        f".copy_segments[0].start is a string, expected {_POINT}",
+        id="segment-start-string",
+    ),
+    pytest.param(
+        ("copy_segments.0.end", "nope"),
+        f".copy_segments[0].end is a string, expected {_POINT}",
+        id="segment-end-string",
+    ),
+    pytest.param(
+        ("copy_segments.0.start.x", _ABSENT),
+        ".copy_segments[0].start has no 'x', expected a number",
+        id="segment-start-no-x",
+    ),
+    pytest.param(
+        ("copy_segments.0.end.x", False),
+        ".copy_segments[0].end.x is a boolean, expected a number",
+        id="segment-end-x-boolean",
+    ),
+]
+
+_BAD_COORDINATES = _BAD_POINTS + _BAD_COPY_POINTS
+
+
+def _put(record: dict, path: str, value) -> None:
+    """Damage the value of ``record`` at dotted ``path`` (``copy_segments.0.end.y``);
+    ``_ABSENT`` removes it."""
+    keys = [int(key) if key.isdigit() else key for key in path.split(".")]
+    node = record
+    for key in keys[:-1]:
+        node = node[key]
+    if value is _ABSENT:
+        del node[keys[-1]]
+    else:
+        node[keys[-1]] = value
+
+
+def _damaged(tmp_path: Path, net: str, path: str, value, *others: str):
+    """``(board, sidecar, pristine records)``: the board after reinforcing ``net`` then
+    ``others``, with ``net``'s record damaged at ``path``. File order is kept, so
+    ``NET_B`` is ``wires[1]`` beside ``NET_A``."""
+    p, records = _reinforced(tmp_path, net, *others)
+    pristine = json.loads(json.dumps(records))
+    _put(next(w for w in records if w["net"] == net), path, value)
+    return p, _rewrite_sidecar(p, records), pristine
+
+
+@pytest.mark.parametrize(("damage", "fragment"), _BAD_COORDINATES)
+def test_record_guard_names_the_file_index_and_the_offending_field(tmp_path, damage, fragment):
+    """The diagnostic names the sidecar, the entry's position in the file -- 1,
+    where sorting would move NET_A to 0 -- and the exact field or element."""
+    bad = _parallel_record("NET_A", 0.0)
+    _put(bad, *damage)
+    entries = [_wire_record("NET_B", 20.0), bad]
+    _board, sidecar = _sidecar_with(tmp_path, entries)
+    before = sidecar.read_bytes()
+    with pytest.raises(ValueError) as refused:
+        load_wire_records(sidecar)
+    assert str(refused.value) == f"{sidecar}: wires[1]{fragment}"
+    assert load_wires(sidecar) == entries and sidecar.read_bytes() == before
+
+
+def test_record_guard_reports_the_first_offender_in_file_order(tmp_path):
+    """An entry that is not an object keeps its #10401 message and is reported before
+    any malformed point, wherever it sits; without one, the first malformed point in
+    file order is named."""
+    bad = _parallel_record("NET_A", 0.0)
+    _put(bad, "anchors.0", "not-a-point")
+    later = _parallel_record("NET_B", 40.0)
+    _put(later, "leg_end.y", True)
+    board, sidecar = _sidecar_with(tmp_path, [bad, later])
+    with pytest.raises(ValueError, match=r"wires\[0\]\.anchors\[0\] is a string"):
+        load_wire_records(sidecar)
+    _rewrite_sidecar(board, [_wire_record("NET_C", 60.0), later, bad])
+    with pytest.raises(ValueError, match=r"wires\[1\]\.leg_end\.y is a boolean"):
+        load_wire_records(sidecar)
+    for entries in ([bad, later, None], [None, bad, later]):
+        _rewrite_sidecar(board, entries)
+        with pytest.raises(ValueError, match=r"wires\[(0|2)\] is null, not a JSON object"):
+            load_wire_records(sidecar)
+
+
+def test_record_guard_accepts_the_shapes_writers_use(tmp_path, capsys):
+    """Integers and floats, empty point lists, and records without the optional
+    parallel-copy fields: a legacy wire, and a parallel copy with empty lists."""
+    entries = [
+        _wire_record("NET_B", 0.0),
+        _wire_record(
+            "NET_C",
+            0.0,
+            leg_start={"x": 20, "y": 70},
+            leg_end={"x": 120, "y": 70},
+            anchors=[{"x": 20, "y": 70}, {"x": 120, "y": 70}],
+        ),
+        _wire_record("NET_D", 0.0, anchors=[]),
+        _parallel_record("NET_E", 0.0),
+        {
+            **_parallel_record("NET_F", 0.0),
+            "polyline": [],
+            "copy_segments": [],
+            "stitch_vias": [],
+        },
+        _wire_record("NET_A", 0.0),
+    ]
+    p = _board(tmp_path)
+    sidecar = _rewrite_sidecar(p, entries)
+    before = sidecar.read_bytes()
+    assert load_wire_records(sidecar) == entries
+    assert check_wire_records(sidecar, entries) is None
+    assert check_wire_records(sidecar, []) is None
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, net=None, list_wires=True)) == 0
+    out = capsys.readouterr().out
+    assert f"{len(entries)} wire(s):" in out and all(w["net"] in out for w in entries)
+    assert sidecar.read_bytes() == before
+
+
+def test_object_check_alone_passes_malformed_coordinates(tmp_path):
+    """The shallow check stays available to a reader that only filters or dumps."""
+    from kicad_tools.pcb.reinforcement_sidecar import check_wire_objects
+
+    bad = _parallel_record("NET_A", 0.0)
+    _put(bad, "anchors.0", "not-a-point")
+    _put(bad, "copy_segments.0.end", 7)
+    _board, sidecar = _sidecar_with(tmp_path, [_wire_record("NET_B", 20.0), bad])
+    assert check_wire_objects(sidecar, [_wire_record("NET_B", 20.0), bad]) is None
+    with pytest.raises(ValueError, match=r"wires\[1\] is null, not a JSON object"):
+        check_wire_objects(sidecar, [_wire_record("NET_B", 20.0), None])
+
+
+def test_lenient_loaders_pass_a_malformed_point_through(tmp_path):
+    """``load_wires`` and the read-only loader validate no field, so nothing is dropped."""
+    bad = _parallel_record("NET_A", 0.0)
+    _put(bad, "anchors.0", "not-a-point")
+    _put(bad, "leg_start.y", _ABSENT)
+    legacy = _wire_record("NET_B", 20.0)
+    board, sidecar = _sidecar_with(tmp_path, [legacy, bad, None])
+    before = sidecar.read_bytes()
+    assert load_wires(sidecar) == [legacy, bad, None]
+    assert load_wires_if_present(board) == [legacy, bad]
+    assert sidecar.read_bytes() == before
+
+
+def test_writers_refuse_a_malformed_point_and_leave_the_file_alone(tmp_path):
+    """``write_sidecar`` and ``drop_wires`` used to raise TypeError from the anchor match."""
+    p, sidecar, pristine = _damaged(tmp_path, "NET_B", "anchors.0", "not-a-point", "NET_A")
+    net_b = next(w for w in pristine if w["net"] == "NET_B")
+    before = sidecar.read_bytes()
+    with pytest.raises(ValueError, match=r"wires\[1\]\.anchors\[0\] is a string"):
+        load_wire_records(sidecar)
+    with pytest.raises(ValueError, match=r"wires\[1\]\.anchors\[0\]"):
+        write_sidecar(p, [_wire_record("NET_C", 40.0)])
+    with pytest.raises(ValueError, match=r"wires\[1\]\.anchors\[0\]"):
+        drop_wires(sidecar, "NET_B", [(a["x"], a["y"]) for a in net_b["anchors"]])
+    assert sidecar.read_bytes() == before
+
+
+@pytest.mark.parametrize("net", ["NET_A", "NET_B"])
+@pytest.mark.parametrize(("damage", "fragment"), _BAD_POINTS)
+def test_clear_refuses_malformed_coordinate_data_before_writing(
+    tmp_path, capsys, net, damage, fragment
+):
+    """The list names the anchors to remove and every writer keys on the leg ends, so
+    the whole list is refused, whichever net is named, where a malformed anchor or
+    leg end used to raise TypeError or KeyError."""
+    p, sidecar, _pristine = _damaged(tmp_path, "NET_B", *damage, "NET_A")
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    rc = run_pcb_command(_args(p, net, clear=True))
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.err == f"Error: {sidecar}: wires[1]{fragment}\n"
+    assert captured.out == ""
+    assert _tree_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("mode", "report"),
+    [
+        ({"adopt": True}, "Error reading {sidecar}: {diagnostic}"),
+        ({"clear": True}, "Error: {sidecar}: {diagnostic}"),
+        ({"replace": True}, "Error: {sidecar}: {diagnostic}"),
+    ],
+    ids=["adopt", "clear", "replace"],
+)
+def test_adopt_clear_and_replace_refuse_a_malformed_anchor(tmp_path, capsys, mode, report):
+    p, sidecar, _pristine = _damaged(tmp_path, "NET_B", "anchors.0", "not-a-point", "NET_A")
+    expected = report.format(
+        sidecar=sidecar, diagnostic=f"wires[1].anchors[0] is a string, expected {_POINT}"
+    )
+    before = _tree_bytes(tmp_path)
+    for fmt in ("text", "json"):
+        capsys.readouterr()
+        assert run_pcb_command(_args(p, "NET_B", format=fmt, **mode)) == 1
+        captured = capsys.readouterr()
+        assert captured.err == f"{expected}\n" and captured.out == ""
+    assert _tree_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("mode", [{"clear": True}, {"replace": True}], ids=["clear", "replace"])
+def test_dry_run_clear_refuses_a_malformed_anchor_like_a_non_object(tmp_path, capsys, mode):
+    """Under --dry-run the list is still read to name the anchors to report."""
+    p, sidecar, _pristine = _damaged(tmp_path, "NET_B", "anchors.0", "not-a-point", "NET_A")
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    rc = run_pcb_command(_args(p, "NET_B", dry_run=True, **mode))
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.err == f"Error: {sidecar}: wires[1].anchors[0] is a string, expected {_POINT}\n"
+    assert captured.out == "" and _tree_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("fmt", ["text", "json"])
+def test_add_refuses_a_malformed_leg_end_before_saving_the_board(tmp_path, capsys, fmt):
+    """A plain pass merges its record into the list and sorts it, which keys on the
+    leg ends; it used to raise TypeError or KeyError there."""
+    p, sidecar, _pristine = _damaged(tmp_path, "NET_B", "leg_start.x", "oops", "NET_A")
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    rc = run_pcb_command(_args(p, "NET_A", format=fmt))
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert (
+        captured.err
+        == f"Error updating reinforcement sidecar: {sidecar}: wires[1].leg_start.x is a string, expected a number\n"
+    )
+    assert captured.out == "" and _tree_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize(("damage", "fragment"), _BAD_COPY_POINTS)
+def test_clear_and_a_parallel_rerun_refuse_a_malformed_copy_record(
+    tmp_path, capsys, damage, fragment
+):
+    """A copy's segments and stitching vias are how --clear and a parallel re-run tell
+    the tool's own copper from copper that predates it."""
+    p = _short_board(tmp_path, 12.0)
+    assert run_pcb_command(_args(p, strategy="parallel")) == 0
+    (record,) = load_wires(sidecar_path(p))
+    _put(record, *damage)
+    sidecar = _rewrite_sidecar(p, [record])
+    before = _tree_bytes(tmp_path)
+    for mode in ({"clear": True}, {"strategy": "parallel"}):
+        capsys.readouterr()
+        assert run_pcb_command(_args(p, **mode)) == 1
+        captured = capsys.readouterr()
+        assert captured.err == f"Error: {sidecar}: wires[0]{fragment}\n"
+        assert captured.out == ""
+    assert _tree_bytes(tmp_path) == before
+
+
+def test_list_wires_text_refuses_a_malformed_anchor_and_json_prints_the_entries(tmp_path, capsys):
+    """The text listing formats the points; the JSON forms only filter or dump the entries."""
+    p, sidecar, _pristine = _damaged(tmp_path, "NET_B", "anchors.0", "not-a-point", "NET_A")
+    entries = load_wires(sidecar)
+    before = _tree_bytes(tmp_path)
+    for net in ("NET_B", None):
+        capsys.readouterr()
+        assert run_pcb_command(_args(p, net, list_wires=True)) == 1
+        captured = capsys.readouterr()
+        assert (
+            captured.err
+            == f"Error reading {sidecar}: wires[1].anchors[0] is a string, expected {_POINT}\n"
+        )
+        assert captured.out == ""
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, "NET_B", list_wires=True, format="json")) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"sidecar": str(sidecar), "wires": [entries[1]]}
+    assert captured.err == ""
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, net=None, list_wires=True, format="json")) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"sidecar": str(sidecar), "wires": entries}
+    assert captured.err == ""
+    assert _tree_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("existing_output", [False, True])
+@pytest.mark.parametrize("fmt", ["text", "json"])
+def test_clear_to_an_output_with_a_malformed_destination_sidecar_writes_nothing(
+    tmp_path, capsys, fmt, existing_output
+):
+    """The destination list names the anchors to drop; its malformed anchor used to
+    raise after the output board had been saved."""
+    p, (net_a,) = _reinforced(tmp_path, "NET_A")
+    out = tmp_path / "out.kicad_pcb"
+    if existing_output:
+        _two_net_pcb(length=80.0).save(out)
+    bad_record = json.loads(json.dumps(net_a))
+    bad_record["anchors"][0] = "not-a-point"
+    bad = _rewrite_sidecar(out, [bad_record])
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    rc = run_pcb_command(_args(p, "NET_A", clear=True, output=str(out), format=fmt))
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert (
+        captured.err
+        == f"Error reading {bad}: wires[0].anchors[0] is a string, expected {_POINT} -- nothing was written\n"
+    )
+    assert captured.out == ""
+    assert out.exists() is existing_output
+    assert _tree_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("mode", "report"),
+    [
+        ({}, "Error updating reinforcement sidecar: {sidecar}: {diagnostic}"),
+        ({"replace": True}, "Error reading {sidecar}: {diagnostic} -- nothing was written"),
+    ],
+    ids=["add", "replace"],
+)
+def test_add_or_replace_to_an_output_with_a_malformed_destination_sidecar_writes_nothing(
+    tmp_path, capsys, mode, report
+):
+    """Add merges its record into the destination list and --replace drops the cleared
+    wires from it first; either way the list is refused before the board is saved."""
+    p, (net_a,) = _reinforced(tmp_path, "NET_A")
+    out = tmp_path / "out" / "out.kicad_pcb"
+    out.parent.mkdir()
+    bad_record = json.loads(json.dumps(net_a))
+    bad_record["leg_end"] = [120.0, 30.0]
+    bad = _rewrite_sidecar(out, [bad_record])
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    rc = run_pcb_command(_args(p, "NET_A", output=str(out), **mode))
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert (
+        captured.err
+        == f"{report.format(sidecar=bad, diagnostic=f'wires[0].leg_end is an array, expected {_POINT}')}\n"
+    )
+    assert captured.out == "" and not out.exists()
+    assert _tree_bytes(tmp_path) == before
+
+
+def test_clear_to_an_output_refuses_a_malformed_source_sidecar(tmp_path, capsys):
+    p, sidecar, _pristine = _damaged(tmp_path, "NET_B", "leg_start.y", _ABSENT, "NET_A")
+    out = tmp_path / "out" / "out.kicad_pcb"
+    out.parent.mkdir()
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    rc = run_pcb_command(_args(p, "NET_B", clear=True, output=str(out)))
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.err == f"Error: {sidecar}: wires[1].leg_start has no 'y', expected a number\n"
+    assert captured.out == "" and not out.exists()
+    assert _tree_bytes(tmp_path) == before
+
+
+def test_cli_reports_a_malformed_point_and_exits_1(tmp_path, capsys):
+    """Through the entry point, the refusal is the handler's diagnostic, not a traceback."""
+    p, sidecar, _pristine = _damaged(tmp_path, "NET_B", "anchors.0", "not-a-point", "NET_A")
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    rc = main(["pcb", "reinforce", str(p), "--net", "NET_B", "--clear"])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out == ""
+    assert captured.err == f"Error: {sidecar}: wires[1].anchors[0] is a string, expected {_POINT}\n"
+    assert _tree_bytes(tmp_path) == before
