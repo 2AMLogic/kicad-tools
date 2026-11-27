@@ -6,10 +6,13 @@ CSS integration, PDF rendering guards, and edge cases.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+QUOTE_SHAPES = str.maketrans({"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'"})
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -499,6 +502,184 @@ class TestRenderPdfPandoc:
         ):
             with pytest.raises(RuntimeError, match="pandoc failed"):
                 renderers.render_pdf_pandoc(md_path, out_pdf)
+
+    def _rendered_report(self, directory: Path, project_name: str, revision: str = "B") -> Path:
+        """Write a report through the real generator; return its Markdown path.
+
+        The name is supplied to the generator directly, so no filesystem
+        naming rule is involved (Issue #10630).
+        """
+        from kicad_tools.report.generator import ReportGenerator
+        from kicad_tools.report.models import ReportData
+
+        data = ReportData(
+            project_name=project_name,
+            revision=revision,
+            date="2026-11-27",
+            manufacturer="jlcpcb",
+        )
+        return ReportGenerator().generate(data, directory / "reports")
+
+    def _pandoc_cmd(self, markdown: str, tmp_path: Path) -> list[str]:
+        """Run render_pdf_pandoc on *markdown* against a mocked subprocess."""
+        from kicad_tools.report import renderers
+
+        md_path = tmp_path / "report.md"
+        md_path.write_text(markdown, encoding="utf-8")
+        captured: dict = {}
+
+        def fake_run(cmd, capture_output, text):  # noqa: ANN001, ANN202
+            captured["cmd"] = cmd
+            return _FakeCompletedProcess(returncode=0, stderr="")
+
+        with patch.object(renderers.subprocess, "run", side_effect=fake_run):
+            renderers.render_pdf_pandoc(md_path, tmp_path / "report.pdf")
+        return captured["cmd"]
+
+    def _latex_output(self, md_path: Path, tmp_path: Path) -> str:
+        """Return the LaTeX render_pdf_pandoc has pandoc write for *md_path*.
+
+        pandoc infers the output format from the file extension, so a
+        ``.tex`` destination runs the real command without a TeX install.
+        Escapes pandoc terminates with ``{}`` (``\\textbackslash{}``,
+        ``\\textbar{}``) have that suffix dropped, so they read the same as
+        the bare form pandoc writes before a space.
+        """
+        from kicad_tools.report import renderers
+
+        tex_path = tmp_path / "report.tex"
+        renderers.render_pdf_pandoc(md_path, tex_path)
+        tex = tex_path.read_text(encoding="utf-8")
+        for escape in ("\\textbackslash", "\\textbar"):
+            tex = tex.replace(escape + "{}", escape)
+        return tex
+
+    def test_cover_scalars_passed_as_literal_metadata(self, tmp_path: Path) -> None:
+        """JSON-quoted cover scalars are decoded and re-supplied as --metadata.
+
+        Pandoc parses YAML metadata strings as Markdown, so a title such as
+        ``Panel A\\B`` reaches the TeX writer as a raw control sequence and
+        XeLaTeX exits 43 (Issue #10630). Command-line ``--metadata`` values
+        are literal strings that override the front matter block.
+        """
+        cmd = self._pandoc_cmd(
+            "---\n"
+            'title: "Panel A\\\\B"\n'
+            'subtitle: "Design Report"\n'
+            'author: "kicad-tools 0.11.0"\n'
+            'date: "Rev B | 2026-11-27 | jlcpcb"\n'
+            'geometry: "margin=1in"\n'
+            "---\n\n# Body\n",
+            tmp_path,
+        )
+
+        metadata_args = [a for a in cmd if a.startswith("--metadata=")]
+        assert metadata_args == [
+            "--metadata=title:Panel A\\B",
+            "--metadata=subtitle:Design Report",
+            "--metadata=author:kicad-tools 0.11.0",
+            "--metadata=date:Rev B | 2026-11-27 | jlcpcb",
+        ]
+
+    def test_boolean_spelled_cover_scalar_keeps_front_matter_value(self, tmp_path: Path) -> None:
+        """pandoc reads ``--metadata=title:False`` as the boolean false.
+
+        A false boolean suppresses the title entirely, so YAML boolean
+        spellings are left to the front matter block, where the template
+        already quotes them.
+        """
+        cmd = self._pandoc_cmd(
+            "---\n"
+            'title: "False"\n'
+            'subtitle: "Design Report"\n'
+            'date: "Rev B | 2026-11-27 | jlcpcb"\n'
+            "---\n\n# Body\n",
+            tmp_path,
+        )
+
+        metadata_args = [a for a in cmd if a.startswith("--metadata=")]
+        assert "--metadata=title:False" not in metadata_args
+        assert metadata_args == [
+            "--metadata=subtitle:Design Report",
+            "--metadata=date:Rev B | 2026-11-27 | jlcpcb",
+        ]
+
+    def test_unquoted_cover_scalar_is_left_to_pandoc(self, tmp_path: Path) -> None:
+        """Older or custom templates may emit plain YAML scalars; nothing is overridden."""
+        cmd = self._pandoc_cmd(
+            "---\ntitle: Panel A\\B\nsubtitle: Design Report\n---\n\n# Body\n",
+            tmp_path,
+        )
+
+        assert not [a for a in cmd if a.startswith("--metadata=")]
+
+    @pytest.mark.skipif(shutil.which("pandoc") is None, reason="Pandoc is unavailable")
+    @pytest.mark.parametrize(
+        ("project_name", "latex_title"),
+        [
+            ("Board 05", "Board 05"),
+            ('ctl "bench"', 'ctl "bench"'),
+            ('Capteur "été"', 'Capteur "été"'),
+            ("Panel A\\B", "Panel A\\textbackslash B"),
+            ("double\\\\slash", "double\\textbackslash\\textbackslash slash"),
+            ("False", "False"),
+        ],
+    )
+    def test_cover_title_reaches_latex_literally(
+        self, tmp_path: Path, project_name: str, latex_title: str
+    ) -> None:
+        """The generator's title and revision survive as literal LaTeX text.
+
+        Only what pandoc hands to TeX is checked here; the report's Markdown
+        is unchanged by Issue #10630.
+        """
+        md_path = self._rendered_report(tmp_path, project_name)
+
+        tex = self._latex_output(md_path, tmp_path)
+
+        assert f"\\title{{{latex_title}}}" in tex
+        assert "\\date{Rev B \\textbar 2026-11-27 \\textbar jlcpcb}" in tex
+
+    @pytest.mark.skipif(shutil.which("pandoc") is None, reason="Pandoc is unavailable")
+    def test_cover_revision_reaches_latex_literally(self, tmp_path: Path) -> None:
+        """A literal backslash in the revision is guarded by the same mechanism."""
+        md_path = self._rendered_report(tmp_path, "Board 05", revision="A\\B")
+
+        tex = self._latex_output(md_path, tmp_path)
+
+        assert "\\date{Rev A\\textbackslash B \\textbar 2026-11-27 \\textbar jlcpcb}" in tex
+
+    @pytest.mark.skipif(
+        shutil.which("pandoc") is None or shutil.which("xelatex") is None,
+        reason="Pandoc or XeLaTeX is unavailable",
+    )
+    @pytest.mark.parametrize(
+        "project_name",
+        ["Board 05", 'ctl "bench"', 'Capteur "été"', "Panel A\\B", "double\\\\slash"],
+    )
+    def test_pdf_text_preserves_literal_title_and_revision(
+        self, tmp_path: Path, project_name: str
+    ) -> None:
+        """A real XeLaTeX run writes a PDF whose text keeps title and revision.
+
+        TeX's default font draws a straight double quote as a typographic one,
+        so only the shape of a quote may differ from the literal name.
+        """
+        import pdfplumber
+
+        from kicad_tools.report import renderers
+
+        md_path = self._rendered_report(tmp_path, project_name)
+        pdf_path = tmp_path / "report.pdf"
+
+        renderers.render_pdf_pandoc(md_path, pdf_path)
+
+        assert pdf_path.is_file()
+        with pdfplumber.open(pdf_path) as pdf:
+            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        first_line = text.lstrip().splitlines()[0]
+        assert first_line.translate(QUOTE_SHAPES) == project_name
+        assert "Rev B | 2026-11-27 | jlcpcb" in text
 
 
 # ---------------------------------------------------------------------------
