@@ -38,6 +38,8 @@ from .pnp import _ref_sort_key, is_through_hole_footprint
 if TYPE_CHECKING:
     from ..drc.violation import DRCViolation
     from ..manufacturers.base import AssemblyCapabilities, ManufacturerProfile
+    from ..parts.cache import PartsCache
+    from ..parts.jlcparts_catalog import JlcpartsCatalog
     from ..schema.pcb import PCB, Footprint, Pad
     from ..spec.schema import (
         BOMEntry,
@@ -1494,7 +1496,8 @@ class PreflightChecker:
         self._parts_cache = parts_cache
         # Optional injected JlcpartsCatalog (offline fallback for parts the
         # cache does not know, issue #7166).  Default: the catalog file that
-        # sits beside the parts cache's ``parts.db``.
+        # sits beside an injected parts cache's ``parts.db``, or, with no cache
+        # injected, wherever ``get_catalog_path()`` resolves.
         self._parts_catalog = parts_catalog
 
         # Resolve the fab *family* once.  Export-format concerns (BOM/CPL
@@ -3020,6 +3023,29 @@ class PreflightChecker:
                 self._pcb = PCB.load(str(self.pcb_path))  # type: ignore[assignment]
         return self._check_bom_lcsc_values()
 
+    def _default_parts_catalog(self, cache: PartsCache | None) -> JlcpartsCatalog | None:
+        """The offline jlcparts catalog for a lookup that injected none.
+
+        Beside an injected ``parts_cache`` the catalog is the one next to that
+        cache's ``parts.db``, so the caller's directory is the only one read.
+        With nothing injected it is wherever
+        :func:`~kicad_tools.parts.jlcparts_catalog.get_catalog_path` resolves,
+        so ``KCT_JLCPARTS_CATALOG`` reaches a session whose runtime redirected
+        ``XDG_CACHE_HOME`` (issue #10655).  Returns ``None`` when there is no
+        cache to sit beside or the reader cannot be built: the lookup then
+        proceeds as with no catalog on disk.
+        """
+        if cache is None:
+            return None
+        try:
+            from ..parts.jlcparts_catalog import CATALOG_FILENAME, JlcpartsCatalog
+
+            if self._parts_cache is None:
+                return JlcpartsCatalog()
+            return JlcpartsCatalog(Path(cache.db_path).parent / CATALOG_FILENAME)
+        except Exception:
+            return None
+
     def _check_bom_lcsc_values(self) -> PreflightResult:
         """Validate assigned LCSC parts against known value AND package.
 
@@ -3074,10 +3100,7 @@ class PreflightChecker:
 
         catalog = self._parts_catalog
         if catalog is None:
-            with contextlib.suppress(Exception):
-                from ..parts.jlcparts_catalog import CATALOG_FILENAME, JlcpartsCatalog
-
-                catalog = JlcpartsCatalog(Path(cache.db_path).parent / CATALOG_FILENAME)
+            catalog = self._default_parts_catalog(cache)
 
         from .lcsc_value_check import verify_lcsc_assignment
 
@@ -3298,10 +3321,7 @@ class PreflightChecker:
                 )
         catalog = self._parts_catalog
         if catalog is None:
-            with contextlib.suppress(Exception):
-                from ..parts.jlcparts_catalog import CATALOG_FILENAME, JlcpartsCatalog
-
-                catalog = JlcpartsCatalog(Path(cache.db_path).parent / CATALOG_FILENAME)
+            catalog = self._default_parts_catalog(cache)
 
         from .lcsc_value_check import verify_lcsc_assignment
 
