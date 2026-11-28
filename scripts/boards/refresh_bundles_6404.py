@@ -1256,8 +1256,15 @@ def repair_command(board: Path, checked_at: str, *, force_replot: bool) -> str:
     """
     inside = board.is_relative_to(REPO_ROOT)
     where = shlex.quote(board.relative_to(REPO_ROOT).as_posix() if inside else str(board))
+    # Quote the whole argument list: a ``--checked-at`` the parser accepts may hold a space.
     return " ".join(
-        [DRIVER, where, *(["--force-replot"] if force_replot else []), "--checked-at", checked_at]
+        [
+            DRIVER,
+            where,
+            *(["--force-replot"] if force_replot else []),
+            "--checked-at",
+            shlex.quote(checked_at),
+        ]
     )
 
 
@@ -1285,23 +1292,28 @@ def drift_exit_status(
     re-plot does, and it regenerates the whole bundle -- measured on Board 04,
     ``--force-replot`` would have republished five files including both ZIPs
     while both check reports already agreed.  ``boards`` and ``anchors`` carry
-    each board's path and the ``checked_at`` it was checked at.
+    each board's path and the ``checked_at`` it was checked at.  ``drift``,
+    ``check_only``, ``boards`` and ``anchors`` are keyed by the board's resolved
+    path, not its basename: two inputs may share a basename (Issue #10727), and
+    the printed repair must name the directory that drifted.  Only the header
+    label shows the basename.
     """
     refused, blocked = refused or [], blocked or []
     check_only, boards, anchors = check_only or {}, boards or {}, anchors or {}
     if not (drift or refused or blocked):
         log("== --check: every bundle reproduces on the pinned toolchain; nothing to publish")
         return 0
-    for name, files in drift.items():
+    for key, files in drift.items():
+        name = Path(key).name
         log(f"== --check DRIFT {name}: a fresh run would publish {len(files)} file(s)")
         for path in files:
             log(f"    {path}")
         repair = None
-        if name in boards and name in anchors:
+        if key in boards and key in anchors:
             repair = repair_command(
-                boards[name], anchors[name], force_replot=bool(check_only.get(name))
+                boards[key], anchors[key], force_replot=bool(check_only.get(key))
             )
-        if check_only.get(name):
+        if check_only.get(key):
             log(
                 "  --check: committed check report(s) disagree with a fresh checker run while "
                 "the archive is current. A plain refresh does not re-run the checker, so it "
@@ -1401,8 +1413,9 @@ def main(argv: list[str] | None = None) -> int:
             anchored = _source_date_epoch(checked_at)
         except ValueError:
             parser.error(f"{origin} is not an ISO timestamp: {checked_at}")
-        boards[board.name] = board
-        anchors[board.name] = checked_at
+        key = str(board)
+        boards[key] = board
+        anchors[key] = checked_at
         added: list[str] = []
         if ambient_epoch is None:
             os.environ["SOURCE_DATE_EPOCH"] = anchored
@@ -1425,7 +1438,7 @@ def main(argv: list[str] | None = None) -> int:
                 if name not in added:
                     log(f"    {name}")
             if added:
-                check_only[board.name] = added
+                check_only[key] = added
                 log(
                     f"  --check: {len(added)} committed check report(s) whose per-rule counts "
                     "differ from a fresh run (not counted above):"
@@ -1433,7 +1446,7 @@ def main(argv: list[str] | None = None) -> int:
                 for name in added:
                     log(f"    {name}")
             if would_publish:
-                drift[board.name] = would_publish
+                drift[key] = would_publish
         except GateFailure as exc:
             log(f"  REFUSED: {exc} -- nothing published for {board.name}")
             status = 1

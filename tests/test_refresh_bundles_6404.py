@@ -1476,6 +1476,38 @@ def test_check_lists_the_targets_the_comparison_added_on_their_own_line(
     )
 
 
+def test_check_remediation_names_each_directory_when_basenames_collide(mod, tmp_path, capsys):
+    """Issue #10727: two inputs sharing a basename each get their own repair, in their own class.
+
+    Keyed by basename, the second board overwrote the first's path, anchor and
+    check-only class, so the printed line re-plotted the wrong (clean) directory.
+    """
+    a, b = tmp_path / "A" / "06-diffpair-test", tmp_path / "B" / "06-diffpair-test"
+    drift = {str(a): ["output/readiness/kct-check.json"], str(b): ["output/manifest.json"]}
+    check_only = {str(a): ["output/readiness/kct-check.json"]}
+    boards = {str(a): a, str(b): b}
+    anchors = {str(a): ANCHOR, str(b): ANCHOR}
+
+    assert mod.drift_exit_status(drift, check_only=check_only, boards=boards, anchors=anchors) == 1
+    repairs = [
+        shlex.split(line.strip())[len(DRIVER.split()) :]
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip().startswith(DRIVER + " ")
+    ]
+    assert repairs == [
+        [str(a), "--force-replot", "--checked-at", ANCHOR],
+        [str(b), "--checked-at", ANCHOR],
+    ]
+
+
+def test_check_remediation_quotes_a_checked_at_with_a_space(mod, tmp_path):
+    """Issue #10727: ``--checked-at`` accepts ``2026-11-27 01:36:26Z``; the line must stay one argv."""
+    spaced = "2026-11-27 01:36:26Z"
+    mod._source_date_epoch(spaced)  # the parser accepts it
+    line = mod.repair_command(tmp_path / "06-diffpair-test", spaced, force_replot=True)
+    assert shlex.split(line)[-2:] == ["--checked-at", spaced]
+
+
 def test_drift_workflow_checks_every_bundle_and_never_runs_per_pr(mod):
     workflow = yaml.safe_load((REPO / ".github/workflows/nightly-bundle-drift.yml").read_text())
     triggers = workflow[True] if True in workflow else workflow["on"]
