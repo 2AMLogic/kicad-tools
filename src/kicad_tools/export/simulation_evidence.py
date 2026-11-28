@@ -29,7 +29,8 @@ Result record, written by the producer::
      "unit": "mA", "value": 85.6, "deck_sha256": "<sha256 of the deck bytes>",
      "inputs": {"sim/models/opto.lib": "<sha256>"}}
 
-The producer's digests are compared with the *current* bytes before the limit
+The result's input paths must match the declaration. The producer's digests
+are compared with the *current* bytes before the limit
 is evaluated, so an obsolete measurement can never pass.  Verdicts, kept
 separate from native DRC:
 
@@ -297,14 +298,26 @@ def _evaluate_case(root: Path, case: Any, index: int) -> CaseVerdict:
         for rel, data in [(deck_rel, deck), (result_rel, record_bytes), *inputs.items()]
         if data is None
     ]
-    if absent:
+    try:
+        record = (
+            _load_json(record_bytes, f"result {result_rel}") if record_bytes is not None else {}
+        )
+    except ValueError as exc:
+        if not absent:
+            verdict.diagnostic = str(exc)
+            return verdict
+        record = {}
+    recorded_inputs = record.get("inputs", {})
+    undeclared = (
+        recorded_inputs.keys() - inputs.keys() if isinstance(recorded_inputs, dict) else set()
+    )
+    # A readable result identifies extra paths even when declared model bytes are missing.
+    if absent and not undeclared:
         verdict.status = MISSING
         verdict.diagnostic = "declared file not found: " + ", ".join(absent)
         return verdict
 
     try:
-        assert record_bytes is not None
-        record = _load_json(record_bytes, f"result {result_rel}")
         if record.get("case") != name:
             raise ValueError(f"result is for case {record.get('case')!r}, not {name!r}")
         if record.get("quantity") != verdict.quantity:
@@ -317,9 +330,12 @@ def _evaluate_case(root: Path, case: Any, index: int) -> CaseVerdict:
             raise ValueError("result 'value' must be a finite number")
         verdict.measured = float(record["value"])
         tested = {deck_rel: record.get("deck_sha256")}
-        recorded_inputs = record.get("inputs", {})
         if not isinstance(recorded_inputs, dict):
             raise ValueError("result 'inputs' must map path to sha256")
+        if undeclared:
+            raise ValueError(
+                "result lists undeclared simulation inputs: " + ", ".join(sorted(undeclared))
+            )
         for rel, _ in input_refs:
             tested[rel] = recorded_inputs.get(rel)
         for rel, digest in tested.items():
