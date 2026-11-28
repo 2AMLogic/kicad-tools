@@ -29,9 +29,11 @@ geometry table (Issue #8930).
 The detector matches ``sharp_trace_corner``'s semantics so the router does not
 repair copper the gate never flags, nor leave copper it does:
 
-* angle in ``[MIN_CORNER_ANGLE_DEG, MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG)``
-  -- i.e. ``[1, 89)`` degrees, with the constants **imported** from
-  :mod:`kicad_tools.explain.checks.acid_trap`, never re-declared here;
+* angle in the sharp-corner window -- ``[1, 89)`` degrees, the upper edge
+  less a float-rounding guard -- as decided by
+  :func:`~kicad_tools.explain.checks.acid_trap.is_acute_corner_angle`,
+  **imported** from :mod:`kicad_tools.explain.checks.acid_trap` and never
+  re-declared here (issue #10677);
 * the vertex is not buried under same-net pad/via copper
   (:meth:`CopperDisc.covers`, inscribed circles -- the rule also honours a
   pad's full outline, see ``tests/router/test_acute_foldback_parity_8930.py``);
@@ -93,8 +95,8 @@ from dataclasses import dataclass, field
 
 from ..explain.checks.acid_trap import (
     ANGLE_TOLERANCE_DEG,
-    MIN_CORNER_ANGLE_DEG,
     MIN_TRACE_ANGLE_DEG,
+    is_acute_corner_angle,
 )
 from .primitives import Layer, Segment
 from .quantize import is_45_aligned
@@ -121,6 +123,8 @@ JUNCTION_TOL = 0.01
 
 #: A corner at or above this angle (degrees) is not a gating acid trap.
 #: Derived from the ``acid_trap`` constants rather than restated: 89.0 deg.
+#: The gate itself is :func:`is_acute_corner_angle`, which applies this bound
+#: less a float-rounding guard (issue #10677).
 MAX_GATING_ANGLE_DEG = MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG
 
 #: Shortest replacement segment the pass will emit (mm).  Below this a new
@@ -440,7 +444,7 @@ def gating_corner_keys(
         for i, s1 in enumerate(segs):
             for s2 in segs[i + 1 :]:
                 angle = _angle_at(s1, s2, point)
-                if angle is None or not (MIN_CORNER_ANGLE_DEG <= angle < MAX_GATING_ANGLE_DEG):
+                if angle is None or not is_acute_corner_angle(angle):
                     continue
                 if wedge_is_open(s1, s2, point, angle):
                     keys.add(_vertex_key(point))
@@ -459,9 +463,10 @@ def find_foldbacks(
     """Gating two-segment acute fold-backs in *segments*.
 
     A fold-back qualifies when the vertex has degree exactly 2, both legs are
-    same-net and same-layer, the interior angle is in ``[1, 89)`` degrees, the
-    vertex is not buried under same-net pad/via copper, and the wedge is open
-    (see :func:`wedge_is_open`).  These are precisely ``sharp_trace_corner``'s
+    same-net and same-layer, the interior angle is in the sharp-corner window
+    of :func:`is_acute_corner_angle` (``[1, 89)`` degrees), the vertex is not
+    buried under same-net pad/via copper, and the wedge is open (see
+    :func:`wedge_is_open`).  These are precisely ``sharp_trace_corner``'s
     conditions narrowed to the two-segment case this pass repairs.
 
     Args:
@@ -486,7 +491,7 @@ def find_foldbacks(
             vertex = verts.point(k)
             s1, s2 = segs
             angle = _angle_at(s1, s2, vertex)
-            if angle is None or not (MIN_CORNER_ANGLE_DEG <= angle < MAX_GATING_ANGLE_DEG):
+            if angle is None or not is_acute_corner_angle(angle):
                 continue
             if _is_buried(discs, net, layer, vertex):
                 continue
