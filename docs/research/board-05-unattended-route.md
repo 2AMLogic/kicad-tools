@@ -709,3 +709,10 @@ nets' routing settings. Both runs hit a wall-clock routing limit within the
 sweep, so these counts describe the saved boards for this seed. Both passed
 label LVS and failed copper LVS. The unattended gate and its full-mask
 acceptance criteria remain open in #9424.
+
+To isolate the pad escapes, I reran only the route command's pour-completion
+stage on two copies of the default seed's saved board (`a2e1506dd57d`).
+The original class map left both pour links open and added no copper.
+Setting only the two neck widths to the reviewed 0.15 mm added one F.Cu
+segment and one 0.60 mm via on each of GND and +5V. Native DRC reported zero violations and the
+single existing VM open. The public JLCPCB audit found zero width mismatches.

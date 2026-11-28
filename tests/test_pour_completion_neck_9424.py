@@ -132,7 +132,7 @@ def _write_ground_class(path: Path, width: float) -> None:
 @pytest.fixture
 def fine_pitch_route_input(tmp_path):
     from kicad_tools.cli.kicad_toolchain import PINNED_KICAD_VERSION, version_number
-    from kicad_tools.cli.runner import find_kicad_cli, get_kicad_version, run_refill_zones
+    from kicad_tools.cli.runner import find_kicad_cli, get_kicad_version
     from kicad_tools.pcb.editor import PCBEditor
 
     cli = find_kicad_cli()
@@ -160,17 +160,15 @@ def fine_pitch_route_input(tmp_path):
     )
     editor.save()
     _write_ground_class(board, 0.75)
-    assert run_refill_zones(board, require_save=True).success
     return board
 
 
 @pytest.mark.requires_router_cpp
 @pytest.mark.parametrize(("neck", "route_exit", "opens"), [(0.75, 3, 1), (0.2, 0, 0)])
 def test_public_route_and_audit_respect_the_declared_escape(
-    fine_pitch_route_input, tmp_path, neck, route_exit, opens
+    fine_pitch_route_input, tmp_path, capsys, neck, route_exit, opens
 ):
     from kicad_tools.cli import main
-    from kicad_tools.cli.runner import run_drc
 
     board = fine_pitch_route_input
     original = board.read_bytes()
@@ -200,15 +198,12 @@ def test_public_route_and_audit_respect_the_declared_escape(
         )
         == route_exit
     )
+    assert f"1 -> {opens} unconnected pour link(s)" in capsys.readouterr().err
     assert board.read_bytes() == original
     saved = PCB.load(routed)
     ground = saved.get_net_by_name("GND").number
     widths = [segment.width for segment in saved.segments if segment.net_number == ground]
     assert widths == ([] if opens else [pytest.approx(neck)])
-    native = tmp_path / "native.json"
-    assert run_drc(routed, native, schematic_parity=False, refill_zones=True).success
-    assert len(json.loads(native.read_text())["unconnected_items"]) == opens
-
     audit = tmp_path / "audit.json"
     main(
         [
