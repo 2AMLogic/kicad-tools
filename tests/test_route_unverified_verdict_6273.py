@@ -23,6 +23,7 @@ import pytest
 from kicad_tools.cli import main as kct_main
 from kicad_tools.cli import route_cmd
 from kicad_tools.router.oracle_completion import (
+    STOP_CONVERGED,
     STOP_DEADLINE,
     STOP_NOT_RUN,
     OracleCompletionResult,
@@ -217,6 +218,100 @@ def test_kicad_cli_failed_first_drc_marks_status_unknown(monkeypatch, tmp_path):
     assert args._stranded_pour_unknown is True
     assert args._stranded_pour_failure == "x"
     assert route_cmd._unverified_checks(args) == ["stranded-pour check"]
+
+
+def _stub_raising_completion(monkeypatch, exc: BaseException) -> None:
+    """Stage stubs with ``run_oracle_completion`` raising ``exc`` (Issue #10710)."""
+    import kicad_tools.router.oracle_completion as oracle_mod
+
+    _stub_pour_stage(
+        monkeypatch, OracleCompletionResult(ran=False, stop_reason=STOP_NOT_RUN, note="unused")
+    )
+
+    def _raise(*_a, **_k):
+        raise exc
+
+    monkeypatch.setattr(oracle_mod, "run_oracle_completion", _raise)
+
+
+def test_closer_exception_marks_status_unknown(monkeypatch, tmp_path, capsys, caplog):
+    """Issue #10710: an exception inside the completion loop means the stranded
+    count was never measured -- unknown, never 0.  The stage still returns 0
+    and raises nothing (advisory machinery must never fail a route)."""
+    _stub_raising_completion(monkeypatch, TypeError("x"))
+    args = _stage_args()
+    n = route_cmd._run_pour_oracle_stage(tmp_path / "b.kicad_pcb", args=args)
+
+    assert n == 0
+    assert args._stranded_pour_unknown is True
+    assert "x" in args._stranded_pour_failure
+    assert route_cmd._unverified_checks(args) == ["stranded-pour check"]
+    assert route_cmd._unverified_exit(0, args) == route_cmd.EXIT_UNVERIFIED
+    out = capsys.readouterr().out
+    assert "stranded-pour status UNKNOWN -- the run is reported unverified" in out
+    assert "Oracle completion skipped" in caplog.text
+
+
+def test_closer_exception_is_quiet_with_quiet(monkeypatch, tmp_path, capsys):
+    _stub_raising_completion(monkeypatch, TypeError("x"))
+    args = _stage_args()
+    route_cmd._run_pour_oracle_stage(tmp_path / "b.kicad_pcb", args=args, quiet=True)
+    assert "UNKNOWN" not in capsys.readouterr().out
+
+
+def test_closer_exception_ignored_when_pads_are_advisory(monkeypatch, tmp_path):
+    """``--allow-stranded-pour-pads`` keeps the unknown status advisory (#10710)."""
+    _stub_raising_completion(monkeypatch, TypeError("x"))
+    args = _stage_args(allow_stranded_pour_pads=True)
+    route_cmd._run_pour_oracle_stage(tmp_path / "b.kicad_pcb", args=args, quiet=True)
+    assert args._stranded_pour_unknown is True
+    assert route_cmd._unverified_checks(args) == []
+    assert route_cmd._unverified_exit(0, args) == 0
+
+
+def test_closer_exception_reason_is_never_empty(monkeypatch, tmp_path):
+    """An exception with no message still names its type (Issue #10710)."""
+    _stub_raising_completion(monkeypatch, RuntimeError())
+    args = _stage_args()
+    route_cmd._run_pour_oracle_stage(tmp_path / "b.kicad_pcb", args=args, quiet=True)
+    assert args._stranded_pour_failure
+    assert "RuntimeError" in args._stranded_pour_failure
+
+
+def test_exception_before_pour_nets_known_marks_status_unknown(monkeypatch, tmp_path):
+    """A setup failure (the board could not even be loaded) leaves the stranded
+    count just as unmeasured (Issue #10710)."""
+    import kicad_tools.core.sexp_file as sexp_mod
+
+    _stub_pour_stage(monkeypatch, OracleCompletionResult(ran=False, stop_reason=STOP_NOT_RUN))
+
+    def _raise(_p):
+        raise OSError("cannot read board")
+
+    monkeypatch.setattr(sexp_mod, "load_pcb", _raise)
+    args = _stage_args()
+    route_cmd._run_pour_oracle_stage(tmp_path / "b.kicad_pcb", args=args, quiet=True)
+    assert args._stranded_pour_unknown is True
+    assert "cannot read board" in args._stranded_pour_failure
+    assert route_cmd._unverified_checks(args) == ["stranded-pour check"]
+
+
+def test_converged_run_is_still_verified(monkeypatch, tmp_path):
+    """Control: the no-exception path is unchanged -- a converged run stays verified."""
+    _stub_pour_stage(
+        monkeypatch,
+        OracleCompletionResult(
+            ran=True, stop_reason=STOP_CONVERGED, initial_links=43, final_links=0
+        ),
+    )
+    args = _stage_args()
+    n = route_cmd._run_pour_oracle_stage(tmp_path / "b.kicad_pcb", args=args)
+
+    assert n == 0
+    assert args._stranded_pour_unknown is False
+    assert args._stranded_pour_failure is None
+    assert route_cmd._unverified_checks(args) == []
+    assert route_cmd._unverified_exit(0, args) == 0
 
 
 # =============================================================================
