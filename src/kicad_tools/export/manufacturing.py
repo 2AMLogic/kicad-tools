@@ -223,6 +223,12 @@ class ManufacturingResult:
     # or ``None`` for any other export.  Bound into ``manifest.json`` when the
     # package is published; on a refusal the diagnostic report is written from it.
     reviewed_copper: dict | None = None
+    # Issue #10468: externally produced simulation evidence for the declared
+    # cases (``SimulationEvidence.to_dict()``), or ``None`` when the board
+    # declares none.  Reported independently of native DRC.
+    simulation: dict | None = None
+    simulation_paths: list[Path] = field(default_factory=list)
+    simulation_evidence: Any | None = field(default=None, repr=False)
 
     @property
     def success(self) -> bool:
@@ -260,6 +266,7 @@ class ManufacturingResult:
         if self.report_md_path:
             files.append(self.report_md_path)
         files.extend(self.image_paths)
+        files.extend(self.simulation_paths)
         if self.project_zip_path:
             files.append(self.project_zip_path)
         if self.readme_path:
@@ -380,6 +387,7 @@ class _PackageOutputs:
             members.add(bundle_key / PURCHASING_FILENAME)
         if config.include_readme:
             members.add(bundle_key / "README.txt")
+        members.add(bundle_key / "simulation")
         if config.stackup_id:
             members.add(bundle_key / "stackup-ordering.json")
         if config.include_report:
@@ -1017,6 +1025,11 @@ def _build_manifest(
     # the reference plot each copper layer was compared with.
     if result.reviewed_copper is not None:
         manifest["reviewed_copper"] = result.reviewed_copper
+
+    # Issue #10468: simulation verdicts live in their own field, never inside
+    # ``preflight``; the evidence files are hashed in ``files`` above.
+    if result.simulation is not None:
+        manifest["simulation"] = result.simulation
 
     return manifest
 
@@ -1800,6 +1813,14 @@ class ManufacturingPackage:
             if result.success
             else []
         )
+        result.simulation_paths = (
+            [
+                live_path(Path(os.path.abspath(p)).relative_to(staging))
+                for p in result.simulation_paths
+            ]
+            if result.success
+            else []
+        )
         if (assembly := result.assembly_result) is not None:
             assembly.output_dir = out_dir
             assembly.bom_path = published(assembly.bom_path)
@@ -1857,6 +1878,9 @@ class ManufacturingPackage:
             self._generate_project_zip(out_dir, result)
             if result.project_zip_path is None:
                 return result
+
+        # Step 3.4: Optional simulation evidence (Issue #10468)
+        self._collect_simulation_evidence(out_dir, result)
 
         # Step 3.5: README.txt (optional)
         if self.config.include_readme:
@@ -4116,6 +4140,16 @@ class ManufacturingPackage:
                 )
             lines.append("")
 
+        if result.simulation_evidence is not None:
+            from .simulation_evidence import readme_lines
+
+            drc = next((pr for pr in result.preflight_results if pr.name == "drc"), None)
+            lines.extend(
+                readme_lines(
+                    result.simulation_evidence, f"{drc.status} ({drc.message})" if drc else None
+                )
+            )
+
         if result.reinforcement_clearance:
             from .reinforcement_clearance import summary_lines
 
@@ -4200,6 +4234,37 @@ class ManufacturingPackage:
             result.warnings.append(line)
         if report.is_clean:
             logger.info("Footprint symbol-link check: %s", report.summary_line())
+
+    def _collect_simulation_evidence(self, out_dir: Path, result: ManufacturingResult) -> None:
+        """Package and evaluate declared simulation cases (Issue #10468).
+
+        Reads only the declaration and the files it names, inside the project
+        root; nothing is executed.  Verdicts are recorded in ``result`` and
+        reported as warnings -- they never change the export outcome, and a
+        board without a declaration is untouched.
+        """
+        from .simulation_evidence import EVIDENCE_DIR, collect_simulation_evidence
+
+        # Drop evidence left by an earlier export (or seeded into the candidate)
+        # so it can never outlive its declaration.
+        target = out_dir / EVIDENCE_DIR
+        if target.exists():
+            shutil.rmtree(target)
+        evidence = collect_simulation_evidence(self._lookup_pcb_path, self.config.project_root)
+        if evidence is None:
+            return
+        try:
+            for rel, data in evidence.evidence_files().items():
+                path = out_dir / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+                result.simulation_paths.append(path)
+        except OSError as e:
+            result.errors.append(f"Simulation evidence packaging failed: {e}")
+            return
+        result.simulation = evidence.to_dict()
+        result.simulation_evidence = evidence
+        result.warnings.extend(evidence.warning_lines())
 
     def _generate_manifest(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Write manifest.json with SHA256 checksums."""

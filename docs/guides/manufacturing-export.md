@@ -900,6 +900,55 @@ The comparison needs Gerber artwork, so `--no-gerbers --verify-reviewed-copper`
 is refused before anything is written. A standard export does not run the
 comparison and keeps its in-place refill.
 
+## Simulation Limits and Fault-Case Evidence (optional)
+
+Copper DRC cannot see circuit operating limits, such as an optotriac driven past its
+datasheet RMS current. A board can attach **externally produced** simulation results to
+the export. `kct export` only reads the declared files: it never runs a simulator or a
+project command, parses no waveforms and converts no units. Boards without a
+declaration export exactly as before.
+
+Declare the cases beside the board, in `<board stem>.simulations.json`. Paths are
+project-relative and must stay inside the project root (symlinks that leave it are
+rejected). Bounds are inclusive; give `upper`, `lower` or both.
+
+```json
+{"cases": [
+  {"name": "fault-installed-ballast", "deck": "sim/installed.cir",
+   "result": "sim/installed.result.json",
+   "quantity": "optotriac_irms", "unit": "mA", "upper": 100,
+   "inputs": ["sim/models/opto.lib"]}
+]}
+```
+
+The producer writes one result record per case. It names the case, quantity and unit
+(compared exactly) and carries a finite `value` plus the SHA-256 of the bytes it tested:
+`deck_sha256`, and an `inputs` map for each extra declared input.
+
+```json
+{"case": "fault-installed-ballast", "quantity": "optotriac_irms", "unit": "mA",
+ "value": 85.6, "deck_sha256": "<sha256 of sim/installed.cir>",
+ "inputs": {"sim/models/opto.lib": "<sha256>"}}
+```
+
+The recorded digests are compared with the current files **before** the limit is
+checked, so an obsolete measurement cannot pass. Each case gets one verdict:
+
+| Verdict | Meaning |
+|---|---|
+| `pass` | measured value within the bound and the tested inputs are current |
+| `out_of_range` | measured value violates the bound |
+| `stale` | a deck or input changed after the result was produced |
+| `missing` | a declared deck, result or input file does not exist |
+| `invalid` | malformed declaration or record, mismatched case/quantity/unit, non-finite value |
+
+Verdicts appear as one row per case in the bundle `README.txt` (next to a separate
+`Native DRC:` line) and in `manifest.json` under `simulation`, with the tested and
+current digests. They are reported as export warnings and never change the export
+outcome, and native DRC and preflight results are untouched. The declaration, decks,
+results and inputs are copied under `simulation/<case>/` and hashed in `files`, so
+`verify_manifest` works after the bundle leaves the source tree.
+
 ## Other Manufacturers
 
 kicad-tools supports multiple manufacturers:
