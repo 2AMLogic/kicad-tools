@@ -822,7 +822,12 @@ class MeshPathfinder:
             pad
             for pad in self.pads
             if pad.net != net
-            and (pad.through_hole or layer_enum is None or pad.layer == layer_enum)
+            and (
+                pad.through_hole
+                or pad.drill > 0  # NPTH barrel exists on every layer (#4271, #10629)
+                or layer_enum is None
+                or pad.layer == layer_enum
+            )
         ]
 
     def _via_allowed_at(

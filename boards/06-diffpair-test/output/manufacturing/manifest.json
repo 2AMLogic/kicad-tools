@@ -9,11 +9,11 @@
       "size": 1109
     },
     "assembly-back.pdf": {
-      "sha256": "0e2eb2937a7556957b7e26c7042e14c2f9bd8ef6d333e64d138ce0aba39e7413",
+      "sha256": "682e62ced42fd2804cca084f523f8e4f94fd97605a146a19c9418ccbf1f1d556",
       "size": 30200
     },
     "assembly-front.pdf": {
-      "sha256": "ce89a9f2023d56a3069136306693e34a1da6f4041ee28cac4184272d1253617f",
+      "sha256": "f0d55e16aa9c8b287f1e9f4e34197a5c6fad9ca73df14269b10560fefb152cf0",
       "size": 57477
     },
     "bom_jlcpcb.csv": {
@@ -21,8 +21,8 @@
       "size": 746
     },
     "check-report.json": {
-      "sha256": "9ef982bc495611ce4eb269a77fc3a6118e9d4b67ae1672eb9da146e4e68d5068",
-      "size": 893306
+      "sha256": "15aadfab546d565339013f5311602227b6b09eea34763facf140805dc383972f",
+      "size": 897169
     },
     "cpl_jlcpcb.csv": {
       "sha256": "cf68a29f553dbfc0332a67c018be523dd09f8a2017d441ba69e8cb17d310b86e",
@@ -77,8 +77,8 @@
       "size": 262609
     },
     "kicad_project.zip": {
-      "sha256": "755f0ce3faf4ec265e1ca52c144b2187521d57349ee527782b1cc43a32291997",
-      "size": 73753
+      "sha256": "f581599fe4431c7161cd4b7022a83a67cc03a19159c9b5f37cb5df339f97a5b7",
+      "size": 74682
     },
     "lvs.json": {
       "sha256": "8a44e465f8db5c6f95b19b46257bd87290819ef27e8b68a85cbf490bd0f47a68",
@@ -97,15 +97,15 @@
       "size": 8620
     },
     "report.md": {
-      "sha256": "521c28e740b13d7b6f9ef4106af777a80a7e6ee8b980079b510011d5d339abde",
+      "sha256": "175b9c8b6419d702859068cf9ce4654373a976c5c4dc7e6d38d8199d8ac275d2",
       "size": 3317
     },
     "report.pdf": {
-      "sha256": "da0519740205ad8749b3616ff9b3e709dd598e1f86c2b2575fdc07722dc083bd",
-      "size": 2249714
+      "sha256": "f3ddb2294f05e68e0b77fa140bf851e0108682b51a1d9558d0093a6fd7e980e1",
+      "size": 2249129
     },
     "schematic.pdf": {
-      "sha256": "25040dc6fe27d4580422e7f245946ba32e682e3fbae9513389bc982c73dd5068",
+      "sha256": "623763a300ef1afeaa485dfddc4ce2b191ca8f6bc90188307b7cd05cc420781d",
       "size": 132640
     }
   },

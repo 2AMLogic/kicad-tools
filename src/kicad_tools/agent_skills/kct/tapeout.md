@@ -25,6 +25,8 @@ uv run kct build-native --check
 
 If the local KiCad is not the pinned release, `kct readiness` refuses before any gate; run it with `KCT_KICAD_DOCKER=1` to use the pinned image.
 
+If the host has no usable offline parts catalog, `kct readiness` refuses with exit 2 after Gate 4 instead of publishing a stock check that describes the host rather than the board (issue #10646; the same refusal covers `--verify` of a package recorded that way). Run `kct parts sync-catalog` first — the catalog lands under `$XDG_CACHE_HOME` — and re-run; the catalog is not auto-downloaded.
+
 `kicad-cli` is required by both the mandatory DRC cross-gate (Gate 2, delegated) and the drawing-export gates (Gates 5–6), and `jq` by the pre-gates and Gate 4b. The venv does not provide `kicad-cli`, and a stock macOS install is not on `PATH`, so resolve it the way `kct` does — with the `find_kicad_cli()` one-liner from `{{skill:manufacturing-readiness}}` Gate 2 (it checks `PATH`, then the macOS app bundle, Homebrew and the Linux and Windows default install paths; `kct doctor` prints the path it found). Only an empty result means it is missing; then `tapeout` **refuses** (see Refusal conditions) — there is no partial-package fallback.
 
 ## Model selection

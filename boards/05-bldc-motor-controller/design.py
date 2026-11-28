@@ -20,6 +20,7 @@ from kicad_tools.dev import warn_if_stale
 from kicad_tools.pcb.center_sheet import centered_origin
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
+from kicad_tools.recipes.silk_clearance import clear_silk_over_holes
 from kicad_tools.router.partial_rescue import CompletionResult, RescueConfig
 from kicad_tools.router.partial_rescue import (
     complete_unfinished_nets as shared_complete_unfinished_nets,
@@ -3834,6 +3835,13 @@ def legacy_main() -> int:
         # measure the repaired geometry).
         if routed_path.exists():
             repair_shorts_in_routed_pcb(routed_path)
+
+        # Clear generator-authored silk from component drills before checking the routed board.
+        if routed_path.exists():
+            print("\nStep 7b: Silkscreen clearance (silk_hole_overlap, Issue #9033)...")
+            graphics_clipped, refs_moved = clear_silk_over_holes(routed_path, log=print)
+            if not graphics_clipped and not refs_moved:
+                print("   no silk over component drills")
 
         # Step 7: Repair DRC clearance violations introduced by routing.
         # Issue #3096: tried calling fix-drc as a separate subprocess

@@ -82,6 +82,7 @@
         "J3"
       ],
       "nets": [],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -106,6 +107,7 @@
         "J2"
       ],
       "nets": [],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -130,6 +132,7 @@
         "J1"
       ],
       "nets": [],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -152,6 +155,7 @@
         "LVDS1_N",
         "LVDS1_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -174,6 +178,7 @@
         "LVDS2_N",
         "LVDS2_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -196,6 +201,7 @@
         "LVDS3_N",
         "LVDS3_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -218,6 +224,7 @@
         "LVDS4_N",
         "LVDS4_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -240,6 +247,7 @@
         "LVDS2_N",
         "LVDS2_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -262,6 +270,7 @@
         "LVDS4_N",
         "LVDS4_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -284,6 +293,7 @@
         "LVDS1_N",
         "LVDS1_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -306,6 +316,7 @@
         "LVDS3_N",
         "LVDS3_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -332,6 +343,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -358,6 +370,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -384,6 +397,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -410,6 +424,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -436,6 +451,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -462,6 +478,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -488,6 +505,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -514,6 +532,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -540,6 +559,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -566,6 +586,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -592,6 +613,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -618,6 +640,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -644,6 +667,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -670,6 +694,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -696,6 +721,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -722,6 +748,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -748,6 +775,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -775,6 +803,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -802,6 +831,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -829,6 +859,7 @@
       "nets": [
         "LVDS2_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -856,6 +887,7 @@
       "nets": [
         "LVDS2_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -883,6 +915,7 @@
       "nets": [
         "LVDS2_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -910,6 +943,7 @@
       "nets": [
         "LVDS2_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -937,6 +971,7 @@
       "nets": [
         "LVDS2_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -964,6 +999,7 @@
       "nets": [
         "LVDS2_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -991,6 +1027,7 @@
       "nets": [
         "LVDS2_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1018,6 +1055,7 @@
       "nets": [
         "LVDS2_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1045,6 +1083,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1072,6 +1111,7 @@
       "nets": [
         "IN2"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1099,6 +1139,7 @@
       "nets": [
         "IN2"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1126,6 +1167,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1153,6 +1195,7 @@
       "nets": [
         "LVDS2_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1180,6 +1223,7 @@
       "nets": [
         "LVDS2_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1207,6 +1251,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1234,6 +1279,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1261,6 +1307,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1288,6 +1335,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1315,6 +1363,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1342,6 +1391,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1369,6 +1419,7 @@
       "nets": [
         "LVDS4_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1396,6 +1447,7 @@
       "nets": [
         "LVDS4_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1423,6 +1475,7 @@
       "nets": [
         "LVDS4_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1450,6 +1503,7 @@
       "nets": [
         "LVDS4_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1477,6 +1531,7 @@
       "nets": [
         "LVDS4_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1504,6 +1559,7 @@
       "nets": [
         "LVDS4_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1531,6 +1587,7 @@
       "nets": [
         "LVDS4_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1558,6 +1615,7 @@
       "nets": [
         "LVDS4_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1585,6 +1643,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1612,6 +1671,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1639,6 +1699,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1666,6 +1727,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1693,6 +1755,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1720,6 +1783,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1747,6 +1811,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1774,6 +1839,7 @@
       "nets": [
         "IN1"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1801,6 +1867,7 @@
       "nets": [
         "IN1"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1828,6 +1895,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1855,6 +1923,7 @@
       "nets": [
         "LVDS1_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1882,6 +1951,7 @@
       "nets": [
         "LVDS1_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1909,6 +1979,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1936,6 +2007,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1963,6 +2035,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1990,6 +2063,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2017,6 +2091,7 @@
       "nets": [
         "LVDS4_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2044,6 +2119,7 @@
       "nets": [
         "LVDS4_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2071,6 +2147,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2098,6 +2175,7 @@
       "nets": [
         "OUT4"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2125,6 +2203,7 @@
       "nets": [
         "OUT4"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2152,6 +2231,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2179,6 +2259,7 @@
       "nets": [
         "IN3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2206,6 +2287,7 @@
       "nets": [
         "IN3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2233,6 +2315,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2260,6 +2343,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2287,6 +2371,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2314,6 +2399,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2341,6 +2427,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2368,6 +2455,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2395,6 +2483,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2422,6 +2511,7 @@
       "nets": [
         "LVDS2_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2449,6 +2539,7 @@
       "nets": [
         "LVDS2_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2476,6 +2567,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2503,6 +2595,7 @@
       "nets": [
         "OUT2"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2530,6 +2623,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2557,6 +2651,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2584,6 +2679,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2611,6 +2707,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2638,6 +2735,7 @@
       "nets": [
         "IN4"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2665,6 +2763,7 @@
       "nets": [
         "IN4"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2692,6 +2791,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2719,6 +2819,7 @@
       "nets": [
         "LVDS4_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2746,6 +2847,7 @@
       "nets": [
         "LVDS4_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2773,6 +2875,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2800,6 +2903,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2827,6 +2931,7 @@
       "nets": [
         "LVDS3_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2854,6 +2959,7 @@
       "nets": [
         "LVDS3_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2881,6 +2987,7 @@
       "nets": [
         "LVDS3_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2908,6 +3015,7 @@
       "nets": [
         "LVDS3_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2935,6 +3043,7 @@
       "nets": [
         "LVDS3_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2962,6 +3071,7 @@
       "nets": [
         "LVDS3_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2989,6 +3099,7 @@
       "nets": [
         "LVDS3_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3016,6 +3127,7 @@
       "nets": [
         "LVDS3_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3043,6 +3155,7 @@
       "nets": [
         "LVDS1_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3070,6 +3183,7 @@
       "nets": [
         "LVDS1_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3097,6 +3211,7 @@
       "nets": [
         "LVDS1_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3124,6 +3239,7 @@
       "nets": [
         "LVDS1_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3151,6 +3267,7 @@
       "nets": [
         "LVDS1_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3178,6 +3295,7 @@
       "nets": [
         "LVDS1_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3205,6 +3323,7 @@
       "nets": [
         "LVDS1_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3232,6 +3351,7 @@
       "nets": [
         "LVDS1_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3259,6 +3379,7 @@
       "nets": [
         "IN1"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3286,6 +3407,7 @@
       "nets": [
         "IN1"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3313,6 +3435,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3340,6 +3463,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3367,6 +3491,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3394,6 +3519,7 @@
       "nets": [
         "IN2"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3421,6 +3547,7 @@
       "nets": [
         "IN2"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3448,6 +3575,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3475,6 +3603,7 @@
       "nets": [
         "OUT1"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3502,6 +3631,7 @@
       "nets": [
         "OUT2"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3529,6 +3659,7 @@
       "nets": [
         "OUT3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3556,6 +3687,7 @@
       "nets": [
         "LVDS1_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3583,6 +3715,7 @@
       "nets": [
         "LVDS1_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3610,6 +3743,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3637,6 +3771,7 @@
       "nets": [
         "OUT1"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3664,6 +3799,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3691,6 +3827,7 @@
       "nets": [
         "IN1"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3718,6 +3855,7 @@
       "nets": [
         "IN2"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3745,6 +3883,7 @@
       "nets": [
         "IN3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3772,6 +3911,7 @@
       "nets": [
         "IN4"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3799,6 +3939,7 @@
       "nets": [
         "IN4"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3826,6 +3967,7 @@
       "nets": [
         "IN4"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3853,6 +3995,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3880,6 +4023,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3907,6 +4051,7 @@
       "nets": [
         "IN3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3934,6 +4079,7 @@
       "nets": [
         "IN3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3961,6 +4107,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -3988,6 +4135,7 @@
       "nets": [
         "LVDS3_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4015,6 +4163,7 @@
       "nets": [
         "LVDS3_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4042,6 +4191,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4069,6 +4219,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4096,6 +4247,7 @@
       "nets": [
         "LVDS3_N"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4123,6 +4275,7 @@
       "nets": [
         "LVDS3_P"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4150,6 +4303,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4177,6 +4331,7 @@
       "nets": [
         "OUT3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4204,6 +4359,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4231,6 +4387,7 @@
       "nets": [
         "+3V3"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4258,6 +4415,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4285,6 +4443,7 @@
       "nets": [
         "OUT4"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4304,6 +4463,7 @@
       "required_value": null,
       "items": [],
       "nets": [],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -4330,7 +4490,7 @@
         "source_sha256": "e6330202d7decf888d54c185e7c94e324ca0490d113a4fb9ef01088aa145793a",
         "project_sha256": "646aa5be16bad2b2a2aa4e1c83a0c679f8d7916bca7d93ccf37af22ee6d686bb",
         "rules_sha256": "55898344647f1a1ae1be91f063ebb7c6db6f3df8e2ee8cbdf55c28eb6b0daadf",
-        "export_profile_sha256": "1703b7863d366ef21de6b2c9be8e6b5198d510d620c7bf682aba5cbf58df16ba"
+        "export_profile_sha256": "eb07696ba121c776da8ffe61fa978108f815a62674614cb181f634d9bd154c7c"
       },
       "measurements": [
         {
@@ -9321,6 +9481,9 @@
           "native_version": "10.0.6",
           "export_identity": {
             "command": [
+              "docker",
+              "run",
+              "kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec",
               "kicad-cli"
             ],
             "arguments": [
@@ -9337,7 +9500,6 @@
             "profile": "macro-free-native-gerber",
             "board_plot_params": false,
             "variables": [],
-            "command_file_sha256": "170493658ffb66d554137711b4e1a8c760de23a5056267424f0148d3e3323f68",
             "plot_profile_source_sha256": "e6330202d7decf888d54c185e7c94e324ca0490d113a4fb9ef01088aa145793a",
             "stdout": "Plotted to '<scratch>/gerbers/diffpair_test_routed-F_Cu.gbr'.\nPlotted to '<scratch>/gerbers/diffpair_test_routed-B_Cu.gbr'.\nPlotted to '<scratch>/gerbers/diffpair_test_routed-F_Mask.gbr'.\nPlotted to '<scratch>/gerbers/diffpair_test_routed-B_Mask.gbr'.\n",
             "stderr": ""
@@ -15234,10 +15396,10 @@
             }
           },
           "gerber_sha256": {
-            "F.Mask": "45b52b2b9db07e64b71b3acab0d64adc0224f65cae16bddece7ede0ba663d562",
-            "B.Mask": "e35767ba1ba77411d2dbfce03bd7b4aaa554a5710453f3e34a44ab351b697e64",
-            "F.Cu": "5c534d4b29a49b26e9a4d090d0bd3575e7abcd3bc287840fb0fcb672343d5b2b",
-            "B.Cu": "ab922e621ac98b0f7a167b140cf59bfc02f3ec408d851aa977efe8039ff69377"
+            "F.Mask": "c54785c0ee7539cf208443ad411b6e49bc986b417c2cbdb73784d8c44f092b1e",
+            "B.Mask": "b3dcde01eb01e2f5e1e573c88f20217797853f8aa2182315beed68b3028fcebe",
+            "F.Cu": "b488c1d5f4057446a1a3413279769ae25353798a5dfc0c0ff3c7fca22df53d03",
+            "B.Cu": "49d90da695aba1e907f05572407398beee0fc1e6e8159f368dea9514a09401b3"
           },
           "unsupported": [],
           "source_geometries": {}
@@ -15245,6 +15407,9 @@
         "objects": {
           "worker_sha256": "72d5a5841144a1cbab758c8f1db27823ac13792f22af7b43a00350097e1778bb",
           "native_python_command": [
+            "docker",
+            "run",
+            "kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec",
             "python3"
           ],
           "native_version": "10.0.6",
@@ -20509,8 +20674,8 @@
             "status": "complete",
             "missing_layers": [],
             "gerber_sha256": {
-              "F.Mask": "45b52b2b9db07e64b71b3acab0d64adc0224f65cae16bddece7ede0ba663d562",
-              "F.Cu": "5c534d4b29a49b26e9a4d090d0bd3575e7abcd3bc287840fb0fcb672343d5b2b"
+              "F.Mask": "c54785c0ee7539cf208443ad411b6e49bc986b417c2cbdb73784d8c44f092b1e",
+              "F.Cu": "b488c1d5f4057446a1a3413279769ae25353798a5dfc0c0ff3c7fca22df53d03"
             },
             "openings": [
               {
@@ -23204,8 +23369,8 @@
             "status": "complete",
             "missing_layers": [],
             "gerber_sha256": {
-              "B.Mask": "e35767ba1ba77411d2dbfce03bd7b4aaa554a5710453f3e34a44ab351b697e64",
-              "B.Cu": "ab922e621ac98b0f7a167b140cf59bfc02f3ec408d851aa977efe8039ff69377"
+              "B.Mask": "b3dcde01eb01e2f5e1e573c88f20217797853f8aa2182315beed68b3028fcebe",
+              "B.Cu": "49d90da695aba1e907f05572407398beee0fc1e6e8159f368dea9514a09401b3"
             },
             "openings": [
               {
