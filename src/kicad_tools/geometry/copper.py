@@ -79,6 +79,10 @@ PAD_FALLBACK_ERODE: float = 0.1
 EXACT_PAD_SHAPES: frozenset[str] = frozenset({"rect", "roundrect", "circle", "oval", "obround"})
 
 
+# KiCad's stored chamfer ratio when ``(chamfer_ratio ...)`` is omitted (Issue #10669).
+_DEFAULT_CHAMFER_RATIO = 0.2
+
+
 def pad_chamfered_outline(
     source: SExp | None, default_ratio: float
 ) -> tuple[tuple[float, float], ...]:
@@ -91,8 +95,11 @@ def pad_chamfered_outline(
     are already turned by the pad's absolute ``(at x y ANGLE)``, so a caller
     adds only the copper centre.
 
-    Returns ``()`` when no corner is cut -- no ``(chamfer ...)`` list, no
-    ``(chamfer_ratio ...)``, or a zero ratio -- and the ordinary ``roundrect``
+    An omitted (or unparseable) ``(chamfer_ratio ...)`` is KiCad's stored
+    default of 0.2, not "no cut": KiCad cuts the named corner regardless.
+
+    Returns ``()`` when no corner is cut -- no ``(chamfer ...)`` list, or an
+    explicit zero ratio -- and the ordinary ``roundrect``
     construction stands.  One construction shared by the router loaders
     (:func:`kicad_tools.router.io._chamfered_outlines`) and
     :func:`pad_copper_outline` (Issue #10669).
@@ -101,11 +108,14 @@ def pad_chamfered_outline(
         return ()
     ratio = source.find_child("chamfer_ratio")
     size = source.find_child("size")
-    if ratio is None or size is None:
+    if size is None:
         return ()
     width, height = size.get_float(0) or 0.0, size.get_float(1) or 0.0
     short = min(width, height)
-    cut = min(0.5, ratio.get_float(0) or 0.0) * short
+    chamfer_ratio = ratio.get_float(0) if ratio is not None else None
+    if chamfer_ratio is None:
+        chamfer_ratio = _DEFAULT_CHAMFER_RATIO
+    cut = min(0.5, chamfer_ratio) * short
     if cut <= 0:
         return ()
     rounding = source.find_child("roundrect_rratio")

@@ -241,6 +241,17 @@ def test_single_corner_chamfer_cuts_only_that_corner(
     assert outline.area == pytest.approx(4.0 - _CUT_AREA_LOSS, abs=1e-9)
 
 
+def test_omitted_chamfer_ratio_cuts_at_kicads_default(tmp_path: Path):
+    """``(chamfer bottom_right)`` without ``(chamfer_ratio)`` is a 0.2 cut (3.92 mm2)."""
+    from shapely.geometry import Point
+
+    outline, exact = _offset_pad_outline(tmp_path, f"{_SQUARE} (chamfer bottom_right)")
+    assert exact
+    assert not outline.covers(Point(*_BOTTOM_RIGHT))
+    assert outline.covers(Point(*_TOP_LEFT))
+    assert outline.area == pytest.approx(3.92, abs=1e-9)
+
+
 def test_chamfer_on_a_far_corner_leaves_the_near_copper(tmp_path: Path):
     from shapely.geometry import Point
 

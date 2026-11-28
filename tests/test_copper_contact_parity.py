@@ -483,6 +483,8 @@ _CUT_CORNER_CASES: dict[str, tuple[str, int, str, int]] = {
         "12.67 14.67",
         0,
     ),
+    # (chamfer_ratio) omitted: KiCad's stored default 0.2 still cuts the corner.
+    "cut_default_ratio": (f"{_SQUARE_CORNERS}(chamfer bottom_right)", 0, "12.67 14.67", 1),
     "plain_square": ("(roundrect_rratio 0)", 0, "12.67 14.67", 0),
     # The pad's own top-right corner sits at the board's bottom right at -90.
     "rotated_cut": (
