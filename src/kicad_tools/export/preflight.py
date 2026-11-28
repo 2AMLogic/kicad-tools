@@ -1491,8 +1491,7 @@ class PreflightChecker:
         self.output_dir = Path(output_dir) if output_dir else None
         self.config = config or PreflightConfig()
         self._bom_source = bom_source
-        # Optional injected PartsCache for LCSC value validation
-        # (default: lazily constructed in _check_bom_lcsc_values).
+        # Shared by the CSV merge and the LCSC value and stock checks.
         self._parts_cache = parts_cache
         # Optional injected JlcpartsCatalog (offline fallback for parts the
         # cache does not know, issue #7166).  Default: the catalog file that
@@ -3085,18 +3084,14 @@ class PreflightChecker:
                 message=f"Could not extract BOM: {e}",
             )
 
-        cache = self._parts_cache
-        if cache is None:
-            try:
-                from ..parts.cache import PartsCache
-
-                cache = PartsCache()
-            except Exception as e:
-                return PreflightResult(
-                    name="bom_lcsc_values",
-                    status="WARN",
-                    message=f"Parts cache unavailable for LCSC value validation: {e}",
-                )
+        try:
+            cache = self._get_parts_cache()
+        except Exception as e:
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="WARN",
+                message=f"Parts cache unavailable for LCSC value validation: {e}",
+            )
 
         catalog = self._parts_catalog
         if catalog is None:
@@ -3307,18 +3302,14 @@ class PreflightChecker:
         except Exception as e:
             return PreflightResult(name=name, status="WARN", message=f"Could not extract BOM: {e}")
 
-        cache = self._parts_cache
-        if cache is None:
-            try:
-                from ..parts.cache import PartsCache
-
-                cache = PartsCache()
-            except Exception as e:
-                return PreflightResult(
-                    name=name,
-                    status="WARN",
-                    message=f"Parts cache unavailable for LCSC stock check: {e}",
-                )
+        try:
+            cache = self._get_parts_cache()
+        except Exception as e:
+            return PreflightResult(
+                name=name,
+                status="WARN",
+                message=f"Parts cache unavailable for LCSC stock check: {e}",
+            )
         catalog = self._parts_catalog
         if catalog is None:
             catalog = self._default_parts_catalog(cache)
@@ -3982,6 +3973,13 @@ class PreflightChecker:
             f"{ref} [{cat}: {why}]" for ref, (cat, why) in sorted(exempt_seen.items())
         )
 
+    def _get_parts_cache(self):
+        if self._parts_cache is None:
+            from ..parts.cache import PartsCache
+
+            self._parts_cache = PartsCache()
+        return self._parts_cache
+
     def _items_with_spec_overlay(self, bom) -> list:
         """Return copies of ``bom.items`` with the ``.kct`` overlay and CSV merge applied.
 
@@ -4012,9 +4010,7 @@ class PreflightChecker:
         except Exception as e:
             logger.warning("Spec overlay failed in preflight (continuing without): %s", e)
 
-        # Existing-CSV merge (issue #8154).  parts_cache=None keeps this
-        # read-only and avoids value/package filtering dropping a number the
-        # export will in fact write.
+        # Use the same catalogue evidence as assembly export for CSV assignments.
         if self.output_dir is not None:
             try:
                 from .assembly import AssemblyConfig
@@ -4031,6 +4027,13 @@ class PreflightChecker:
                     if csv_path.is_file():
                         existing = read_existing_lcsc_assignments(csv_path)
                         if existing:
+                            try:
+                                cache = self._get_parts_cache()
+                            except Exception as e:
+                                logger.debug(
+                                    "Parts cache unavailable for CSV-merge validation: %s", e
+                                )
+                                cache = None
                             apply_existing_lcsc_assignments(
                                 [
                                     i
@@ -4039,7 +4042,7 @@ class PreflightChecker:
                                     and not (i.reference in spec_refs and i.mpn and not i.lcsc)
                                 ],
                                 existing,
-                                parts_cache=None,
+                                parts_cache=cache,
                             )
             except Exception as e:
                 logger.warning("BOM CSV merge failed in preflight (continuing without): %s", e)

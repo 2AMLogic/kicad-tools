@@ -437,7 +437,8 @@ def apply_existing_lcsc_assignments(
     """Apply LCSC assignments from an existing BOM CSV to fresh items.
 
     Items that already have an LCSC number (schematic/spec priority) or
-    are DNP are skipped.  When ``parts_cache`` is provided, each
+    are DNP are skipped. Chip resistors require catalogue evidence of their
+    package even when the cache is unavailable. When ``parts_cache`` is provided, each
     candidate assignment is validated against the part's known
     parametric value and chip package; a clear mismatch is dropped with
     a WARNING instead of being propagated (issue #3590: one bad cache
@@ -456,17 +457,20 @@ def apply_existing_lcsc_assignments(
         Tuple of (number of items that received an LCSC, set of
         references that were assigned).
     """
-    from .lcsc_value_check import check_lcsc_against_cache
+    from .lcsc_value_check import (
+        check_lcsc_against_cache,
+        is_wire_landing,
+        sourcing_problem,
+    )
 
     merged_count = 0
     merged_refs: set[str] = set()
-    rejected: set[tuple[str, str]] = set()
 
     for item in items:
         if getattr(item, "lcsc", "") or getattr(item, "dnp", False):
             continue
         key = (item.value, item.footprint)
-        if key in rejected:
+        if is_wire_landing(item.footprint):
             continue
         lcsc = existing.get(key)
         if not lcsc:
@@ -475,15 +479,17 @@ def apply_existing_lcsc_assignments(
         mismatch = check_lcsc_against_cache(
             parts_cache, lcsc, item.value, item.reference, footprint=item.footprint
         )
-        if mismatch is not None:
-            rejected.add(key)
+        part = parts_cache.get(lcsc, ignore_expiry=True) if parts_cache else None
+        problem = mismatch.describe() if mismatch else sourcing_problem(item, part)
+        if problem:
             logger.warning(
                 "Dropping LCSC assignment %s read back from existing BOM "
-                "for %s [%s]: %s -- leaving row unassigned",
+                "for %s %s [%s]: %s -- leaving row unassigned",
                 lcsc,
+                item.reference,
                 item.value,
                 item.footprint,
-                mismatch.describe(),
+                problem,
             )
             continue
 

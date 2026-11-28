@@ -48,9 +48,11 @@ from ..cost.suggest import (
 )
 
 if TYPE_CHECKING:
+    from ..cost.suggest import SuggestedPart
     from ..parts.cache import PartsCache
     from ..parts.jlcparts_catalog import JlcpartsCatalog
     from ..parts.models import Part
+    from ..schema.bom import BOMItem
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +159,9 @@ LcscMismatch = ValueMismatch | PackageMismatch
 CHIP_PACKAGES = frozenset(
     {"01005", "0201", "0402", "0603", "0805", "1206", "1210", "1812", "2010", "2220", "2512"}
 )
+
+# Cylindrical MELF bodies: never interchangeable with a rectangular chip.
+_NON_CHIP_BODY_RE = re.compile(r"MELF|MM[ABU]-?\d{4}", re.I)
 
 # A chip-size token in free text ("16V 100nF X7R ±10% 0402 MLCC").
 # The lookarounds reject tokens embedded in part numbers like
@@ -348,7 +353,8 @@ def find_package_mismatch(
         cannot validate).
     """
     requested = extract_package_from_footprint(footprint)
-    if requested not in CHIP_PACKAGES:
+    melf = _NON_CHIP_BODY_RE.search(footprint)
+    if requested not in CHIP_PACKAGES and melf is None:
         return None  # not a chip footprint -- out of scope, accept
 
     # MPN size-code conventions are only reliable for chip passives.
@@ -361,6 +367,14 @@ def find_package_mismatch(
     if candidate is None:
         return None  # cannot validate -- accept
     candidate_package, source = candidate
+
+    if melf is not None and requested not in CHIP_PACKAGES:
+        # A cylindrical MELF body is never a rectangular chip (issue #10424).
+        return PackageMismatch(
+            requested_package=footprint.split(":")[-1],
+            candidate_package=candidate_package,
+            candidate_source=source,
+        )
 
     if candidate_package == requested:
         return None
@@ -572,6 +586,200 @@ def find_value_mismatch(
         requested_si=requested_si,
         candidate_si=candidate_si,
     )
+
+
+def is_wire_landing(footprint: str) -> bool:
+    return footprint.split(":")[-1].casefold().startswith("solderwire")
+
+
+_NUM = r"(?:\d+(?:\.\d*)?|\.\d+)"
+_PERCENT = re.compile(rf"(?<![\w.])({_NUM})\s*%")
+_WATTS = re.compile(rf"(?<![\w.])({_NUM})(?:\s*/\s*(\d+))?\s*(m?W)(?![a-z])", re.I)
+
+
+def _watts(text: str) -> float | None:
+    match = _WATTS.search(text)
+    if match is None:
+        return None
+    divisor = int(match[2] or 1)
+    if not divisor:
+        return None
+    return float(match[1]) / divisor * (0.001 if match[3].lower() == "mw" else 1)
+
+
+def stated_ratings(item: BOMItem) -> tuple[re.Match[str] | None, float | None]:
+    """Strictest tolerance match and power (W) the row states.
+
+    Reads the Value field and the explicit ``Tolerance`` / ``Power`` /
+    ``Wattage`` KiCad properties (case-insensitive), so ratings written
+    either way constrain the assignment.
+    """
+    props = {k.casefold(): v for k, v in (getattr(item, "properties", None) or {}).items()}
+    tol_texts = [item.value, props.get("tolerance", "")]
+    pow_texts = [item.value, props.get("power", ""), props.get("wattage", "")]
+    tolerances = [m for t in tol_texts if (m := _PERCENT.search(t or ""))]
+    tolerance = min(tolerances, key=lambda m: float(m[1])) if tolerances else None
+    powers = [w for t in pow_texts if (w := _watts(t or "")) is not None]
+    return tolerance, (max(powers) if powers else None)
+
+
+# Catalogue measurements that are not the initial tolerance / rated power.
+_QUALIFIER = (
+    r"(?:pulse|surge|peak|overload|load[\s-]*life|resistance\s+change|drift|stability"
+    r"|temperature\s+coefficient|tcr)"
+)
+_QUALIFIED_PREFIX = re.compile(
+    _QUALIFIER + r"(?:\s+(?:power|rating|resistance|change|of|is))*[\s:=±+/-]*$", re.I
+)
+_QUALIFIED_SUFFIX = re.compile(r"\s*[/(-]?\s*" + _QUALIFIER + r"\b", re.I)
+
+
+def _is_rating(match: re.Match[str]) -> bool:
+    text = match.string
+    if re.match(r"\s*/\s*(?:[℃℉]|°\s*[CFK]|kelvin)", text[match.end() :], re.I):
+        return False
+    if _QUALIFIED_PREFIX.search(text[: match.start()]):
+        return False
+    suffix = _QUALIFIED_SUFFIX.match(text, match.end())
+    if suffix is None:
+        return True
+    # A following qualifier can introduce a separate measurement ("1% pulse power 1 W").
+    return bool(re.match(r"(?:\s+(?:power|rating|of))*[\s:=±+/-]*\d", text[suffix.end() :], re.I))
+
+
+_RATED_POWER = re.compile(r"(?:rated\s+power|power\s+rating|rated)\s*[:=]?\s*", re.I)
+
+
+def _candidate_tolerance(part: object) -> float | None:
+    """Tolerance (percent) the catalogue record establishes, or None.
+
+    The structured ``tolerance`` field wins; otherwise the description is used
+    only when it states a single distinct percentage.
+    """
+    structured = _PERCENT.search(str(getattr(part, "tolerance", "") or ""))
+    if structured:
+        return float(structured[1])
+    description = getattr(part, "description", "") or ""
+    found = {float(m[1]) for m in _PERCENT.finditer(description) if _is_rating(m)}
+    return found.pop() if len(found) == 1 else None
+
+
+def _candidate_power(part: object) -> float | None:
+    """Rated power (W) the catalogue record establishes, or None.
+
+    Structured ``power_rating`` wins; then an explicit "rated power" phrase in
+    the description (so "pulse power 1 W, rated power 125 mW" reads 125 mW);
+    then a description with exactly one distinct wattage.
+    """
+    structured = _watts(str(getattr(part, "power_rating", "") or ""))
+    if structured is not None:
+        return structured
+    description = getattr(part, "description", "") or ""
+    for rated in _RATED_POWER.finditer(description):
+        match = _WATTS.match(description, rated.end())
+        if (
+            match is not None
+            and _is_rating(match)
+            and not _QUALIFIED_PREFIX.search(description[: rated.start()])
+        ):
+            return _watts(match[0])
+    values = {
+        w for m in _WATTS.finditer(description) if (w := _watts(m[0])) is not None and _is_rating(m)
+    }
+    return values.pop() if len(values) == 1 else None
+
+
+_MELF_SIZE = re.compile(r"MM[ABU]-?\d{4}(?!\d)", re.I)
+_DIN_SIZE = re.compile(r"DIN[- ]?\d{4}(?!\d)", re.I)
+
+
+def _body_problem(footprint: str, part: object) -> str | None:
+    """Require the requested axial or MELF body, including a specified size."""
+    if "axial" in footprint.casefold():
+        family = re.compile(r"axial|DIN[- ]?\d{4}", re.I)
+        pattern = _DIN_SIZE
+        body = "axial"
+    elif _NON_CHIP_BODY_RE.search(footprint):
+        family = _NON_CHIP_BODY_RE
+        pattern = _MELF_SIZE
+        body = "MELF"
+    else:
+        return None
+
+    package = getattr(part, "package", "") or ""
+    texts = (
+        [package]
+        if package.strip()
+        else [
+            getattr(part, "description", "") or "",
+            getattr(part, "mfr_part", "") or "",
+        ]
+    )
+    if size := pattern.search(footprint):
+        body = size[0]
+        expected = re.sub(r"[- ]", "", body).upper()
+        if any(
+            re.sub(r"[- ]", "", m[0]).upper() == expected
+            for t in texts
+            for m in pattern.finditer(t)
+        ):
+            return None
+    elif any(family.search(t) for t in texts):
+        return None
+    return f"catalogue does not establish the {body} body"
+
+
+def sourcing_problem(item: BOMItem, part: SuggestedPart | Part | None) -> str | None:
+    """Check specifications a broad nominal-value search can lose.
+
+    For resistors a catalogue record must *positively* establish the chip
+    package of a chip footprint and any stated tolerance / power rating; an
+    unknown or undecodable record leaves the row unresolved.
+    """
+    mpn = getattr(item, "mpn", "")
+    if mpn and (part is None or (part.mfr_part or "").casefold() != mpn.casefold()):
+        return f"catalogue MPN does not match {mpn}"
+    if not re.fullmatch(r"R\d+[A-Z]*", item.reference, re.I):
+        return None
+    requested = extract_package_from_footprint(item.footprint)
+    if requested in CHIP_PACKAGES:
+        structured = (getattr(part, "package", "") or "").strip()
+        if structured and _PKG_FIELD_CHIP_RE.search(structured) is None:
+            # A stated non-chip package is authoritative; never fall back to
+            # decoding the MPN or description around it.
+            return f"catalogue package {structured} is not the {requested} chip package"
+        found_package = (
+            _extract_part_chip_package(
+                getattr(part, "package", "") or "",
+                getattr(part, "description", "") or "",
+                getattr(part, "mfr_part", "") or "",
+                allow_mpn=True,
+            )
+            if part is not None
+            else None
+        )
+        if found_package is None or found_package[0] != requested:
+            return f"catalogue does not establish the {requested} package"
+    body_problem = _body_problem(item.footprint, part)
+    if body_problem:
+        return body_problem
+    tolerance, power = stated_ratings(item)
+    props = {k.casefold(): v for k, v in (getattr(item, "properties", None) or {}).items()}
+    if props.get("tolerance", "").strip() and tolerance is None:
+        return "stated tolerance is not readable"
+    if any(props.get(k, "").strip() for k in ("power", "wattage")) and power is None:
+        return "stated power rating is not readable"
+    if part is None and not (tolerance or power is not None):
+        return None
+    if tolerance:
+        found = _candidate_tolerance(part)
+        if found is None or found > float(tolerance[1]):
+            return f"catalogue does not establish {tolerance[0]} resistor tolerance"
+    if power is not None:
+        found_power = _candidate_power(part)
+        if found_power is None or found_power < power:
+            return f"catalogue does not establish the required {power:g} W rating"
+    return None
 
 
 def check_lcsc_against_cache(
