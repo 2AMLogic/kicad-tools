@@ -2,7 +2,7 @@
 title: "stm32_devboard_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.29.0"
-date: "Rev 1 | 2026-11-27 | jlcpcb-tier1"
+date: "Rev A | 2026-11-28 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -125,7 +125,7 @@ Demonstrates circuit blocks API
 | Errors | 0 |
 | Errors: kct (reviewed process rules, not stock `--mfr jlcpcb-tier1`) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
-| Warnings | 5 |
+| Warnings | 4 |
 | Blocking | 0 |
 
 **Status**: PASS
@@ -134,7 +134,7 @@ Demonstrates circuit blocks API
 
 | Violation Type | Count |
 |----------------|-------|
-| pour_slot | 5 |
+| pour_slot | 4 |
 
 
 
@@ -147,7 +147,7 @@ Demonstrates circuit blocks API
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 3 zone-connected nets, then re-run kct audit
-- **[OPTIONAL]** Review 5 DRC warnings
+- **[OPTIONAL]** Review 4 DRC warnings
 
 
 \newpage

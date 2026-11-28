@@ -27,12 +27,18 @@ they were not used to narrow the rule.  The angle threshold was not changed.
 Sub-types (issue #9037): every finding carries ``corner_class`` --
 ``"bend"`` when exactly two track directions meet at the vertex (the
 population JLCDFM was observed to flag) or ``"junction"`` when three or
-more do. A continuous track contributes a direction on each side of a tap.
-Reporting is unchanged -- the tag only makes the populations separable, so
-a consumer can gate on the fab-equivalent two-segment subset.  Stacked
-duplicate segments count once, so a duplicated bend is not misclassified
-as a junction.  The fab-DFM parity table attributes only the bend
-population to JLCDFM's category (``sharp_trace_corner#bend``).
+more do.  A direction is a distinct bearing leaving the vertex
+(``_TraceJunction.leg_count``), not a ``(segment ...)`` element: a
+continuous track contributes a direction on each side of a tap, and
+overlapping same-bearing tracks -- a stacked duplicate, or a shorter track
+lying on a longer one -- count as one direction (issue #10675).  Reporting
+is unchanged -- the tag only makes the populations separable, so a consumer
+can gate on the fab-equivalent two-direction subset.  Because duplicates
+count once, a duplicated bend is not misclassified as a junction.  The
+``junction`` message names that count as ``"N-way junction"``
+(issue #10704), so ``N`` can exceed the number of segments ending at the
+vertex.  The fab-DFM parity table attributes only the bend population to
+JLCDFM's category (``sharp_trace_corner#bend``).
 
 Inner layers (issue #9037 decision): in scope.  The fab's three flagged
 vertices on the consumer board were all on outer layers (F.Cu/B.Cu), so
@@ -229,17 +235,13 @@ class _TraceJunction:
         return len({bearing for bearing, _width in self.legs})
 
     def open_angles(self, check: AcidTrapCheck) -> Iterator[float]:
-        from kicad_tools.explain.checks.acid_trap import (
-            ANGLE_TOLERANCE_DEG,
-            MIN_CORNER_ANGLE_DEG,
-            MIN_TRACE_ANGLE_DEG,
-        )
+        from kicad_tools.explain.checks.acid_trap import is_acute_corner_angle
 
         for first, second in combinations(self.legs.values(), 2):
             angle = check._calculate_angle(first, second, self.location)
             if (
                 angle is not None
-                and MIN_CORNER_ANGLE_DEG <= angle < MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG
+                and is_acute_corner_angle(angle)
                 and _wedge_is_open(first, second, self.location, angle)
             ):
                 yield angle
@@ -389,7 +391,7 @@ class SharpTraceCornerRule(DRCRule):
                 continue
             n_legs = junction.leg_count
             corner_class = "junction" if n_legs >= 3 else "bend"
-            kind = f"; {n_legs}-segment junction" if corner_class == "junction" else ""
+            kind = f"; {n_legs}-way junction" if corner_class == "junction" else ""
             results.add(
                 DRCViolation(
                     rule_id=SHARP_TRACE_CORNER_RULE_ID,

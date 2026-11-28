@@ -195,7 +195,7 @@ def test_open_air_junction_reported_with_junction_sub_type(tmp_path):
     assert len(v) == 1
     assert v[0].corner_class == "junction"
     assert v[0].actual_value < 90
-    assert "3-segment junction" in v[0].message
+    assert "3-way junction" in v[0].message
 
 
 @pytest.mark.parametrize("split", [False, True])
@@ -212,7 +212,7 @@ def test_branch_at_track_interior_matches_explicit_split(tmp_path, split, shape)
     hit = hits[0]
     assert (hit.nets, hit.layer, hit.location) == (("SIG",), "F.Cu", (10, 0))
     assert hit.actual_value == pytest.approx(45)
-    assert hit.corner_class == "junction" and "3-segment junction" in hit.message
+    assert hit.corner_class == "junction" and "3-way junction" in hit.message
 
 
 def test_multiple_taps_on_reversed_and_stacked_carrier(tmp_path):
@@ -222,7 +222,7 @@ def test_multiple_taps_on_reversed_and_stacked_carrier(tmp_path):
     assert all(
         hit.corner_class == "junction" and hit.actual_value == pytest.approx(45) for hit in hits
     )
-    assert all("3-segment junction" in hit.message for hit in hits)
+    assert all("3-way junction" in hit.message for hit in hits)
 
 
 @pytest.mark.parametrize("stops", [[-5, 5], [-5, 0, 5], [-5, -0.4, 0, 5]])

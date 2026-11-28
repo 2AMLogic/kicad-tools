@@ -16,6 +16,24 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-28
 
+- **PR #10707**: fix: report sharp_trace_corner junctions as N-way, not N-segment
+- **PR #10686**: docs: describe model selection in the installed workflow skills
+- **PR #10674**: fix(geometry): cut chamfered corners from the shared pad copper outline
+- **PR #10668**: fix(readiness): publish the public verdict for boards with a board-local check
+- **PR #10653**: fix: read a pad-edge-split own-pad entry through its authored continuation
+- **PR #10608**: fix: land named route-link endpoints on the pad copper outline
+- **Issue #10704** (closed): sharp_trace_corner: 'N-segment junction' text now counts directions, not segments
+- **Issue #10681** (closed): Installed help, HV, readiness and tapeout skills point to a missing model hint
+- **Issue #10669** (closed): pad_outline_is_exact() misses a single-corner chamfer, so pad copper is over-reported
+- **Issue #10662** (closed): Board 04 reports ready in fleet status but fails public readiness on the same PCB
+- **Issue #10645** (closed): mask_to_copper reports a new error when a straight own-pad entry is split at the pad edge
+- **Issue #10604** (closed): Default route-link misses a rotated, offset plated source pad
+- **Issue #10627** (closed): Pour completion writes power-plane welds and routed links at the board width instead of their net class width
+- **Issue #10675** (closed): Report acute branches on unsplit same-net tracks in the sharp-corner check
+- **PR #10678**: fix: detect acute branches on continuous copper tracks
+- **Issue #10679** (closed): Rendered EE-review skill refers to model metadata absent in Codex and opencode
+- **PR #10682**: docs: clarify model selection in the installed EE-review skill
+- **Issue #10701** (closed): Judge docs-only fast path is unreachable: its #13760 WORK_LOG check reads a gh PR field that does not exist
 - **PR #10695**: docs: clarify model selection in the scaffold and journal skills
 - **PR #10672**: fix(boards): author board 02's reviewed net classes so release cleanup keeps its track widths
 - **PR #10666**: fix(report): apply project clearance rules to pour-slot warnings
@@ -4536,48 +4554,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **PR #5780**: ci(release): tag merged release SHA, GitHub Release, PyPI check (#5777)
 - **Issue #5777** (closed): [Epic #5774] Phase 3: tag merged SHA, publish via workflow_call, GitHub Release on release-PR merge
 - **Issue #5774** (closed): Epic: automated daily releases through CI
-
-### 2026-09-28
-
-- **PR #5782**: docs(research): compare and benchmark KiCadRoutingTools vs kct route (#5781)
-- **Issue #5781** (closed): research: explore drandyhaas/KiCadRoutingTools — compare, benchmark, and triage borrowable routing techniques
-- **PR #5779**: ci(release): daily automated release-PR workflow (#5776)
-- **PR #5778**: ci(changelog): changelog.d fragments, per-PR fragment check, assembly script
-- **Issue #5776** (closed): [Epic #5774] Phase 2: daily release-PR workflow (gate, bump level, one PR at a time)
-- **Issue #5775** (closed): [Epic #5774] Phase 1: changelog fragments + per-PR changelog check
-- **PR #5773**: ci: stop CPU-pinning the self-hosted kicad job containers (#5694)
-- **PR #5772**: chore(release): bump version to 0.22.0
-- **PR #5771**: fix(boards): regenerate stale committed .kicad_dru sidecars (#5059 follow-up)
-- **PR #5770**: fix: correct --deterministic-budget's --timeout backstop claim, log determinism loss
-- **PR #5769**: ci: give the fork-PR Test job a 90-minute budget
-- **PR #5766**: test(board03): drop wall-clock --timeout from frozen reach recipe (#5752)
-- **Issue #5765** (closed): --deterministic-budget + --timeout: per-attempt fair slice makes --timeout bind at timeout/N, not a safety backstop
-- **PR #5763**: fix(board03): stop the saved-plan replay from deleting footprint silkscreen
-- **PR #5760**: fix(width_consistency): join endpoints within tolerance across rounding buckets
-- **PR #5759**: feat(board04): emit pin-1 / polarity silkscreen for U1, U2, D1, J1
-- **PR #5758**: docs: note via_under_body/pin1_marker can newly fail kct check --strict
-- **PR #5757**: fix(tests): stop board-05 export test rewriting committed .kicad_dru
-- **PR #5756**: fix(via_under_body): case-insensitive default pattern; recognise split exposed pads
-- **Issue #5755** (closed): Regenerate stale committed .kicad_dru sidecars for boards 00-04, 06, 07, legacy DRV8301 (missing #5059 SMD Pad Clearance rule)
-- **PR #5754**: fix(pin1_marker): corner-mark tie-break must only group own silk
-- **PR #5753**: ci: pin kicad containers to cpuset 6-31 on the 32-CPU runner host (#5694)
-- **Issue #5752** (closed): flaky: board-03 test_reach_meets_floor / test_per_net_reach_usb_signals fail in long serial runs, pass standalone
-- **Issue #5751** (closed): docs: default-on via_under_body / pin1_marker newly fail kct check --strict — note in CHANGELOG/release notes
-- **Issue #5750** (closed): width_consistency: rounded endpoint keys can split a chain early (missed findings)
-- **Issue #5749** (closed): via_under_body: case-sensitive default footprint pattern; split exposed pads not recognized as thermal
-- **Issue #5748** (closed): pin1_marker: corner-mark tie-break also groups board-level silk (can pass a footprint with no own mark)
-- **Issue #5747** (closed): ci: Test can never finish on fork PRs (GitHub-hosted ~40 min vs 45-min timeout)
-- **Issue #5746** (closed): test suite rewrites committed board-05 .kicad_dru in place (stale DRU + kct export writes beside input) → 28 #3580 guard errors
-- **Issue #5745** (closed): Board 04 generator: emit pin-1 / polarity silkscreen marks for U1, U2, D1, J1
-- **Issue #5744** (closed): board-03: routed artifact has lost all footprint silkscreen graphics (139 → 0)
-- **PR #5739**: feat(validate): opt-in trace width-consistency audit rule
-- **PR #5737**: feat(check): pin-1 / polarity silkscreen-marker rule (pin1_marker category)
-- **PR #5736**: feat(check): via-under-package-body rule (via_under_body category)
-- **PR #5733**: chore(deps-dev): bump nanobind from 3.0.1 to 3.1.0
-- **PR #5732**: chore(deps): bump markitdown from 0.1.7 to 0.1.8 in the python-minor-patch group
-- **PR #5731**: chore(deps): bump astral-sh/setup-uv from 10.1.0 to 10.2.0 in the github-actions group
-- **PR #5730**: chore(deps): bump astro from 7.3.2 to 7.3.3 in /site
-- **PR #5729**: chore(deps-dev): bump @types/node from 26.5.1 to 26.6.2 in /site in the site-minor-patch group
 
 ### 2026-07-20 (evening)
 
