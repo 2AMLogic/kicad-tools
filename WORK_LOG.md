@@ -16,6 +16,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-28
 
+- **PR #10705**: docs: clarify model selection in the tapeout, readiness, HV-loop and help skills
+- **PR #10708**: test: cover scaffold and journal model hints in installed wheels
+- **PR #10691**: fix: guard the sharp-corner 89-degree boundary against float rounding
+- **PR #10693**: fix(boards): refresh Board 04 bundle so its pour_slot count matches a fresh pinned run
+- **Issue #10703** (closed): Six other installed kct skills still assert a frontmatter suggestedModel that Codex and opencode strip
+- **Issue #10694** (closed): Extend the installed-wheel model_hints check to board-recipe-scaffold and layout-journal
+- **Issue #10677** (closed): Make the sharp-corner check's 89-degree boundary consistent on macOS and Linux
+- **Issue #10684** (closed): Board 04's committed DRC evidence records 5 pour_slot warnings; a fresh pinned run reportedly gives 4
 - **PR #10707**: fix: report sharp_trace_corner junctions as N-way, not N-segment
 - **PR #10686**: docs: describe model selection in the installed workflow skills
 - **PR #10674**: fix(geometry): cut chamfered corners from the shared pad copper outline
