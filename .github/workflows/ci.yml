@@ -583,7 +583,7 @@ jobs:
           set -euo pipefail
           tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           dir="$(mktemp -d)"
-          curl -fsSL -o "$dir/$tarball" \
+          curl -fsSL --retry 3 -o "$dir/$tarball" \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
           echo "${ACTIONLINT_SHA256}  $dir/$tarball" | sha256sum -c -
           tar -xzf "$dir/$tarball" -C "$dir" actionlint
