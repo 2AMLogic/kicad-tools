@@ -882,7 +882,7 @@
     {
       "name": "drc",
       "status": "WARN",
-      "message": "DRC passed with 10 warning(s)"
+      "message": "DRC passed with 4 warning(s)"
     },
     {
       "name": "erc",

@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import logging
 import math
 import re
 from dataclasses import dataclass, field
@@ -13,6 +14,37 @@ from kicad_tools.validate.mask_copper import MaskCopperAssessment
 
 from .parity import SchematicParityStatus, schematic_parity_status
 from .violation import DRCViolation, Location, Severity, ViolationType
+
+logger = logging.getLogger(__name__)
+
+# Severity spellings the DRC JSON readers accept.  ``exclusion`` / ``ignore`` are
+# KiCad's own "user excluded this" values and stay non-gating (info).
+_JSON_SEVERITIES: dict[str, Severity] = {
+    "error": Severity.ERROR,
+    "warning": Severity.WARNING,
+    "info": Severity.INFO,
+    "exclusion": Severity.INFO,
+    "ignore": Severity.INFO,
+}
+
+
+def _parse_json_severity(raw: object, message: str) -> tuple[Severity, str]:
+    """Parse a severity from a DRC JSON finding without failing open (Issue #10650).
+
+    A missing key keeps the historical ``error`` default.  A blank,
+    non-string or unrecognized value used to fall through to ``info`` -- a
+    non-gating level -- so a damaged report could clear strict DRC and the
+    export preflight.  It is now a ``warning`` (never ``info``), logged, and
+    the message is annotated so the diagnostic travels with the finding.
+    """
+    if isinstance(raw, str):
+        sev = _JSON_SEVERITIES.get(raw.strip().lower())
+        if sev is not None:
+            return sev, message
+    logger.warning("Unrecognized DRC severity %r; treating finding as a warning", raw)
+    note = f"[unrecognized severity {raw!r}; treated as warning]"
+    return Severity.WARNING, f"{message} {note}".strip()
+
 
 if TYPE_CHECKING:
     from kicad_tools.validate.filters import ViolationFilter
@@ -154,8 +186,13 @@ class DRCReport:
 
     @property
     def warning_count(self) -> int:
-        """Number of warning-level violations."""
-        return sum(1 for v in self.violations if not v.is_error)
+        """Number of warning-level violations (``info`` findings are not warnings)."""
+        return sum(1 for v in self.violations if v.is_warning)
+
+    @property
+    def info_count(self) -> int:
+        """Number of informational findings (Issue #10650)."""
+        return sum(1 for v in self.violations if v.is_info)
 
     @property
     def errors(self) -> list[DRCViolation]:
@@ -165,7 +202,12 @@ class DRCReport:
     @property
     def warnings(self) -> list[DRCViolation]:
         """Get only warning-level violations."""
-        return [v for v in self.violations if not v.is_error]
+        return [v for v in self.violations if v.is_warning]
+
+    @property
+    def infos(self) -> list[DRCViolation]:
+        """Get only informational findings."""
+        return [v for v in self.violations if v.is_info]
 
     def by_type(self, vtype: ViolationType) -> list[DRCViolation]:
         """Get violations of a specific type."""
@@ -242,6 +284,7 @@ class DRCReport:
             "total_violations": self.violation_count,
             "errors": self.error_count,
             "warnings": self.warning_count,
+            "infos": self.info_count,
             "footprint_errors": self.footprint_errors,
             "by_type": {
                 vtype.value: len(violations)
@@ -260,6 +303,7 @@ class DRCReport:
             "violation_count": self.violation_count,
             "error_count": self.error_count,
             "warning_count": self.warning_count,
+            "info_count": self.info_count,
             "footprint_errors": self.footprint_errors,
             "violations": [v.to_dict() for v in self.violations],
             "passed": self.passed,
@@ -523,7 +567,7 @@ def _parse_kct_check_json(data: dict, source_file: str = "") -> DRCReport:
     for item in data.get("violations", []):
         type_str = item.get("rule_id", "unknown")
         message = item.get("message", "")
-        severity = Severity.from_string(item.get("severity", "error"))
+        severity, message = _parse_json_severity(item.get("severity", "error"), message)
 
         locations: list[Location] = []
 
@@ -671,7 +715,7 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
     ]:
         type_str = item.get("type", "unknown")
         message = item.get("description", "")
-        severity = Severity.from_string(item.get("severity", "error"))
+        severity, message = _parse_json_severity(item.get("severity", "error"), message)
         rule = item.get("rule", "")
 
         locations: list[Location] = []
