@@ -124,20 +124,49 @@ def test_built_wheel_contains_skills_and_installs_from_it(tmp_path: Path) -> Non
     # The agent primer behind `kct agent-guide` ships beside the skills (#5960).
     assert "kicad_tools/agent_skills/AGENT_GUIDE.md" in names
 
-    target = tmp_path / "x"
     code = (
         "import sys, kicad_tools; from kicad_tools.cli import main; "
         "print(kicad_tools.__file__, file=sys.stderr); "
-        f"sys.exit(main(['skills', 'install', '--target', {str(target)!r}]))"
+        "sys.exit(main(sys.argv[1:]))"
     )
     env = {**os.environ, "PYTHONPATH": str(tmp_path / "site")}
-    run = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120
-    )
-    assert run.returncode == 0, run.stderr[-2000:]
-    assert str(tmp_path / "site") in run.stderr, "imported kicad_tools from outside the wheel"
-    assert {p.name for p in (target / "kct").glob("*.md")} == _repo_skill_names()
-    assert check_installed(target).in_sync
+    model_hints = {
+        "ee-review": "opus",
+        "help": "sonnet",
+        "hv-isolation-loop": "sonnet",
+        "manufacturing-readiness": "sonnet",
+        "tapeout": "sonnet",
+    }
+    for harness, skill_path in (
+        ("claude-code", "kct/{skill}.md"),
+        ("codex", "kct-{skill}/SKILL.md"),
+        ("opencode", "kct/{skill}.md"),
+    ):
+        target = tmp_path / harness
+        args = ["skills", "install", "--harness", harness, "--target", str(target)]
+        run = subprocess.run(
+            [sys.executable, "-c", code, *args],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+        assert run.returncode == 0, run.stderr[-2000:]
+        assert str(tmp_path / "site") in run.stderr, "imported kicad_tools from outside the wheel"
+        assert check_installed(target, harness).in_sync
+        if harness == "claude-code":
+            assert {p.name for p in (target / "kct").glob("*.md")} == _repo_skill_names()
+        for skill, hint in model_hints.items():
+            path = target / skill_path.format(skill=skill)
+            fields, body = split_frontmatter(path.read_text(encoding="utf-8"))
+            expected_hint = hint if harness == "claude-code" else None
+            assert fields.get("suggestedModel") == expected_hint, path
+            if harness != "claude-code":
+                selection = body.split("## Model selection", 1)[1].split("## ", 1)[0]
+                assert "is set in the frontmatter above" not in selection, path
+                assert "this doc's frontmatter" not in selection, path
+                assert re.search(r"Codex CLI and opencode[^.]*session[^.]*model", selection), path
 
     guide = subprocess.run(
         [

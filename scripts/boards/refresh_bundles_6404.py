@@ -62,7 +62,10 @@ gate passes.  Stages, in order:
    rebuilds, manifest re-hash (only ``files`` may change), its gates
    (refilled native DRC, ``kct check``, ``net-status``, ``validate --sync``),
    metric comparison, and the ``readiness.json`` re-pin validated by
-   ``read_readiness()``.
+   ``read_readiness()``.  A board registered with ``tier_check`` is also
+   judged by the public verifier's generic check, and what it measures is the
+   receipt published: ``blocked`` names the unaccepted findings and exits 1
+   (Issue #10662).
 
 Usage (repository root, KiCad 10 ``kicad-cli`` on PATH or ``KICAD_CLI_DIR``)::
 
@@ -1046,6 +1049,7 @@ def refresh_bundle(
     dry_run: bool = False,
     known_issue: list[str] | None = None,
     resolve_known_issue: list[str] | None = None,
+    on_verdict: Callable[[str], None] | None = None,
 ) -> list[str]:
     cfg = rr.BOARDS[board.name]
     bundle = BUNDLES[board.name]
@@ -1135,6 +1139,7 @@ def refresh_bundle(
             known_issue=known_issue,
             resolve_known_issue=resolve_known_issue,
             after_manifest=after_manifest if stale else None,
+            on_verdict=on_verdict,
         )
 
 
@@ -1149,19 +1154,35 @@ def _source_date_epoch(checked_at: str) -> str:
     return str(int(datetime.fromisoformat(checked_at.replace("Z", "+00:00")).timestamp()))
 
 
-def drift_exit_status(drift: dict[str, list[str]]) -> int:
-    """The ``--check`` verdict: 1 when any board would publish, else 0 (Issue #10692)."""
-    if not drift:
+def drift_exit_status(
+    drift: dict[str, list[str]],
+    refused: list[str] | None = None,
+    blocked: list[str] | None = None,
+) -> int:
+    """The ``--check`` verdict (Issue #10692).
+
+    1 when any board would publish, was refused by a gate, or does not verify
+    ready (a ``blocked`` receipt, Issue #10662 -- the nightly stays red for
+    such a board until its defect is fixed); else 0.  The "clean" line is only
+    printed when none of those happened, so a red run never reads as clean.
+    """
+    refused, blocked = refused or [], blocked or []
+    if not (drift or refused or blocked):
         log("== --check: every bundle reproduces on the pinned toolchain; nothing to publish")
         return 0
     for name, files in drift.items():
         log(f"== --check DRIFT {name}: a fresh run would publish {len(files)} file(s)")
         for path in files:
             log(f"    {path}")
-    log(
-        "  --check: the committed bundle disagrees with a fresh run. Refresh it with this "
-        "driver (without --check) on the pinned toolchain and commit the result."
-    )
+    if drift:
+        log(
+            "  --check: the committed bundle disagrees with a fresh run. Refresh it with this "
+            "driver (without --check) on the pinned toolchain and commit the result."
+        )
+    for name in refused:
+        log(f"== --check REFUSED {name}: a gate refused the fresh run; drift is unknown")
+    for name in blocked:
+        log(f"== --check BLOCKED {name}: the board does not verify ready (not drift)")
     return 1
 
 
@@ -1215,11 +1236,14 @@ def main(argv: list[str] | None = None) -> int:
     ambient_epoch = os.environ.get("SOURCE_DATE_EPOCH")
     status = 0
     drift: dict[str, list[str]] = {}
+    refused: list[str] = []
+    blocked: list[str] = []
     for board in args.boards:
         board = board.resolve()
         if board.name not in BUNDLES:
             parser.error(f"{board.name}: no bundle configuration (known: {sorted(BUNDLES)})")
         log(f"== {board.name}")
+        verdict = rr.Verdict()
         if args.checked_at:
             checked_at, origin = args.checked_at, "--checked-at"
         else:
@@ -1245,6 +1269,7 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run or args.check,
                 known_issue=args.known_issue,
                 resolve_known_issue=args.resolve_known_issue,
+                on_verdict=verdict.publish,
             )
             for name in would_publish:
                 log(f"    {name}")
@@ -1253,8 +1278,14 @@ def main(argv: list[str] | None = None) -> int:
         except GateFailure as exc:
             log(f"  REFUSED: {exc} -- nothing published for {board.name}")
             status = 1
+            refused.append(board.name)
+            continue
+        if verdict.status != "ready":
+            log(f"  BLOCKED: {board.name} does not verify ready (exit 1)")
+            status = 1
+            blocked.append(board.name)
     if args.check:
-        status = drift_exit_status(drift) or status
+        status = drift_exit_status(drift, refused=refused, blocked=blocked) or status
     return status
 
 

@@ -1095,6 +1095,37 @@ def _known_label(entries: list[dict]) -> str:
     return "known: " + ",".join(f"#{entry['issue']}" for entry in entries)
 
 
+#: Width of the receipt blocker a ``blocked`` readiness report lends the table.
+_BLOCKED_RECEIPT_WIDTH = 110
+
+
+def _receipt_blockers(board_dir: Path) -> list[str]:
+    """The blocker of a readiness receipt its producer published as ``blocked`` (Issue #10662).
+
+    The receipt is the board's own published verdict: whatever this survey's
+    own checks say, a board whose ``output/readiness.json`` says ``blocked`` is
+    not ship-ready.  Warn-only like :func:`_detect_known_issues`: a missing or
+    unreadable report, and any other status, adds nothing; hash validation
+    stays ``read_readiness()``'s job.  The first recorded blocker is quoted,
+    shortened for the table.
+    """
+    try:
+        data = json.loads((board_dir / "output" / "readiness.json").read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("status") != "blocked":
+        return []
+    recorded = data.get("blockers")
+    first = (
+        next((b.strip() for b in recorded if isinstance(b, str) and b.strip()), "")
+        if isinstance(recorded, list)
+        else ""
+    )
+    if len(first) > _BLOCKED_RECEIPT_WIDTH:
+        first = first[: _BLOCKED_RECEIPT_WIDTH - 3].rstrip() + "..."
+    return [f"readiness blocked: {first}" if first else "readiness blocked"]
+
+
 def _compute_routing(routed_pcb: Path) -> RoutingStatus:
     """Run NetStatusAnalyzer on a routed PCB and tally pads/nets."""
     status = RoutingStatus()
@@ -1274,6 +1305,9 @@ def _survey_board(
 
     blockers = _compute_blockers(routing, mfg, routed_pcb, drc)
     known_issues = _detect_known_issues(board_dir)
+    # A receipt published as blocked is the board's own verdict (Issue #10662);
+    # it leads, because it says why.
+    blockers.extend(_receipt_blockers(board_dir))
     # An open known defect means the board fails its own spec (Issue #7261).
     blockers.extend(f"known defect #{entry['issue']}" for entry in defects(known_issues))
 

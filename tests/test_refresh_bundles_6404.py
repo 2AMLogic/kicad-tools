@@ -1193,21 +1193,37 @@ def test_check_anchors_each_board_to_its_committed_checked_at(
     assert {entry[2] for entry in seen[2:]} == {"caller"}
 
 
-def test_checked_at_is_required_unless_check_reads_the_committed_one(mod, tmp_path, monkeypatch):
+def test_checked_at_is_required_unless_check_reads_the_committed_one(
+    mod, tmp_path, monkeypatch, capsys
+):
     board = _repin_board(mod, tmp_path, monkeypatch)
     with pytest.raises(SystemExit) as exc:
         mod.main([str(board)])
     assert exc.value.code == 2
+    assert "--checked-at is required unless --check" in capsys.readouterr().err
 
     # The fake board's readiness.json carries no checked_at.
     with pytest.raises(SystemExit) as exc:
         mod.main([str(board), "--check"])
     assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "unrecognized arguments" not in err
+    assert "unreadable in output/readiness.json" in err
 
     (board / "output" / "readiness.json").write_text(json.dumps({"checked_at": "soon"}))
     with pytest.raises(SystemExit) as exc:
         mod.main([str(board), "--check"])
     assert exc.value.code == 2
+    assert "is not an ISO timestamp" in capsys.readouterr().err
+
+
+def test_drift_exit_status_never_prints_clean_on_refused_or_blocked(mod, capsys):
+    assert mod.drift_exit_status({}, refused=["04-stm32-devboard"]) == 1
+    out = capsys.readouterr().out
+    assert "nothing to publish" not in out and "REFUSED 04-stm32-devboard" in out
+    assert mod.drift_exit_status({}, blocked=["04-stm32-devboard"]) == 1
+    out = capsys.readouterr().out
+    assert "nothing to publish" not in out and "BLOCKED 04-stm32-devboard" in out
 
 
 def test_drift_workflow_checks_every_bundle_and_never_runs_per_pr(mod):
