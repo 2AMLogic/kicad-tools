@@ -26,11 +26,16 @@ whichever fits; the whole bus is one refereed edit.  When no placement fits it
 reports ``channel too narrow: needs X mm, has Y mm``.
 
 Only the moved run's endpoints are re-pointed: same-net segments that meet it
-at an endpoint follow it (their end is stretched to the new point); a run that
-ends on a pad or a locked segment is left alone.  A run that ends on a
-*same-net* via keeps that end on the via and reaches the shifted line through a
-short 45-degree jog leg (Issue #8459); only axis-aligned runs are jogged, and a
-different-net via at an endpoint still refuses the run.
+at an endpoint follow it (their end is stretched to the new point), as long as
+that keeps them on the 0/45/90/135 degree set; a run that ends on a pad or a
+locked segment is left alone.  A neighbour that following would re-aim (a
+45-degree leg or a straight continuation) stays on its own line instead
+(Issue #10734): when it is the only segment at the joint, the joint slides to
+where the run's shifted line meets the neighbour's line; otherwise nothing at
+the joint moves and the run is jogged back to it, as for a via-ended run.  A
+run that ends on a *same-net* via keeps that end on the via and reaches the
+shifted line through a short 45-degree jog leg (Issue #8459); only axis-aligned
+runs are jogged, and a different-net via at an endpoint still refuses the run.
 """
 
 from __future__ import annotations
@@ -40,6 +45,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from kicad_tools.router.quantize import (
+    ANGLE_TOL_DEG,
+    _is_quantum_aligned,
+    _rounded_4,
+    off_angle_degrees,
+)
 from kicad_tools.validate.rules.pour_slot import (
     PourSlotClearances,
     PourSlotPair,
@@ -141,6 +152,53 @@ def _pad_positions(pcb: Any) -> list[tuple[tuple[float, float], float]]:
     return out
 
 
+def _on_angle_grid(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """True when ``a -> b`` is 45-legal as :func:`segment_angle_census` reads it."""
+    dx, dy = _rounded_4(b[0]) - _rounded_4(a[0]), _rounded_4(b[1]) - _rounded_4(a[1])
+    return _is_quantum_aligned(dx, dy) or off_angle_degrees(dx, dy) <= ANGLE_TOL_DEG
+
+
+def _jog_to_joint(
+    edits: dict[int, list],
+    jogs: list[tuple[Any, Any]],
+    mover: Any,
+    idx: int,
+    old_pt: tuple,
+    shift: tuple,
+    run_len: float,
+) -> None:
+    """Shorten ``mover`` at end ``idx`` by the shift and add a leg from ``old_pt`` to the new end."""
+    dx, dy, shift_len = shift
+    far = mover.end if idx == 0 else mover.start
+    ux, uy = (far[0] - old_pt[0]) / run_len, (far[1] - old_pt[1]) / run_len
+    knee = (old_pt[0] + dx + ux * shift_len, old_pt[1] + dy + uy * shift_len)
+    edits[id(mover)][1 + idx] = knee
+    jogs.append((old_pt, knee))
+
+
+def _slid_joint(
+    run_dir: tuple[float, float], new_end: tuple, old_pt: tuple, far: tuple
+) -> tuple | None:
+    """Where the shifted run's line meets the one held neighbour's own line.
+
+    The neighbour keeps its line and the run keeps its shifted line; only
+    their joint moves.  ``None`` when the two lines meet too obliquely to
+    give a nearby joint, or when the joint would use up the neighbour.
+    """
+    vx, vy = far[0] - old_pt[0], far[1] - old_pt[1]
+    vlen = math.hypot(vx, vy)
+    vx, vy = vx / vlen, vy / vlen
+    ux, uy = run_dir
+    cross = ux * vy - uy * vx
+    if abs(cross) < 0.5:
+        return None
+    t = ((far[0] - new_end[0]) * vy - (far[1] - new_end[1]) * vx) / cross
+    joint = (new_end[0] + t * ux, new_end[1] + t * uy)
+    if vlen - ((joint[0] - old_pt[0]) * vx + (joint[1] - old_pt[1]) * vy) < _TOL:
+        return None
+    return joint
+
+
 def _plan_shift(
     pcb: Any, mover: Any, dx: float, dy: float, pads: list
 ) -> tuple[list[tuple[Any, tuple, tuple, bool]], str | None]:
@@ -148,7 +206,7 @@ def _plan_shift(
 
     Returns ``([(segment, new_start, new_end, replaces), ...], reason)``.  When
     ``replaces`` is true ``segment`` is removed and re-added at the new
-    endpoints; when false the entry is a *new* segment (a via jog leg) and
+    endpoints; when false the entry is a *new* segment (a jog leg) and
     ``segment`` is only a template for its width/layer/net.  ``reason`` is set
     (and the plan empty) when the run cannot be moved safely.
     """
@@ -160,13 +218,17 @@ def _plan_shift(
         0: (mover.start[0] + dx, mover.start[1] + dy),
         1: (mover.end[0] + dx, mover.end[1] + dy),
     }
-    edits: dict[int, list] = {id(mover): [mover, mover.start, mover.end]}
-    edits[id(mover)][1], edits[id(mover)][2] = new_ends[0], new_ends[1]
+    edits: dict[int, list] = {id(mover): [mover, new_ends[0], new_ends[1]]}
 
     jogs: list[tuple[Any, Any]] = []  # (new segment start, new segment end)
     shift_len = math.hypot(dx, dy)
+    shift = (dx, dy, shift_len)
     run_len = math.hypot(mover.end[0] - mover.start[0], mover.end[1] - mover.start[1])
-    for idx, old_pt in ((0, mover.start), (1, mover.end)):
+    if run_len < _TOL:
+        return [], "move would collapse a connected track"
+    ends = ((0, mover.start), (1, mover.end))
+    run_dir = ((mover.end[0] - mover.start[0]) / run_len, (mover.end[1] - mover.start[1]) / run_len)
+    for idx, old_pt in ends:
         via_end = False
         for via in pcb.vias:
             if (
@@ -186,15 +248,10 @@ def _plan_shift(
                 and abs(mover.end[1] - mover.start[1]) > _TOL
             ):
                 return [], "via-ended run is not axis-aligned"
-            far = mover.end if idx == 0 else mover.start
-            ux, uy = (far[0] - old_pt[0]) / run_len, (far[1] - old_pt[1]) / run_len
-            knee = (
-                old_pt[0] + dx + ux * shift_len,
-                old_pt[1] + dy + uy * shift_len,
-            )
-            edits[id(mover)][1 + idx] = knee
-            jogs.append((old_pt, knee))
+            _jog_to_joint(edits, jogs, mover, idx, old_pt, shift, run_len)
             continue  # the via stays put; same-net neighbours stay connected to it
+        follow: list[tuple[Any, int]] = []  # (segment, end index) re-pointed to the new end
+        held: list[tuple[Any, int]] = []  # would leave the angle grid by following
         for other in pcb.segments:
             if other is mover or other.layer != mover.layer:
                 continue
@@ -205,17 +262,45 @@ def _plan_shift(
                     continue
                 if getattr(other, "locked", False):
                     return [], "connected to a locked track"
+                far = other.end if which == 0 else other.start
+                if _near(far, ends[1 - idx][1]):
+                    far = new_ends[1 - idx]  # a coincident copy of the run moves with it
+                if _on_angle_grid(new_ends[idx], far) or not _on_angle_grid(old_pt, far):
+                    follow.append((other, which))
+                else:
+                    held.append((other, which))
+        if not held:
+            for other, which in follow:
                 rec = edits.setdefault(id(other), [other, other.start, other.end])
                 rec[1 + which] = new_ends[idx]
+            continue
+        if not follow and len(held) == 1:
+            other, which = held[0]
+            far = other.end if which == 0 else other.start
+            joint = _slid_joint(run_dir, new_ends[idx], old_pt, far)
+            if joint is not None:
+                edits[id(mover)][1 + idx] = joint
+                edits[id(other)] = [other, other.start, other.end]
+                edits[id(other)][1 + which] = joint
+                continue
+        _jog_to_joint(edits, jogs, mover, idx, old_pt, shift, run_len)  # nothing at the joint moves
     if jogs and run_len - len(jogs) * shift_len < _TOL:
         return [], "no room for jog"
     plan = []
     for seg, ns, ne in edits.values():
-        if math.hypot(ne[0] - ns[0], ne[1] - ns[1]) < _TOL:
+        folded_back = seg is mover and (
+            (ne[0] - ns[0]) * (mover.end[0] - mover.start[0])
+            + (ne[1] - ns[1]) * (mover.end[1] - mover.start[1])
+            < 0
+        )
+        if folded_back or math.hypot(ne[0] - ns[0], ne[1] - ns[1]) < _TOL:
             return [], "move would collapse a connected track"
         plan.append((seg, ns, ne, True))
     for a, b in jogs:
         plan.append((mover, a, b, False))
+    for seg, ns, ne, replaces in plan:
+        if not _on_angle_grid(ns, ne) and (not replaces or _on_angle_grid(seg.start, seg.end)):
+            return [], "connected track would leave the angle grid"
     return plan, None
 
 
