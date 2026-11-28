@@ -392,8 +392,10 @@ Examples:
         choices=["clearance", "drill-clearance", "mask-copper", "copper-gap"],
         help=(
             "Only fix a specific violation type. 'mask-copper' re-centres a "
-            "track that enters its own pad off-centre and nudges a same-net "
-            "pass-through clear of its own pad's opening (mask_to_copper); it is "
+            "track that enters its own pad off-centre, nudges a same-net "
+            "pass-through clear of its own pad's opening, removes a redundant "
+            "edge fragment and widens a pad's own-pour relief past the band "
+            "the rule examines (mask_to_copper); it is "
             "detected with kct check's rules, not kicad-cli, and is also part "
             "of the default set when the report carries such findings. "
             "'copper-gap' moves a via that sits too close to its own pad or "
@@ -1987,12 +1989,13 @@ def _run_mask_pass(
             def lost_contacts() -> set[str]:
                 if not contact_nets:
                     return set()
+                checker = MaskCopperRepairer(candidate)
                 removed = {
                     act.uuid for act in result.actions if isinstance(act, MaskFragmentAction)
                 }
-                return MaskCopperRepairer(candidate).disconnected_copper_nets(
-                    before, contact_nets, removed=removed
-                )
+                if removed:
+                    return checker.disconnected_copper_nets(before, contact_nets, removed=removed)
+                return checker.disconnected_copper_nets(before, contact_nets)
 
             # Refill zone pours before grading so moved tracks and via antipads
             # are checked against the copper that will actually be published (#9939).

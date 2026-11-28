@@ -5831,9 +5831,11 @@ def _add_fix_drc_parser(subparsers) -> None:
         choices=["clearance", "drill-clearance", "mask-copper", "copper-gap"],
         help=(
             "Only fix a specific violation type. 'mask-copper' re-centres a "
-            "track that enters its own pad off-centre (mask_to_copper); it is "
-            "detected with kct check's rules, not kicad-cli, and is also part "
-            "of the default set when the report carries such findings. "
+            "track that enters its own pad off-centre, nudges a same-net "
+            "pass-through clear of its own pad's opening, removes a redundant "
+            "edge fragment and widens a pad's own-pour relief (mask_to_copper); "
+            "it is detected with kct check's rules, not kicad-cli, and is also "
+            "part of the default set when the report carries such findings. "
             "'copper-gap' moves a via that sits too close to its own pad or "
             "track (same-net physical_copper_gap slits), also detected with "
             "kct check's rules and part of the default set."

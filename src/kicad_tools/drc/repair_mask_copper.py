@@ -24,13 +24,32 @@ nudge is issue #9896):
   and a candidate that would crowd another opening (or whose joined ends
   would leave a pad they terminate in) is declined.
 
-Everything else (different net, pour, arc, overlap of any kind, a straddle,
-both ends inside, an immovable junction, an exotic pad shape,
-or a measured clearance the pad-shape opening model cannot reproduce) is
-left untouched and listed as unrepaired with a reason.  A move that would
-bring the copper closer than the clearance rule to other-net copper, or a
-via destination that fails the shared clearance engine (copper, pad or
-drill-to-drill), is declined (``would_violate_clearance``).
+Everything else (different net, an arc, a straddle, both ends inside, an
+immovable junction, an exotic pad shape, or a measured clearance the
+pad-shape opening model cannot reproduce) is left untouched and listed as
+unrepaired with a reason.  A move that would bring the copper closer than
+the clearance rule to other-net copper, or a via destination that fails the
+shared clearance engine (copper, pad or drill-to-drill), is declined
+(``would_violate_clearance``).
+
+Three further shapes the same-net error population takes (issue #10664):
+
+* **own-pour relief** -- the conductor is the same-net ``zone`` a single pad
+  is thermally joined to, and the declared relief gap is narrower than the
+  band the rule examines (its warning clearance).  The pad gets its own
+  ``thermal_gap`` past the band, so the pour body moves out of it after the
+  refill the caller runs; the spokes then read ``own_pour_thermal``.
+* **edge fragment** -- the conductor is a same-net segment no longer than its
+  own width lying on its pad, whose ends are each held by same-net track that
+  all stays in contact without it.  The fragment is removed.
+* **swept via connection** -- a pass-through via whose every opening-clearing
+  destination lies farther than a connection inside its land can reach may
+  keep its approach lines with connections inside the land it sweeps between
+  its old and new centres.  Those are cleared against the board like a track.
+
+A jog or chamfer slide that needs the end of a run an earlier action of the
+same pass already moved is deferred to the next pass (``fix-drc`` with
+``--max-passes``) instead of being translated into a skew.
 
 The repairer cannot re-run the native mask assessment itself; ``fix-drc``
 re-checks the saved board and reverts any move that did not clear its finding
