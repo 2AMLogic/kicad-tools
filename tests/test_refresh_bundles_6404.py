@@ -1161,7 +1161,11 @@ def test_check_exits_one_when_a_committed_report_is_edited(
 
 
 def _check_report(rules: dict[str, int], *, noise: str = "") -> bytes:
-    violations = [{"rule_id": r, "message": noise} for r, n in rules.items() for _ in range(n)]
+    violations = [
+        {"rule_id": r, "severity": "warning", "message": noise}
+        for r, n in rules.items()
+        for _ in range(n)
+    ]
     return json.dumps(
         {"summary": {"warnings": sum(rules.values())}, "violations": violations}
     ).encode()
@@ -1192,6 +1196,31 @@ def test_check_names_a_stale_check_report_on_a_current_bundle(
     assert "nothing to publish" not in out
 
 
+def test_check_detects_severity_drift_with_the_same_rule_counts(
+    mod, tmp_path, monkeypatch, unanchored_clock, capsys
+):
+    board = _repin_board(mod, tmp_path, monkeypatch)
+    assert mod.main([str(board), "--checked-at", "2026-10-18T00:00:00+00:00"]) == 0
+    target = board / "output" / "manufacturing" / "check-report.json"
+    old_rows = [
+        {"rule_id": "connector_edge_distance", "severity": "warning"},
+        {"rule_id": "pad_grid", "severity": "info"},
+    ]
+    new_rows = [
+        {"rule_id": "connector_edge_distance", "severity": "info"},
+        {"rule_id": "pad_grid", "severity": "warning"},
+    ]
+    target.write_text(json.dumps({"violations": old_rows}))
+    monkeypatch.setattr(
+        mod, "run_check_report", lambda staged, cfg: json.dumps({"violations": new_rows}).encode()
+    )
+    before = _tree(board)
+    assert mod.main([str(board), "--check"]) == 1
+    assert _tree(board) == before
+    output = capsys.readouterr().out
+    assert "--check DRIFT" in output and "output/manufacturing/check-report.json" in output
+
+
 def test_check_ignores_report_noise_that_is_not_a_rule_count(
     mod, tmp_path, monkeypatch, unanchored_clock
 ):
@@ -1206,9 +1235,16 @@ def test_check_ignores_report_noise_that_is_not_a_rule_count(
 
 
 def test_rule_counts_reads_violations_and_rejects_non_reports(mod):
-    assert mod.rule_counts(_check_report({"pour_slot": 2, "x": 1})) == {"pour_slot": 2, "x": 1}
+    assert mod.rule_counts(_check_report({"pour_slot": 2, "x": 1})) == {
+        ("pour_slot", "warning"): 2,
+        ("x", "warning"): 1,
+    }
     assert mod.rule_counts(b"not json") is None
     assert mod.rule_counts(b'{"violations": [{"no_rule": 1}]}') is None
+    assert mod.rule_counts(b'{"violations": [{"rule_id": "pour_slot"}]}') is None
+    assert mod.rule_counts(b"{}") is None
+    assert mod.rule_counts(b'{"violations": "invalid"}') is None
+    assert mod.rule_counts(b'{"violations": []}') == {}
 
 
 def test_check_anchors_each_board_to_its_committed_checked_at(

@@ -964,15 +964,25 @@ def stage_check_report(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) 
     _write_targets(staged, bundle.check_reports, run_check_report(staged, cfg))
 
 
-def rule_counts(report: bytes) -> dict[str, int] | None:
-    """Per-rule violation counts of a check report; ``None`` when it is not a report."""
+def rule_counts(report: bytes) -> dict[tuple[str, str], int] | None:
+    """Count findings by rule and severity. Return ``None`` for an unreadable report."""
     try:
-        data = json.loads(report)
-        violations = data.get("violations", [])
-        counts: dict[str, int] = {}
+        violations = json.loads(report)["violations"]
+        if not isinstance(violations, list):
+            return None
+        counts: dict[tuple[str, str], int] = {}
         for violation in violations:
-            counts[violation["rule_id"]] = counts.get(violation["rule_id"], 0) + 1
-    except (ValueError, AttributeError, KeyError, TypeError):
+            rule, severity = violation["rule_id"], violation["severity"]
+            if (
+                not isinstance(rule, str)
+                or not rule
+                or not isinstance(severity, str)
+                or not severity
+            ):
+                return None
+            key = (rule, severity)
+            counts[key] = counts.get(key, 0) + 1
+    except (ValueError, KeyError, TypeError):
         return None
     return counts
 
@@ -984,7 +994,7 @@ def stale_check_reports(
 
     The refresh only re-runs the checker when the archive is stale, so a bundle
     that is self-consistent but was checked under older rules would otherwise
-    compare clean.  Only per-rule counts are compared: the report's bytes also
+    compare clean.  Counts are compared per rule and severity. The report's bytes also
     carry archive-level noise that is not checker drift.
     """
     committed_targets = [t for t in bundle.check_reports if (board / t).is_file()]
