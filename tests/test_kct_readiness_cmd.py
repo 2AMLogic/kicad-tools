@@ -2400,7 +2400,7 @@ def test_copper_cleanup_runs_dedupe_and_records_counts(tmp_path, monkeypatch):
     )
     gen = readiness_cmd._copper_cleanup(_cleanup_options(tmp_path, operation="generate"))
     assert gen["removed"] == {"segments": 15, "vias": 1} and saved
-    assert list(gen["steps"]) == ["dedupe", "prune", "optimize_traces", "redundant_copper"]
+    assert list(gen["steps"]) == ["dedupe", "redundant_copper", "prune", "optimize_traces"]
     assert gen["steps"]["prune"]["segments_removed"] == 4
     assert gen["steps"]["redundant_copper"]["status"] == "not-needed"
     saved.clear()
@@ -2609,8 +2609,7 @@ def test_cleanup_guard_leaves_a_step_that_did_not_apply_alone(tmp_path):
 def test_copper_cleanup_guards_prune_and_optimize_but_not_the_verified_repair(
     tmp_path, monkeypatch
 ):
-    """The sequence: dedupe -> prune -> optimize-traces (each kept only when it
-    adds nothing) -> the verified repair, which judges its own edits."""
+    """The verified repair sees the original covering tracks before either guarded pass."""
     from kicad_tools.schema import pcb as pcb_mod
 
     class _P:
@@ -2632,7 +2631,7 @@ def test_copper_cleanup_guards_prune_and_optimize_but_not_the_verified_repair(
     )
     record = readiness_cmd._copper_cleanup(_cleanup_options(tmp_path, operation="generate"))
     assert guarded == ["_cleanup_prune_step", "_cleanup_optimize_step"]
-    assert list(record["steps"]) == ["dedupe", "prune", "optimize_traces", "redundant_copper"]
+    assert list(record["steps"]) == ["dedupe", "redundant_copper", "prune", "optimize_traces"]
 
 
 def test_cleanup_redundant_step_is_skipped_when_nothing_is_left_to_repair(tmp_path, monkeypatch):

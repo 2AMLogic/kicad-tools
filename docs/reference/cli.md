@@ -1019,8 +1019,10 @@ readiness gate refuses without a per-rule acknowledgement: a
 split, so no tap becomes an explicit acute junction (the new
 `sharp_trace_corner` findings `kct pcb prune` leaves behind), and a
 `redundant_copper_staircase` or `redundant_copper_detour` chain is replaced by
-the rule's own fewer-bend path (a 45-degree leg and an H/V leg, either order,
-or one straight leg) at the chain's widest width. Before an edit is applied it
+a path of axial and 45-degree legs at the chain's widest width. Near a
+same-net junction, the repair can split a leg to follow existing copper.
+It checks the resulting junctions for new sharp corners and reuses any
+matching same-width leg. Before an edit is applied it
 must pass the rule's own gates -- clearance at the net-class pair requirement,
 mask-opening zones, terminal contact, the physical-gap slit oracle -- plus the
 acute-corner test `sharp_trace_corner` applies, so a chain whose only shorter
@@ -1042,9 +1044,10 @@ reported with the last reason (`new_sharp_trace_corner`, `new_track_dangling`,
 `new_mask_to_copper`, `new_drc_error`, `native_open`, `pad_connection_lost`,
 `recheck_unavailable`) and make the exit 2. A new `mask_to_copper` *warning*
 does not refuse an edit unless `--no-new-warnings` is given, as for
-`mask-copper` itself. `kct readiness` runs this pass as the last step of its
-copper cleanup, after `dedupe`, `prune` and `optimize-traces --drc-aware`, and
-records it as `not-needed` on a board with none of its findings. The `prune`
+`mask-copper` itself. `kct readiness` runs the repair immediately after
+`dedupe`, while covering tracks are still whole. It records `not-needed`
+when there are no targeted findings, then runs `prune` and
+`optimize-traces --drc-aware`. The `prune`
 and `optimize-traces` steps are kept only when they add no `sharp_trace_corner`
 or `redundant_copper` finding: both verify with native DRC, which accepts the
 explicit acute junction a split covered track becomes, so a pass that would

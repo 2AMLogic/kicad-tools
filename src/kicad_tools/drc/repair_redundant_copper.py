@@ -266,6 +266,8 @@ class RedundantCopperRepairer:
             this run (``DRCChecker.redundant_copper_rule``).  Its chain walk,
             options and gates are what the repair re-runs.
         design_rules: The checker's manufacturer rules, for the rule.
+        allow_junction_paths: Consider two-bend paths around existing copper.
+            The fix-drc pass verifies the saved board before keeping these edits.
     """
 
     def __init__(
@@ -274,10 +276,12 @@ class RedundantCopperRepairer:
         *,
         rule: RedundantCopperRule,
         design_rules: DesignRules | None = None,
+        allow_junction_paths: bool = False,
     ) -> None:
         self.path = Path(pcb_path)
         self._rule = rule
         self._design_rules = design_rules
+        self._allow_junction_paths = allow_junction_paths
         self._edits: list[CopperEdit] = []
         self._rejected: dict[tuple[str, tuple[str, ...]], dict[tuple[Point2, ...], str]] = {}
         self.pcb: PCB = PCB.load(self.path)
@@ -533,6 +537,51 @@ class RedundantCopperRepairer:
             witnesses=witnesses,
         )
 
+    def _two_bend_paths(self, ends: Sequence[Point2], chain: Sequence[Any]) -> list[list[Point2]]:
+        """Shift a dogleg along the two original routing directions.
+
+        Split one leg at quarter points or distances from the chain's own
+        vertices and spans. Each path has the same length as the one-bend
+        shortcut and consists of axial and 45-degree segments.
+        """
+        base = self._rule.shortcut_candidates(list(ends))
+        if len(base) != 2:
+            return []
+        start, elbow, end = base[0]
+        diagonal = (elbow[0] - start[0], elbow[1] - start[1])
+        straight = (end[0] - elbow[0], end[1] - elbow[1])
+        points = self._rule.chain_points(chain)
+        paths = []
+        for split, across in ((diagonal, straight), (straight, diagonal)):
+            axis = 0 if abs(split[0]) >= abs(split[1]) else 1
+            length = abs(split[axis])
+            ratios = {0.25, 0.5, 0.75}
+            for point in points[1:-1]:
+                ratios.add(round(abs(point[axis] - start[axis]) / length, 9))
+                ratios.add(round(1 - abs(end[axis] - point[axis]) / length, 9))
+            for p, q in zip(points, points[1:], strict=False):
+                ratios.add(round(abs(q[axis] - p[axis]) / length, 9))
+            for ratio in sorted(r for r in ratios if 0 < r < 1):
+                a = (round(start[0] + ratio * split[0], 6), round(start[1] + ratio * split[1], 6))
+                b = (round(a[0] + across[0], 6), round(a[1] + across[1], 6))
+                path = [start, a, b, end]
+                if _q(a) != _q(start) and _q(b) != _q(end) and path not in paths:
+                    paths.append(path)
+        return paths
+
+    def _sharp_sites(self, segments: list[Segment], first: Segment) -> set[Point2]:
+        from kicad_tools.explain.checks.acid_trap import AcidTrapCheck
+        from kicad_tools.validate.rules.sharp_trace_corner import _group_junctions, _is_buried
+
+        check = AcidTrapCheck()
+        discs = self._rule._copper_discs()
+        return {
+            (round(j.location[0], 2), round(j.location[1], 2))
+            for j in _group_junctions(segments, check)
+            if next(iter(j.open_angles(check)), None) is not None
+            and not _is_buried(discs, first.net_name, first.layer, j.location)
+        }
+
     def _plan_chain(
         self, rule_id: str, witnesses: tuple[str, ...], first: Segment, pairs: dict[int, int]
     ) -> CopperEdit | str:
@@ -552,28 +601,83 @@ class RedundantCopperRepairer:
         }:
             return "chain_not_single_net_layer"
         width = max(seg.width for seg in segments)
-        graph = rule._junction_graph(rule.chain_groups(self.pcb)[(first.net_number, first.layer)])
+        group = rule.chain_groups(self.pcb)[(first.net_number, first.layer)]
+        graph = rule._junction_graph(group)
         rejected = self._rejected.get((rule_id, witnesses), {})
         reason = "no_candidate"
+        kept_points: set[Point2] = set()
+        try_junction_paths = False
+        if (
+            self._allow_junction_paths
+            and rule_id == "redundant_copper_staircase"
+            and (not rejected or "new_sharp_trace_corner" in rejected.values())
+        ):
+            replaced = {seg.uuid for seg in segments}
+            kept_points = {_q(p) for s in group if s.uuid not in replaced for p in (s.start, s.end)}
+            xs, ys = zip(*rule.chain_points(chain), strict=True)
+            left, right, bottom, top = min(xs), max(xs), min(ys), max(ys)
+            # Nearby retained copper makes alternate elbows worth testing.
+            # The rule still checks each path against the actual geometry.
+            try_junction_paths = any(
+                left <= x <= right and bottom <= y <= top for x, y in kept_points
+            )
         legal: list[tuple[Any, list[Point2], bool]] = []
         for option in rule.chain_options(chain):
-            for cand in rule.shortcut_candidates(list(option.ends)):
-                if tuple(_q(p) for p in cand) in rejected:
-                    reason = rejected[tuple(_q(p) for p in cand)]
+            paths = rule.shortcut_candidates(list(option.ends))
+            if try_junction_paths:
+                paths.extend(self._two_bend_paths(option.ends, chain))
+            for cand in paths:
+                key = tuple(_q(p) for p in cand)
+                if key in rejected:
+                    reason = rejected[key]
                     continue
                 why = rule.option_reason(chain, option, cand, graph.terminals, width)
                 if why is not None:
                     reason = why
                     continue
                 legal.append((option, cand, self._duplicates_copper(cand, width, first, segments)))
-        if not legal:
-            return reason
-        # The first clean path; a path that doubles kept copper only when it
-        # is the only legal one (the covered edit then removes the double).
-        option, cand, duplicates = next((item for item in legal if not item[2]), legal[0])
-        if self._worsens_skew(first, pairs.get(first.net_number), chain, option, cand, width):
-            return "would_widen_pair_skew"
-        return self._edit_for(rule_id, witnesses, first, chain, option, cand, duplicates, width)
+        if try_junction_paths:
+            legal.sort(
+                key=lambda item: (
+                    not item[2],
+                    -sum(_q(p) in kept_points for p in item[1][1:-1]),
+                    len(item[1]),
+                )
+            )
+        else:
+            legal.sort(key=lambda item: item[2])
+            if not self._allow_junction_paths:
+                legal = legal[:1]
+        old_sites = self._sharp_sites(group, first) if try_junction_paths and legal else set()
+        for option, cand, duplicates in legal:
+            if self._worsens_skew(first, pairs.get(first.net_number), chain, option, cand, width):
+                reason = "would_widen_pair_skew"
+                continue
+            edit = self._edit_for(rule_id, witnesses, first, chain, option, cand, duplicates, width)
+            if isinstance(edit, str):
+                reason = edit
+                continue
+            if try_junction_paths:
+                removed = {s.uuid for s in edit.removed} | {s.uuid for s in edit.trimmed}
+                candidate = [s for s in group if s.uuid not in removed]
+                replacement_legs = [(s.kept, s.end, s.width) for s in edit.trimmed]
+                replacement_legs.extend((s.start, s.end, s.width) for s in edit.added)
+                for start, end, leg_width in replacement_legs:
+                    candidate.append(
+                        Segment(
+                            start=start,
+                            end=end,
+                            width=leg_width,
+                            layer=first.layer,
+                            net_number=first.net_number,
+                            net_name=first.net_name,
+                        )
+                    )
+                if self._sharp_sites(candidate, first) - old_sites:
+                    reason = "new_sharp_trace_corner"
+                    continue
+            return edit
+        return reason
 
     def _edit_for(
         self,
@@ -609,6 +713,8 @@ class RedundantCopperRepairer:
             else:
                 exact_ends.append(self._exact(end_node))
         paths = rule.shortcut_candidates(exact_ends)
+        if len(cand) == 4:
+            paths = self._two_bend_paths(exact_ends, chain)
         try:
             exact = paths[
                 [tuple(_q(p) for p in path) for path in paths].index(tuple(_q(p) for p in cand))
@@ -636,6 +742,17 @@ class RedundantCopperRepairer:
             kept = max((seg.start, seg.end), key=lambda p: math.dist(p, inner))
             trimmed.append(TrimmedSegment(seg.uuid, kept, cut, seg.width))
         legs = [(a, b, width) for a, b in zip(exact, exact[1:], strict=False)]
+        kept_legs = set()
+        if self._allow_junction_paths:
+            replaced = {s.uuid for s in removed} | {s.uuid for s in trimmed}
+            kept_legs = {
+                tuple(sorted((s.start, s.end)))
+                for s in self.pcb.segments
+                if s.net_number == first.net_number
+                and s.layer == first.layer
+                and s.width == width
+                and s.uuid not in replaced
+            }
         added = tuple(
             AddedSegment(
                 uuid=self.pcb.mint_uuid(
@@ -646,6 +763,7 @@ class RedundantCopperRepairer:
                 width=leg_width,
             )
             for index, (a, b, leg_width) in enumerate(legs)
+            if tuple(sorted((a, b))) not in kept_legs
         )
         source = removed[0].uuid if removed else trimmed[0].uuid
         template_segment = self._segment(source)

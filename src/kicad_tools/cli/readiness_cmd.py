@@ -1900,8 +1900,8 @@ def _gate_kct_check(
         if introduced:
             shown = ", ".join(introduced[:3]) + (", ..." if len(introduced) > 3 else "")
             note = (
-                " [introduced by the copper_cleanup step (dedupe/prune/"
-                f"optimize-traces/redundant-copper), absent from the committed board: {shown}; "
+                " [introduced by the copper_cleanup step (dedupe/redundant-copper/"
+                f"prune/optimize-traces), absent from the committed board: {shown}; "
                 "re-run with --skip-cleanup to keep the committed copper]"
             )
             outcome.detail += note
@@ -3362,17 +3362,12 @@ def _cleanup_optimize_step(options: ReadinessOptions) -> dict[str, Any]:
 def _cleanup_redundant_step(options: ReadinessOptions) -> dict[str, Any]:
     """``kct fix-drc --only redundant-copper`` step (Issue #10667).
 
-    The verified repair for the trace-quality findings the earlier steps
-    cannot clear: covered tracks are removed without splitting the covering
-    track, staircases and detours are replaced by the ``redundant_copper``
-    rule's own fewer-bend path, and every edit is re-checked on the saved,
-    refilled board (``kct check``'s rule set with the mask assessment, native
-    DRC) and put back when it leaves a new finding.  It runs last so the board
-    the trace-quality gate counts is the one it verified.
+    Repair covered tracks, staircases and detours before prune can split a
+    covering track at a tap. Check each edit on the saved, refilled board
+    with the mask assessment and native DRC. Restore edits that fail.
 
-    Skipped -- recorded, never silent -- when the board the earlier steps
-    left has none of its findings: that pre-check costs one rule run, where
-    the repair costs a mask assessment and a native DRC per verified round.
+    A board with no targeted findings records a skip after one rule run.
+    Each verified repair round needs a mask assessment and native DRC.
     Its exit status is not the verdict: ``fix-drc`` exits 2 on a board with
     any warning outside the category, so the step reads its JSON instead.
     """
@@ -3440,13 +3435,11 @@ def _cleanup_redundant_step(options: ReadinessOptions) -> dict[str, Any]:
 def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
     """Run (generate) or count (verify) the copper cleanup.
 
-    ``dedupe -> prune -> optimize-traces --drc-aware -> fix-drc --only
-    redundant-copper`` (Issue #8633, extending the #8218 dedupe step; the
-    last step Issue #10667).  Must run before any hashing/refill so the DRC
-    cross-gate judges the cleaned board.  A skip is recorded, never silent, and
-    each step's counts land in ``steps``.  ``--drc-aware`` is verified only by
-    the kicad-cli refill DRC and creepage census the later gates run (#8632);
-    the last step verifies its own edits before it saves them.
+    Dedupe first (#8218), repair redundant copper (#10667), then prune and
+    optimize traces (#8633). The repair needs the original covering tracks.
+    Prune and optimize run under the trace-quality guard. The later gates
+    check the cleaned board with native DRC after refill and a creepage
+    census (#8632). Each step records its counts or the reason it skipped.
     """
     if options.skip_cleanup:
         return {"copper_cleanup": "skipped"}
@@ -3468,14 +3461,13 @@ def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
         pcb.save(str(options.pcb))
     steps: dict[str, Any] = {"dedupe": {"status": "applied", **removed}}
     for name, step, guarded in (
+        ("redundant_copper", _cleanup_redundant_step, False),
         ("prune", _cleanup_prune_step, True),
         ("optimize_traces", _cleanup_optimize_step, True),
-        ("redundant_copper", _cleanup_redundant_step, False),
     ):
         try:
-            # The verified repair judges its own edits; the two passes before
-            # it are kept only when they add no finding of the rules the
-            # trace-quality gate and the fab care about (Issue #10667).
+            # The repair verifies its own edits. Guard the following passes
+            # against introducing sharp corners or redundant copper (#10667).
             steps[name] = _guarded_cleanup_step(options, step) if guarded else step(options)
         except Exception as exc:  # recorded; the trace-quality gate still judges the board
             steps[name] = {"status": "failed", "detail": str(exc)}

@@ -2402,7 +2402,10 @@ def _run_redundant_copper_pass(
         checker.fab_view_gap_policy = policy
         checker.mask_copper_request = default_request_for_manufacturer(rule_set.manufacturer)
         repairer = RedundantCopperRepairer(
-            load_path, rule=checker.redundant_copper_rule(), design_rules=design_rules
+            load_path,
+            rule=checker.redundant_copper_rule(),
+            design_rules=design_rules,
+            allow_junction_paths=True,
         )
     except Exception as e:
         print(f"Error during redundant-copper repair: {e}", file=sys.stderr)

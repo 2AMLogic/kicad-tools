@@ -23,6 +23,7 @@ from kicad_tools.drc.repair_redundant_copper import (
 )
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+from kicad_tools.validate.rules.sharp_trace_corner import SharpTraceCornerRule
 
 _RULE_TESTS = Path(__file__).resolve().parent / "test_validate_redundant_copper.py"
 
@@ -165,6 +166,28 @@ def test_staircase_is_replaced_by_the_rules_path(tmp_path):
     saved = PCB.load(out)
     assert len(saved.segments) == 2
     assert _findings(_repairer(out)) == []
+
+
+def test_staircase_reuses_a_junction_leg_without_moving_the_sharp_corner(tmp_path):
+    chain = [(0, 0), (3, 0), (4, 1), (6, 1), (7, 2), (8, 2), (9, 3), (10, 3)]
+    retained = [((0, 0), (2, 2)), ((2, 2), (5, 2)), ((0, 0), (-2, -2))]
+    segments = [Board._Seg(a, b, width=0.2) for a, b in zip(chain, chain[1:], strict=False)]
+    segments.extend(Board._Seg(a, b, width=0.2) for a, b in retained)
+    path = _write(tmp_path, segments)
+    corners = SharpTraceCornerRule()
+    assert [v.location for v in corners.check(PCB.load(path), None).violations] == [(0, 0)]
+
+    repairer = RedundantCopperRepairer(path, rule=RedundantCopperRule(), allow_junction_paths=True)
+    result = repairer.plan(_findings(repairer))
+    assert result.edits and not result.unrepaired
+    out = tmp_path / "repaired.kicad_pcb"
+    repairer.save(out)
+    saved = PCB.load(out)
+    assert corners.check(saved, None).violations == []
+    assert _findings(_repairer(out)) == []
+    first = result.edits[0]
+    assert first.legs[:2] == ((0, 0), (2, 2))
+    assert all({s.start, s.end} != {(0, 0), (2, 2)} for s in first.added)
 
 
 def test_new_legs_end_exactly_where_the_neighbouring_track_does(tmp_path):
