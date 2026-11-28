@@ -656,11 +656,18 @@ def _pad_has_cut_corner(pad: Any) -> bool:
     node = getattr(pad, "_sexp_node", None)
     if node is None or (getattr(pad, "shape", "") or "").lower() != "roundrect":
         return False
-    ratio, corners = node.find("chamfer_ratio"), node.find("chamfer")
-    if ratio is None or corners is None:
+    corners = node.find("chamfer")
+    if corners is None or not getattr(corners, "children", None):
         return False
-    value = ratio.get_float(0)
-    return bool(value) and value > 0 and bool(getattr(corners, "children", None))
+    return _chamfer_ratio(node) > 0
+
+
+def _chamfer_ratio(node: Any) -> float:
+    """The pad's ``chamfer_ratio``; an omitted one is KiCad's default 0.2."""
+    ratio = node.find("chamfer_ratio")
+    if ratio is None:
+        return 0.2
+    return ratio.get_float(0) or 0.0
 
 
 def _approximated_pad_box(fp: Any, pad: Any, geom: Any) -> Any:
@@ -690,7 +697,7 @@ def _approximated_pad_box(fp: Any, pad: Any, geom: Any) -> Any:
     local: list[tuple[float, float]]
     if node is not None and shape == "roundrect" and _pad_has_cut_corner(pad):
         short = min(w, h)
-        ratio = node.find("chamfer_ratio").get_float(0) or 0.0
+        ratio = _chamfer_ratio(node)
         cut = max(0.0, min(0.5, ratio)) * short
         selected = {c.value for c in node.find("chamfer").children}
         round_ratio = getattr(pad, "roundrect_rratio", None)

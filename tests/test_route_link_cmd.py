@@ -561,6 +561,11 @@ class TestCommit:
             "(chamfer_ratio 0.14) (chamfer top_left top_right bottom_left bottom_right) "
             '(drill 0.4 (offset -0.3 -0.3)) (layers "*.Cu" "*.Mask") (net 1 "SENSE"))'
         ),
+        "omitted": (
+            '(pad "1" thru_hole roundrect (at 0 0) (size 2 2) (roundrect_rratio 0) '
+            "(chamfer top_left) "
+            '(drill 0.4 (offset -0.3 -0.3)) (layers "*.Cu" "*.Mask") (net 1 "SENSE"))'
+        ),
         "trapezoid": (
             '(pad "1" thru_hole trapezoid (at 0 0) (size 2 2) (rect_delta 0 0.6) '
             '(drill 0.4 (offset -0.3 -0.3)) (layers "*.Cu" "*.Mask") (net 1 "SENSE"))'
@@ -601,8 +606,16 @@ class TestCommit:
         # One 0.28 mm cut removes a single 0.28**2 / 2 triangle from the 2 x 2 box.
         assert land.area == pytest.approx(4 - 0.28**2 / 2, abs=1e-6)
 
+    def test_omitted_chamfer_ratio_defaults_to_kicad_0_2(self, tmp_path):
+        from kicad_tools.router.link_router import terminal_for_pad
+
+        pcb = PCB.load(str(self._diagonal_board(tmp_path, "omitted")))
+        land = terminal_for_pad(pcb, "P2", "1").layers["F.Cu"]
+        # No (chamfer_ratio): KiCad's 0.2 -> one 0.4 mm cut, 4 - 0.4**2 / 2.
+        assert land.area == pytest.approx(4 - 0.4**2 / 2, abs=1e-6)
+
     @pytest.mark.parametrize("order", ["P3.1 P2.1", "P2.1 P3.1"])
-    @pytest.mark.parametrize("kind", ["chamfered", "trapezoid"])
+    @pytest.mark.parametrize("kind", ["chamfered", "omitted", "trapezoid"])
     def test_offset_approximated_pad_on_a_diagonal_link(self, tmp_path, capsys, kind, order):
         board = self._diagonal_board(tmp_path, kind)
         out = tmp_path / "saved.kicad_pcb"
