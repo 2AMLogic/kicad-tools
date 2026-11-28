@@ -6675,6 +6675,7 @@ def run_stitch(
     fill_verified: bool = False,
     mask_entry_clearance: float = 0.0,
     entry_lands: Mapping[tuple[str, str], "MaskOpening"] | None = None,
+    pad_escape_class: tuple[float, float] | None = None,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -6771,6 +6772,16 @@ def run_stitch(
             placement no strategy can seat legally is dropped at the
             commit chokepoint with an explicit ``same_net_trace_gap``
             skip reason.  ``0.0`` (default) disables the guard.
+        pad_escape_class: Issue #9424 -- ``(class_width, class_clearance)``
+            when ``trace_width`` is that class's pad-escape neck
+            (``PourLinkCloser.neck_width``). Every written stub must then be
+            one leg the net-class agreement audit judges a pad escape: a
+            straight leg or a single 45-degree dogleg landing within the
+            class's pad-escape reach of the pad
+            (:func:`kicad_tools.validate.rules.netclass_agreement.pad_escape_lands`).
+            Any other placement is skipped with a ``pad_escape_reach``
+            reason instead of writing copper below the class width as a
+            detour.  ``None`` (default) constrains nothing.
 
     Returns:
         StitchResult with details of what was done
@@ -7968,6 +7979,19 @@ def run_stitch(
                     break
             else:
                 result.pads_skipped.append((pad, "no clearance-legal full-width pad entry"))
+                continue
+
+        if pad_escape_class is not None:
+            from kicad_tools.validate.rules.netclass_agreement import (
+                pad_escape_lands,
+                pad_escape_reach,
+            )
+
+            reach = pad_escape_reach((pad.width, pad.height), *pad_escape_class)
+            if not pad_escape_lands(trace_points(trace), reach):
+                result.pads_skipped.append(
+                    (pad, f"pad_escape_reach: necked stub would land beyond {reach:.2f} mm")
+                )
                 continue
 
         # Issue #6684: decide keep-or-drop BEFORE recording anything, so a
