@@ -193,8 +193,9 @@ with an error before routing; `--force` routes at the requested pitch anyway.
 
 `summary.verdict` is `"success"` (exit 0), `"unverified"` (exit 10) or
 `"failed"` (any other non-zero exit). `"unverified"` means the post-route DRC
-and/or the stranded-pour check did not complete: `--timeout` ran out, or
-kicad-cli crashed, was killed or hit its per-call DRC timeout (Issue #6724).
+and/or the stranded-pour check did not complete: `--timeout` ran out;
+kicad-cli crashed, was killed or hit its per-call DRC timeout (Issue #6724);
+or the pour completion loop raised internally (Issue #10710).
 The board is saved but not verified, so run `kct check` on it before
 manufacturing. It only ever replaces a would-be exit 0 (Issue #6273; see the
 [`kct route` exit-code ladder](cli.md#kct-route-ladder)).

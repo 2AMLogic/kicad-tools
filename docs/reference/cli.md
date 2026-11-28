@@ -719,6 +719,17 @@ RUN parity is `verdict: "incomplete"` with `exit_code: 0`. It also adds a
 `parity_errors`/`parity_warnings` in `summary`. Waiver entries match parity
 findings the same way they match DRC findings.
 
+**Informational findings (#10650)**
+
+An `info`-severity finding counts as neither an error nor a warning, so it
+never changes the exit code: an info-only report exits 0 under `--strict` when
+its other gates pass. It stays listed for inspection — an `INFO
+(informational, non-gating)` section and an `Infos:` count in the table, an
+`Infos` column in `--format summary`, and `summary.infos` in `--format json`
+(present only when the count is nonzero, like `waived`). In `--mfr` output an
+unchecked info finding adds `, N info` to the `NOT CHECKED` line and
+`not_checked_infos` to the JSON summary.
+
 **Manufacturer check (`--mfr`, #7170)**
 
 `--mfr <fab>` gives every kicad-cli violation exactly one verdict:
@@ -743,7 +754,8 @@ under `--strict`, or when schematic parity did NOT RUN without
 `--allow-incomplete`, like plain `kct drc report.json`); else 0.
 `--mfr --format json` prints `{manufacturer, layers, source, summary: {total,
 checked, compatible, incompatible, not_checked, not_checked_errors,
-not_checked_warnings, not_checked_by_type, parity_errors, parity_warnings},
+not_checked_warnings, not_checked_infos (nonzero only, #10650),
+not_checked_by_type, parity_errors, parity_warnings},
 checks: [{type_str, severity, result, rule_name, message, violation_message,
 manufacturer_limit, actual_value}], schematic_parity, schematic_parity_checked,
 verdict, exit_code}`; `checked + not_checked == total`. Other `--format` values print
@@ -3272,7 +3284,7 @@ epilog in [`src/kicad_tools/cli/route_exit_codes_help.py`](../../src/kicad_tools
 | 5 | Interrupted by SIGINT with partial results saved (file on disk is valid) |
 | 8 | `--complete`: one or more previously-unconnected links remain unroutable (issue #4477) |
 | 9 | A pre-route gate fired — **detailed routing was not started**. Two opt-in gates share this code and the stderr prefix says which: `[crosstail-gate]` — `--census-advisory-gate`'s replayed crossing-tail census (`--census-advisory <report.json>`) predicts an inert crossover lattice, refused before any router or component loading, so nothing at all was spent (issue #4799; see [crosstail-census-report](crosstail-census-report.md#turning-the-prediction-into-a-gate)); `[plan-gate]` — `--plan-gate` found `overflow_report.feasible` false, refused after the report-only plan stage (board loaded, plan under 5 s) but before any detailed routing, and overridable with `--force` (issue #5510 Phase 1c; see [`routing-plan.md`](routing-plan.md)). For both, the fix layer is placement / escape planning / stackup, not the router. Neither is ever returned without its flag. |
-| 10 | **UNVERIFIED** — the run would have exited 0 (completion threshold met, no failure found), but the post-route DRC and/or the stranded-pour check (issue #5785) did not complete: the hard `--timeout` could not cover it, or kicad-cli crashed, was killed or hit its per-call DRC timeout (issue #6724). The board is saved but **not verified**: run `kct check <board> --mfr <manufacturer>` before manufacturing. Only ever replaces exit 0 — a run with a known failure keeps its own code. A stranded-pour check skipped under `--allow-stranded-pour-pads` does not count. `--format json` reports `summary.verdict` as `"unverified"` (issue #6273). |
+| 10 | **UNVERIFIED** — the run would have exited 0 (completion threshold met, no failure found), but the post-route DRC and/or the stranded-pour check (issue #5785) did not complete: the hard `--timeout` could not cover it; kicad-cli crashed, was killed or hit its per-call DRC timeout (issue #6724); or the pour completion loop raised internally (issue #10710). The board is saved but **not verified**: run `kct check <board> --mfr <manufacturer>` before manufacturing. Only ever replaces exit 0 — a run with a known failure keeps its own code. A stranded-pour check skipped under `--allow-stranded-pour-pads` does not count. `--format json` reports `summary.verdict` as `"unverified"` (issue #6273). |
 
 > **Consumer note (issues #4588 / #4607).** `kct build` and `kct pipeline`
 > forward `--voltage-map` (plus `--creepage-standard`, `--pollution-degree`,

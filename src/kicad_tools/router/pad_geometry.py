@@ -25,10 +25,15 @@ def routing_pad_chamfer(pad: BoardPad) -> tuple[frozenset[str], float] | None:
 
     A missing corner list leaves the pad unchamfered. KiCad's default ratio
     for selected corners is 0.2. Both routing models support ratios up to 0.5.
+    A ``chamfer`` child on a shape other than ``roundrect`` is refused: KiCad
+    reads such a pad as a chamfered rectangle whatever shape the file declares
+    (Issue #10720), so the declared shape's plain outline over-claims it.
     """
     node = getattr(pad, "_sexp_node", None)
-    if node is None or pad.shape.lower() != "roundrect":
+    if node is None:
         return frozenset(), 0.0
+    if pad.shape.lower() != "roundrect":
+        return None if node.find_child("chamfer") is not None else (frozenset(), 0.0)
     chamfers = node.find_children("chamfer")
     if not chamfers:
         return frozenset(), 0.0

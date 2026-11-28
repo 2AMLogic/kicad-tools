@@ -76,7 +76,11 @@ Usage (repository root, KiCad 10 ``kicad-cli`` on PATH or ``KICAD_CLI_DIR``)::
 A rerun with the same ``--checked-at`` and ``--reuse-erc`` publishes 0 files.
 ``--build-dir DIR`` keeps board 07's ``build.py`` output in DIR, and replays
 it when DIR already holds one.  ``--dry-run`` runs every gate and publishes
-nothing.
+nothing.  ``--check`` (Issue #10692) is a ``--dry-run`` that anchors each board
+to the ``checked_at`` its committed ``readiness.json`` already carries (so
+``--checked-at`` is optional) and exits 1 when any bundle would publish a
+file: a committed bundle can be self-consistent and still disagree with what
+the current rules emit, and only a fresh run on the pinned toolchain shows it.
 """
 
 from __future__ import annotations
@@ -922,8 +926,8 @@ def stage_replot(
     return written
 
 
-def stage_check_report(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> None:
-    """Write the bundle's ``kct check`` report (board-relative path, so reproducible).
+def run_check_report(staged: Path, cfg: rr.BoardConfig) -> bytes:
+    """Run the bundle's ``kct check`` (board-relative path, so reproducible); return the report.
 
     A board with a ``check_script`` (board 04) runs that instead, as its gate does.
     """
@@ -952,8 +956,57 @@ def stage_check_report(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) 
         run(command, cwd=staged, env=env)
         if not report.is_file():
             raise GateFailure("the check did not produce a report")
-        data = report.read_bytes()
-    _write_targets(staged, bundle.check_reports, data)
+        return report.read_bytes()
+
+
+def stage_check_report(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> None:
+    """Write the bundle's ``kct check`` report into every committed target."""
+    _write_targets(staged, bundle.check_reports, run_check_report(staged, cfg))
+
+
+def rule_counts(report: bytes) -> dict[tuple[str, str], int] | None:
+    """Count findings by rule and severity. Return ``None`` for an unreadable report."""
+    try:
+        violations = json.loads(report)["violations"]
+        if not isinstance(violations, list):
+            return None
+        counts: dict[tuple[str, str], int] = {}
+        for violation in violations:
+            rule, severity = violation["rule_id"], violation["severity"]
+            if (
+                not isinstance(rule, str)
+                or not rule
+                or not isinstance(severity, str)
+                or not severity
+            ):
+                return None
+            key = (rule, severity)
+            counts[key] = counts.get(key, 0) + 1
+    except (ValueError, KeyError, TypeError):
+        return None
+    return counts
+
+
+def stale_check_reports(
+    board: Path, staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig
+) -> list[str]:
+    """Committed check reports whose per-rule counts differ from the current checker (Issue #10692).
+
+    The refresh only re-runs the checker when the archive is stale, so a bundle
+    that is self-consistent but was checked under older rules would otherwise
+    compare clean.  Counts are compared per rule and severity. The report's bytes also
+    carry archive-level noise that is not checker drift.
+    """
+    committed_targets = [t for t in bundle.check_reports if (board / t).is_file()]
+    if not committed_targets:
+        return []
+    fresh = rule_counts(run_check_report(staged, cfg))
+    stale = []
+    for target in committed_targets:
+        committed = board / target
+        if fresh is None or rule_counts(committed.read_bytes()) != fresh:
+            stale.append(target)
+    return stale
 
 
 def stage_recipe_drc(
@@ -1046,6 +1099,7 @@ def refresh_bundle(
     known_issue: list[str] | None = None,
     resolve_known_issue: list[str] | None = None,
     on_verdict: Callable[[str], None] | None = None,
+    compare_checks: bool = False,
 ) -> list[str]:
     cfg = rr.BOARDS[board.name]
     bundle = BUNDLES[board.name]
@@ -1124,7 +1178,7 @@ def refresh_bundle(
                         "published DRC preflight disagrees with output/drc_report.json"
                     )
 
-        return rr.repin_staged(
+        would_publish = rr.repin_staged(
             board,
             staged,
             cfg,
@@ -1137,12 +1191,65 @@ def refresh_bundle(
             after_manifest=after_manifest if stale else None,
             on_verdict=on_verdict,
         )
+        if compare_checks and not stale:
+            # Issue #10692: a current archive skips the checker above, so compare
+            # the committed per-rule counts to a fresh run here.
+            for target in stale_check_reports(board, staged, cfg, bundle):
+                if target not in would_publish:
+                    would_publish.append(target)
+        return would_publish
+
+
+def committed_checked_at(board: Path) -> str:
+    """The ``checked_at`` a board's committed ``readiness.json`` was pinned at (Issue #10692)."""
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    return report["checked_at"]
+
+
+def _source_date_epoch(checked_at: str) -> str:
+    """``SOURCE_DATE_EPOCH`` for an ISO ``checked_at``; the ``Z`` suffix parses on 3.10 too."""
+    return str(int(datetime.fromisoformat(checked_at.replace("Z", "+00:00")).timestamp()))
+
+
+def drift_exit_status(
+    drift: dict[str, list[str]],
+    refused: list[str] | None = None,
+    blocked: list[str] | None = None,
+) -> int:
+    """The ``--check`` verdict (Issue #10692).
+
+    1 when any board would publish, was refused by a gate, or does not verify
+    ready (a ``blocked`` receipt, Issue #10662 -- the nightly stays red for
+    such a board until its defect is fixed); else 0.  The "clean" line is only
+    printed when none of those happened, so a red run never reads as clean.
+    """
+    refused, blocked = refused or [], blocked or []
+    if not (drift or refused or blocked):
+        log("== --check: every bundle reproduces on the pinned toolchain; nothing to publish")
+        return 0
+    for name, files in drift.items():
+        log(f"== --check DRIFT {name}: a fresh run would publish {len(files)} file(s)")
+        for path in files:
+            log(f"    {path}")
+    if drift:
+        log(
+            "  --check: the committed bundle disagrees with a fresh run. Refresh it with this "
+            "driver (without --check) on the pinned toolchain and commit the result."
+        )
+    for name in refused:
+        log(f"== --check REFUSED {name}: a gate refused the fresh run; drift is unknown")
+    for name in blocked:
+        log(f"== --check BLOCKED {name}: the board does not verify ready (not drift)")
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("boards", nargs="+", type=Path, help="board directories")
-    parser.add_argument("--checked-at", required=True, help="ISO timestamp for readiness.json")
+    parser.add_argument(
+        "--checked-at",
+        help="ISO timestamp for readiness.json (with --check: defaults to each board's committed value)",
+    )
     parser.add_argument("--reuse-erc", type=Path, help="replay ERC reports saved by --save-erc")
     parser.add_argument("--save-erc", type=Path, help="keep the native ERC reports here")
     parser.add_argument(
@@ -1154,6 +1261,11 @@ def main(argv: list[str] | None = None) -> int:
         "--force-replot", action="store_true", help="re-plot even if the bundle is current"
     )
     parser.add_argument("--dry-run", action="store_true", help="run every gate, publish nothing")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="publish nothing; exit 1 when any bundle would publish files (Issue #10692)",
+    )
     parser.add_argument(
         "--known-issue",
         action="append",
@@ -1169,47 +1281,69 @@ def main(argv: list[str] | None = None) -> int:
         help="drop a recorded known issue by number (repeatable, Issue #7323)",
     )
     args = parser.parse_args(argv)
+    if not args.checked_at and not args.check:
+        parser.error("--checked-at is required unless --check reads each board's committed value")
     # Issue #9536: anchor every exporter wall-clock stamp (manifest
     # ``generated_at``, README ``Generated at``, report date -- and weasyprint
-    # PDF metadata) to ``--checked-at`` via the reproducible-builds
+    # PDF metadata) to the board's ``checked_at`` via the reproducible-builds
     # ``SOURCE_DATE_EPOCH`` convention, so a repeated publish with the same
-    # inputs writes byte-identical evidence.  ``setdefault`` keeps an explicit
-    # caller override.
-    try:
-        from datetime import datetime as _dt
-
-        _anchored = str(int(_dt.fromisoformat(args.checked_at).timestamp()))
-        os.environ.setdefault("SOURCE_DATE_EPOCH", _anchored)
-    except ValueError:
-        parser.error(f"--checked-at is not an ISO timestamp: {args.checked_at}")
+    # inputs writes byte-identical evidence.  It is set per board, because
+    # ``--check`` takes each board's own committed anchor; a value already in
+    # the environment is an explicit caller override and is kept.
+    ambient_epoch = os.environ.get("SOURCE_DATE_EPOCH")
     status = 0
+    drift: dict[str, list[str]] = {}
+    refused: list[str] = []
+    blocked: list[str] = []
     for board in args.boards:
         board = board.resolve()
         if board.name not in BUNDLES:
             parser.error(f"{board.name}: no bundle configuration (known: {sorted(BUNDLES)})")
         log(f"== {board.name}")
         verdict = rr.Verdict()
+        if args.checked_at:
+            checked_at, origin = args.checked_at, "--checked-at"
+        else:
+            origin = f"{board.name}: committed checked_at"
+            try:
+                checked_at = committed_checked_at(board)
+            except (OSError, KeyError, ValueError):
+                parser.error(f"{origin} is unreadable in output/readiness.json")
         try:
-            for name in refresh_bundle(
+            anchored = _source_date_epoch(checked_at)
+        except ValueError:
+            parser.error(f"{origin} is not an ISO timestamp: {checked_at}")
+        if ambient_epoch is None:
+            os.environ["SOURCE_DATE_EPOCH"] = anchored
+        try:
+            would_publish = refresh_bundle(
                 board,
-                args.checked_at,
+                checked_at,
                 reuse_erc=args.reuse_erc,
                 save_erc=args.save_erc,
                 build_dir=args.build_dir.resolve() if args.build_dir else None,
                 force_replot=args.force_replot,
-                dry_run=args.dry_run,
+                dry_run=args.dry_run or args.check,
+                compare_checks=args.check,
                 known_issue=args.known_issue,
                 resolve_known_issue=args.resolve_known_issue,
                 on_verdict=verdict.publish,
-            ):
+            )
+            for name in would_publish:
                 log(f"    {name}")
+            if would_publish:
+                drift[board.name] = would_publish
         except GateFailure as exc:
             log(f"  REFUSED: {exc} -- nothing published for {board.name}")
             status = 1
+            refused.append(board.name)
             continue
         if verdict.status != "ready":
             log(f"  BLOCKED: {board.name} does not verify ready (exit 1)")
             status = 1
+            blocked.append(board.name)
+    if args.check:
+        status = drift_exit_status(drift, refused=refused, blocked=blocked) or status
     return status
 
 

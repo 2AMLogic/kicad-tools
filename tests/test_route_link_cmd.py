@@ -566,6 +566,11 @@ class TestCommit:
             "(chamfer top_left) "
             '(drill 0.4 (offset -0.3 -0.3)) (layers "*.Cu" "*.Mask") (net 1 "SENSE"))'
         ),
+        "rect_chamfer": (
+            '(pad "1" thru_hole rect (at 0 0) (size 2 2) '
+            "(chamfer top_left) "
+            '(drill 0.4 (offset -0.3 -0.3)) (layers "*.Cu" "*.Mask") (net 1 "SENSE"))'
+        ),
         "trapezoid": (
             '(pad "1" thru_hole trapezoid (at 0 0) (size 2 2) (rect_delta 0 0.6) '
             '(drill 0.4 (offset -0.3 -0.3)) (layers "*.Cu" "*.Mask") (net 1 "SENSE"))'
@@ -649,6 +654,66 @@ class TestCommit:
         terminal = terminal_for_pad(PCB.load(board), "P2", "1")
         assert terminal is not None
         assert terminal.layers["F.Cu"].area == pytest.approx(area)
+
+    @pytest.mark.parametrize(
+        ("pad_text", "expected"),
+        [
+            (_DIAGONAL_PADS["rect_chamfer"], None),
+            (_DIAGONAL_PADS["rect_chamfer"].replace("(chamfer top_left) ", ""), (frozenset(), 0.0)),
+            (_DIAGONAL_PADS["omitted"], (frozenset({"top_left"}), 0.2)),
+            (_DIAGONAL_PADS["omitted"].replace("(chamfer top_left)", "(chamfer)"), None),
+            (
+                _DIAGONAL_PADS["omitted"].replace(
+                    "(chamfer top_left)", "(chamfer_ratio 0.9) (chamfer top_left)"
+                ),
+                None,
+            ),
+            (
+                _DIAGONAL_PADS["omitted"].replace(
+                    "(chamfer top_left)", "(chamfer_ratio abc) (chamfer top_left)"
+                ),
+                None,
+            ),
+        ],
+        ids=[
+            "rect-with-chamfer",
+            "rect-without-chamfer",
+            "roundrect-with-chamfer",
+            "roundrect-empty-chamfer",
+            "roundrect-ratio-0.9",
+            "roundrect-ratio-abc",
+        ],
+    )
+    def test_chamfer_reading_by_pad_representation(self, tmp_path, pad_text, expected):
+        """Both routing models read chamfers through one reader (Issues #10711, #10720)."""
+        from kicad_tools.router.pad_geometry import routing_pad_chamfer
+
+        old_pads, type(self)._DIAGONAL_PADS = (
+            type(self)._DIAGONAL_PADS,
+            dict(type(self)._DIAGONAL_PADS, row=pad_text),
+        )
+        try:
+            pcb = PCB.load(str(self._diagonal_board(tmp_path, "row")))
+        finally:
+            type(self)._DIAGONAL_PADS = old_pads
+        assert routing_pad_chamfer(pcb.get_footprint("P2").pads[0]) == expected
+
+    def test_chamfer_token_on_a_rect_pad_refuses_the_named_pad(self, tmp_path, capsys):
+        """KiCad honours ``(chamfer ...)`` on a ``rect`` pad, so a plain box over-claims it."""
+        from kicad_tools.router.link_router import terminal_for_pad
+
+        board = self._diagonal_board(tmp_path, "rect_chamfer")
+        before = board.read_bytes()
+        assert terminal_for_pad(PCB.load(board), "P2", "1") is None
+        dest = tmp_path / "saved.kicad_pcb"
+        for mode in [("--probe",), ("-o", str(dest))]:
+            rc, result = _run(capsys, str(board), "--link", "SENSE P3.1 P2.1", *mode)
+            assert rc == 1
+            link = result["links"][0]
+            assert not link["routable"]
+            assert "P2.1" in link["reason"] and "chamfer" in link["reason"]
+        assert board.read_bytes() == before
+        assert not dest.exists()
 
     @pytest.mark.parametrize("order", ["P3.1 P2.1", "P2.1 P3.1"])
     @pytest.mark.parametrize("kind", ["chamfered", "omitted", "trapezoid"])

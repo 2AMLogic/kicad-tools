@@ -6675,6 +6675,7 @@ def run_stitch(
     fill_verified: bool = False,
     mask_entry_clearance: float = 0.0,
     entry_lands: Mapping[tuple[str, str], "MaskOpening"] | None = None,
+    pad_escape_class: tuple[float, float] | None = None,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -6771,6 +6772,16 @@ def run_stitch(
             placement no strategy can seat legally is dropped at the
             commit chokepoint with an explicit ``same_net_trace_gap``
             skip reason.  ``0.0`` (default) disables the guard.
+        pad_escape_class: Issue #9424 -- ``(class_width, class_clearance)``
+            when ``trace_width`` is that class's pad-escape neck
+            (``PourLinkCloser.neck_width``). Every written stub must then be
+            one leg the net-class agreement audit judges a pad escape: a
+            straight leg or a single 45-degree dogleg landing within the
+            class's pad-escape reach of the pad
+            (:func:`kicad_tools.validate.rules.netclass_agreement.pad_escape_lands`).
+            Any other placement is skipped with a ``pad_escape_reach``
+            reason instead of writing copper below the class width as a
+            detour.  ``None`` (default) constrains nothing.
 
     Returns:
         StitchResult with details of what was done
@@ -7970,6 +7981,19 @@ def run_stitch(
                 result.pads_skipped.append((pad, "no clearance-legal full-width pad entry"))
                 continue
 
+        if pad_escape_class is not None:
+            from kicad_tools.validate.rules.netclass_agreement import (
+                pad_escape_lands,
+                pad_escape_reach,
+            )
+
+            reach = pad_escape_reach((pad.width, pad.height), *pad_escape_class)
+            if not pad_escape_lands(trace_points(trace), reach):
+                result.pads_skipped.append(
+                    (pad, f"pad_escape_reach: necked stub would land beyond {reach:.2f} mm")
+                )
+                continue
+
         # Issue #6684: decide keep-or-drop BEFORE recording anything, so a
         # dropped via never counts as connectivity for a later same-net pad,
         # never sits in the cross-net obstacle pool and is never counted.
@@ -8157,6 +8181,7 @@ def _finish_post_stitch_drc(result, pcb_path: Path) -> dict:
     error_count = report.error_count
     warning_count = report.warning_count
     unconnected_count = report.unconnected_item_count
+    info_count = report.info_count
     passed = error_count == warning_count == unconnected_count == 0
 
     print(f"\n{'=' * 60}")
@@ -8164,11 +8189,28 @@ def _finish_post_stitch_drc(result, pcb_path: Path) -> dict:
     print(f"{'=' * 60}")
     print(f"  Errors:   {error_count}")
     print(f"  Warnings: {warning_count}")
+    if info_count:
+        print(f"  Infos:    {info_count}")
 
     print(f"  Unconnected items: {unconnected_count}")
 
+    # Info findings never gate (Issue #10650) but must not vanish from a
+    # passing run: the temp report is deleted, so this is their only record.
+    info_by_type: dict[str, int] = {}
+    for v in report.violations:
+        if v.is_info:
+            info_by_type[v.type_str] = info_by_type.get(v.type_str, 0) + 1
+
     if passed:
-        print("\nDRC PASSED - No violations found")
+        if info_count:
+            print(
+                f"\nDRC PASSED - No errors or warnings ({info_count} informational "
+                f"finding{'s' if info_count != 1 else ''} remain)"
+            )
+            for type_str, n in sorted(info_by_type.items(), key=lambda x: -x[1]):
+                print(f"  {type_str}: {n} info{'s' if n != 1 else ''}")
+        else:
+            print("\nDRC PASSED - No violations found")
     else:
         # Group by type
         by_type = report.violations_by_type()
@@ -8176,12 +8218,15 @@ def _finish_post_stitch_drc(result, pcb_path: Path) -> dict:
         print("BY TYPE:")
         for vtype, violations in sorted(by_type.items(), key=lambda x: -len(x[1])):
             errors = sum(1 for v in violations if v.is_error)
-            warnings = len(violations) - errors
+            warnings = sum(1 for v in violations if v.is_warning)
+            infos = sum(1 for v in violations if v.is_info)
             parts = []
             if errors:
                 parts.append(f"{errors} error{'s' if errors != 1 else ''}")
             if warnings:
                 parts.append(f"{warnings} warning{'s' if warnings != 1 else ''}")
+            if infos:
+                parts.append(f"{infos} info{'s' if infos != 1 else ''}")
             print(f"  {vtype.value}: {', '.join(parts)}")
 
         if error_count > 0:
@@ -8203,6 +8248,8 @@ def _finish_post_stitch_drc(result, pcb_path: Path) -> dict:
         "passed": passed,
         "error_count": error_count,
         "warning_count": warning_count,
+        "info_count": info_count,
+        "info_by_type": info_by_type,
         "unconnected_item_count": unconnected_count,
         "reason": None,
     }
