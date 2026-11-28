@@ -284,6 +284,24 @@ class TestEndpointFailClosed:
                 False,
                 id="uncut-corner-keeps-radius",
             ),
+            pytest.param(
+                "roundrect",
+                0,
+                ("bottom_right", 0.0, None),
+                "17 18",
+                "12.60 14.60",
+                False,
+                id="missing-chamfer-ratio",
+            ),
+            pytest.param(
+                "roundrect",
+                0,
+                ("bottom_right", 0.0, 0.14),
+                "17 18",
+                "13.20 13.70",
+                False,
+                id="chamfer-off-side",
+            ),
         ],
     )
     def test_contact_with_offset_plated_pad(
@@ -296,9 +314,8 @@ class TestEndpointFailClosed:
         corner_tokens = ""
         if chamfer:
             corner, radius_ratio, cut_ratio = chamfer
-            corner_tokens = (
-                f"(roundrect_rratio {radius_ratio}) (chamfer_ratio {cut_ratio}) (chamfer {corner})"
-            )
+            ratio_token = "" if cut_ratio is None else f" (chamfer_ratio {cut_ratio})"
+            corner_tokens = f"(roundrect_rratio {radius_ratio}){ratio_token} (chamfer {corner})"
         pcb = tmp_path / "offset.kicad_pcb"
         pcb.write_text(f"""(kicad_pcb (version 20240108) (generator "test")
             (general (thickness 1.6)) (layers (0 "F.Cu" signal) (31 "B.Cu" signal)
@@ -328,6 +345,81 @@ class TestEndpointFailClosed:
             errors = [v for v in violations if v["severity"] == "error"]
             assert len(errors) == 1
             assert "P2.1 has no routed copper touching it" in errors[0]["message"]
+
+    @pytest.mark.parametrize(
+        ("shape", "pad_tokens"),
+        [
+            pytest.param(
+                "roundrect", "(roundrect_rratio 0.0) (chamfer bottom_right)", id="no-ratio"
+            ),
+            pytest.param(
+                "roundrect",
+                "(roundrect_rratio 0.0) (chamfer_ratio 0.0) (chamfer bottom_right)",
+                id="zero-ratio",
+            ),
+            pytest.param(
+                "roundrect",
+                "(roundrect_rratio 0.0) (chamfer_ratio -0.1) (chamfer bottom_right)",
+                id="negative-ratio",
+            ),
+            pytest.param(
+                "roundrect",
+                "(roundrect_rratio 0.0) (chamfer_ratio 0.8) (chamfer bottom_right)",
+                id="ratio-above-half",
+            ),
+            pytest.param(
+                "roundrect",
+                "(roundrect_rratio 0.0) (chamfer_ratio nan) (chamfer bottom_right)",
+                id="nan-ratio",
+            ),
+            pytest.param(
+                "roundrect",
+                "(roundrect_rratio 0.0) (chamfer_ratio banana) (chamfer bottom_right)",
+                id="non-numeric-ratio",
+            ),
+            pytest.param(
+                "roundrect",
+                "(roundrect_rratio 0.2) (chamfer_ratio 0.2) (chamfer bogus)",
+                id="unknown-corner",
+            ),
+            pytest.param(
+                "roundrect",
+                "(roundrect_rratio banana)",
+                id="non-numeric-rratio",
+            ),
+            pytest.param(
+                "rect",
+                "(chamfer_ratio 0.2) (chamfer bottom_right)",
+                id="chamfer-on-rect",
+            ),
+        ],
+    )
+    def test_unusable_chamfer_or_ratio_fails_closed(
+        self, tmp_path: Path, shape: str, pad_tokens: str
+    ):
+        pcb = tmp_path / "malformed.kicad_pcb"
+        pcb.write_text(f"""(kicad_pcb (version 20240108) (generator "test")
+            (general (thickness 1.6)) (layers (0 "F.Cu" signal) (31 "B.Cu" signal)
+            (44 "Edge.Cuts" user) (49 "F.Fab" user)) (setup) (net 0 "") (net 1 "SENSE")
+            (gr_rect (start 1 1) (end 23 23) (stroke (width 0.1) (type default))
+             (fill none) (layer "Edge.Cuts"))
+            (footprint "P" (layer "F.Cu") (at 17 18) (fp_text reference "P3" (at 0 0) (layer "F.Fab") hide)
+             (pad "1" thru_hole rect (at 0 0) (size 2 2) (drill 0.4) (layers "*.Cu") (net 1 "SENSE")))
+            (footprint "P" (layer "F.Cu") (at 12 14) (fp_text reference "P2" (at 0 0) (layer "F.Fab") hide)
+             (pad "1" thru_hole {shape} (at 0 0) (size 2 2) {pad_tokens}
+              (drill 0.4 (offset -0.3 -0.3)) (layers "*.Cu") (net 1 "SENSE")))
+            (segment (start 17 18) (end 11.70 13.70) (width 0.20) (layer "F.Cu") (net 1)))""")
+        spec = CurrentPathSpec(
+            "branch", "SENSE", PathEndpoint("P3", "1"), PathEndpoint("P2", "1"), 0.10
+        )
+        sidecar = _write_sidecar(tmp_path / "current_paths.json", [spec])
+        report = tmp_path / "report.json"
+        result = _run_check(pcb, report, extra=["--current-paths", str(sidecar), "--drc-only"])
+
+        assert result == 2
+        errors = [v for v in _path_ampacity_violations(report) if v["severity"] == "error"]
+        assert len(errors) == 1
+        assert "P2.1 has no routed copper touching it" in errors[0]["message"]
 
     def test_moved_pad_reports_error_not_silent_pass(self, adequate_pcb: Path, tmp_path: Path):
         """A declared endpoint that no longer resolves is a visible error --

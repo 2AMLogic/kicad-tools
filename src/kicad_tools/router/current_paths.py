@@ -4281,17 +4281,40 @@ def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float])
     return len(pads) == 1 and _physical_pad_covers(fp, pads[0], point)
 
 
-def _corner_chamfer_ratio(pad: Pad, x: float, y: float) -> float | None:
-    """Cut ratio for the corner in this pad-local quadrant, if selected."""
+_CHAMFER_CORNERS = frozenset({"top_left", "top_right", "bottom_left", "bottom_right"})
+
+
+def _corner_chamfer_ratio(pad: Pad, x: float, y: float) -> tuple[bool, float | None]:
+    """Return ``(usable, cut_ratio)`` for this pad-local quadrant.
+
+    When a ``(chamfer ...)`` list is present with a missing or unusable
+    ``(chamfer_ratio ...)`` (or malformed corner tokens), ``usable`` is
+    ``False`` so the caller refuses the pad instead of falling back to an
+    uncut corner.
+    """
     node = pad._sexp_node
-    if node is None or (corners := node.find_child("chamfer")) is None:
-        return None
+    if node is None:
+        return True, None
+    chamfers = node.find_children("chamfer")
+    if not chamfers:
+        return True, None
+    if len(chamfers) != 1:
+        return False, None
+    corners = chamfers[0]
+    if not corners.children or any(
+        not item.is_atom or item.value not in _CHAMFER_CORNERS for item in corners.children
+    ):
+        return False, None
+    ratios = node.find_children("chamfer_ratio")
+    if len(ratios) != 1 or len(ratios[0].children) != 1 or not ratios[0].children[0].is_atom:
+        return False, None
+    ratio = ratios[0].get_float(0)
+    if ratio is None or not math.isfinite(ratio) or not 0 < ratio <= 0.5:
+        return False, None
     corner = ("top" if y < 0 else "bottom") + ("_left" if x < 0 else "_right")
     if not any(item.value == corner for item in corners.children):
-        return None
-    ratio_node = node.find_child("chamfer_ratio")
-    ratio = ratio_node.get_float(0) if ratio_node is not None else None
-    return min(ratio, 0.5) if ratio is not None and math.isfinite(ratio) and ratio > 0 else None
+        return True, None
+    return True, ratio
 
 
 def _physical_pad_covers(fp: Footprint, pad: Pad, point: tuple[float, float]) -> bool:
@@ -4327,6 +4350,14 @@ def _physical_pad_covers(fp: Footprint, pad: Pad, point: tuple[float, float]) ->
     # The drill is at the anchor. The copper is displaced in pad-local axes.
     local_x -= pad.drill_offset[0]
     local_y -= pad.drill_offset[1]
+    if not (math.isfinite(local_x) and math.isfinite(local_y)):
+        return False
+    if (
+        pad._sexp_node is not None
+        and pad._sexp_node.find_child("chamfer") is not None
+        and pad.shape != "roundrect"
+    ):
+        return False
 
     if pad.shape == "circle":
         radius = min(half_w, half_h)
@@ -4343,10 +4374,22 @@ def _physical_pad_covers(fp: Footprint, pad: Pad, point: tuple[float, float]) ->
         edge_x, edge_y = half_w - abs(local_x), half_h - abs(local_y)
         if min(edge_x, edge_y) < -_PAD_EPS:
             return False
+        if pad._sexp_node is not None and (
+            rratios := pad._sexp_node.find_children("roundrect_rratio")
+        ):
+            if (
+                len(rratios) != 1
+                or len(rratios[0].children) != 1
+                or not rratios[0].children[0].is_atom
+                or rratios[0].get_float(0) is None
+            ):
+                return False
         ratio = pad.roundrect_rratio
         if not 0 <= ratio <= 0.5:
             return False
-        cut_ratio = _corner_chamfer_ratio(pad, local_x, local_y)
+        usable, cut_ratio = _corner_chamfer_ratio(pad, local_x, local_y)
+        if not usable:
+            return False
         if cut_ratio is not None:
             # A straight cut joins two points this distance along the edges.
             cut = 2 * min(half_w, half_h) * cut_ratio
