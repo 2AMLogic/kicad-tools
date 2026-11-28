@@ -444,6 +444,11 @@ class DesignRules:
     # supplies this value. Without one, only the published width floor applies.
     trace_width_warning_mm: float | None = None
 
+    # A configured band grades silk on plated/non-plated component drills
+    # as errors and silk on via drills as informational (#9033). None keeps
+    # the existing advisory grade. JLCPCB's configured 0.0 mm detects overlap.
+    silk_to_hole_danger_mm: float | None = None
+
     def __post_init__(self) -> None:
         """Enforce ``min_inner_clearance_mm <= min_clearance_mm`` (Issue #9113).
 
@@ -514,6 +519,7 @@ class DesignRules:
             "min_copper_to_edge_mm": self.min_copper_to_edge_mm,
             "min_hole_to_edge_mm": self.min_hole_to_edge_mm,
             "min_hole_to_hole_mm": self.min_hole_to_hole_mm,
+            "silk_to_hole_danger_mm": self.silk_to_hole_danger_mm,
             "min_silkscreen_width_mm": self.min_silkscreen_width_mm,
             "min_silkscreen_height_mm": self.min_silkscreen_height_mm,
             "min_solder_mask_dam_mm": self.min_solder_mask_dam_mm,
