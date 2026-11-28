@@ -3482,12 +3482,15 @@ def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
     return {"copper_cleanup": "applied", "removed": removed, "steps": steps}
 
 
-def _avoidable_copper(pcb_path: Path) -> tuple[int, int] | None:
-    """``(sharp_trace_corner, redundant_copper*)`` finding counts, or ``None``.
+def _avoidable_copper(pcb_path: Path) -> tuple[frozenset[tuple[Any, ...]], int] | None:
+    """``(sharp_trace_corner sites, redundant_copper* count)``, or ``None``.
 
     The two rules that judge a cleanup pass's *shape* -- native DRC accepts an
-    explicit acute junction and a split-off stub (Issue #10667).  ``None``
-    when they cannot run; a caller then keeps the step's own verification.
+    explicit acute junction and a split-off stub (Issue #10667).  Sharp corners
+    are tracked by ``(nets, layer, x, y)`` site (0.01 mm precision) rather than
+    only by total count so a pass that replaces an old corner with a new one is
+    caught.  ``None`` when they cannot run; a caller then keeps the step's own
+    verification.
     """
     try:
         from kicad_tools.schema.pcb import PCB
@@ -3505,8 +3508,18 @@ def _avoidable_copper(pcb_path: Path) -> tuple[int, int] | None:
         redundant = checker.redundant_copper_rule().check(pcb, checker.design_rules)
     except Exception:  # noqa: BLE001 - an unreadable board is the gates' to report
         return None
+    sharp_sites = frozenset(
+        (
+            tuple(sorted(v.nets)),
+            v.layer or "",
+            round(v.location[0], 2) if v.location is not None else None,
+            round(v.location[1], 2) if v.location is not None else None,
+        )
+        for v in sharp.violations
+        if v.rule_id == "sharp_trace_corner"
+    )
     return (
-        sum(1 for v in sharp.violations if v.rule_id == "sharp_trace_corner"),
+        sharp_sites,
         sum(1 for v in redundant.violations if v.rule_id.startswith("redundant_copper")),
     )
 
@@ -3532,18 +3545,24 @@ def _guarded_cleanup_step(
     if record.get("status") != "applied":
         return record
     after = _avoidable_copper(pcb_path)
-    if after is not None and (after[0] > before[0] or after[1] > before[1]):
-        pcb_path.write_bytes(snapshot)
-        added = ", ".join(
-            f"{after[i] - before[i]} {label}"
-            for i, label in enumerate(("sharp_trace_corner", "redundant_copper"))
-            if after[i] > before[i]
-        )
-        return {
-            "status": "not-applied",
-            "detail": f"would introduce {added} finding(s)",
-            **{k: v for k, v in record.items() if k != "status"},
-        }
+    if after is not None:
+        new_sharp = len(after[0] - before[0])
+        new_redundant = max(0, after[1] - before[1])
+        if new_sharp or new_redundant:
+            pcb_path.write_bytes(snapshot)
+            added = ", ".join(
+                f"{count} {label}"
+                for count, label in (
+                    (new_sharp, "sharp_trace_corner"),
+                    (new_redundant, "redundant_copper"),
+                )
+                if count
+            )
+            return {
+                "status": "not-applied",
+                "detail": f"would introduce {added} finding(s)",
+                **{k: v for k, v in record.items() if k != "status"},
+            }
     return record
 
 

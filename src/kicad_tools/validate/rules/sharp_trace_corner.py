@@ -326,6 +326,7 @@ def sharp_vertex(
     *,
     added: Sequence[Any] = (),
     removed: Sequence[Any] = (),
+    copper_discs: Sequence[tuple[str, tuple[str, ...], float, float, float, Any]] | None = None,
 ) -> tuple[float, str] | None:
     """``(angle, corner_class)`` were ``sharp_trace_corner`` to report ``point``.
 
@@ -337,9 +338,16 @@ def sharp_vertex(
     taps a straight run at 45 deg is declined here, not only when the saved
     board is re-checked. ``kct fix-drc --only redundant-copper`` (issue #10667)
     calls it to decline a candidate before it is applied.
+
+    Callers evaluating many candidate vertices on one board can pass
+    ``copper_discs`` precomputed via :func:`_copper_discs` to avoid rebuilding
+    every pad polygon per call.
     """
     from kicad_tools.explain.checks.acid_trap import AcidTrapCheck
 
+    discs = _copper_discs(pcb) if copper_discs is None else copper_discs
+    if _is_buried(discs, net_name, layer, point):
+        return None
     tracks = [
         s
         for s in pcb.segments
@@ -348,8 +356,6 @@ def sharp_vertex(
         and all(s is not gone for gone in removed)
     ]
     tracks.extend(added)
-    if _is_buried(_copper_discs(pcb), net_name, layer, point):
-        return None
     check = AcidTrapCheck()
     for joint in _group_junctions(tracks, check):
         if math.dist(joint.location, point) > 0.02:

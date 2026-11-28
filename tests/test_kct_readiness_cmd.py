@@ -2500,9 +2500,47 @@ def _sharp_corner_board(path: Path) -> Path:
 
 def test_avoidable_copper_counts_both_rules(tmp_path):
     clean = _redundant_board(tmp_path / "clean.kicad_pcb", [_rule_module()._Seg((0, 0), (5, 0))])
-    assert readiness_cmd._avoidable_copper(clean) == (0, 0)
-    assert readiness_cmd._avoidable_copper(_staircase_board(tmp_path / "stair.kicad_pcb")) == (0, 1)
-    assert readiness_cmd._avoidable_copper(_sharp_corner_board(tmp_path / "fold.kicad_pcb"))[0] == 1
+    assert readiness_cmd._avoidable_copper(clean) == (frozenset(), 0)
+    assert readiness_cmd._avoidable_copper(_staircase_board(tmp_path / "stair.kicad_pcb")) == (
+        frozenset(),
+        1,
+    )
+    sharp_sites, redundant_count = readiness_cmd._avoidable_copper(
+        _sharp_corner_board(tmp_path / "fold.kicad_pcb")
+    )
+    assert len(sharp_sites) == 1
+    assert redundant_count == 0
+
+
+def test_cleanup_pass_that_replaces_a_sharp_corner_at_a_new_site_is_put_back(tmp_path):
+    """PR #10698 regression: removing one sharp corner while introducing a new
+    one at another coordinate keeps the total unchanged, so site identity must
+    reject the step."""
+    module = _rule_module()
+    options = _tier1_options(
+        tmp_path,
+        [
+            module._Seg((0, 0), (4, 0), width=0.3),
+            module._Seg((4, 0), (3.4, 0.6), width=0.3),
+        ],
+    )
+    before = options.pcb.read_bytes()
+    moved = _redundant_board(
+        tmp_path / "moved.kicad_pcb",
+        [
+            module._Seg((0, 0), (6, 0), width=0.3),
+            module._Seg((6, 0), (5.4, 0.6), width=0.3),
+        ],
+    ).read_bytes()
+
+    def replaces_corner(options):
+        options.pcb.write_bytes(moved)
+        return {"status": "applied", "segments_removed": 1}
+
+    record = readiness_cmd._guarded_cleanup_step(options, replaces_corner)
+    assert record["status"] == "not-applied"
+    assert record["detail"] == "would introduce 1 sharp_trace_corner finding(s)"
+    assert options.pcb.read_bytes() == before
 
 
 def test_cleanup_pass_that_adds_a_sharp_corner_is_put_back(tmp_path):

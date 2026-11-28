@@ -289,14 +289,25 @@ class RedundantCopperRule(DRCRule):
             getattr(design_rules, "min_clearance_mm", None) or STAIRCASE_DEFAULT_CLEARANCE_MM
         )
         self._requirement = self._pair_requirement(pcb)
-        self._foreign_cache: dict[str, list[Any]] = {}
+        self._req_cache: dict[tuple[int, int], float] = {}
+        self._foreign_cache: dict[str, list[tuple[Any, float, float, float, float]]] = {}
+        self._static_foreign_cache: dict[str, list[tuple[Any, float, float, float, float]]] = {}
         self._mask_cache: dict[str, list[_MaskZone]] = {}
+        self._copper_discs_cache: list[Any] | None = None
         self._gap_oracle = None  # Rebuild lazily for this PCB.
 
     def invalidate_copper(self) -> None:
         """Forget per-layer copper caches after an edit (pads and masks keep)."""
         self._foreign_cache = {}
         self._gap_oracle = None
+
+    def _copper_discs(self) -> list[Any]:
+        """Pad/via burial discs for the bound PCB, built once per ``bind``."""
+        if self._copper_discs_cache is None:
+            from .sharp_trace_corner import _copper_discs
+
+            self._copper_discs_cache = _copper_discs(self._pcb)
+        return self._copper_discs_cache
 
     @staticmethod
     def chain_groups(pcb: PCB) -> dict[tuple[int, str], list[Any]]:
@@ -674,7 +685,7 @@ class RedundantCopperRule(DRCRule):
             return []
         return [
             ((elem.geometry[0], elem.geometry[1]), elem.kernel_shape())
-            for elem in self._foreign_elements(layer)
+            for elem, *_ in self._static_foreign_elements(layer)
             if elem.net_number == net and elem.element_type in ("pad", "via")
         ]
 
@@ -824,42 +835,68 @@ class RedundantCopperRule(DRCRule):
 
     # -- staircase (Issue #8831) ------------------------------------------
 
-    def _foreign_elements(self, layer: str) -> list[Any]:
-        """Segment/via/pad copper on ``layer``, as clearance-kernel elements."""
+    @staticmethod
+    def _element_bounds(elem: Any) -> tuple[float, float, float, float]:
+        """Conservative axis-aligned bounding box ``(minx, miny, maxx, maxy)``."""
+        if elem.element_type == "segment":
+            x1, y1, x2, y2, w = elem.geometry
+            hw = w / 2.0
+            return (min(x1, x2) - hw, min(y1, y2) - hw, max(x1, x2) + hw, max(y1, y2) + hw)
+        poly = getattr(elem, "polygon", None)
+        if poly is not None and not poly.is_empty:
+            minx, miny, maxx, maxy = poly.bounds
+            return (float(minx), float(miny), float(maxx), float(maxy))
+        cx, cy, w, h = elem.geometry[:4]
+        r = math.hypot(w, h) / 2.0
+        return (cx - r, cy - r, cx + r, cy + r)
+
+    def _static_foreign_elements(self, layer: str) -> list[tuple[Any, float, float, float, float]]:
+        """Via/pad copper on ``layer``, cached across segment-only edits."""
+        from .clearance import CopperElement
+
+        if layer in self._static_foreign_cache:
+            return self._static_foreign_cache[layer]
+        pcb = self._pcb
+        elems: list[tuple[Any, float, float, float, float]] = []
+        for via in pcb.vias:
+            if via_spans_layer(via.layers, layer):
+                elem = CopperElement(
+                    element_type="via",
+                    layer="*",
+                    net_number=via.net_number,
+                    geometry=(via.position[0], via.position[1], via.size, via.size),
+                    reference="",
+                    explicit_layers=tuple(via.layers),
+                )
+                elems.append((elem, *self._element_bounds(elem)))
+        for fp in getattr(pcb, "footprints", None) or []:
+            for pad in getattr(fp, "pads", None) or []:
+                pad_layers = getattr(pad, "layers", None) or []
+                if layer in pad_layers or "*.Cu" in pad_layers:
+                    elem = CopperElement.from_pad(pad, fp)
+                    elems.append((elem, *self._element_bounds(elem)))
+        self._static_foreign_cache[layer] = elems
+        return elems
+
+    def _foreign_elements(self, layer: str) -> list[tuple[Any, float, float, float, float]]:
+        """Segment/via/pad copper on ``layer``, as ``(CopperElement, minx, miny, maxx, maxy)``."""
         from .clearance import CopperElement
 
         if layer in self._foreign_cache:
             return self._foreign_cache[layer]
         pcb = self._pcb
-        elems: list[Any] = []
+        elems: list[tuple[Any, float, float, float, float]] = []
         for seg in pcb.segments:
             if seg.layer == layer and seg.width > 0:
-                elems.append(
-                    CopperElement(
-                        element_type="segment",
-                        layer=layer,
-                        net_number=seg.net_number,
-                        geometry=(seg.start[0], seg.start[1], seg.end[0], seg.end[1], seg.width),
-                        reference="",
-                    )
+                elem = CopperElement(
+                    element_type="segment",
+                    layer=layer,
+                    net_number=seg.net_number,
+                    geometry=(seg.start[0], seg.start[1], seg.end[0], seg.end[1], seg.width),
+                    reference="",
                 )
-        for via in pcb.vias:
-            if via_spans_layer(via.layers, layer):
-                elems.append(
-                    CopperElement(
-                        element_type="via",
-                        layer="*",
-                        net_number=via.net_number,
-                        geometry=(via.position[0], via.position[1], via.size, via.size),
-                        reference="",
-                        explicit_layers=tuple(via.layers),
-                    )
-                )
-        for fp in getattr(pcb, "footprints", None) or []:
-            for pad in getattr(fp, "pads", None) or []:
-                pad_layers = getattr(pad, "layers", None) or []
-                if layer in pad_layers or "*.Cu" in pad_layers:
-                    elems.append(CopperElement.from_pad(pad, fp))
+                elems.append((elem, *self._element_bounds(elem)))
+        elems.extend(self._static_foreign_elements(layer))
         self._foreign_cache[layer] = elems
         return elems
 
@@ -876,7 +913,13 @@ class RedundantCopperRule(DRCRule):
             pair_clearance_tolerance_mm,
         )
 
+        hw = width / 2.0
+        foreign = self._foreign_elements(layer)
         for a, b in path:
+            c_minx = min(a[0], b[0]) - hw
+            c_miny = min(a[1], b[1]) - hw
+            c_maxx = max(a[0], b[0]) + hw
+            c_maxy = max(a[1], b[1]) + hw
             cand = CopperElement(
                 element_type="segment",
                 layer=layer,
@@ -884,11 +927,18 @@ class RedundantCopperRule(DRCRule):
                 geometry=(a[0], a[1], b[0], b[1], width),
                 reference="",
             )
-            for other in self._foreign_elements(layer):
+            for other, o_minx, o_miny, o_maxx, o_maxy in foreign:
                 if other.net_number == net:
                     continue
-                gap = _calculate_clearance(cand, other)[0]
                 required = self._required_clearance(net, other.net_number)
+                if (
+                    c_maxx + required < o_minx
+                    or o_maxx + required < c_minx
+                    or c_maxy + required < o_miny
+                    or o_maxy + required < c_miny
+                ):
+                    continue
+                gap = _calculate_clearance(cand, other)[0]
                 # Same pair rule as ``netclass_clearance_copper`` (Issue
                 # #9848): an exact tie is legal copper, not float noise.
                 if not drc_clear(gap, required, band_mm=pair_clearance_tolerance_mm(cand, other)):
@@ -916,9 +966,15 @@ class RedundantCopperRule(DRCRule):
             return None
 
     def _required_clearance(self, net_a: int, net_b: int) -> float:
+        key = (net_a, net_b) if net_a <= net_b else (net_b, net_a)
+        cached = self._req_cache.get(key)
+        if cached is not None:
+            return cached
         requirement = self._requirement
         assert requirement is not None
-        return max(float(self._clearance), float(requirement(net_a, net_b)))
+        value = max(float(self._clearance), float(requirement(net_a, net_b)))
+        self._req_cache[key] = value
+        return value
 
     def _slit_oracle(self) -> Any | None:
         """The physical-gap slit oracle when a policy is active (Issue #9862).
@@ -1328,6 +1384,7 @@ class RedundantCopperRule(DRCRule):
                     net_number=first.net_number,
                 )
             )
+        discs = self._copper_discs()
         for node in cand:
             found = sharp_vertex(
                 self._pcb,
@@ -1336,6 +1393,7 @@ class RedundantCopperRule(DRCRule):
                 node,
                 added=added,
                 removed=[seg for seg, _f, _t in chain],
+                copper_discs=discs,
             )
             if found is not None:
                 return f"sharp_corner_{found[0]:.0f}deg"

@@ -1237,6 +1237,7 @@ def _execute_repair(
                     drill_result=drill_result,
                     mask_result=mask_result,
                     copper_result=copper_result,
+                    redundant_result=redundant_result,
                     regressed=regressed,
                     snapshot=snapshot,
                     pass_number=pass_num,
@@ -1620,6 +1621,16 @@ _MASK_RULE_TYPES = (ViolationType.MASK_TO_COPPER, ViolationType.MASK_TO_COPPER_I
 def _error_class(v: DRCViolation, split_parents: dict[str, str]) -> tuple:
     """Group topology findings by witness and clearance findings by net pair."""
     key = (v.type_str, tuple(sorted(v.nets)))
+    if v.type_str == "sharp_trace_corner":
+        # Match sharp corners by net, layer, and board coordinate (same 0.01 mm
+        # precision as SharpTraceCornerRule's vertex identity) so a corner that
+        # moves or replaces an old one never hides inside a proximity radius.
+        return (
+            *key,
+            tuple(
+                sorted((loc.layer, round(loc.x_mm, 2), round(loc.y_mm, 2)) for loc in v.locations)
+            ),
+        )
     if v.type_str.startswith("redundant_copper_") or v.type_str in {
         "pour_slot",
         "physical_copper_gap",
@@ -2327,6 +2338,8 @@ def _redundant_offenders(
                 matched.append(edit)
         if not matched:
             matched = [e for e in edits if not nets or e.net_name in nets]
+        if not matched:
+            matched = list(edits)
         dangling = list(v.witnesses) if v.type_str == "track_dangling" else []
         offenders.extend((edit, reason, dangling) for edit in matched)
     return offenders
@@ -2430,7 +2443,9 @@ def _run_redundant_copper_pass(
             has_zones = any(
                 zone.find("keepout") is None for zone in repairer.pcb._sexp.find_all("zone")
             )
-            edited_nets = {e.net_name for e in repairer.edits}
+            edited_nets = {e.net_name for e in repairer.edits} | {
+                n for v in violations for n in v.nets
+            }
             pad_islands = (
                 _mask_pad_islands(candidate, edited_nets) if not args.no_connectivity_check else {}
             )
@@ -2442,7 +2457,10 @@ def _run_redundant_copper_pass(
                     if gone.reason != "replanned":
                         discarded[(gone.rule_id, gone.uuid)] = gone.reason
 
+            verified_bytes: str | None = None
             for _attempt in range(_REDUNDANT_TXN_ROUNDS):
+                if not repairer.edits:
+                    break
                 repairer.save(candidate)
                 if has_zones:
                     from kicad_tools.cli.runner import run_refill_zones
@@ -2472,6 +2490,7 @@ def _run_redundant_copper_pass(
                     {},
                 )
                 vetoed = False
+                widened = False
                 for edit, reason, dangling in _redundant_offenders(new, repairer, candidate):
                     if edit not in repairer.edits:
                         continue
@@ -2481,6 +2500,7 @@ def _run_redundant_copper_pass(
                         and dangling
                         and repairer.widen(edit, dangling) is not None
                     ):
+                        widened = True
                         continue
                     revert(edit, reason)
                     vetoed = True
@@ -2502,15 +2522,25 @@ def _run_redundant_copper_pass(
                     if edit.net_name in lost:
                         revert(edit, "pad_connection_lost")
                         vetoed = True
-                if not vetoed:
+                if not vetoed and not widened:
+                    verified_bytes = candidate.read_text()
                     break
-                # The findings put back get their chain's next legal path.
-                again = repairer.plan(violations)
-                declined = {(u.rule_id, u.uuid): u.reason for u in again.unrepaired}
-                if not again.edits:
+                # The findings put back get their chain's next legal path; when
+                # surviving edits remain, the next round must still save and
+                # verify them even if replanning adds nothing new.
+                if vetoed:
+                    again = repairer.plan(violations)
+                    declined = {(u.rule_id, u.uuid): u.reason for u in again.unrepaired}
+                if not repairer.edits:
                     break
-            if repairer.edits:
-                atomic_write_text(output_path, candidate.read_text())
+            if verified_bytes is not None:
+                atomic_write_text(output_path, verified_bytes)
+            elif repairer.edits:
+                # Round limit exhausted before the surviving edits were
+                # verified on disk: never publish unverified bytes.
+                for edit in list(repairer.edits):
+                    discarded.setdefault((edit.rule_id, edit.uuid), "round_limit_exceeded")
+                repairer.reset()
     except Exception as e:
         print(f"Error during redundant-copper repair: {e}", file=sys.stderr)
         for edit in list(repairer.edits):
@@ -2750,6 +2780,7 @@ def _attempt_granular_rollback(
     pass_number: int,
     mask_result: MaskRepairResult | None = None,
     copper_result: CopperGapResult | None = None,
+    redundant_result: RedundantCopperResult | None = None,
 ) -> tuple[bool, int, list[str]]:
     """Revert only the nudges that touched a regressed net.
 
@@ -2779,11 +2810,20 @@ def _attempt_granular_rollback(
     actions = list(drill_result.actions)
     mask_actions = list(mask_result.actions) if mask_result is not None else []
     copper_actions = list(copper_result.actions) if copper_result is not None else []
-    total = len(nudges) + len(actions) + len(mask_actions) + len(copper_actions)
+    redundant_edits = list(redundant_result.edits) if redundant_result is not None else []
+    total = (
+        len(nudges) + len(actions) + len(mask_actions) + len(copper_actions) + len(redundant_edits)
+    )
 
     # No nudges were applied this pass -- nothing to do.
     if total == 0:
         return (False, 0, [])
+
+    # Redundant-copper edits are verified as one saved board; never leave them
+    # half-reverted on a connectivity regression.
+    if redundant_edits:
+        output_path.write_bytes(snapshot)
+        return (True, 0, [])
 
     # Identify offenders by net_name membership.
     offending_nudges = [n for n in nudges if n.net_name in regressed]

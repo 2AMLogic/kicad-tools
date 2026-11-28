@@ -217,3 +217,100 @@ def test_dry_run_plans_without_writing(tmp_path, quiet):
     assert fix_drc_cmd.main(_argv(board, "--dry-run")) == 0
     assert board.read_bytes() == before
     assert len(quiet.calls) == 1  # the detection run only: nothing saved, nothing re-checked
+
+
+def test_exhausted_round_limit_does_not_publish_vetoed_candidate(
+    tmp_path, quiet, monkeypatch, capsys
+):
+    """PR #10698 regression: with one transaction round and a protected corner
+    only on the first saved candidate, the command vetoes it, plans an
+    unmeasured alternative, and must return without writing the vetoed bytes."""
+    monkeypatch.setattr(fix_drc_cmd, "_REDUNDANT_TXN_ROUNDS", 1)
+    board = _write(tmp_path, _staircase())
+    before = board.read_bytes()
+    quiet.extra[1] = [_warning("sharp_trace_corner", ("PWR",), 0.0, 0.0)]
+    argv = _argv(board, "--format", "json")
+    argv.remove("--quiet")
+    assert fix_drc_cmd.main(argv) == 2
+    assert board.read_bytes() == before
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["redundant_copper"]["repaired"] == 0
+    assert doc["redundant_copper"]["unrepaired"]
+
+
+def test_moved_sharp_corner_within_proximity_radius_is_still_vetoed(tmp_path, quiet):
+    """PR #10698 regression: a sharp corner at (0, 0) on the input replaced by
+    one at (0.4, 0) on each candidate must not be masked by the 0.75 mm
+    proximity tolerance."""
+    board = _write(tmp_path, _staircase())
+    before = board.read_bytes()
+    quiet.extra[0] = [_warning("sharp_trace_corner", ("PWR",), 0.0, 0.0)]
+    quiet.extra[1] = [_warning("sharp_trace_corner", ("PWR",), 0.4, 0.0)]
+    quiet.extra[2] = [_warning("sharp_trace_corner", ("PWR",), 0.4, 0.0)]
+    assert fix_drc_cmd.main(_argv(board)) == 2
+    assert board.read_bytes() == before
+
+
+def test_unchanged_sharp_corner_at_same_coordinate_is_not_treated_as_new(tmp_path, quiet):
+    """Control for coordinate matching: an untouched pre-existing sharp corner
+    at the same net, layer, and board coordinate does not block the repair."""
+    board = _write(tmp_path, _staircase())
+    quiet.extra[0] = [_warning("sharp_trace_corner", ("PWR",), 0.0, 0.0)]
+    quiet.extra[1] = [_warning("sharp_trace_corner", ("PWR",), 0.0, 0.0)]
+    # Exit 2 reflects the non-targeted pre-existing warning; the staircase itself
+    # must be repaired rather than vetoed.
+    assert fix_drc_cmd.main(_argv(board)) == 2
+    saved = PCB.load(board)
+    assert RedundantCopperRule().check(saved, None).violations == []
+    assert len(saved.segments) == 2
+
+
+def test_partial_veto_rechecks_surviving_edits_before_publishing(tmp_path, quiet):
+    """PR #10698 regression: when one net's edit is vetoed with no alternate
+    path while another net's edit survives, the transaction must save and
+    verify the surviving-only candidate before writing it."""
+    pwr = _staircase()
+    other = [
+        Board._Seg(
+            (a[0], a[1] + 50.0), (b[0], b[1] + 50.0), width=2.6, net_number=2, net_name="OTHER"
+        )
+        for a, b in zip(Board._STAIR_PTS, Board._STAIR_PTS[1:], strict=False)
+    ]
+    board = _write(tmp_path, pwr + other)
+    # Refuse both candidate paths of OTHER's staircase, leaving PWR clean.
+    quiet.extra[1] = [_warning("sharp_trace_corner", ("OTHER",), 0.0, 50.0)]
+    quiet.extra[2] = [_warning("sharp_trace_corner", ("OTHER",), 0.0, 50.0)]
+    assert fix_drc_cmd.main(_argv(board)) == 2
+    # Round 1: both -> veto OTHER path 1; Round 2: both -> veto OTHER path 2
+    # (replan produces 0 new edits, PWR survives); Round 3: PWR-only verified
+    # and published; Round 4: post-pass recheck.
+    saved = PCB.load(board)
+    remaining = RedundantCopperRule().check(saved, None).violations
+    assert [v.nets for v in remaining] == [("OTHER",)]
+    assert len([s for s in saved.segments if s.net_name == "PWR"]) == 2
+    assert len([s for s in saved.segments if s.net_name == "OTHER"]) == len(other)
+
+
+def test_unowned_blocking_warning_on_other_net_reverts_run(tmp_path, quiet):
+    """A new blocking warning on a net no edit touched must still revert the
+    run rather than passing uncharged."""
+    board = _write(tmp_path, _staircase())
+    before = board.read_bytes()
+    quiet.extra[1] = [_warning("pour_slot", ("OTHER",), 80.0, 80.0)]
+    quiet.extra[2] = [_warning("pour_slot", ("OTHER",), 80.0, 80.0)]
+    assert fix_drc_cmd.main(_argv(board, "--no-new-warnings")) == 2
+    assert board.read_bytes() == before
+
+
+def test_post_pass_connectivity_drop_restores_input_board(tmp_path, quiet, monkeypatch):
+    """PR #10698 regression: a post-pass connectivity decrease after a
+    redundant-copper pass must bulk-restore the pre-pass snapshot instead of
+    leaving the modified board on disk with zero edits restored."""
+    board = _write(tmp_path, _staircase())
+    before = board.read_bytes()
+    counts = iter([2, 1])
+    monkeypatch.setattr(fix_drc_cmd, "_count_connected_nets", lambda _p: next(counts))
+    monkeypatch.setattr(fix_drc_cmd, "_connectivity_report", lambda _p: None)
+    monkeypatch.setattr(fix_drc_cmd, "_regressed_nets", lambda _b, _a: {"PWR"})
+    assert fix_drc_cmd.main(_argv(board)) == 3
+    assert board.read_bytes() == before
