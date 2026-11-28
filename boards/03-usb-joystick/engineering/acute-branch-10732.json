@@ -1,0 +1,1406 @@
+{
+  "schema": "board03-acute-branch-measurement/1",
+  "issue": 10732,
+  "measured_at": "2026-11-28T13:43:40Z",
+  "input": {
+    "path": "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
+    "sha256": "4d3ad6dad097f7722c0587649156ad504bd158510d712461ccd8c6a35b8cde7d"
+  },
+  "producer": {
+    "head": "ed3bad72a1fc486592603ff7b82e6cc6d4a9d387",
+    "dirty": false,
+    "script_sha256": "8c7ad142450a9216f7615177a44140f5cd4f1035b8ed1e88f285f411d25b8056"
+  },
+  "stages": {
+    "input": {
+      "sharp_trace_corner": [
+        {
+          "net": "BTN1",
+          "layer": "F.Cu",
+          "x": 33.6,
+          "y": 29.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "B.Cu",
+          "x": 50.4,
+          "y": 46.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "B.Cu",
+          "x": 52.8,
+          "y": 45.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "x": 32.8,
+          "y": 38.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "x": 33.6,
+          "y": 38.4,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "x": 41.6,
+          "y": 45.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 33.2,
+          "y": 33.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 33.2,
+          "y": 34.8,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 40.4,
+          "y": 46.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 41.6,
+          "y": 47.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN4",
+          "layer": "F.Cu",
+          "x": 44.8,
+          "y": 36.8,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "B.Cu",
+          "x": 27.2,
+          "y": 31.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "B.Cu",
+          "x": 30.8,
+          "y": 30.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "F.Cu",
+          "x": 36.8,
+          "y": 27.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "B.Cu",
+          "x": 22.0,
+          "y": 29.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "B.Cu",
+          "x": 40.0,
+          "y": 27.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "F.Cu",
+          "x": 41.6,
+          "y": 27.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "x": 34.4,
+          "y": 25.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "x": 40.0,
+          "y": 25.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "x": 44.4,
+          "y": 25.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "x": 57.6,
+          "y": 25.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "x": 35.2,
+          "y": 17.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "x": 35.2,
+          "y": 17.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "x": 40.0,
+          "y": 12.8,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "XTAL1",
+          "layer": "F.Cu",
+          "x": 31.6,
+          "y": 28.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        }
+      ],
+      "sha256": "4d3ad6dad097f7722c0587649156ad504bd158510d712461ccd8c6a35b8cde7d",
+      "kct_check": {
+        "errors": 71,
+        "warnings": 386,
+        "by_rule": {
+          "bypass_distance_unassociated": 7,
+          "diffpair_routing_continuity": 1,
+          "mask_to_copper": 464,
+          "mask_to_copper_openings": 1,
+          "netclass_sidecar_mismatch": 9,
+          "pad_grid": 2,
+          "plane_split": 2,
+          "pour_slot": 25,
+          "redundant_copper_covered": 52,
+          "redundant_copper_duplicate": 134,
+          "redundant_copper_staircase": 37,
+          "sharp_trace_corner": 25,
+          "silk_hole_overlap": 6,
+          "silk_pad_clearance": 21
+        },
+        "mask_assessment_coverage": [
+          "complete"
+        ],
+        "mask_findings": 465
+      },
+      "native_saved": {
+        "ran": true,
+        "violations": 0,
+        "opens": 0,
+        "by_type": {},
+        "all_by_type": {},
+        "sha256": null
+      },
+      "native_refilled": {
+        "ran": true,
+        "violations": 0,
+        "opens": 0,
+        "by_type": {},
+        "all_by_type": {},
+        "sha256": "7650b0ca92a3a3b0cdda473882c58e1789923665d455a12c7b2d339ffd476790"
+      },
+      "pad_groups": {
+        "groups": 27,
+        "pads": 142
+      },
+      "lvs": {
+        "copper_clean": true,
+        "label_clean": true,
+        "copper_bound_pad_count": 129,
+        "mismatches": 0,
+        "copper_mismatches": 0
+      },
+      "usb_geometry": {
+        "lengths_mm": {
+          "USB_D+": 15.790877515751076,
+          "USB_D-": 15.790877515751076,
+          "USB_MCU_D+": 3.9356328834891876,
+          "USB_MCU_D-": 3.7982796662062412
+        },
+        "common_coupled_mm": 4.070927124746197,
+        "branch_skew_mm": 0.0
+      },
+      "strict_manufacturing_check": {
+        "summary": {
+          "errors": 0,
+          "warnings": 307,
+          "infos": 25,
+          "waived": 0
+        },
+        "meta_overall": "FAILED",
+        "meta_checks": {
+          "drc": {
+            "status": "FAILED",
+            "detail": "0 errors, 307 warnings; reviewed 0.45 mm pad-hole floor"
+          },
+          "erc": {
+            "status": "FAILED",
+            "detail": "0 error(s), 1 warning(s) (strict) -- KiCad global library tables not initialized: 1 of these warning(s) reference library table entries missing from this host ('Joystick'), not necessarily a real schematic defect. Point kicad-cli at the pinned tables with `eval \"$(python3 scripts/ci/init_kicad_libraries.py --shell)\"` in this shell, then re-run this check (see README 'Fresh worktree checklist')."
+          },
+          "lvs": {
+            "status": "PASSED",
+            "detail": "label + copper: 0 mismatch(es)"
+          },
+          "manifest": {
+            "status": "NOT RUN",
+            "detail": "no manufacturing bundle; run `kct export` first"
+          },
+          "schematic": {
+            "status": null,
+            "detail": null
+          }
+        }
+      }
+    },
+    "dedupe": {
+      "removed": {
+        "segments": 134,
+        "vias": 0
+      },
+      "sha256_before": "4d3ad6dad097f7722c0587649156ad504bd158510d712461ccd8c6a35b8cde7d",
+      "sha256": "ba43fb2d44c07e6402eb2fc47eacd41fe68c58ef67cef06438c6194a8ae038f7",
+      "sharp_trace_corner": [
+        {
+          "net": "BTN1",
+          "layer": "F.Cu",
+          "x": 33.6,
+          "y": 29.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "B.Cu",
+          "x": 50.4,
+          "y": 46.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "B.Cu",
+          "x": 52.8,
+          "y": 45.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "x": 32.8,
+          "y": 38.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "x": 33.6,
+          "y": 38.4,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "x": 41.6,
+          "y": 45.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 33.2,
+          "y": 33.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 33.2,
+          "y": 34.8,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 40.4,
+          "y": 46.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 41.6,
+          "y": 47.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN4",
+          "layer": "F.Cu",
+          "x": 44.8,
+          "y": 36.8,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "B.Cu",
+          "x": 27.2,
+          "y": 31.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "B.Cu",
+          "x": 30.8,
+          "y": 30.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "F.Cu",
+          "x": 36.8,
+          "y": 27.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "B.Cu",
+          "x": 22.0,
+          "y": 29.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "B.Cu",
+          "x": 40.0,
+          "y": 27.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "F.Cu",
+          "x": 41.6,
+          "y": 27.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "x": 34.4,
+          "y": 25.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "x": 40.0,
+          "y": 25.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "x": 44.4,
+          "y": 25.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "x": 57.6,
+          "y": 25.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "x": 35.2,
+          "y": 17.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "x": 35.2,
+          "y": 17.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "x": 40.0,
+          "y": 12.8,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "XTAL1",
+          "layer": "F.Cu",
+          "x": 31.6,
+          "y": 28.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        }
+      ]
+    },
+    "redundant-copper": {
+      "exit": 2,
+      "sha256": "739600ac1f4959fb3965f5e14a7f28f75c0e45508754165768ef20d2078d9076",
+      "findings": 84,
+      "repaired": 83,
+      "edits": [
+        {
+          "net": "XTAL1",
+          "layer": "B.Cu",
+          "detail": "replaced 3 segment(s) with 2: (22.800, 29.200) -> (23.200, 28.800) -> (30.800, 28.800)"
+        },
+        {
+          "net": "USB_D+",
+          "layer": "B.Cu",
+          "detail": "replaced 4 segment(s) with 2: (38.425, 5.800) -> (37.600, 6.625) -> (37.600, 7.200)"
+        },
+        {
+          "net": "ISP_MOSI",
+          "layer": "B.Cu",
+          "detail": "replaced 4 segment(s) with 2: (42.200, 24.600) -> (44.600, 24.600) -> (45.200, 24.000)"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "detail": "replaced 4 segment(s) with 2, running through 1 tap(s): (39.600, 45.200) -> (43.600, 49.200) -> (45.600, 49.200)"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (33.200, 33.600) -> (33.200, 35.200)"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (33.200, 34.800) -> (33.200, 35.200)"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (39.600, 45.200) -> (40.400, 46.000)"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (39.600, 45.200) -> (41.600, 47.200)"
+        },
+        {
+          "net": "BTN4",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (38.800, 32.400) -> (41.600, 35.200)"
+        },
+        {
+          "net": "BTN4",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (41.600, 35.200) -> (42.400, 35.200)"
+        },
+        {
+          "net": "VBUS",
+          "layer": "B.Cu",
+          "detail": "replaced 3 segment(s) with 2: (35.875, 5.800) -> (35.875, 8.275) -> (36.000, 8.400)"
+        },
+        {
+          "net": "AREF",
+          "layer": "F.Cu",
+          "detail": "replaced 8 segment(s) with 2: (44.400, 25.600) -> (46.000, 27.200) -> (46.000, 30.800)"
+        },
+        {
+          "net": "AREF",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (43.662, 25.600) -> (43.600, 25.600)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "B.Cu",
+          "detail": "replaced 4 segment(s) with 2, running through 1 tap(s): (52.000, 46.000) -> (57.200, 40.800) -> (57.600, 40.800)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "B.Cu",
+          "detail": "replaced 12 segment(s) with 3: (52.800, 45.200) -> (57.200, 40.800) -> (63.600, 40.800) -> (64.000, 40.400)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (50.400, 46.000) -> (52.000, 46.000)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (52.000, 46.000) -> (52.800, 45.200)"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "detail": "replaced 3 segment(s) with 2: (33.400, 25.000) -> (34.000, 25.600) -> (34.400, 25.600)"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "detail": "replaced 4 segment(s) with 2: (57.600, 25.600) -> (58.000, 26.000) -> (64.000, 26.000) -> (65.000, 27.000)"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (34.400, 25.600) -> (40.000, 25.600)"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (29.600, 31.200) -> (27.200, 31.200)"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (30.800, 30.000) -> (29.600, 31.200)"
+        },
+        {
+          "net": "BTN1",
+          "layer": "B.Cu",
+          "detail": "replaced 4 segment(s) with 2: (36.000, 31.200) -> (44.400, 39.600) -> (45.600, 39.600)"
+        },
+        {
+          "net": "BTN1",
+          "layer": "B.Cu",
+          "detail": "replaced 12 segment(s) with 3: (36.800, 31.200) -> (42.800, 37.200) -> (49.600, 37.200) -> (52.000, 39.600)"
+        },
+        {
+          "net": "JOY_BTN",
+          "layer": "B.Cu",
+          "detail": "replaced 26 segment(s) with 2: (12.000, 44.400) -> (28.800, 44.400) -> (35.000, 38.200)"
+        },
+        {
+          "net": "HWB",
+          "layer": "B.Cu",
+          "detail": "replaced 3 segment(s) with 2: (36.600, 38.200) -> (37.600, 37.200) -> (38.800, 37.200)"
+        },
+        {
+          "net": "XTAL2",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (32.338, 27.200) -> (32.400, 27.200)"
+        },
+        {
+          "net": "XTAL2",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (32.400, 27.200) -> (29.150, 27.200)"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "detail": "replaced 6 segment(s) with 2: (36.000, 16.000) -> (38.000, 14.000) -> (38.000, 11.638)"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "detail": "removed 0.500 mm track hidden under a longer collinear one (35.200, 17.200) -> (36.000, 16.400)"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "detail": "removed 0.500 mm track hidden under a longer collinear one (35.200, 18.800) -> (35.200, 17.200)"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "detail": "removed 0.500 mm track hidden under a longer collinear one (35.200, 18.800) -> (35.200, 17.600)"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "detail": "removed 0.500 mm track hidden under a longer collinear one (36.800, 16.000) -> (40.000, 12.800)"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "detail": "removed 0.500 mm track hidden under a longer collinear one (40.000, 12.800) -> (40.000, 7.600)"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "B.Cu",
+          "detail": "replaced 3 segment(s) with 2: (22.000, 28.800) -> (23.600, 27.200) -> (27.600, 27.200)"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (22.000, 28.800) -> (22.000, 29.600)"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (40.000, 27.200) -> (27.600, 27.200)"
+        },
+        {
+          "net": "ISP_MISO",
+          "layer": "F.Cu",
+          "detail": "replaced 4 segment(s) with 2, running through 1 tap(s): (34.000, 22.400) -> (34.000, 21.200) -> (35.200, 20.000)"
+        },
+        {
+          "net": "ISP_MISO",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (34.000, 22.338) -> (34.000, 22.400)"
+        },
+        {
+          "net": "USB_D-",
+          "layer": "F.Cu",
+          "detail": "replaced 4 segment(s) with 2: (38.400, 7.200) -> (38.950, 7.750) -> (38.950, 9.362)"
+        },
+        {
+          "net": "UCAP",
+          "layer": "F.Cu",
+          "detail": "removed 0.150 mm track hidden under a longer collinear one (38.000, 22.338) -> (38.000, 22.400)"
+        },
+        {
+          "net": "USB_D+",
+          "layer": "F.Cu",
+          "detail": "replaced 4 segment(s) with 2: (37.600, 7.200) -> (37.050, 7.750) -> (37.050, 9.362)"
+        },
+        {
+          "net": "GND",
+          "layer": "F.Cu",
+          "detail": "replaced 3 segment(s) with 2: (34.350, 38.470) -> (34.700, 38.820) -> (34.750, 38.820)"
+        },
+        {
+          "net": "HWB",
+          "layer": "F.Cu",
+          "detail": "replaced 3 segment(s) with 2: (38.800, 37.200) -> (39.200, 37.200) -> (42.000, 34.400)"
+        },
+        {
+          "net": "HWB",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (42.000, 33.662) -> (42.000, 33.600)"
+        },
+        {
+          "net": "BTN4",
+          "layer": "F.Cu",
+          "detail": "replaced 5 segment(s) with 2: (32.338, 31.200) -> (35.200, 31.200) -> (36.000, 32.000)"
+        },
+        {
+          "net": "BTN4",
+          "layer": "F.Cu",
+          "detail": "replaced 4 segment(s) with 2: (52.000, 45.200) -> (52.800, 46.000) -> (52.825, 46.000)"
+        },
+        {
+          "net": "BTN4",
+          "layer": "F.Cu",
+          "detail": "replaced 10 segment(s) with 2: (55.200, 43.200) -> (55.200, 46.450) -> (58.850, 50.100)"
+        },
+        {
+          "net": "BTN4",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (36.000, 32.000) -> (36.400, 32.400)"
+        },
+        {
+          "net": "BTN4",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (37.000, 32.600) -> (37.200, 32.400)"
+        },
+        {
+          "net": "BTN4",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (44.800, 36.800) -> (47.200, 39.200)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "detail": "replaced 5 segment(s) with 2: (57.600, 40.800) -> (58.300, 40.100) -> (58.850, 40.100)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "detail": "replaced 4 segment(s) with 2: (64.000, 40.400) -> (64.850, 40.400) -> (65.150, 40.100)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (32.338, 29.600) -> (32.400, 29.600)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (32.400, 37.600) -> (32.800, 38.000)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (33.600, 38.400) -> (38.400, 43.200)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (39.200, 43.200) -> (40.600, 44.600)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (39.200, 43.200) -> (41.600, 45.600)"
+        },
+        {
+          "net": "XTAL1",
+          "layer": "F.Cu",
+          "detail": "replaced 3 segment(s) with 2: (26.900, 28.850) -> (27.750, 28.000) -> (28.000, 28.000)"
+        },
+        {
+          "net": "XTAL1",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (32.000, 28.000) -> (31.600, 28.000)"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "F.Cu",
+          "detail": "replaced 4 segment(s) with 2: (24.800, 31.200) -> (22.025, 31.200) -> (21.225, 32.000)"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (40.000, 27.200) -> (36.800, 27.200)"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "F.Cu",
+          "detail": "replaced 4 segment(s) with 2: (25.400, 34.200) -> (25.825, 34.625) -> (25.825, 35.000)"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (43.662, 27.200) -> (41.600, 27.200)"
+        },
+        {
+          "net": "BTN1",
+          "layer": "F.Cu",
+          "detail": "replaced 4 segment(s) with 2: (40.400, 45.200) -> (40.825, 45.625) -> (40.825, 46.000)"
+        },
+        {
+          "net": "BTN1",
+          "layer": "F.Cu",
+          "detail": "replaced 5 segment(s) with 2: (45.600, 39.600) -> (46.100, 40.100) -> (46.850, 40.100)"
+        },
+        {
+          "net": "BTN1",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (33.200, 28.800) -> (33.600, 29.200)"
+        },
+        {
+          "net": "USB_D-",
+          "layer": "In2.Cu",
+          "detail": "replaced 4 segment(s) with 2: (37.575, 5.800) -> (38.400, 6.625) -> (38.400, 7.200)"
+        },
+        {
+          "net": "BTN3",
+          "layer": "F.Cu",
+          "detail": "replaced 5 segment(s) with 2: (45.600, 49.200) -> (46.500, 50.100) -> (46.850, 50.100)"
+        },
+        {
+          "net": "BTN3",
+          "layer": "F.Cu",
+          "detail": "replaced 5 segment(s) with 2: (46.400, 46.800) -> (48.025, 46.800) -> (48.825, 46.000)"
+        },
+        {
+          "net": "RESET",
+          "layer": "F.Cu",
+          "detail": "replaced 3 segment(s) with 2: (51.600, 21.600) -> (52.524, 20.676) -> (52.524, 20.540)"
+        },
+        {
+          "net": "RESET",
+          "layer": "F.Cu",
+          "detail": "replaced 3 segment(s) with 2: (59.000, 26.200) -> (59.850, 27.050) -> (59.850, 27.100)"
+        },
+        {
+          "net": "RESET",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (32.338, 24.800) -> (33.200, 24.800)"
+        },
+        {
+          "net": "RESET",
+          "layer": "F.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (33.200, 24.800) -> (33.400, 25.000)"
+        },
+        {
+          "net": "JOY_BTN",
+          "layer": "F.Cu",
+          "detail": "replaced 4 segment(s) with 2: (11.000, 44.850) -> (11.450, 44.400) -> (12.000, 44.400)"
+        },
+        {
+          "net": "JOY_BTN",
+          "layer": "F.Cu",
+          "detail": "removed 0.150 mm track hidden under a longer collinear one (35.600, 33.662) -> (35.600, 33.600)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (57.200, 40.800) -> (57.600, 40.800)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (52.800, 45.200) -> (57.200, 40.800)"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (44.400, 25.600) -> (57.600, 25.600)"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (58.000, 26.000) -> (58.800, 26.000)"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "detail": "removed 0.200 mm track hidden under a longer collinear one (34.000, 25.600) -> (34.400, 25.600)"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "detail": "replaced 3 segment(s) with 2, running through 1 tap(s): (33.200, 38.000) -> (39.800, 44.600) -> (40.600, 44.600)"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "detail": "replaced 3 segment(s) with 2, running through 1 tap(s): (34.000, 25.600) -> (58.400, 25.600) -> (58.800, 26.000)"
+        }
+      ],
+      "unrepaired": [
+        {
+          "rule": "redundant_copper_staircase",
+          "uuid": "64fa869b-bb51-584a-b569-47f9260c8723",
+          "net": "BTN3",
+          "reason": "new_sharp_trace_corner",
+          "detail": ""
+        }
+      ],
+      "sharp_trace_corner": [
+        {
+          "net": "BTN1",
+          "layer": "F.Cu",
+          "x": 33.6,
+          "y": 29.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "B.Cu",
+          "x": 50.4,
+          "y": 46.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "x": 32.8,
+          "y": 38.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "x": 33.6,
+          "y": 38.4,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "x": 41.6,
+          "y": 45.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 33.2,
+          "y": 33.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 33.2,
+          "y": 34.8,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 40.4,
+          "y": 46.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 41.6,
+          "y": 47.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "BTN4",
+          "layer": "F.Cu",
+          "x": 44.8,
+          "y": 36.8,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "B.Cu",
+          "x": 27.2,
+          "y": 31.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "B.Cu",
+          "x": 30.8,
+          "y": 30.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "F.Cu",
+          "x": 36.8,
+          "y": 27.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "B.Cu",
+          "x": 22.0,
+          "y": 29.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "B.Cu",
+          "x": 40.0,
+          "y": 27.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "F.Cu",
+          "x": 41.6,
+          "y": 27.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "x": 40.0,
+          "y": 25.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "x": 44.4,
+          "y": 25.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "x": 35.2,
+          "y": 17.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "x": 35.2,
+          "y": 17.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "x": 40.0,
+          "y": 12.8,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "XTAL1",
+          "layer": "F.Cu",
+          "x": 31.6,
+          "y": 28.0,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        }
+      ],
+      "kct_check": {
+        "errors": 49,
+        "warnings": 146,
+        "by_rule": {
+          "bypass_distance_unassociated": 7,
+          "diffpair_routing_continuity": 1,
+          "mask_to_copper": 368,
+          "mask_to_copper_openings": 1,
+          "netclass_sidecar_mismatch": 9,
+          "pad_grid": 2,
+          "plane_split": 2,
+          "pour_slot": 16,
+          "redundant_copper_staircase": 1,
+          "sharp_trace_corner": 22,
+          "silk_hole_overlap": 6,
+          "silk_pad_clearance": 21
+        },
+        "mask_assessment_coverage": [
+          "complete"
+        ],
+        "mask_findings": 369
+      }
+    },
+    "acute-branch": {
+      "exit": 2,
+      "sha256": "d981d3bf03331319e507514069061652cac33fde2f5a28d62c7b9f6891ed4b11",
+      "findings": 23,
+      "repaired": 20,
+      "edits": [
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "detail": "tap met the BTN2 carrier at 45 deg at (33.600, 38.400); now (33.200, 38.400) -> (33.400, 38.200) at 0.200 mm"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "detail": "tap met the BTN2 carrier at 45 deg at (32.800, 38.000); now (33.200, 38.000) -> (33.000, 38.200) at 0.200 mm"
+        },
+        {
+          "net": "BTN2",
+          "layer": "F.Cu",
+          "detail": "tap met the BTN2 carrier at 45 deg at (41.600, 45.600); now (41.600, 46.400) -> (41.600, 46.000) -> (41.800, 45.800) at 0.200 mm"
+        },
+        {
+          "net": "BTN2",
+          "layer": "B.Cu",
+          "detail": "tap met the BTN2 carrier at 45 deg at (50.400, 46.000); now (50.000, 45.600) -> (50.000, 46.000) at 0.200 mm"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "detail": "tap met the BTN3 carrier at 45 deg at (33.200, 33.600); now (31.200, 31.600) -> (32.600, 33.000) -> (33.200, 33.000) at 0.200 mm"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "detail": "tap met the BTN3 carrier at 45 deg at (40.400, 46.000); now (45.600, 46.000) -> (41.600, 46.000) -> (41.000, 46.600) at 0.200 mm"
+        },
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "detail": "tap met the BTN3 carrier at 45 deg at (41.600, 47.200); now (45.200, 47.200) -> (43.400, 49.000) at 0.200 mm"
+        },
+        {
+          "net": "BTN4",
+          "layer": "F.Cu",
+          "detail": "tap met the BTN4 carrier at 45 deg at (44.800, 36.800); now (44.000, 36.800) -> (44.400, 36.400) at 0.200 mm"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "B.Cu",
+          "detail": "tap met the JOY_X carrier at 45 deg at (27.200, 31.200); now (26.800, 31.600) -> (26.800, 31.200) at 0.200 mm"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "B.Cu",
+          "detail": "tap met the JOY_X carrier at 45 deg at (30.800, 30.000); now (31.200, 30.000) -> (31.000, 29.800) at 0.200 mm"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "F.Cu",
+          "detail": "tap met the JOY_Y carrier at 45 deg at (41.600, 27.200); now (40.800, 28.000) -> (40.900, 27.900) -> (40.900, 27.200) at 0.200 mm"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "B.Cu",
+          "detail": "tap met the JOY_Y carrier at 45 deg at (40.000, 27.200); now (40.800, 28.000) -> (40.700, 27.900) -> (40.700, 27.200) at 0.200 mm"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "detail": "tap met the RESET carrier at 45 deg at (40.000, 25.600); now (42.000, 27.600) -> (42.000, 25.600) at 0.200 mm"
+        },
+        {
+          "net": "RESET",
+          "layer": "B.Cu",
+          "detail": "tap met the RESET carrier at 45 deg at (44.400, 25.600); now (44.000, 25.200) -> (44.000, 25.600) at 0.200 mm"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "detail": "tap met the VBUS carrier at 45 deg at (35.200, 17.200); now (36.400, 16.000) -> (36.050, 16.350) -> (35.200, 16.350) at 0.500 mm"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "detail": "tap met the VBUS carrier at 45 deg at (40.000, 12.800); now (40.800, 12.800) -> (40.400, 12.400) at 0.500 mm"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "detail": "tap met the VBUS carrier at 45 deg at (40.000, 12.800); now (40.000, 6.400) -> (40.000, 11.200) -> (40.800, 12.000) at 0.500 mm"
+        },
+        {
+          "net": "XTAL1",
+          "layer": "F.Cu",
+          "detail": "tap met the XTAL1 carrier at 45 deg at (31.600, 28.000); now (30.800, 28.800) -> (31.300, 28.300) -> (31.300, 28.000) at 0.200 mm"
+        },
+        {
+          "net": "BTN1",
+          "layer": "F.Cu",
+          "detail": "tap met the BTN1 carrier at 45 deg at (33.600, 29.200); now (33.600, 30.000) -> (33.600, 29.483) -> (33.741, 29.341) at 0.200 mm"
+        },
+        {
+          "net": "VBUS",
+          "layer": "F.Cu",
+          "detail": "tap met the VBUS carrier at 45 deg at (35.200, 17.600); now (30.400, 12.800) -> (33.450, 15.850) -> (35.200, 15.850) at 0.500 mm"
+        }
+      ],
+      "unrepaired": [
+        {
+          "rule": "sharp_trace_corner",
+          "uuid": "0c779142-4bf7-5089-850e-3f4e82c4685b",
+          "net": "BTN3",
+          "reason": "new_redundant_copper_staircase",
+          "detail": ""
+        },
+        {
+          "rule": "sharp_trace_corner",
+          "uuid": "1ab841e6-ede7-57e8-a8f5-b86efe12ca5d",
+          "net": "JOY_Y",
+          "reason": "new_redundant_copper_staircase",
+          "detail": ""
+        },
+        {
+          "rule": "sharp_trace_corner",
+          "uuid": "c5087b5c-a1d6-5124-9a05-a03e5c694a7e",
+          "net": "JOY_X",
+          "reason": "new_redundant_copper_staircase",
+          "detail": ""
+        }
+      ],
+      "sharp_trace_corner": [
+        {
+          "net": "BTN3",
+          "layer": "B.Cu",
+          "x": 33.2,
+          "y": 34.8,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_X",
+          "layer": "F.Cu",
+          "x": 36.8,
+          "y": 27.2,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        },
+        {
+          "net": "JOY_Y",
+          "layer": "B.Cu",
+          "x": 22.0,
+          "y": 29.6,
+          "angle_deg": 45.0,
+          "corner_class": "junction"
+        }
+      ],
+      "kct_check": {
+        "errors": 48,
+        "warnings": 124,
+        "by_rule": {
+          "bypass_distance_unassociated": 7,
+          "diffpair_routing_continuity": 1,
+          "mask_to_copper": 367,
+          "mask_to_copper_openings": 1,
+          "netclass_sidecar_mismatch": 9,
+          "pad_grid": 2,
+          "plane_split": 2,
+          "pour_slot": 14,
+          "sharp_trace_corner": 3,
+          "silk_hole_overlap": 6,
+          "silk_pad_clearance": 21
+        },
+        "mask_assessment_coverage": [
+          "complete"
+        ],
+        "mask_findings": 368
+      },
+      "native_saved": {
+        "ran": true,
+        "violations": 0,
+        "opens": 0,
+        "by_type": {},
+        "all_by_type": {},
+        "sha256": null
+      },
+      "native_refilled": {
+        "ran": true,
+        "violations": 0,
+        "opens": 0,
+        "by_type": {},
+        "all_by_type": {},
+        "sha256": "16d8b91d0758184b9b59468a38b9c84a16692d516ece4dd8bf5357f5697cfbbf"
+      },
+      "pad_groups": {
+        "groups": 27,
+        "pads": 142
+      },
+      "lvs": {
+        "copper_clean": true,
+        "label_clean": true,
+        "copper_bound_pad_count": 129,
+        "mismatches": 0,
+        "copper_mismatches": 0
+      },
+      "usb_geometry": {
+        "lengths_mm": {
+          "USB_D+": 15.790877515751076,
+          "USB_D-": 15.790877515751076,
+          "USB_MCU_D+": 3.9356328834891876,
+          "USB_MCU_D-": 3.7982796662062412
+        },
+        "common_coupled_mm": 4.070927124746197,
+        "branch_skew_mm": 0.0
+      },
+      "strict_manufacturing_check": {
+        "summary": {
+          "errors": 0,
+          "warnings": 51,
+          "infos": 25,
+          "waived": 0
+        },
+        "meta_overall": "FAILED",
+        "meta_checks": {
+          "drc": {
+            "status": "FAILED",
+            "detail": "0 errors, 51 warnings; reviewed 0.45 mm pad-hole floor"
+          },
+          "erc": {
+            "status": "FAILED",
+            "detail": "0 error(s), 1 warning(s) (strict) -- KiCad global library tables not initialized: 1 of these warning(s) reference library table entries missing from this host ('Joystick'), not necessarily a real schematic defect. Point kicad-cli at the pinned tables with `eval \"$(python3 scripts/ci/init_kicad_libraries.py --shell)\"` in this shell, then re-run this check (see README 'Fresh worktree checklist')."
+          },
+          "lvs": {
+            "status": "PASSED",
+            "detail": "label + copper: 0 mismatch(es)"
+          },
+          "manifest": {
+            "status": "NOT RUN",
+            "detail": "no manufacturing bundle; run `kct export` first"
+          },
+          "schematic": {
+            "status": null,
+            "detail": null
+          }
+        }
+      }
+    }
+  },
+  "toolchain": {
+    "kicad_version": "10.0.6",
+    "image": "kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec"
+  },
+  "elapsed_s": 858
+}

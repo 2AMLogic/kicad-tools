@@ -5834,6 +5834,7 @@ def _add_fix_drc_parser(subparsers) -> None:
             "mask-copper",
             "copper-gap",
             "redundant-copper",
+            "acute-branch",
         ],
         help=(
             "Only fix a specific violation type. 'mask-copper' re-centres a "
@@ -5851,7 +5852,15 @@ def _add_fix_drc_parser(subparsers) -> None:
             "warnings, so only --only targets them); each edit is re-checked "
             "on the saved board and put back when it leaves a new error or a "
             "new sharp_trace_corner / track_dangling / physical_copper_gap "
-            "warning (Issue #10667)."
+            "warning (Issue #10667). "
+            "'acute-branch' re-routes a tap that meets the side of a same-net "
+            "carrier at an acute angle so it meets it at a right angle, "
+            "keeping the carrier, its other taps and the tap's width, net and "
+            "layer (sharp_trace_corner; warnings, so only --only targets "
+            "them); each edit is re-checked on the saved board and put back "
+            "when it leaves a new error, a new redundant_copper warning or a "
+            "new track_dangling / via_dangling / physical_copper_gap warning "
+            "(Issue #10732)."
         ),
     )
     fix_drc_parser.add_argument(

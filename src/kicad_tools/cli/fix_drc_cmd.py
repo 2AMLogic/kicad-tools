@@ -15,6 +15,10 @@ This command repairs multiple types of DRC violations:
   splitting the covering track, and replaces a staircase or detour with the
   rule's own fewer-bend path; every edit is re-checked on the saved board
   and put back when it leaves a new finding
+- sharp_trace_corner where a tap meets the side of a same-net carrier
+  (``--only acute-branch``, Issue #10732): rewrites the tap so it meets the
+  carrier at a right angle, leaving the carrier and its other taps as they
+  are; verified the same way
 
 Success is never self-reported (Issues #6431 / #6434): after the last pass
 ``fix-drc`` re-checks the output with ``kct check``'s own rule set (the
@@ -31,6 +35,7 @@ Usage:
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --only drill-clearance
     kct fix-drc board.kicad_pcb --only copper-gap --dry-run
     kct fix-drc board.kicad_pcb --only redundant-copper
+    kct fix-drc board.kicad_pcb --only acute-branch
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --max-passes 3
 """
 
@@ -45,11 +50,11 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from kicad_tools.cli.fix_drc_creepage import (
     CreepageVerificationError,
@@ -59,6 +64,13 @@ from kicad_tools.cli.fix_drc_creepage import (
 from kicad_tools.core.atomic_write import atomic_write_text
 from kicad_tools.core.types import Severity
 from kicad_tools.drc.mask_trace_angles import MaskTraceAngleError
+from kicad_tools.drc.repair_acute_branch import (
+    REPAIRED_RULE as ACUTE_BRANCH_RULE,
+)
+from kicad_tools.drc.repair_acute_branch import (
+    AcuteBranchRepairer,
+    AcuteBranchResult,
+)
 from kicad_tools.drc.repair_clearance import ClearanceRepairer, RepairResult
 from kicad_tools.drc.repair_copper_gap import (
     CopperGapRepairer,
@@ -189,10 +201,10 @@ def _mask_in_scope(args: argparse.Namespace) -> bool:
 
     True for ``--only mask-copper``, and once a run's detection report carried
     mask findings (``_execute_repair`` records that on ``args``).  Also for
-    ``--only redundant-copper``: its veto puts back an edit that leaves a new
-    mask warning (Issue #10667).
+    ``--only redundant-copper`` and ``--only acute-branch``: their veto puts
+    back an edit that leaves a new mask warning (Issues #10667 / #10732).
     """
-    return args.only in ("mask-copper", "redundant-copper") or bool(
+    return args.only in ("mask-copper", "redundant-copper", "acute-branch") or bool(
         getattr(args, "mask_findings_seen", False)
     )
 
@@ -215,9 +227,10 @@ def _copper_gap_in_scope(args: argparse.Namespace) -> bool:
     the mask precedent (#9334).  True for ``--only copper-gap``, and once a
     run's detection report carried same-net gap findings.  Also for
     ``--only redundant-copper`` (Issue #10667): a rewritten path may open a
-    slit the rule's oracle does not model.
+    slit the rule's oracle does not model.  Also for ``--only acute-branch``
+    (Issue #10732), for the same reason.
     """
-    return args.only in ("copper-gap", "redundant-copper") or bool(
+    return args.only in ("copper-gap", "redundant-copper", "acute-branch") or bool(
         getattr(args, "copper_gap_findings_seen", False)
     )
 
@@ -260,6 +273,40 @@ def _targeted_redundant_copper(report: DRCReport, only: str | None) -> list:
     if only != "redundant-copper":
         return []
     return [v for v in report.violations if v.type_str in REPAIRED_RULES]
+
+
+def _targeted_acute_branch(report: DRCReport, only: str | None) -> list:
+    """The ``sharp_trace_corner`` warnings fix-drc may rewrite (#10732).
+
+    Only ``--only acute-branch`` targets them: they are warnings, and the
+    default run keeps to the error-severity repairs.  The repairer re-reads
+    the findings from the board (one per tap); this sizes the run.
+    """
+    if only != "acute-branch":
+        return []
+    return [v for v in report.violations if v.type_str == ACUTE_BRANCH_RULE]
+
+
+#: Warnings an acute-branch edit may not leave behind (Issue #10732).  The
+#: repairer's own gates see the acute corner at every new vertex; a new
+#: ``redundant_copper_*`` warning is the trade the strict factory check would
+#: count next, and the rest are what only the saved board can show.
+_ACUTE_GUARDED_WARNINGS = frozenset({"track_dangling", "via_dangling", "physical_copper_gap"})
+
+
+def _blocks_acute_edit(v: DRCViolation, args: argparse.Namespace) -> bool:
+    """Whether a new finding vetoes an acute-branch edit."""
+    if v.type_str == ACUTE_BRANCH_RULE:
+        return False  # the plan's own account of what it cleared
+    if v.is_error:
+        return True
+    if v.severity != Severity.WARNING or v.waived:
+        return False
+    return (
+        bool(getattr(args, "no_new_warnings", False))
+        or v.type_str in _ACUTE_GUARDED_WARNINGS
+        or v.type_str.startswith("redundant_copper_")
+    )
 
 
 #: Warnings a redundant-copper edit may not leave behind (Issue #10667).  The
@@ -362,6 +409,7 @@ class PassResult:
     mask_result: MaskRepairResult = field(default_factory=MaskRepairResult)
     copper_result: CopperGapResult = field(default_factory=CopperGapResult)
     redundant_result: RedundantCopperResult = field(default_factory=RedundantCopperResult)
+    acute_result: AcuteBranchResult = field(default_factory=AcuteBranchResult)
     connectivity_before: int | None = None
     connectivity_after: int | None = None
     connectivity_rolled_back: bool = False
@@ -416,6 +464,9 @@ Examples:
     # Only remove hidden tracks and rewrite staircases / detours (redundant_copper)
     kct fix-drc board.kicad_pcb --only redundant-copper --dry-run
 
+    # Only re-route taps that meet a same-net carrier at an acute angle (sharp_trace_corner)
+    kct fix-drc board.kicad_pcb --only acute-branch --dry-run
+
     # Run up to 3 iterative repair passes
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --max-passes 3
         """,
@@ -466,6 +517,7 @@ Examples:
             "mask-copper",
             "copper-gap",
             "redundant-copper",
+            "acute-branch",
         ],
         help=(
             "Only fix a specific violation type. 'mask-copper' re-centres a "
@@ -486,7 +538,15 @@ Examples:
             "is re-checked on the saved board and put back when it leaves a "
             "new error or a new sharp_trace_corner / track_dangling / "
             "physical_copper_gap warning (any new warning with "
-            "--no-new-warnings)."
+            "--no-new-warnings). "
+            "'acute-branch' re-routes a tap that meets the side of a same-net "
+            "carrier at an acute angle so it meets it at a right angle, "
+            "keeping the carrier, its other taps and the tap's width, net and "
+            "layer (sharp_trace_corner; kct check's rules, findings are "
+            "warnings); each edit is re-checked on the saved board and put "
+            "back when it leaves a new error, a new redundant_copper warning "
+            "or a new track_dangling / via_dangling / physical_copper_gap "
+            "warning (any new warning with --no-new-warnings)."
         ),
     )
     parser.add_argument(
@@ -557,7 +617,8 @@ Examples:
             "may improve to a warning. Exit 4 means the mask assessment failed. "
             "With --only redundant-copper, also put back an edit that leaves any "
             "new warning, not only a sharp_trace_corner / dangling / "
-            "physical_copper_gap one."
+            "physical_copper_gap one; with --only acute-branch, not only a "
+            "redundant_copper / dangling / physical_copper_gap one."
         ),
     )
     parser.add_argument(
@@ -616,11 +677,15 @@ Examples:
     # ``mask-copper`` and ``copper-gap`` findings only exist in ``kct check``'s
     # rule set (kicad-cli has neither rule), so without a supplied report the
     # detection run is forced onto the pure-Python engine (#9334 / #9332).
-    if args.only in ("mask-copper", "copper-gap", "redundant-copper") and not args.drc_report:
-        # Issue #10667: the redundant-copper veto compares warnings, so its
-        # detection run keeps the topology advisories too.
+    if (
+        args.only in ("mask-copper", "copper-gap", "redundant-copper", "acute-branch")
+        and not args.drc_report
+    ):
+        # Issues #10667 / #10732: the redundant-copper and acute-branch vetoes
+        # compare warnings, so their detection runs keep the topology
+        # advisories too.
         detection = dict(_mask_kwargs(args))
-        if args.only == "redundant-copper":
+        if args.only in ("redundant-copper", "acute-branch"):
             detection["guard_warnings"] = True
         report = _run_python_drc(
             pcb_path,
@@ -950,6 +1015,7 @@ def _engine_verdict(engine: str, report: DRCReport | None, only: str | None) -> 
     targeted_ids = {id(v) for v in targeted}
     other = sum(1 for v in report.violations if v.is_error and id(v) not in targeted_ids)
     warnings = [v for v in _targeted_redundant_copper(report, only) if not v.is_error]
+    warnings += [v for v in _targeted_acute_branch(report, only) if not v.is_error]
     return EngineRecheck(
         engine=engine,
         ran=True,
@@ -1047,6 +1113,7 @@ def _execute_repair(
         if mask_violations:
             args.mask_findings_seen = True
         redundant_violations = _targeted_redundant_copper(report, args.only)
+        acute_violations = _targeted_acute_branch(report, args.only)
 
         total_targeted = (
             len(clearance_violations)
@@ -1054,6 +1121,7 @@ def _execute_repair(
             + len(mask_violations)
             + len(copper_violations)
             + len(redundant_violations)
+            + len(acute_violations)
         )
         total_all = len(report.violations)
         non_targeted_count = total_all - total_targeted
@@ -1119,6 +1187,8 @@ def _execute_repair(
                         for k, n in sorted(by_rule.items())
                     )
                 )
+            if acute_violations:
+                print(f"  Sharp trace corner (acute branch): {len(acute_violations)}")
             if non_targeted_count > 0:
                 print(
                     f"Also found {non_targeted_count} non-repairable "
@@ -1194,12 +1264,33 @@ def _execute_repair(
                 design_rules=drill_design_rules,
             )
 
+        acute_result = AcuteBranchResult()
+        if acute_violations:
+            acute_result = _run_acute_branch_pass(
+                report=report,
+                args=args,
+                pcb_path=pcb_path,
+                output_path=output_path,
+                violations=acute_violations,
+                pass_number=pass_num,
+                earlier_saved=(
+                    clearance_result.repaired
+                    + drill_result.repaired
+                    + copper_result.repaired
+                    + mask_result.repaired
+                    + redundant_result.repaired
+                    > 0
+                ),
+                design_rules=drill_design_rules,
+            )
+
         repaired_this_pass = (
             clearance_result.repaired
             + drill_result.repaired
             + mask_result.repaired
             + copper_result.repaired
             + redundant_result.repaired
+            + acute_result.repaired
         )
 
         # Post-pass connectivity check and rollback
@@ -1230,9 +1321,9 @@ def _execute_repair(
                         # With pours it also invalidates the saved fills. Use the
                         # bulk rollback path to restore the complete pre-pass board.
                         regressed = set()
-                if redundant_result.repaired:
-                    # Issue #10667: the verified edits are re-checked as one
-                    # saved board; restore the complete pre-pass board.
+                if redundant_result.repaired or acute_result.repaired:
+                    # Issues #10667 / #10732: the verified edits are re-checked
+                    # as one saved board; restore the complete pre-pass board.
                     regressed = set()
 
                 reverted_all, kept_count, reverted_uuid_list = _attempt_granular_rollback(
@@ -1242,6 +1333,7 @@ def _execute_repair(
                     mask_result=mask_result,
                     copper_result=copper_result,
                     redundant_result=redundant_result,
+                    acute_result=acute_result,
                     regressed=regressed,
                     snapshot=snapshot,
                     pass_number=pass_num,
@@ -1294,6 +1386,7 @@ def _execute_repair(
                 mask_result=mask_result,
                 copper_result=copper_result,
                 redundant_result=redundant_result,
+                acute_result=acute_result,
                 connectivity_before=baseline_conn,
                 connectivity_after=after_conn,
                 connectivity_rolled_back=rolled_back,
@@ -1413,9 +1506,10 @@ def _execute_repair(
         if total_repaired == 0:
             # Nothing was repaired: never claim success, whatever the board
             # now measures (a clean re-check means the report was stale).
-            if args.only == "redundant-copper" and recheck.remaining:
-                # Issue #10667: findings the transaction put back "remain"
-                # (2); "no progress" (1) is for a run that found nothing to do.
+            if args.only in ("redundant-copper", "acute-branch") and recheck.remaining:
+                # Issue #10667 / #10732: findings the transaction put back
+                # "remain" (2); "no progress" (1) is for a run that found
+                # nothing to do.
                 return 2
             return 1 if non_targeted == 0 else 2
         remaining_targeted = recheck.remaining
@@ -2399,24 +2493,13 @@ def _run_redundant_copper_pass(
     edits the saved board confirms (Issue #10667).
 
     The repairer gates every edit with the rule's own shortcut gates before
-    it is applied.  What those cannot see is judged here, on the saved board
-    after its pours are refilled: ``kct check``'s rule set (with the mask
-    assessment) and native DRC must report nothing new next to an edit's
-    copper -- no error, and no new ``sharp_trace_corner`` / ``mask_to_copper``
-    / ``track_dangling`` / ``physical_copper_gap`` warning (any new warning
-    under ``--no-new-warnings``) -- and the edited nets' pads must stay in the
-    groups they were in.  An edit that fails is put back
-    (:meth:`RedundantCopperRepairer.veto`) and the chain's next legal path is
-    planned in its place.  A covered edit whose removal left a stub dangling
-    widens to remove the stub when the stub's copper lies inside same-net
-    copper that stays.  A re-check that cannot run, or a finding no edit
-    owns, reverts every edit: an unverified edit is never kept.
+    it is applied; the saved-board half of the verification is
+    :func:`_run_copper_edit_pass`.  A covered edit whose removal left a stub
+    dangling widens to remove the stub when the stub's copper lies inside
+    same-net copper that stays.
     """
-    result = RedundantCopperResult()
-    load_path = pcb_path
-    if not args.dry_run and output_path.exists() and (pass_number > 1 or earlier_saved):
-        load_path = output_path
-    try:
+
+    def make(load_path: Path) -> RedundantCopperRepairer:
         from kicad_tools.cli.check_cmd import build_check_rule_set
         from kicad_tools.schema.pcb import PCB
 
@@ -2430,14 +2513,119 @@ def _run_redundant_copper_pass(
         checker.fab_view_copper_oz = outer
         checker.fab_view_gap_policy = policy
         checker.mask_copper_request = default_request_for_manufacturer(rule_set.manufacturer)
-        repairer = RedundantCopperRepairer(
+        return RedundantCopperRepairer(
             load_path,
             rule=checker.redundant_copper_rule(),
             design_rules=design_rules,
             allow_junction_paths=True,
         )
+
+    return _run_copper_edit_pass(
+        make_repairer=make,
+        empty_result=RedundantCopperResult,
+        blocks_edit=lambda v: _blocks_redundant_edit(v, args),
+        report=report,
+        args=args,
+        pcb_path=pcb_path,
+        output_path=output_path,
+        violations=violations,
+        pass_number=pass_number,
+        earlier_saved=earlier_saved,
+        label="redundant-copper",
+    )
+
+
+def _run_acute_branch_pass(
+    *,
+    report: DRCReport,
+    args: argparse.Namespace,
+    pcb_path: Path,
+    output_path: Path,
+    violations: list,
+    pass_number: int,
+    earlier_saved: bool,
+    design_rules: DesignRules | None,
+) -> AcuteBranchResult:
+    """Re-route the acute taps, keeping only the edits the saved board confirms
+    (Issue #10732).
+
+    The repairer gates every candidate with the ``redundant_copper`` rule's
+    clearance, mask and slit gates and ``sharp_trace_corner``'s own test before
+    it is applied; the saved-board half of the verification is
+    :func:`_run_copper_edit_pass`.  A new ``redundant_copper`` warning vetoes
+    an edit here as well: the strict factory check counts it next.
+    """
+
+    def make(load_path: Path) -> AcuteBranchRepairer:
+        from kicad_tools.cli.check_cmd import build_check_rule_set
+        from kicad_tools.schema.pcb import PCB
+
+        load = PCB.load(load_path)
+        rule_set = build_check_rule_set(
+            load_path, manufacturer=args.mfr, layers=args.layers, pcb=load
+        )
+        checker = rule_set.checker
+        checker.fab_view = rule_set.manufacturer == "jlcpcb"
+        outer, policy = _board_gap_policy(load, rule_set.manufacturer, args.layers)
+        checker.fab_view_copper_oz = outer
+        checker.fab_view_gap_policy = policy
+        checker.mask_copper_request = default_request_for_manufacturer(rule_set.manufacturer)
+        return AcuteBranchRepairer(
+            load_path, rule=checker.redundant_copper_rule(), design_rules=design_rules
+        )
+
+    return _run_copper_edit_pass(
+        make_repairer=make,
+        empty_result=AcuteBranchResult,
+        blocks_edit=lambda v: _blocks_acute_edit(v, args),
+        report=report,
+        args=args,
+        pcb_path=pcb_path,
+        output_path=output_path,
+        violations=violations,
+        pass_number=pass_number,
+        earlier_saved=earlier_saved,
+        label="acute-branch",
+    )
+
+
+_EditResultT = TypeVar("_EditResultT", bound=RedundantCopperResult)
+
+
+def _run_copper_edit_pass(
+    *,
+    make_repairer: Callable[[Path], Any],
+    empty_result: Callable[[], _EditResultT],
+    blocks_edit: Callable[[DRCViolation], bool],
+    report: DRCReport,
+    args: argparse.Namespace,
+    pcb_path: Path,
+    output_path: Path,
+    violations: list,
+    pass_number: int,
+    earlier_saved: bool,
+    label: str,
+) -> _EditResultT:
+    """Keep only the copper edits the saved board confirms (Issues #10667 / #10732).
+
+    A repairer gates every edit before it is applied.  What its gates cannot
+    see is judged here, on the saved board after its pours are refilled:
+    ``kct check``'s rule set (with the mask assessment) and native DRC must
+    report nothing new next to an edit's copper -- no error, and no new
+    warning ``blocks_edit`` names -- and the edited nets' pads must stay in
+    the groups they were in.  An edit that fails is put back
+    (``repairer.veto``) and the finding's next legal path is planned in its
+    place.  A re-check that cannot run, or a finding no edit owns, reverts
+    every edit: an unverified edit is never kept.
+    """
+    result = empty_result()
+    load_path = pcb_path
+    if not args.dry_run and output_path.exists() and (pass_number > 1 or earlier_saved):
+        load_path = output_path
+    try:
+        repairer = make_repairer(load_path)
     except Exception as e:
-        print(f"Error during redundant-copper repair: {e}", file=sys.stderr)
+        print(f"Error during {label} repair: {e}", file=sys.stderr)
         for v in violations:
             nets = list(v.nets)
             witnesses = list(v.witnesses or ())
@@ -2448,12 +2636,15 @@ def _run_redundant_copper_pass(
                 "recheck_unavailable",
             )
         return result
-    planned = repairer.plan(violations)
-    result = RedundantCopperResult(total=planned.total, edits=list(planned.edits))
+    planned: _EditResultT = repairer.plan(violations)
+    result = replace(planned, unrepaired=[])
     if args.dry_run or not repairer.edits:
         result.unrepaired = list(planned.unrepaired)
         return result
     net_by_witness = {w: v.nets[0] for v in violations if v.nets for w in v.witnesses}
+    # A repairer that re-reads its findings from the board (the acute-branch
+    # repair, whose findings carry no witness) names the net itself.
+    net_by_witness.update({u.uuid: u.net_name for u in planned.unrepaired})
     # ``(rule, first witness)`` of each vetoed finding -> the veto's reason.
     discarded: dict[tuple[str, str], str] = {}
     declined = {(u.rule_id, u.uuid): u.reason for u in planned.unrepaired}
@@ -2516,8 +2707,8 @@ def _run_redundant_copper_pass(
                         revert(edit, "recheck_unavailable")
                     break
                 new = _new_errors(
-                    [v for v in after.violations if _blocks_redundant_edit(v, args)],
-                    [v for v in baseline.violations if _blocks_redundant_edit(v, args)],
+                    [v for v in after.violations if blocks_edit(v)],
+                    [v for v in baseline.violations if blocks_edit(v)],
                     _REDUNDANT_REACH_MM,
                     {},
                 )
@@ -2563,6 +2754,7 @@ def _run_redundant_copper_pass(
                 if vetoed:
                     again = repairer.plan(violations)
                     declined = {(u.rule_id, u.uuid): u.reason for u in again.unrepaired}
+                    net_by_witness.update({u.uuid: u.net_name for u in again.unrepaired})
                 if not repairer.edits:
                     break
             if verified_bytes is not None:
@@ -2574,7 +2766,7 @@ def _run_redundant_copper_pass(
                     discarded.setdefault((edit.rule_id, edit.uuid), "round_limit_exceeded")
                 repairer.reset()
     except Exception as e:
-        print(f"Error during redundant-copper repair: {e}", file=sys.stderr)
+        print(f"Error during {label} repair: {e}", file=sys.stderr)
         for edit in list(repairer.edits):
             discarded[(edit.rule_id, edit.uuid)] = "recheck_unavailable"
         repairer.reset()
@@ -2828,6 +3020,7 @@ def _attempt_granular_rollback(
     mask_result: MaskRepairResult | None = None,
     copper_result: CopperGapResult | None = None,
     redundant_result: RedundantCopperResult | None = None,
+    acute_result: AcuteBranchResult | None = None,
 ) -> tuple[bool, int, list[str]]:
     """Revert only the nudges that touched a regressed net.
 
@@ -2858,17 +3051,23 @@ def _attempt_granular_rollback(
     mask_actions = list(mask_result.actions) if mask_result is not None else []
     copper_actions = list(copper_result.actions) if copper_result is not None else []
     redundant_edits = list(redundant_result.edits) if redundant_result is not None else []
+    acute_edits = list(acute_result.edits) if acute_result is not None else []
     total = (
-        len(nudges) + len(actions) + len(mask_actions) + len(copper_actions) + len(redundant_edits)
+        len(nudges)
+        + len(actions)
+        + len(mask_actions)
+        + len(copper_actions)
+        + len(redundant_edits)
+        + len(acute_edits)
     )
 
     # No nudges were applied this pass -- nothing to do.
     if total == 0:
         return (False, 0, [])
 
-    # Redundant-copper edits are verified as one saved board; never leave them
-    # half-reverted on a connectivity regression.
-    if redundant_edits:
+    # Redundant-copper and acute-branch edits are verified as one saved board;
+    # never leave them half-reverted on a connectivity regression.
+    if redundant_edits or acute_edits:
         output_path.write_bytes(snapshot)
         return (True, 0, [])
 
@@ -3284,6 +3483,7 @@ def _print_json(
     mask_result = last.mask_result if last else MaskRepairResult()
     copper_result = last.copper_result if last else CopperGapResult()
     redundant_result = last.redundant_result if last else RedundantCopperResult()
+    acute_result = last.acute_result if last else AcuteBranchResult()
 
     # Compute overall totals across all passes
     total_repaired_all = sum(p.repaired for p in pass_results)
@@ -3317,6 +3517,7 @@ def _print_json(
             + mask_result.total_violations
             + copper_result.total_violations
             + redundant_result.total
+            + acute_result.total
         )
         if rolled_back:
             total_repaired = 0
@@ -3327,6 +3528,7 @@ def _print_json(
                 + (mask_result.repaired - mask_reverted)
                 + (copper_result.repaired - copper_reverted)
                 + redundant_result.repaired
+                + acute_result.repaired
             )
         else:
             total_repaired = (
@@ -3335,6 +3537,7 @@ def _print_json(
                 + mask_result.repaired
                 + copper_result.repaired
                 + redundant_result.repaired
+                + acute_result.repaired
             )
     else:
         # Multi-pass: first pass had the original count; total repaired is cumulative
@@ -3364,6 +3567,7 @@ def _print_json(
         effective_mask_repaired = mask_result.repaired
         effective_copper_repaired = copper_result.repaired
     effective_redundant_repaired = 0 if rolled_back else redundant_result.repaired
+    effective_acute_repaired = 0 if rolled_back else acute_result.repaired
 
     data: dict = {
         "dry_run": dry_run,
@@ -3476,6 +3680,13 @@ def _print_json(
             "edits": [e.to_dict() for e in redundant_result.edits],
             "unrepaired": [u.to_dict() for u in redundant_result.unrepaired],
         },
+        "acute_branch": {
+            "violations": acute_result.total,
+            "repaired": effective_acute_repaired,
+            "by_rule": acute_result.by_rule(),
+            "edits": [e.to_dict() for e in acute_result.edits],
+            "unrepaired": [u.to_dict() for u in acute_result.unrepaired],
+        },
     }
 
     # Add connectivity_check section when any pass has connectivity data
@@ -3542,12 +3753,14 @@ def _print_summary(
         mask_result = last.mask_result if last else MaskRepairResult()
         copper_result = last.copper_result if last else CopperGapResult()
         redundant_result = last.redundant_result if last else RedundantCopperResult()
+        acute_result = last.acute_result if last else AcuteBranchResult()
         total_violations = (
             clearance_result.total_violations
             + drill_result.total_violations
             + mask_result.total_violations
             + copper_result.total_violations
             + redundant_result.total
+            + acute_result.total
         )
 
         # Issue #2851: when a rollback occurred (full or partial), the
@@ -3571,18 +3784,21 @@ def _print_summary(
             mask_repaired = 0
             copper_repaired = 0
             redundant_repaired = 0
+            acute_repaired = 0
         elif partial_rolled_back:
             clearance_repaired = clearance_result.repaired - clearance_reverted
             drill_repaired = drill_result.repaired - drill_reverted
             mask_repaired = mask_result.repaired - mask_reverted
             copper_repaired = copper_result.repaired - copper_reverted
             redundant_repaired = redundant_result.repaired
+            acute_repaired = acute_result.repaired
             total_repaired = (
                 clearance_repaired
                 + drill_repaired
                 + mask_repaired
                 + copper_repaired
                 + redundant_repaired
+                + acute_repaired
             )
         else:
             clearance_repaired = clearance_result.repaired
@@ -3590,12 +3806,14 @@ def _print_summary(
             mask_repaired = mask_result.repaired
             copper_repaired = copper_result.repaired
             redundant_repaired = redundant_result.repaired
+            acute_repaired = acute_result.repaired
             total_repaired = (
                 clearance_repaired
                 + drill_repaired
                 + mask_repaired
                 + copper_repaired
                 + redundant_repaired
+                + acute_repaired
             )
 
         print(f"{action} {total_repaired}/{total_violations} DRC violations")
@@ -3609,6 +3827,8 @@ def _print_summary(
             print(f"  Copper gap (same-net): {copper_repaired}/{copper_result.total_violations}")
         if redundant_result.total > 0:
             print(f"  Redundant copper: {redundant_repaired}/{redundant_result.total}")
+        if acute_result.total > 0:
+            print(f"  Acute branch: {acute_repaired}/{acute_result.total}")
     else:
         # Multi-pass: per-pass progress
         total_repaired_all = sum(p.repaired for p in pass_results)
@@ -3654,6 +3874,7 @@ def _print_text(
     mask_result = last.mask_result if last else MaskRepairResult()
     copper_result = last.copper_result if last else CopperGapResult()
     redundant_result = last.redundant_result if last else RedundantCopperResult()
+    acute_result = last.acute_result if last else AcuteBranchResult()
     action = "Would repair" if dry_run else "Repaired"
 
     # Issue #2839: when the final pass was rolled back due to a connectivity
@@ -3885,6 +4106,23 @@ def _print_text(
                 )
             print(f"  Not repaired ({len(redundant_result.unrepaired)}):")
             for reason, count in sorted(redundant_reasons.items(), key=lambda kv: -kv[1]):
+                print(f"    {reason}: {count}")
+
+    if acute_result.total > 0:
+        print(f"\n{'-' * 60}")
+        effective_acute = 0 if rolled_back else acute_result.repaired
+        suffix = " (reverted)" if rolled_back else ""
+        print(f"ACUTE BRANCH: {effective_acute}/{acute_result.total}{suffix}")
+        for edit in acute_result.edits[:5]:
+            print(f"  [{edit.kind.upper()}] {edit.net_name} {edit.layer}: {edit.detail}")
+        if len(acute_result.edits) > 5:
+            print(f"  ... and {len(acute_result.edits) - 5} more")
+        if acute_result.unrepaired:
+            acute_reasons: dict[str, int] = {}
+            for acute_item in acute_result.unrepaired:
+                acute_reasons[acute_item.reason] = acute_reasons.get(acute_item.reason, 0) + 1
+            print(f"  Not repaired ({len(acute_result.unrepaired)}):")
+            for reason, count in sorted(acute_reasons.items(), key=lambda kv: -kv[1]):
                 print(f"    {reason}: {count}")
 
     # Show skipped totals
