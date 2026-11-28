@@ -17,8 +17,8 @@
     --color-error: #d9534f;
     --color-warning: #f0ad4e;
     --color-ok: #5cb85c;
-    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+    --font-sans: "KCT Report Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "KCT Report Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
 }
 
 * {
@@ -344,6 +344,7 @@ hr {
 @page {
     size: letter;
     margin: 1in 0.85in 0.85in 0.85in;
+    font-family: var(--font-sans);
 
     @bottom-center {
         content: counter(page) " / " counter(pages);

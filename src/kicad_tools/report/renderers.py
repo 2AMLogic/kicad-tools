@@ -164,7 +164,9 @@ def render_pdf(html_content: str, output_path: Path | str) -> None:
         ) from exc
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    weasyprint.HTML(string=html_content).write_pdf(str(output_path))
+    # Font URLs resolve relative to this packaged stylesheet on every host.
+    font_stylesheet = _TEMPLATES_DIR / "fonts" / "faces.css"
+    weasyprint.HTML(string=html_content).write_pdf(str(output_path), stylesheets=[font_stylesheet])
 
 
 _JSON_QUOTED_FRONT_MATTER_KEYS = frozenset({"title", "subtitle", "author", "date"})

@@ -269,6 +269,39 @@ class TestRenderHtml:
 class TestRenderPdf:
     """Tests for the render_pdf function."""
 
+    def test_pdf_uses_bundled_fonts_for_text_code_and_page_numbers(
+        self, tmp_path: Path, simple_markdown: str
+    ) -> None:
+        import pdfplumber
+
+        from kicad_tools.report.renderers import _weasyprint_available, render_html, render_pdf
+
+        if not _weasyprint_available():
+            pytest.skip("WeasyPrint is unavailable")
+
+        html = render_html(
+            simple_markdown
+            + "\n*Italic* and ***bold italic***.\n\n`Code`, **`bold`**, *`italic`*, ***`both`***."
+        )
+        layouts = []
+        for output in (tmp_path / "first.pdf", tmp_path / "second.pdf"):
+            render_pdf(html, output)
+            with pdfplumber.open(output) as pdf:
+                layouts.append(
+                    [
+                        [(c["text"], c["fontname"], c["x0"], c["top"]) for c in page.chars]
+                        for page in pdf.pages
+                    ]
+                )
+
+        assert layouts[0] == layouts[1]
+        fonts = {font.split("+")[-1] for page in layouts[0] for _, font, _, _ in page}
+        assert fonts == {
+            f"KCT-Report-{family}{style}"
+            for family in ("Sans", "Mono")
+            for style in ("", "-Bold", "-Italic", "-Bold-Italic")
+        }
+
     def test_missing_weasyprint_raises_import_error(self, tmp_path: Path) -> None:
         """render_pdf raises ImportError with install hint when weasyprint is absent."""
         from kicad_tools.report.renderers import render_pdf
@@ -305,7 +338,9 @@ class TestRenderPdf:
             (),
             {
                 "__init__": lambda self, string: None,
-                "write_pdf": lambda self, path: Path(path).write_bytes(b"%PDF-mock"),
+                "write_pdf": lambda self, path, *, stylesheets: Path(path).write_bytes(
+                    b"%PDF-mock"
+                ),
             },
         )
 
@@ -340,7 +375,9 @@ class TestRenderPdf:
             (),
             {
                 "__init__": lambda self, string: None,
-                "write_pdf": lambda self, path: Path(path).write_bytes(b"%PDF-mock"),
+                "write_pdf": lambda self, path, *, stylesheets: Path(path).write_bytes(
+                    b"%PDF-mock"
+                ),
             },
         )
 

@@ -1,0 +1,44 @@
+/* Unmodified faces from the DejaVu Fonts 2.37 TTF release. See LICENSE.
+ * https://github.com/dejavu-fonts/dejavu-fonts/releases/tag/version_2_37
+ * Private family names distinguish these files from a host's installed copy.
+ */
+@font-face {
+    font-family: "KCT Report Sans";
+    src: url("DejaVuSans.ttf");
+}
+@font-face {
+    font-family: "KCT Report Sans";
+    font-weight: bold;
+    src: url("DejaVuSans-Bold.ttf");
+}
+@font-face {
+    font-family: "KCT Report Sans";
+    font-style: italic;
+    src: url("DejaVuSans-Oblique.ttf");
+}
+@font-face {
+    font-family: "KCT Report Sans";
+    font-weight: bold;
+    font-style: italic;
+    src: url("DejaVuSans-BoldOblique.ttf");
+}
+@font-face {
+    font-family: "KCT Report Mono";
+    src: url("DejaVuSansMono.ttf");
+}
+@font-face {
+    font-family: "KCT Report Mono";
+    font-weight: bold;
+    src: url("DejaVuSansMono-Bold.ttf");
+}
+@font-face {
+    font-family: "KCT Report Mono";
+    font-style: italic;
+    src: url("DejaVuSansMono-Oblique.ttf");
+}
+@font-face {
+    font-family: "KCT Report Mono";
+    font-weight: bold;
+    font-style: italic;
+    src: url("DejaVuSansMono-BoldOblique.ttf");
+}
