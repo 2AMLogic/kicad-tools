@@ -552,15 +552,19 @@ def _host_with_catalog(lookup_dir: Path, monkeypatch, lcsc: str = "C999") -> Non
     assert JlcpartsCatalog(get_catalog_path()).lookup(lcsc) is not None
 
 
-@pytest.mark.parametrize("condition", CATALOG_CONDITIONS)
+@pytest.mark.parametrize("condition", ["miss"])
 def test_bundle_names_the_catalog_condition(tmp_path, condition):
-    # Same assignment, empty cache: only the host's catalog differs.
+    # A catalog that was searched and does not list the part is an honest
+    # result about the part, so it still publishes and explains itself.  A
+    # catalog the lookups never reached (``missing`` / ``unreadable``) says
+    # something about the host instead, and is refused: issue #10646, covered
+    # by ``test_readiness_catalog_precondition_10646.py``.
     entry = _produced_entry(tmp_path / "producer", [], [("R1", "C999")], condition)
     assert entry["status"] == "WARN"
 
     board = make_board(tmp_path)
     code, report = _gate(board, entry)
-    assert code == 0  # the WARN never blocked; it now explains itself too
+    assert code == 0
     metric = report["metrics"]["lcsc_stock_order"]
     assert metric["sources"] == {"parts_cache": "miss", "offline_catalog": condition}
     assert metric["message"] == entry["message"]
@@ -575,13 +579,13 @@ def test_bundle_names_the_catalog_condition(tmp_path, condition):
 
 
 def test_verify_keeps_the_producers_provenance_whatever_this_host_has(tmp_path, monkeypatch):
-    # Produced on a worker with no offline catalog, the situation in #10386.
-    entry = _produced_entry(tmp_path / "producer", [], [("R1", "C999")])
+    # Produced on a worker whose catalog does not list the part.
+    entry = _produced_entry(tmp_path / "producer", [], [("R1", "C999")], "miss")
     board = make_board(tmp_path)
     code, report = _gate(board, entry)
     assert code == 0
     metric = report["metrics"]["lcsc_stock_order"]
-    assert metric["sources"] == {"parts_cache": "miss", "offline_catalog": "missing"}
+    assert metric["sources"] == {"parts_cache": "miss", "offline_catalog": "miss"}
 
     # This host's catalog lists the part: had verification looked, it would
     # have found it.  The record stays the producer's.
@@ -591,7 +595,7 @@ def test_verify_keeps_the_producers_provenance_whatever_this_host_has(tmp_path, 
 
 def test_bundle_keeps_partial_coverage_with_its_provenance(tmp_path):
     refs = [("Y2", "C1"), ("R1", "C999")]
-    entry = _produced_entry(tmp_path / "producer", [_part("C1", 500)], refs)
+    entry = _produced_entry(tmp_path / "producer", [_part("C1", 500)], refs, "miss")
     assert entry["status"] == "WARN" and "C999" in entry["details"]
 
     board = make_board(tmp_path)
@@ -599,11 +603,11 @@ def test_bundle_keeps_partial_coverage_with_its_provenance(tmp_path):
     assert code == 0
     metric = report["metrics"]["lcsc_stock_order"]
     assert (metric["status"], metric["message"]) == (entry["status"], entry["message"])
-    assert metric["sources"] == {"parts_cache": "hit", "offline_catalog": "missing"}
+    assert metric["sources"] == {"parts_cache": "hit", "offline_catalog": "miss"}
     recorded, readme = _bundle_record(board)
     assert [p["lcsc"] for p in recorded["data"]["parts"]] == ["C1"]
     assert recorded["data"]["unresolved"] == ["C999"]
-    assert CATALOG_CONDITION_TEXT["missing"] in readme
+    assert CATALOG_CONDITION_TEXT["miss"] in readme
     assert _verify(board)["metrics"]["lcsc_stock_order"] == metric
 
 

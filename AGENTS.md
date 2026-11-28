@@ -92,6 +92,15 @@ KCT_KICAD_DOCKER=1 uv run kct readiness boards/<board> --verify --checked-at <IS
 Never "fix" a `lib_footprint_issues` refusal by ignoring the rule in a
 `.kicad_pro`; it means the environment, not the board, was checked.
 
+The offline parts catalog is a precondition of committed assembly evidence in
+the same way (issue #10646): `kct readiness --generate` / `--verify` refuse
+(exit 2, nothing written) a package whose `lcsc_stock_order` records
+`sources.offline_catalog` as `missing` or `unreadable`, so run
+`kct parts sync-catalog` on the generating host first -- it lands under
+`$XDG_CACHE_HOME`, which a dispatched session may redirect away from
+`~/.cache` -- and regenerate rather than committing a stock check that
+describes the host.
+
 ## Type checks: distrust a local mypy error outside your diff
 
 `.mypy_cache/` is gitignored, so it survives `git reset --hard`,
