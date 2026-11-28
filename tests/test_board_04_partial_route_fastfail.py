@@ -24,6 +24,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+from kicad_tools.recipes.mask_repair import MaskRepairOutcome
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "04-stm32-devboard"
 
@@ -74,6 +76,7 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(module.runpy, "run_path", _boom("manufacturing repair"))
         monkeypatch.setattr(module, "finalize_silkscreen", _boom("finalize_silkscreen"))
         monkeypatch.setattr(module, "fill_zones", _boom("fill_zones"))
+        monkeypatch.setattr(module, "repair_mask_copper", _boom("repair_mask_copper"))
         monkeypatch.setattr(module, "run_drc", _boom("run_drc"))
         monkeypatch.setattr(module, "write_lvs_report", _boom("write_lvs_report"))
         monkeypatch.setattr(module, "generate_manufacturing", _boom("generate_manufacturing"))
@@ -140,6 +143,10 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(module, "finalize_silkscreen", lambda *a, **k: True)
         monkeypatch.setattr(module, "check_silk_clear_of_holes", lambda *a, **k: True)
         monkeypatch.setattr(module, "fill_zones", lambda *a, **k: True)
+        # Issue #10664: the mask repair reads the routed PCB too.
+        monkeypatch.setattr(
+            module, "repair_mask_copper", lambda *a, **k: MaskRepairOutcome(0, 0, 0)
+        )
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
         monkeypatch.setattr(module, "generate_manufacturing", lambda *a, **k: True)
         monkeypatch.setattr(

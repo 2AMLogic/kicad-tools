@@ -960,7 +960,7 @@ the run to a single repair pass:
 |----------------|---------|
 | `clearance` | Copper-clearance violations between tracks, vias and pads (nudge traces) |
 | `drill-clearance` | Hole-to-hole clearance violations (de-duplicate or slide vias) |
-| `mask-copper` | A track entering its own pad's opening off-centre (see below) |
+| `mask-copper` | Same-net copper inside the error band beside its own pad's mask opening: a track entering off-centre, a pass-through, a redundant edge fragment, a pad's own pour (see below) |
 | `copper-gap` | Same-net `physical_copper_gap` slits: a via beside its own pad, a track tangent to its own via, or a short trace shelf at a routed branch (see below) |
 
 ```bash
@@ -974,17 +974,24 @@ the other `--only` values (and the default set), detection resolves in order:
 `--drc-report` if given, else kicad-cli's DRC if it is installed, else the
 pure-Python checker.
 
-`mask-copper` addresses the `same-net own-pad entry` class of the
-`mask_to_copper` check (see the [mask-to-copper guide](../guides/mask-to-copper.md)):
-the offending track is re-centred. Detection uses `kct check`'s rules, not
-kicad-cli, and the pass also runs in the default set when the report carries
-such findings. Because the repairer cannot run the native mask assessment, a
-move is kept only when a post-save `kct check` re-check confirms it; otherwise
+`mask-copper` addresses the same-net error classes of the `mask_to_copper`
+check (see the [mask-to-copper guide](../guides/mask-to-copper.md)): a track
+that enters its own pad off-centre is re-centred, a pass-through track or via
+beside its own pad's opening is moved clear of it, a redundant same-net edge
+fragment on its pad is removed, and a pad thermally joined to its own pour
+with a relief gap narrower than the band the rule examines gets a wider
+pad-level thermal gap (the fill changes on the zone refill that follows).
+Detection uses `kct check`'s rules, not kicad-cli, and the pass also runs in
+the default set when the report carries such findings. Because the repairer
+cannot run the native mask assessment, a move is kept only when a post-save
+`kct check` re-check confirms it; otherwise
 it is reverted and reported as unrepaired with a reason:
 `finding_not_cleared` (the finding is still present), `new_mask_finding` (the
 move exposed a new finding on the moved segment or its pad) or
 `recheck_unavailable` (the re-check could not run — an unverified move is
-never kept).
+never kept). A jog slide that needs the end of a run an earlier move of the
+same pass already edited is deferred to the next pass, so a board that mixes
+an own-pad exit with a jog leaving it needs `--max-passes 2` or more.
 
 `copper-gap` addresses the same-net classes of `physical_copper_gap` (the fab
 cannot see nets, so a sub-spacing slit between two shapes of one net still

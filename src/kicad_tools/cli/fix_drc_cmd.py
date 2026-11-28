@@ -63,7 +63,9 @@ from kicad_tools.drc.repair_drill_clearance import DrillClearanceRepairer, Drill
 from kicad_tools.drc.repair_mask_copper import (
     PASS_THROUGH_MARGIN_MM,
     MaskCopperRepairer,
+    MaskFragmentAction,
     MaskNudgeAction,
+    MaskPourReliefAction,
     MaskRepairAction,
     MaskRepairResult,
     MaskUnrepaired,
@@ -390,8 +392,10 @@ Examples:
         choices=["clearance", "drill-clearance", "mask-copper", "copper-gap"],
         help=(
             "Only fix a specific violation type. 'mask-copper' re-centres a "
-            "track that enters its own pad off-centre and nudges a same-net "
-            "pass-through clear of its own pad's opening (mask_to_copper); it is "
+            "track that enters its own pad off-centre, nudges a same-net "
+            "pass-through clear of its own pad's opening, removes a redundant "
+            "edge fragment and widens a pad's own-pour relief past the band "
+            "the rule examines (mask_to_copper); it is "
             "detected with kct check's rules, not kicad-cli, and is also part "
             "of the default set when the report carries such findings. "
             "'copper-gap' moves a via that sits too close to its own pad or "
@@ -1718,6 +1722,20 @@ def _persisting_mask_conductors(
     }
 
 
+def _persisting_mask_openings(violations: list[DRCViolation], conductor: str) -> set[str]:
+    """Opening uuids on which ``conductor`` still carries a mask error.
+
+    A pour relief edits one pad of a zone that may carry findings on other
+    pads (issue #10664); only the pad it edited decides whether it cleared.
+    """
+    return {
+        opening
+        for v in mask_copper_violations(violations)
+        if (key := finding_key(v)) and key[-1] == conductor
+        for opening in key[:-1]
+    }
+
+
 def _mask_action_nets(action: MaskRepairAction | MaskNudgeAction) -> set[str]:
     """Every named net whose copper an action moves (primary plus any slid foreign net)."""
     return {action.net_name, *getattr(action, "extra_nets", ())} - {""}
@@ -1971,7 +1989,13 @@ def _run_mask_pass(
             def lost_contacts() -> set[str]:
                 if not contact_nets:
                     return set()
-                return MaskCopperRepairer(candidate).disconnected_copper_nets(before, contact_nets)
+                checker = MaskCopperRepairer(candidate)
+                removed = {
+                    act.uuid for act in result.actions if isinstance(act, MaskFragmentAction)
+                }
+                if removed:
+                    return checker.disconnected_copper_nets(before, contact_nets, removed=removed)
+                return checker.disconnected_copper_nets(before, contact_nets)
 
             # Refill zone pours before grading so moved tracks and via antipads
             # are checked against the copper that will actually be published (#9939).
@@ -2062,8 +2086,13 @@ def _run_mask_pass(
                     raise _MaskBatchRejected(
                         "new_mask_finding", "final saved mask repair introduced new mask findings"
                     )
-                persisting = _persisting_mask_conductors(final.violations, parents)
-                if any(a.uuid in persisting for a in result.actions) or final_gaps.missed:
+                if (
+                    any(
+                        _action_finding_persists(a, final.violations, parents)
+                        for a in result.actions
+                    )
+                    or final_gaps.missed
+                ):
                     raise _MaskBatchRejected(
                         "finding_not_cleared",
                         "mask openings failed verification on the final saved board",
@@ -2164,6 +2193,22 @@ class _ElbowGapCheck:
                         self.missed.add(uid)
 
 
+def _action_finding_persists(
+    action, violations: list[DRCViolation], parents: dict[str, str]
+) -> bool:
+    """Whether the finding an action was made for still names its conductor.
+
+    A pour relief edits one pad of a zone (issue #10664), so for it only an
+    error on that pad counts; every other action owns its whole conductor.
+    """
+    persisting = _persisting_mask_conductors(violations, parents)
+    if action.uuid not in persisting:
+        return False
+    if isinstance(action, MaskPourReliefAction):
+        return action.pad_uuid in _persisting_mask_openings(violations, action.uuid)
+    return True
+
+
 def _verify_mask_actions(
     result: MaskRepairResult,
     report: DRCReport,
@@ -2209,7 +2254,6 @@ def _verify_mask_actions(
         not any(_mask_action_touches(act, set(key)) for act in result.actions) for key in new_keys
     )
     touched = {u for key in new_keys for u in key}
-    persisting = _persisting_mask_conductors(after.violations, parents) if after else set()
     regressed = (
         _moves_with_new_errors(
             after=after,
@@ -2250,7 +2294,7 @@ def _verify_mask_actions(
             revert.append((act, "pad_connection_lost"))
         elif unattributed_mask_finding or _mask_action_touches(act, touched):
             revert.append((act, "new_mask_finding"))
-        elif act.uuid in persisting:
+        elif _action_finding_persists(act, after.violations, parents):
             revert.append((act, "finding_not_cleared"))
         elif act.uuid in gaps.missed:
             revert.append((act, "mask_margin_not_met"))

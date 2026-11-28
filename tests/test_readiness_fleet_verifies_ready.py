@@ -78,10 +78,10 @@ def test_enumeration_selects_only_committed_ready_boards(tmp_path):
 
 def test_committed_boards_are_enumerated():
     ready = {b.name for b in committed_ready_boards(BOARDS_DIR)}
-    # Board 04 disagreed again (#10662): its producer now publishes the public
-    # verdict, so it is committed ``blocked`` and never asserted ready.
-    assert "04-stm32-devboard" not in ready
-    assert committed_status(BOARDS_DIR / "04-stm32-devboard") == "blocked"
+    # Board 04 is committed ``ready`` again (#10664): its repaired receipt is the
+    # public verdict, so it is asserted ready (the #7355 guard).
+    assert "04-stm32-devboard" in ready
+    assert committed_status(BOARDS_DIR / "04-stm32-devboard") == "ready"
     assert "09-usbc-pd-power" not in ready  # committed blocked: never asserted ready
     assert ready, "no committed ready board left -- guard is vacuous"
 
@@ -151,41 +151,3 @@ def test_committed_ready_board_verifies_ready_natively(board: Path, tmp_path, re
     code = readiness_cmd.main([str(copy), "--verify", "--checked-at", CHECKED_AT])
     result = json.loads((copy / "output" / "readiness-verification" / "readiness.json").read_text())
     assert code == 0 and result["status"] == "ready", result.get("blockers")
-
-
-# Boards published ``blocked`` by a registered producer whose blockers must be
-# the public verifier's own, verified natively below.
-COMMITTED_BLOCKED = ("04-stm32-devboard",)
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("board", COMMITTED_BLOCKED)
-def test_committed_blocked_board_names_the_public_verifiers_blockers(board: str, tmp_path):
-    """The published ``blocked`` verdict is the public one, to the word (Issue #10662)."""
-    refusal = _toolchain_refusal()
-    if refusal is not None:
-        pytest.skip(f"pinned evidence toolchain unavailable: {refusal}")
-    copy = tmp_path / board
-    shutil.copytree(BOARDS_DIR / board, copy)
-    code = readiness_cmd.main(
-        [
-            str(copy),
-            "--verify",
-            "--assembly",
-            "--mfr",
-            "jlcpcb-tier1",
-            "--checked-at",
-            CHECKED_AT,
-        ]
-    )
-    verified = copy / "output" / "readiness-verification"
-    result = json.loads((verified / "readiness.json").read_text())
-    committed = json.loads((copy / "output" / "readiness.json").read_text())
-    assert code != 0 and result["status"] == "blocked"
-    assert committed["status"] == "blocked"
-    assert result["blockers"] == committed["blockers"]
-    assert result["known_issues"] == committed["known_issues"]
-    # The bound ``tier_check`` evidence is the verifier's own ``kct check`` report.
-    published = json.loads((copy / committed["evidence"]["tier_check"]).read_text())
-    report = json.loads((verified / "kct-check.json").read_text())
-    assert published and published == {name: report[name] for name in published}

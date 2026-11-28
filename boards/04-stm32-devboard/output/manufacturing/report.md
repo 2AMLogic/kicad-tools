@@ -20,7 +20,7 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 20 (18 SMD, 2 THT, 0 other) |
 | Nets | 12 |
-| Traces | 94 segments |
+| Traces | 95 segments |
 | Vias | 32 |
 | Board Size | 60.0 x 40.0 mm |
 

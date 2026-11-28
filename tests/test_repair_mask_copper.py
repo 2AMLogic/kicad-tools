@@ -2571,16 +2571,20 @@ def test_via_alternate_blocked_in_every_direction_stays_in_place(tmp_path):
     """Issue #9939: a via with no legal candidate is left alone, with a reason.
 
     Foreign copper fences every direction that would clear the pad opening,
-    so the bounded search finds nothing and the board is untouched.
+    so the bounded search finds nothing and the board is untouched.  Since
+    #10664 the via may also leave with a connection inside the land it
+    sweeps along its approach, so the floor reaches past the pad's corner:
+    a floor only under the walls left that exit open.
     """
     fence = "\n".join(
         [
-            # Left wall past the pad, right wall, floor below, roof above:
-            # every opening-clearing destination crowds one of them below
-            # the project's own clearance (0.2 mm without a project).
-            _seg("wall-l", (101.85, 98.4), (101.85, 100.8), net=2),
-            _seg("wall-r", (102.85, 98.4), (102.85, 100.8), net=2),
-            _seg("wall-b", (101.85, 98.4), (102.85, 98.4), net=2),
+            # Left wall past the pad, right wall, a floor reaching to the
+            # pad's corner, roof above: every opening-clearing destination
+            # crowds one of them below the project's own clearance (0.2 mm
+            # without a project).
+            _seg("wall-l", (101.85, 99.0), (101.85, 100.8), net=2),
+            _seg("wall-r", (102.85, 99.0), (102.85, 100.8), net=2),
+            _seg("wall-b", (100.9, 99.0), (102.85, 99.0), net=2),
             _seg("wall-t", (101.85, 100.8), (102.85, 100.8), net=2),
         ]
     )
