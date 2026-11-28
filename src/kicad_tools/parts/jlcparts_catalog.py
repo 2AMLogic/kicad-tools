@@ -72,6 +72,8 @@ JLCPARTS_DATA_BASE = "https://yaqwsx.github.io/jlcparts/data"
 # Filename of the reassembled catalog inside the cache directory.
 CATALOG_FILENAME = "jlcparts.sqlite3"
 
+CATALOG_ENV_VAR = "KCT_JLCPARTS_CATALOG"
+
 # Zip signatures (little-endian) relevant to split-archive extraction.
 #   PK\x07\x08 -- "spanning" / split-archive marker prepended to the first
 #                 segment of a ``zip -s`` archive.
@@ -112,12 +114,18 @@ class CatalogLookup(NamedTuple):
 
 
 def get_catalog_path() -> Path:
-    """Return the path to the local jlcparts catalog inside the cache dir.
+    """Return the path to the local jlcparts catalog.
 
-    Sits alongside the per-query ``parts.db`` produced by
+    ``KCT_JLCPARTS_CATALOG`` (:data:`CATALOG_ENV_VAR`) pins the path when set
+    to a non-blank value; it is returned as given, ``~`` expanded, without
+    consulting or creating the cache directory. Otherwise the catalog sits
+    alongside the per-query ``parts.db`` produced by
     :func:`~kicad_tools.parts.cache.get_default_cache_path`. Does not require
     the file to exist -- callers check :meth:`Path.exists` themselves.
     """
+    override = os.environ.get(CATALOG_ENV_VAR)
+    if override and override.strip():
+        return Path(override.strip()).expanduser()
     return get_default_cache_path().parent / CATALOG_FILENAME
 
 
@@ -148,6 +156,7 @@ class JlcpartsCatalog:
 
         Args:
             db_path: Path to the jlcparts SQLite file (default:
+                ``$KCT_JLCPARTS_CATALOG``, else
                 ``~/.cache/kicad-tools/jlcparts.sqlite3``). The file is not
                 required to exist.
             snapshot_revision: Trusted dataset revision, when supplied by its producer.
@@ -661,7 +670,8 @@ def sync_catalog(
     Downloads the split-zip SQLite dataset from ``base_url`` (``cache.z01`` ..
     ``cache.zNN`` + ``cache.zip``), concatenates the segments, unzips the
     resulting archive, and writes the extracted SQLite database to ``dest``
-    (default ``~/.cache/kicad-tools/jlcparts.sqlite3``).
+    (default ``$KCT_JLCPARTS_CATALOG``, else
+    ``~/.cache/kicad-tools/jlcparts.sqlite3``).
 
     This is a *large* download (hundreds of MB) and must only ever be invoked
     explicitly by a user or CI job -- never as a side effect of a lookup, and

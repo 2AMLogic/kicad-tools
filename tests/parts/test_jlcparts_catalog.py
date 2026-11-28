@@ -20,6 +20,7 @@ import pytest
 
 from kicad_tools.parts import Part, PartsCache
 from kicad_tools.parts.jlcparts_catalog import (
+    CATALOG_ENV_VAR,
     CATALOG_FILENAME,
     JlcpartsCatalog,
     _extract_catalog,
@@ -130,13 +131,79 @@ def test_parse_price_column_edge_cases():
 # --------------------------------------------------------------------------
 
 
-def test_get_catalog_path_sits_beside_cache():
+def test_get_catalog_path_sits_beside_cache(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv(CATALOG_ENV_VAR, raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
     path = get_catalog_path()
     assert path.name == CATALOG_FILENAME
     # Same directory as the per-query parts cache.
     from kicad_tools.parts.cache import get_default_cache_path
 
     assert path.parent == get_default_cache_path().parent
+    assert path == tmp_path / "xdg" / "kicad-tools" / CATALOG_FILENAME
+
+
+def test_get_catalog_path_env_override_beats_xdg_cache_home(tmp_path: Path, monkeypatch):
+    """A runtime that redirects ``XDG_CACHE_HOME`` can still be pointed at the host catalog."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "redirected"))
+    pinned = tmp_path / "shared" / "jlcparts.sqlite3"
+    monkeypatch.setenv(CATALOG_ENV_VAR, str(pinned))
+
+    assert get_catalog_path() == pinned
+    assert not (tmp_path / "redirected").exists()
+    assert not pinned.parent.exists()
+
+
+def test_get_catalog_path_env_override_expands_user_and_strips_blanks(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv(CATALOG_ENV_VAR, f"  {tmp_path / 'pinned.sqlite3'} \t")
+    assert get_catalog_path() == tmp_path / "pinned.sqlite3"
+
+    monkeypatch.setenv(CATALOG_ENV_VAR, "~/pinned/jlcparts.sqlite3")
+    assert get_catalog_path() == tmp_path / "pinned" / "jlcparts.sqlite3"
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_get_catalog_path_blank_env_override_falls_back(tmp_path: Path, monkeypatch, blank):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv(CATALOG_ENV_VAR, blank)
+
+    assert get_catalog_path() == tmp_path / "xdg" / "kicad-tools" / CATALOG_FILENAME
+
+
+def test_get_catalog_path_env_override_never_consults_the_cache_dir(tmp_path: Path, monkeypatch):
+    def _unexpected():
+        raise AssertionError("get_default_cache_path() consulted under KCT_JLCPARTS_CATALOG")
+
+    monkeypatch.setattr("kicad_tools.parts.jlcparts_catalog.get_default_cache_path", _unexpected)
+    pinned = tmp_path / "pinned.sqlite3"
+    monkeypatch.setenv(CATALOG_ENV_VAR, str(pinned))
+
+    assert get_catalog_path() == pinned
+
+
+def test_catalog_default_path_honours_env_override(tmp_path: Path, monkeypatch):
+    """``JlcpartsCatalog()`` follows the override; an explicit ``db_path`` still wins."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "redirected"))
+    pinned = tmp_path / "shared" / "jlcparts.sqlite3"
+    monkeypatch.setenv(CATALOG_ENV_VAR, str(pinned))
+
+    assert JlcpartsCatalog().db_path == pinned
+
+    explicit = tmp_path / "explicit.sqlite3"
+    assert JlcpartsCatalog(explicit).db_path == explicit
+
+
+def test_lcsc_client_default_catalog_honours_env_override(tmp_path: Path, monkeypatch):
+    """``LCSCClient``'s offline fallback follows the override unless told otherwise."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "redirected"))
+    pinned = tmp_path / "shared" / "jlcparts.sqlite3"
+    monkeypatch.setenv(CATALOG_ENV_VAR, str(pinned))
+
+    assert LCSCClient(use_cache=False)._get_catalog().db_path == pinned
+
+    explicit = tmp_path / "explicit.sqlite3"
+    assert LCSCClient(use_cache=False, catalog_path=explicit)._get_catalog().db_path == explicit
 
 
 def test_catalog_absent_is_silent_noop(tmp_path: Path):
@@ -845,6 +912,28 @@ def test_sync_catalog_force_redownloads(catalog_db: Path, tmp_path: Path, monkey
     assert result == dest
     assert dest.read_bytes() != b"stale"
     assert JlcpartsCatalog(dest).count() == 4
+
+
+def test_sync_catalog_default_dest_honours_env_override(
+    catalog_db: Path, tmp_path: Path, monkeypatch
+):
+    """With no ``dest``, the catalog is written where ``KCT_JLCPARTS_CATALOG`` says (#10655)."""
+    data_dir = tmp_path / "dataset"
+    _builder.build_split_zip_dataset(data_dir, catalog_db)
+    monkeypatch.setitem(sys.modules, "requests", _make_fake_requests(data_dir))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "redirected"))
+    pinned = tmp_path / "shared" / "pinned.sqlite3"
+    monkeypatch.setenv(CATALOG_ENV_VAR, str(pinned))
+
+    assert sync_catalog(base_url="https://fake.local/data", progress=False) == pinned
+    assert JlcpartsCatalog(pinned).count() == 4
+    assert not (tmp_path / "redirected").exists()
+
+    explicit = tmp_path / "explicit.sqlite3"
+    assert (
+        sync_catalog(dest=explicit, base_url="https://fake.local/data", progress=False) == explicit
+    )
+    assert JlcpartsCatalog(explicit).count() == 4
 
 
 # --------------------------------------------------------------------------
