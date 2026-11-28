@@ -850,4 +850,9 @@ openings remain as errors, with the same 3 disjoint warnings.
 unchanged; on the base board it exits 1 with `kct check --mfr jlcpcb
 warnings: 9`. The nightly rule set is at 0 errors and 0 warnings on all
 three seeds. `--skip mask_to_copper` stays in the gate (operator ruling,
-2026-11-23) until the 11 mask errors are repaired at their source.
+2026-11-23) until the 11 mask errors are repaired at their source. On this
+branch merged with `origin/main` @ `762306338` (`70d262df2`, the #10729
+sharp-corner window guard), seed 42 saves the same bytes in 535.3 s and
+passes. `kct check --mfr jlcpcb` takes 19.7 s with the mask pass skipped and
+69.7 s with it (load 12 to 26): the pass costs 49.9 s, the number for when
+the skip goes.
