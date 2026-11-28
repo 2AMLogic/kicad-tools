@@ -82,6 +82,45 @@ def test_packaged_text_has_no_demo_board_paths() -> None:
         assert not re.search(r"\bboards/\d{2}-", source.text), source.filename
 
 
+def _skill_bodies() -> list[tuple[str, str]]:
+    """``(filename, body)`` for every packaged skill, frontmatter removed."""
+    return [
+        (source.filename, split_frontmatter(source.text)[1])
+        for source in packaged_skill_sources()
+        if not source.is_readme
+    ]
+
+
+def _prose_sentences(body: str) -> list[str]:
+    """Sentences of *body* outside fenced code blocks, line wraps joined."""
+    prose = re.sub(r"```.*?```", "", body, flags=re.S)
+    sentences: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", prose):
+        sentences.extend(re.split(r"(?<=[.!?])\s+", " ".join(paragraph.split())))
+    return sentences
+
+
+@pytest.mark.parametrize(
+    "body", [pytest.param(body, id=filename) for filename, body in _skill_bodies()]
+)
+def test_body_scopes_model_hint_to_installs_that_carry_it(body: str) -> None:
+    """No sentence presents ``suggestedModel`` as a field the reader holds (#10703).
+
+    The Codex CLI and opencode renderers drop ``suggestedModel``, so prose such
+    as `` `suggestedModel: sonnet`. `` opening a paragraph or "this doc's
+    frontmatter ``suggestedModel``" describes frontmatter two of the three
+    installs do not have. The string is not banned: the house wording scopes it
+    with "when the installed frontmatter includes ...".
+    """
+    unscoped = [
+        sentence
+        for sentence in _prose_sentences(body)
+        if "suggestedModel" in sentence
+        and not re.search(r"\bwhen the installed\b", sentence, re.IGNORECASE)
+    ]
+    assert unscoped == [], f"states the model hint unconditionally: {unscoped}"
+
+
 # --- wheel contents -----------------------------------------------------------
 
 

@@ -236,6 +236,7 @@ from kicad_tools.geometry.copper import (
     collinear_overlap_length,
     extends_collinear,
 )
+from kicad_tools.router.pad_geometry import routing_pad_chamfer
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -4281,46 +4282,6 @@ def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float])
     return len(pads) == 1 and _physical_pad_covers(fp, pads[0], point)
 
 
-_CHAMFER_CORNERS = frozenset({"top_left", "top_right", "bottom_left", "bottom_right"})
-_DEFAULT_CHAMFER_RATIO = 0.2
-
-
-def _corner_chamfer_ratio(pad: Pad, x: float, y: float) -> tuple[bool, float | None]:
-    """Return ``(usable, cut_ratio)`` for this pad-local quadrant.
-
-    KiCad defaults ``chamfer_ratio`` to ``0.2`` when ``(chamfer ...)`` omits
-    the ratio token, and treats an explicit ``0`` as a zero-length straight
-    cut on the selected corner. Out-of-range or malformed tokens return
-    ``usable=False`` so the caller fails closed.
-    """
-    node = pad._sexp_node
-    if node is None:
-        return True, None
-    chamfers = node.find_children("chamfer")
-    if not chamfers:
-        return True, None
-    if len(chamfers) != 1:
-        return False, None
-    corners = chamfers[0]
-    if not corners.children or any(
-        not item.is_atom or item.value not in _CHAMFER_CORNERS for item in corners.children
-    ):
-        return False, None
-    ratios = node.find_children("chamfer_ratio")
-    if not ratios:
-        ratio: float | None = _DEFAULT_CHAMFER_RATIO
-    elif len(ratios) != 1 or len(ratios[0].children) != 1 or not ratios[0].children[0].is_atom:
-        return False, None
-    else:
-        ratio = ratios[0].get_float(0)
-    if ratio is None or not math.isfinite(ratio) or not 0 <= ratio <= 0.5:
-        return False, None
-    corner = ("top" if y < 0 else "bottom") + ("_left" if x < 0 else "_right")
-    if not any(item.value == corner for item in corners.children):
-        return True, None
-    return True, ratio
-
-
 def _physical_pad_covers(fp: Footprint, pad: Pad, point: tuple[float, float]) -> bool:
     """True if ``point`` lies on the named pad's copper.
 
@@ -4391,10 +4352,12 @@ def _physical_pad_covers(fp: Footprint, pad: Pad, point: tuple[float, float]) ->
         ratio = pad.roundrect_rratio
         if not 0 <= ratio <= 0.5:
             return False
-        usable, cut_ratio = _corner_chamfer_ratio(pad, local_x, local_y)
-        if not usable:
+        chamfer = routing_pad_chamfer(pad)
+        if chamfer is None:
             return False
-        if cut_ratio is not None:
+        selected, cut_ratio = chamfer
+        corner = ("top" if local_y < 0 else "bottom") + ("_left" if local_x < 0 else "_right")
+        if corner in selected:
             # A straight cut joins two points this distance along the edges.
             cut = 2 * min(half_w, half_h) * cut_ratio
             return edge_x + edge_y >= cut - _PAD_EPS
