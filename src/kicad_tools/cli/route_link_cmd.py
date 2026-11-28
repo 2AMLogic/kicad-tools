@@ -450,7 +450,8 @@ def _rules_from_args(args: argparse.Namespace, pcb: Any) -> Any:
         via_drill=args.via_drill,
     )
     names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}
-    if Path(args.pcb).with_suffix(".kicad_dru").exists():
+    pcb_path = Path(args.pcb)
+    if pcb_path.with_suffix(".kicad_dru").exists() or pcb_path.with_suffix(".kicad_pro").exists():
         from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 
         project = BoardClearanceRules.from_board(args.pcb)
@@ -460,6 +461,12 @@ def _rules_from_args(args: argparse.Namespace, pcb: Any) -> Any:
             base = replace(
                 base, board_rules=project, net_names={num: name for name, num in names.items()}
             )
+        else:
+            # Issue #10504: no copper rule, so only the drill floor resolves
+            # through the project.  ``board_rules`` stays unset -- its presence
+            # is what makes ``_rules_for_link`` drop the authored netclass
+            # floors.
+            base = replace(base, hole_rules=project)
     if not args.net_clearance:
         return base
     return replace(base, clearance_by_net=_parse_net_clearances(args.net_clearance, names))
