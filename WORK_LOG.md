@@ -16,6 +16,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-28
 
+- **Issue #10692** (closed): No gate compares a committed board bundle's per-rule warning counts to a fresh run (Board 04 pour_slot 5 vs 4 went unnoticed)
+- **PR #10697**: feat(scripts): add --check drift gate to refresh_bundles_6404.py
+- **Issue #10720** (closed): link_router accepts a (chamfer ...) token on a non-roundrect pad that current_paths refuses
+- **PR #10722**: fix(router): refuse a chamfer token on non-roundrect routing pads
+- **Issue #10715** (closed): docs(changelog): update stale Board 04 manifest note in changelog.d/10650.upgrade.md
+- **Issue #10650** (closed): DRC preflight counts informational findings as warnings in a manufacturing manifest
+- **PR #10673**: fix(drc): count only warning-severity findings as warnings
 - **PR #10718**: test: derive model hints from skills with a Model selection section
 - **PR #10713**: fix: report kct route as UNVERIFIED when the pour completion loop raises
 - **PR #10709**: fix(router): neck a pour weld the class width cannot place

@@ -19,6 +19,9 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 - **#10526**: chore(loom): resync installed Loom to v0.20.37
 - **#10532**: Expand BOM reference intervals with matching designator suffixes
 - **#10544**: perf(router): prove a timed-out connection from its goal side before repeating its search
+- **#10670**: fix(boards): group Board 06 connector headers in the JLCPCB BOM
+- **#10700**: fix: resolve pour_slot clearances from the board project in DRCChecker
+- **#10712**: chore: resync installed Loom surfaces
 
 ## Very Important
 
@@ -32,6 +35,8 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
 - **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes
+- **#10611**: Board 03 exporter appends a second rules filename that makes the editable project fail readiness
+- **#10667**: Board 03: 90 redundant_copper warnings outlive the mask-copper repair and readiness's cleanup, so the reissue cannot reach ready
 
 ## Ready
 
@@ -53,21 +58,12 @@ Issues currently being built (`loom:building`).
 - **#10485**: CI flake: Install pinned actionlint download returned HTTP 504 in Test
 - **#10504**: route-link: non-plated-hole clearance ignores the board's hole_clearance rule
 - **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313
-- **#10604**: Default route-link misses a rotated, offset plated source pad
 - **#10611**: Board 03 exporter appends a second rules filename that makes the editable project fail readiness
-- **#10645**: mask_to_copper reports a new error when a straight own-pad entry is split at the pad edge
-- **#10650**: DRC preflight counts informational findings as warnings in a manufacturing manifest
-- **#10662**: Board 04 reports ready in fleet status but fails public readiness on the same PCB
 - **#10664**: Board 04: clear the ten same-net mask_to_copper errors the public readiness check reports
 - **#10667**: Board 03: 90 redundant_copper warnings outlive the mask-copper repair and readiness's cleanup, so the reissue cannot reach ready
-- **#10669**: pad_outline_is_exact() misses a single-corner chamfer, so pad copper is over-reported
-- **#10677**: Make the sharp-corner check's 89-degree boundary consistent on macOS and Linux
-- **#10681**: Installed help, HV, readiness and tapeout skills point to a missing model hint
 - **#10683**: Remaining check_all callers still grade pour_slot without the board's clearance rules
-- **#10684**: Board 04's committed DRC evidence records 5 pour_slot warnings; a fresh pinned run reportedly gives 4
-- **#10692**: No gate compares a committed board bundle's per-rule warning counts to a fresh run (Board 04 pour_slot 5 vs 4 went unnoticed)
-- **#10703**: Six other installed kct skills still assert a frontmatter suggestedModel that Codex and opencode strip
-- **#10704**: sharp_trace_corner: 'N-segment junction' text now counts directions, not segments
+- **#10723**: Pour-completion neck escape disables the mask-entry pad keepout (pad_entry_gap=0.0)
+- **#10727**: refresh_bundles_6404.py --check prints a remediation that does not repair the drift it detects
 
 ## PRs Awaiting Review
 
@@ -75,17 +71,9 @@ PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
 - **#10507**: fix(boards): declare Board 07's reviewed class widths and re-pin its SDRAM evidence
-- **#10608**: fix: land named route-link endpoints on the pad copper outline
-- **#10653**: fix: read a pad-edge-split own-pad entry through its authored continuation
-- **#10673**: fix(drc): count only warning-severity findings as warnings
-- **#10674**: fix(geometry): cut chamfered corners from the shared pad copper outline
 - **#10687**: fix(drc): repair pour, fragment and boxed-via mask_to_copper findings; re-issue Board 04
-- **#10691**: fix: guard the sharp-corner 89-degree boundary against float rounding
-- **#10693**: fix(boards): refresh Board 04 bundle so its pour_slot count matches a fresh pinned run
-- **#10697**: feat(scripts): add --check drift gate to refresh_bundles_6404.py
-- **#10698**: feat: add fix-drc --only redundant-copper and run it in the readiness cleanup
-- **#10700**: fix: resolve pour_slot clearances from the board project in DRCChecker
-- **#10705**: docs: clarify model selection in the tapeout, readiness, HV-loop and help skills
+- **#10725**: fix(router): preserve mask-entry clearance on necked pour escapes
+- **#10726**: ci(board-05): declare the pour neck in the unattended route
 
 ## Approved (Awaiting Merge)
 
@@ -100,9 +88,9 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 - **#10526**: chore(loom): resync installed Loom to v0.20.37
 - **#10532**: Expand BOM reference intervals with matching designator suffixes
 - **#10544**: perf(router): prove a timed-out connection from its goal side before repeating its search
-- **#10668**: fix(readiness): publish the public verdict for boards with a board-local check
 - **#10670**: fix(boards): group Board 06 connector headers in the JLCPCB BOM
-- **#10686**: docs: describe model selection in the installed workflow skills
+- **#10700**: fix: resolve pour_slot clearances from the board project in DRCChecker
+- **#10712**: chore: resync installed Loom surfaces
 
 ## Proposed
 
@@ -135,21 +123,13 @@ Issues carrying `loom:curated`.
 - **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313 *(curated)*
 - **#10530**: Expand BOM numeric reference ranges with a shared suffix such as Q1A-Q4A *(curated)*
 - **#10575**: Preserve Board 03’s connector and MCU USB widths in the routed KiCad project *(curated)*
-- **#10604**: Default route-link misses a rotated, offset plated source pad *(curated)*
 - **#10611**: Board 03 exporter appends a second rules filename that makes the editable project fail readiness *(curated)*
-- **#10645**: mask_to_copper reports a new error when a straight own-pad entry is split at the pad edge *(curated)*
 - **#10647**: config-resolver.sh passes config tiers as single jq arguments, so a >128 KiB defaults tier breaks create-issue.sh on Linux *(curated)*
-- **#10650**: DRC preflight counts informational findings as warnings in a manufacturing manifest *(curated)*
 - **#10664**: Board 04: clear the ten same-net mask_to_copper errors the public readiness check reports *(curated)*
 - **#10667**: Board 03: 90 redundant_copper warnings outlive the mask-copper repair and readiness's cleanup, so the reissue cannot reach ready *(curated)*
-- **#10669**: pad_outline_is_exact() misses a single-corner chamfer, so pad copper is over-reported *(curated)*
-- **#10677**: Make the sharp-corner check's 89-degree boundary consistent on macOS and Linux *(curated)*
-- **#10681**: Installed help, HV, readiness and tapeout skills point to a missing model hint *(curated)*
 - **#10683**: Remaining check_all callers still grade pour_slot without the board's clearance rules *(curated)*
-- **#10684**: Board 04's committed DRC evidence records 5 pour_slot warnings; a fresh pinned run reportedly gives 4 *(curated)*
-- **#10692**: No gate compares a committed board bundle's per-rule warning counts to a fresh run (Board 04 pour_slot 5 vs 4 went unnoticed) *(curated)*
-- **#10703**: Six other installed kct skills still assert a frontmatter suggestedModel that Codex and opencode strip *(curated)*
-- **#10704**: sharp_trace_corner: 'N-segment junction' text now counts directions, not segments *(curated)*
+- **#10723**: Pour-completion neck escape disables the mask-entry pad keepout (pad_entry_gap=0.0) *(curated)*
+- **#10727**: refresh_bundles_6404.py --check prints a remediation that does not repair the drift it detects *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -166,14 +146,14 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 8 |
+| Operator merge-risk holds | 11 |
 | Very important | 1 |
-| Important | 2 |
+| Important | 4 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 25 |
-| PRs awaiting review | 13 |
+| In Progress (`loom:building`) | 16 |
+| PRs awaiting review | 5 |
 | Approved PRs awaiting merge | 12 |
-| Curated | 42 |
+| Curated | 34 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
