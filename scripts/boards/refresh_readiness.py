@@ -930,24 +930,39 @@ def gate_tier_check(board: Path, cfg: BoardConfig) -> GateOutcome:
     report.parent.mkdir(parents=True, exist_ok=True)
     # The public verifier's own wording, PCB path elided as it elides it (#8826).
     invocation = f"kct check <pcb> --mfr {cfg.tier} --schematic {cfg.schematic}"
-    run(
-        kct(
-            "check",
-            cfg.routed_pcb,
-            "--mfr",
-            cfg.tier,
-            "--schematic",
-            cfg.schematic,
-            "--format",
-            "json",
-            "--output",
-            str(report),
-        ),
-        cwd=board,
-    )
-    if not report.is_file():
-        raise GateFailure("kct check did not produce a report")
-    evidence = tier_check_evidence(json.loads(report.read_text()))
+    # Run into a fresh path: the staged board already holds the last published
+    # report, so a checker that dies before writing (missing PCB, crash) must not
+    # be able to leave that old report to be judged as this run's evidence.
+    with tempfile.TemporaryDirectory(prefix="refresh-readiness-tier-") as tmp:
+        fresh = Path(tmp) / "tier-check.json"
+        proc = run(
+            kct(
+                "check",
+                cfg.routed_pcb,
+                "--mfr",
+                cfg.tier,
+                "--schematic",
+                cfg.schematic,
+                "--format",
+                "json",
+                "--output",
+                str(fresh),
+            ),
+            cwd=board,
+        )
+        # A genuine finding exits non-zero WITH a new report; no report is no evidence.
+        if not fresh.is_file():
+            raise GateFailure(
+                f"kct check exited {proc.returncode} without producing a report: "
+                f"{proc.stderr.strip()[-300:]}"
+            )
+        try:
+            raw = json.loads(fresh.read_text())
+        except json.JSONDecodeError as exc:
+            raise GateFailure(f"kct check wrote an unreadable report: {exc}") from exc
+        if not isinstance(raw, dict) or ("summary" not in raw and "violations" not in raw):
+            raise GateFailure("kct check wrote a report without a verdict")
+    evidence = tier_check_evidence(raw)
     report.write_text(json.dumps(evidence, indent=2) + "\n")
     judged = judge_kct_check_report(evidence, recorded_known_issues(board))
     outcome = GateOutcome("tier_check", judged.status, judged.detail, tuple(judged.blockers))

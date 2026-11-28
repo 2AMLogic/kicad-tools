@@ -186,7 +186,8 @@ def test_exact_exception_match_publishes_ready_and_binds_the_evidence(
         "json",
         "--output",
     ]
-    assert calls[0][-1].endswith("/99-fake/output/readiness/tier-check.json")
+    assert calls[0][-1].endswith("/tier-check.json")
+    assert not calls[0][-1].endswith("/99-fake/output/readiness/tier-check.json")  # fresh path
 
 
 def test_changed_identity_control_still_publishes_blocked(mod, tmp_path, monkeypatch) -> None:
@@ -307,6 +308,32 @@ def test_without_publish_blocked_a_failed_tier_check_publishes_nothing(
 
     with pytest.raises(mod.GateFailure, match="no longer fires"):
         mod.refresh(board, CHECKED_AT)
+    assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
+
+
+def test_checker_that_writes_no_report_cannot_reissue_a_passing_receipt(
+    mod, tmp_path, monkeypatch
+) -> None:
+    """A second refresh whose tier check dies must not re-judge the last report."""
+    board = _publishing_board(mod, tmp_path, monkeypatch)
+    _public_check_writes(mod, monkeypatch, _tier_report(RECORDED))
+    mod.refresh(board, CHECKED_AT)
+    assert _check(_receipt(board), "tier_check")["status"] == "passed"
+    published = board / "output" / "readiness" / "tier-check.json"
+    assert published.is_file()
+    before = {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+
+    real_run = mod.run
+
+    def dying(cmd, **kwargs):
+        if "kicad_tools.cli" in cmd:
+            # exits 1 ("Path not found") and writes nothing, as the real check does
+            return subprocess.CompletedProcess(cmd, 1, "", "Path not found")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(mod, "run", dying)
+    with pytest.raises(mod.GateFailure, match="without producing a report"):
+        mod.refresh(board, "2026-11-29T00:00:00Z")
     assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
 
 
