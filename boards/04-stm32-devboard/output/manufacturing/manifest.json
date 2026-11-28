@@ -471,7 +471,7 @@
     {
       "name": "drc",
       "status": "WARN",
-      "message": "DRC passed with 11 warning(s)"
+      "message": "DRC passed with 5 warning(s)"
     },
     {
       "name": "erc",
