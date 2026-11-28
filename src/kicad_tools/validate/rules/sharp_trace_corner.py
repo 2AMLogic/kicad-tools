@@ -194,12 +194,7 @@ class SharpTraceCornerRule(DRCRule):
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
         """Return one ``sharp_trace_corner`` warning per acute junction."""
         del design_rules
-        from kicad_tools.explain.checks.acid_trap import (
-            ANGLE_TOLERANCE_DEG,
-            MIN_CORNER_ANGLE_DEG,
-            MIN_TRACE_ANGLE_DEG,
-            AcidTrapCheck,
-        )
+        from kicad_tools.explain.checks.acid_trap import AcidTrapCheck, is_acute_corner_angle
 
         results = DRCResults()
         results.rules_checked = 1
@@ -250,9 +245,7 @@ class SharpTraceCornerRule(DRCRule):
             for i, s1 in enumerate(touching):
                 for s2 in touching[i + 1 :]:
                     angle = check._calculate_angle(s1, s2, loc)
-                    if angle is None or not (
-                        MIN_CORNER_ANGLE_DEG <= angle < MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG
-                    ):
+                    if angle is None or not is_acute_corner_angle(angle):
                         continue
                     if _wedge_is_open(s1, s2, loc, angle) and (worst is None or angle < worst):
                         worst = angle
