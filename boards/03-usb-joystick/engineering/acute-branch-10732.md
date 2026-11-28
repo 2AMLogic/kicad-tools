@@ -1,6 +1,6 @@
 # Board 03 acute-branch measurement (Issue #10732)
 
-Produced by `engineering/acute_branch_10732.py` (SHA-256 `8c7ad142450a9216f7615177a44140f5cd4f1035b8ed1e88f285f411d25b8056`) on 2026-11-28T13:22:08Z in 675 s, on KiCad 10.0.6 (`kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec`), from the published routed PCB `output/usb_joystick_routed.kicad_pcb` (SHA-256 `4d3ad6dad097f7722c0587649156ad504bd158510d712461ccd8c6a35b8cde7d`) at `850c9370ea4d5f2867d8d8b1086787b1d16dc741`. The machine-readable record is `acute-branch-10732.json` next to this note.
+Produced by `engineering/acute_branch_10732.py` (SHA-256 `8c7ad142450a9216f7615177a44140f5cd4f1035b8ed1e88f285f411d25b8056`) on 2026-11-28T13:43:40Z in 858 s, on KiCad 10.0.6 (`kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec`), from the published routed PCB `output/usb_joystick_routed.kicad_pcb` (SHA-256 `4d3ad6dad097f7722c0587649156ad504bd158510d712461ccd8c6a35b8cde7d`) at `ed3bad72a1fc486592603ff7b82e6cc6d4a9d387`. The machine-readable record is `acute-branch-10732.json` next to this note.
 
 This is the public stand-in, not the coordinated reissue input: the tool-generated rebuild #8900 measures from is not on `main`. The run is the readiness copper cleanup's order on a scratch copy -- `dedupe`, `kct fix-drc --only redundant-copper` (#10667), then `kct fix-drc --only acute-branch` (this issue) -- with each stage measured on its saved bytes.
 
