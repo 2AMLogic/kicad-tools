@@ -21,6 +21,7 @@ from kicad_tools.cli import main as kct_main
 from kicad_tools.cli.pcb_diff import run_pcb_diff
 from kicad_tools.pcb.diff import DiffItem, diff_items, diff_pcbs, extract_items, to_json
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.sexp import parse_file
 
 REPO = Path(__file__).resolve().parents[1]
 BOARD01 = REPO / "boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb"
@@ -187,8 +188,14 @@ def test_self_diff_is_empty(board: Path, capsys):
 
 def test_self_diff_board05_smoke():
     result = _diff(BOARD05, BOARD05)
-    assert result.counts()["unchanged"] > 1000
     assert not result.has_changes
+    source = parse_file(BOARD05)
+    by_kind = to_json(result)["by_kind"]
+    for kind in ("segment", "via", "zone", "footprint"):
+        assert by_kind[kind]["unchanged"] == len(source.find_children(kind))
+    assert by_kind["pad"]["unchanged"] == sum(
+        len(fp.find_children("pad")) for fp in source.find_children("footprint")
+    )
 
 
 def test_board01_item_inventory():

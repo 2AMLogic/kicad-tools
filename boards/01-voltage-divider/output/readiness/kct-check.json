@@ -81,6 +81,9 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [
+        "bedc8a75-aed6-5abc-b36c-83007d1d6a92"
+      ],
       "same_net": true,
       "fab_band": null,
       "corner_class": null,
@@ -117,6 +120,9 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [
+        "2b314c61-90f4-5c9f-95e7-faa044baa9e8"
+      ],
       "same_net": true,
       "fab_band": null,
       "corner_class": null,
@@ -146,6 +152,7 @@
       "required_value": null,
       "items": [],
       "nets": [],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -170,6 +177,7 @@
         "J2"
       ],
       "nets": [],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -194,6 +202,7 @@
         "J1"
       ],
       "nets": [],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -221,6 +230,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -248,6 +258,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -275,6 +286,7 @@
       "nets": [
         "VIN"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -302,6 +314,7 @@
       "nets": [
         "VOUT"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -329,6 +342,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -356,6 +370,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -383,6 +398,7 @@
       "nets": [
         "VIN"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -410,6 +426,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -437,6 +454,7 @@
       "nets": [
         "VOUT"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -464,6 +482,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -491,6 +510,7 @@
       "nets": [
         "VOUT"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -518,6 +538,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -545,6 +566,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -564,6 +586,7 @@
       "required_value": null,
       "items": [],
       "nets": [],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -590,7 +613,7 @@
         "source_sha256": "7932e07ff6b357533509194dd2affaea75c1038155efee3f516d114e3b7404d5",
         "project_sha256": "6b45aa185f18f6916f7a1e81fb1524668649043b0000da98710f6073115bd2a1",
         "rules_sha256": "c8725a98814be28fb7ef26c387bdbb9f0f5d282b155d191d97aed2aba1017994",
-        "export_profile_sha256": "a14db0b80b025ce4319c841c8f5b08deb2bd6b87c188842f068eab065902c7c2"
+        "export_profile_sha256": "d6f160eca9ad82242e0fb5b398f8f6bda392fe5e31098655428d17354768e068"
       },
       "measurements": [
         {
@@ -1091,6 +1114,9 @@
           "native_version": "10.0.6",
           "export_identity": {
             "command": [
+              "docker",
+              "run",
+              "kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec",
               "kicad-cli"
             ],
             "arguments": [
@@ -1107,7 +1133,6 @@
             "profile": "macro-free-native-gerber",
             "board_plot_params": false,
             "variables": [],
-            "command_file_sha256": "170493658ffb66d554137711b4e1a8c760de23a5056267424f0148d3e3323f68",
             "plot_profile_source_sha256": "7932e07ff6b357533509194dd2affaea75c1038155efee3f516d114e3b7404d5",
             "stdout": "Plotted to '<scratch>/gerbers/voltage_divider_routed-F_Cu.gbr'.\nPlotted to '<scratch>/gerbers/voltage_divider_routed-B_Cu.gbr'.\nPlotted to '<scratch>/gerbers/voltage_divider_routed-F_Mask.gbr'.\nPlotted to '<scratch>/gerbers/voltage_divider_routed-B_Mask.gbr'.\n",
             "stderr": ""
@@ -1558,10 +1583,10 @@
             }
           },
           "gerber_sha256": {
-            "F.Mask": "5444959251904ac4d0e86b15996b2b17d3eaf079398abde01d35cb0bea7dfaf4",
-            "B.Mask": "0ad02890e56e5272ee229844440ce783d55703f83ec4ccb4ab3df667fef10b5d",
-            "F.Cu": "c4b8cb1ba6aaa4d0e3479fe253d4f495b9de988d69112c58443d4ced7040fea2",
-            "B.Cu": "af18591aa303e3ed35c0e69bf39ff01cb44cc384a70c43809c8dd8372e333f5a"
+            "F.Mask": "8efecd6a1c9b1f3e5622068df385548f40b1135b87ff917e168328da0d7d64d5",
+            "B.Mask": "fc40f6533066801370d344ee926b89297f81814c252addee7d1fcc6f38c20a2e",
+            "F.Cu": "0f0606344dc29757bc4a98fa1456bc620e3f08e0d2366c6a2c92b68025c02b93",
+            "B.Cu": "af8d10266c74011fe0c1694e3883b89c454f7af2dd63f665baa9bddf770434f6"
           },
           "unsupported": [],
           "source_geometries": {}
@@ -1569,6 +1594,9 @@
         "objects": {
           "worker_sha256": "72d5a5841144a1cbab758c8f1db27823ac13792f22af7b43a00350097e1778bb",
           "native_python_command": [
+            "docker",
+            "run",
+            "kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec",
             "python3"
           ],
           "native_version": "10.0.6",
@@ -2007,8 +2035,8 @@
             "status": "complete",
             "missing_layers": [],
             "gerber_sha256": {
-              "F.Mask": "5444959251904ac4d0e86b15996b2b17d3eaf079398abde01d35cb0bea7dfaf4",
-              "F.Cu": "c4b8cb1ba6aaa4d0e3479fe253d4f495b9de988d69112c58443d4ced7040fea2"
+              "F.Mask": "8efecd6a1c9b1f3e5622068df385548f40b1135b87ff917e168328da0d7d64d5",
+              "F.Cu": "0f0606344dc29757bc4a98fa1456bc620e3f08e0d2366c6a2c92b68025c02b93"
             },
             "openings": [
               {
@@ -2267,8 +2295,8 @@
             "status": "complete",
             "missing_layers": [],
             "gerber_sha256": {
-              "B.Mask": "0ad02890e56e5272ee229844440ce783d55703f83ec4ccb4ab3df667fef10b5d",
-              "B.Cu": "af18591aa303e3ed35c0e69bf39ff01cb44cc384a70c43809c8dd8372e333f5a"
+              "B.Mask": "fc40f6533066801370d344ee926b89297f81814c252addee7d1fcc6f38c20a2e",
+              "B.Cu": "af8d10266c74011fe0c1694e3883b89c454f7af2dd63f665baa9bddf770434f6"
             },
             "openings": [
               {

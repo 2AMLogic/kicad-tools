@@ -21,6 +21,7 @@ from kicad_tools.router.io import (
     PCBDesignRules,
     _extract_edge_segments,
     _extract_pad_blocks,
+    _pad_copper_layer,
     adjust_grid_for_compliance,
     format_clearance_violations,
     generate_netclass_setup,
@@ -335,6 +336,65 @@ def test_missing_pad_size_uses_analysis_default(single_pad_board):
     path = single_pad_board('(pad 1 smd rect (at 0 0) (layers "F.Cu"))')
     (pad,) = load_pads_for_analysis(path)
     assert (pad.width, pad.height) == (0.3, 0.3)
+
+
+@pytest.mark.parametrize(
+    "pad,through_hole,drill,layer",
+    [
+        (
+            '(pad "" np_thru_hole circle (at 0 0) (size 2 2) (drill 2) (layers "*.Cu" "*.Mask"))',
+            False,
+            2.0,
+            Layer.F_CU,
+        ),
+        ('(pad "1" smd rect (at 0 0) (size 1 1) (layers "B.Cu"))', False, 0.0, Layer.B_CU),
+        (
+            '(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (pinfunction "thru_hole B.Cu"))',
+            False,
+            0.0,
+            Layer.F_CU,
+        ),
+        (
+            '(pad "1" smd rect (at 0 0) (size 1 1) (layers "B.Cu") (pinfunction "thru_hole F.Cu"))',
+            False,
+            0.0,
+            Layer.B_CU,
+        ),
+        (
+            '(pad "1" thru_hole circle (at 0 0) (size 1.6 1.6) (drill 0.8) (layers "*.Cu"))',
+            True,
+            0.8,
+            Layer.F_CU,
+        ),
+    ],
+    ids=["npth", "back-smd", "quoted-thru-hole", "quoted-front-on-back", "pth"],
+)
+def test_loaders_agree_on_through_hole_and_layer(single_pad_board, pad, through_hole, drill, layer):
+    """Issue #10629: both loaders read plating and copper layer from the parsed pad."""
+    path = single_pad_board(pad)
+    router, _ = load_pcb_for_routing(str(path), validate_drc=False)
+    (routed,) = router.pads.values()
+    (analyzed,) = load_pads_for_analysis(path)
+    for loaded in (routed, analyzed):
+        assert (loaded.through_hole, loaded.drill, loaded.layer) == (
+            through_hole,
+            drill,
+            layer,
+        )
+
+
+def test_analysis_loader_resolves_inner_copper_layer(single_pad_board):
+    """Issue #10629: an inner-layer SMD pad is no longer collapsed to F.Cu.
+
+    ``load_pcb_for_routing`` rejects inner layers on this two-layer stack, so
+    the shared ``_pad_copper_layer`` helper is checked directly alongside.
+    """
+    path = single_pad_board('(pad "1" smd rect (at 0 0) (size 1 1) (layers "In1.Cu"))')
+    (analyzed,) = load_pads_for_analysis(path)
+    assert analyzed.layer == Layer.IN1_CU
+    assert _pad_copper_layer(("In1.Cu", "F.Mask")) == Layer.IN1_CU
+    assert _pad_copper_layer(("*.Cu", "*.Mask")) == Layer.F_CU
+    assert _pad_copper_layer(()) == Layer.F_CU
 
 
 class TestLoadPcbForRouting:

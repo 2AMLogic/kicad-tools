@@ -2,7 +2,7 @@ Manufacturing package for simple_led_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-11-26T18:58:00+00:00
+Generated        : 2026-11-27T20:59:51+00:00
 
 Assembly package: BOM and CPL are included.
 CPL rotations combine the KiCad angle with a catalog-part or footprint table offset.
@@ -53,8 +53,8 @@ LCSC stock order
 ----------------
   order size: 5 board(s)
   no parts declared as held in operator inventory
-  parts data sources: parts cache searched, no matching row; offline catalog not available on the generating host (no catalog file)
-  stock check WARN: Stock not verified: 3 assigned LCSC number(s) found in neither the parts cache nor the offline catalog; parts cache searched, no matching row; offline catalog not available on the generating host (no catalog file)
+  parts data sources: parts cache searched, no matching row; offline catalog searched, match found
+  stock check OK: 3 LCSC part(s) have recorded stock for 5 board(s)
 
 Assembly prep
 -------------

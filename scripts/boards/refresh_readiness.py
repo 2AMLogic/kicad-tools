@@ -154,6 +154,9 @@ class BoardConfig:
             ("output/manufacturing/design-source.zip", (".", "output")),
         )
     )
+    # Board 05's recipe ZIP prefixes every member with manufacturing/. Its
+    # distributed ZIP puts the same complete manifest inventory at the root.
+    publish_flat_recipe_bundle: bool = False
 
 
 BOARDS: dict[str, BoardConfig] = {
@@ -232,6 +235,10 @@ BOARDS: dict[str, BoardConfig] = {
             ),
         ),
         manifest_refresher="redesign/package.py:refresh_manifest",
+        publish_flat_recipe_bundle=True,
+        additional_design_sources=(
+            "redesign/board05_revB.pretty/TI_DGN0008C_Lands1.4x0.45_EP1.57x1.89_ThermalVias.kicad_mod",
+        ),
     ),
     "06-diffpair-test": BoardConfig(
         routed_pcb="output/diffpair_test_routed.kicad_pcb",
@@ -339,6 +346,8 @@ def rebuild_archive(
     additional_members: tuple[str, ...] = (),
     derived: dict[str, bytes] | None = None,
     replaces: frozenset[str] = frozenset(),
+    flat_bundle_members: set[str] | None = None,
+    pinned: dict[str, bytes] | None = None,
 ) -> list[str]:
     """Refresh existing and explicitly requested members from current files.
 
@@ -355,13 +364,33 @@ def rebuild_archive(
     while none of *replaces* -- the checked file names those members displaced
     -- is still archived under its own name: such a bundle was written before
     the renaming and keeps refreshing member by member.
+
+    With ``flat_bundle_members``, accept the exact manifest inventory in either
+    its published layout or the recipe's enclosing directory. Publish flat.
+
+    *pinned* names members whose bytes come from a selected source rather than
+    a same-named file under *search* (Issue #10637: the net-class map a legacy
+    archive keeps beside its checked-basename PCB).  Unlike *derived* it applies
+    whatever the archive layout, and it never adds a member by itself: a pinned
+    name is written only when it is already archived or listed in
+    *additional_members*.
     """
     with zipfile.ZipFile(archive) as existing:
-        old = {name: existing.read(name) for name in existing.namelist() if not name.endswith("/")}
+        entries = [entry for entry in existing.infolist() if not entry.is_dir()]
+        old = {entry.filename: existing.read(entry) for entry in entries}
+    names = set(old)
+    if flat_bundle_members is not None:
+        prefixed = {f"{search[0].name}/{name}" for name in flat_bundle_members}
+        if len(entries) != len(old) or names not in (flat_bundle_members, prefixed):
+            raise GateFailure(f"{archive.name}: archive inventory differs from the manifest")
+        names = flat_bundle_members
     if replaces & old.keys():
         derived = None
     members: dict[str, bytes] = {}
-    for name in sorted(old.keys() | set(additional_members)):
+    for name in sorted(names | set(additional_members)):
+        if pinned and name in pinned:
+            members[name] = pinned[name]
+            continue
         if derived and name in derived:
             members[name] = derived[name]
             continue
@@ -378,6 +407,66 @@ def rebuild_archive(
     return changed
 
 
+def selected_net_class_map(pcb: Path) -> Path | None:
+    """The net-class map a board's readiness gate binds, bounded to its directory.
+
+    The explicitly selected readiness input wins; otherwise the sidecar
+    discovered for the checked board.  Registered boards keep the checked PCB
+    and readiness receipt in ``output/``.
+    """
+    from kicad_tools.cli.readiness_cmd import _find_net_class_map
+
+    receipt = pcb.parent / "readiness.json"
+    selected = (
+        json.loads(receipt.read_text()).get("selected_net_class_map") if receipt.is_file() else None
+    )
+    board = pcb.parent.parent.resolve()
+    source = board / selected if selected is not None else _find_net_class_map(pcb)
+    if source is None:
+        return None
+    source = source.resolve()
+    if not source.is_relative_to(board) or not source.is_file():
+        raise GateFailure(f"Invalid net-class map source for {pcb.name}: {source}")
+    return source
+
+
+def legacy_net_class_map_member(
+    names: list[str], pcb: Path, schematic: Path | None, *, add: bool = False
+) -> dict[str, bytes]:
+    """The selected map's bytes under the member a checked-basename archive uses.
+
+    A ``kicad_project.zip`` written before the delivered-basename layout
+    (Issue #10108) keeps the checked PCB name, and an extracted copy finds its
+    map through the sidecar probe for *that* name (Issue #10637).  Returns
+    ``{member: bytes}`` for the archived candidate of that probe or, with
+    *add*, the member a missing map should be filed under; empty when the
+    board selects no map, the archive uses the delivered layout (whose map
+    rides in ``delivered_project_members``), or nothing is archived and *add*
+    is false -- so a plain refresh never grows a legacy member list.
+    """
+    from kicad_tools.sidecars import net_class_map_sidecar_candidates, net_class_map_sidecar_names
+
+    _, replaces = delivered_project_members(pcb, schematic)
+    source = selected_net_class_map(pcb)
+    if source is None or replaces.isdisjoint(names):
+        return {}
+    member = next(
+        (
+            path.as_posix()
+            for path in net_class_map_sidecar_candidates(pcb.name)
+            if path.as_posix() in names
+        ),
+        None,
+    )
+    if member is None:
+        if not add:
+            return {}
+        standard = source.name in net_class_map_sidecar_names(pcb.stem)
+        member = Path(pcb.name).with_name(source.name if standard else "net_class_map.json")
+        member = member.as_posix()
+    return {member: source.read_bytes()}
+
+
 def delivered_project_members(
     pcb: Path, schematic: Path | None
 ) -> tuple[dict[str, bytes], frozenset[str]]:
@@ -390,7 +479,6 @@ def delivered_project_members(
     The delivered map takes its bytes from the explicitly selected readiness
     input or the sidecar discovered for the checked board.
     """
-    from kicad_tools.cli.readiness_cmd import _find_net_class_map
     from kicad_tools.export.project_identity import (
         archived_member,
         project_identity,
@@ -408,17 +496,8 @@ def delivered_project_members(
     if identity.renamed:
         derived["VERSION.md"] = record
 
-    # Registered boards keep the checked PCB and readiness receipt in output/.
-    receipt = pcb.parent / "readiness.json"
-    selected = (
-        json.loads(receipt.read_text()).get("selected_net_class_map") if receipt.is_file() else None
-    )
-    board = pcb.parent.parent.resolve()
-    source = board / selected if selected is not None else _find_net_class_map(pcb)
+    source = selected_net_class_map(pcb)
     if source is not None:
-        source = source.resolve()
-        if not source.is_relative_to(board) or not source.is_file():
-            raise GateFailure(f"Invalid net-class map source for {pcb.name}: {source}")
         derived[net_class_map_sidecar_names(identity.name)[0]] = source.read_bytes()
     return derived, frozenset(source.name for source, _ in identity.renamed)
 
@@ -889,12 +968,19 @@ def repin_staged(
             if Path(archive).name == "kicad_project.zip"
             else ({}, frozenset())
         )
+        pinned: dict[str, bytes] = {}
+        if Path(archive).name == "kicad_project.zip":
+            with zipfile.ZipFile(staged / archive) as existing:
+                pinned = legacy_net_class_map_member(
+                    existing.namelist(), staged / cfg.routed_pcb, staged / cfg.schematic
+                )
         changed = rebuild_archive(
             staged / archive,
             [staged / s for s in search],
             additional_members=extra,
             derived=derived or None,
             replaces=replaces,
+            pinned=pinned or None,
         )
         log(f"  {archive}: rebuilt; members with new content {changed}")
 
@@ -914,6 +1000,9 @@ def repin_staged(
         out / "manufacturing.zip",
         bundle_roots,
         additional_members=tuple(p.relative_to(bundle_roots[0]).as_posix() for p in bundle_files),
+        flat_bundle_members=(
+            set(after["files"]) | {"manifest.json"} if cfg.publish_flat_recipe_bundle else None
+        ),
     )
     log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
 
