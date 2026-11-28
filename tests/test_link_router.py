@@ -79,6 +79,23 @@ class TestRouteLink:
         assert box(9.6, 9.6, 10.4, 10.4).contains(shapely.geometry.Point(sx, sy))
         assert box(13.6, 9.6, 14.4, 10.4).contains(shapely.geometry.Point(ex, ey))
 
+    @pytest.mark.parametrize(("mask_gap", "lands_on_pad"), [(0.0, False), (0.09, True)])
+    def test_wide_link_endpoint_beside_same_net_pad(self, mask_gap, lands_on_pad):
+        # An island's existing track protrudes 0.20 mm beyond its pad. A wide
+        # cap ending on that track would graze the opening beside the pad tip.
+        land = box(10, 9.65, 10.30, 10.35)
+        island = LinkTerminal(
+            "island", (10.15, 10), {"F.Cu": land.union(box(10.15, 9.9, 10.50, 10.1))}
+        )
+        pad = _Item(1, {"F.Cu": land}, is_pad=True)
+        rules = LinkRouteRules(trace_width=0.5, pad_entry_gap=mask_gap)
+        route = route_link(
+            None, 1, "GND", _term("start", 12, 10), island, rules, model=_model(["F.Cu"], [pad])
+        )
+        assert route is not None
+        _, _, x, y, _ = route.segments[-1]
+        assert land.contains(shapely.geometry.Point(x, y)) == lands_on_pad
+
     def test_foreign_wall_forces_detour_clear_of_it(self):
         wall = _Item(2, {"F.Cu": box(11.8, 8.0, 12.2, 12.0)})
         a, b = _term("a", 10.0, 10.0), _term("b", 14.0, 10.0)
