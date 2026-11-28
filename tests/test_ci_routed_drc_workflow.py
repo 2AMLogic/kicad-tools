@@ -1,7 +1,7 @@
 """Tests for the `routed-pcb-drc-check` CI job and its helper script.
 
 Issue #2546 added a CI gate that validates committed `*_routed.kicad_pcb`
-files via ``kct check --mfr jlcpcb --errors-only``. These tests pin the
+files via ``kct check --mfr jlcpcb --format json``. These tests pin the
 critical structural properties of the workflow YAML, the allowlist file,
 and the helper script's allowlist semantics so regressions in any of the
 three layers are caught immediately rather than at the next CI run.
@@ -165,6 +165,32 @@ class TestWorkflowYAML:
             "scripts/ci/jobs/routed-pcb-drc-check.sh must invoke "
             "scripts/ci/check_routed_drc_internal.py (the helper that reads "
             "the per-board allowlist and emits ::error:: annotations)."
+        )
+
+    def test_ordinary_step_pins_native_toolchain(self, workflow: dict) -> None:
+        """Issue #9706: the ordinary-board kct check step must run with
+        ``KCT_KICAD_DOCKER: "1"`` so the native ``mask_to_copper`` pass
+        completes inside the pinned KiCad image. Without it (bare
+        ubuntu-latest, no kicad-cli) the rule emits only an info
+        ``mask_to_copper_incomplete`` record with zero findings, and the
+        identity-allowance gate mis-read every allowance entry as stale on
+        scheduled main runs."""
+        steps = workflow["jobs"][JOB_NAME]["steps"]
+        ordinary_step = next(
+            (
+                s
+                for s in steps
+                if isinstance(s, dict) and "routed-pcb-drc-check.sh" in str(s.get("run", ""))
+            ),
+            None,
+        )
+        assert ordinary_step is not None, (
+            "Expected the ordinary-board step invoking scripts/ci/jobs/routed-pcb-drc-check.sh."
+        )
+        assert ordinary_step.get("env", {}).get("KCT_KICAD_DOCKER") == "1", (
+            "The ordinary-board kct check step must set env "
+            'KCT_KICAD_DOCKER: "1" so mask_to_copper runs to completion '
+            "on the pinned KiCad toolchain (Issue #9706)."
         )
 
     def test_job_has_short_circuit_on_no_files(self, workflow: dict) -> None:

@@ -157,10 +157,9 @@ BOARD_07_EXPECTED_GAP_ERRORS = 104
 # Issue #8858: the committed board 07 fixture carries a residual
 # ``mask_to_copper`` population (162 errors on 22 net signatures, measured
 # 2026-11-18 on main @ ea0c5e2a1, pinned image kicad-cli 10.0.6).  The CI
-# release gate judges such populations by IDENTITY
-# (``.github/routed-drc-tolerance.yml`` ``identity_allowances:``); the
-# matchgroup coverage gate does the same for its own REGENERATED population.
-# This test excludes the committed fixture's population the same way so the
+# release gate counts mask findings on the release board (#9706). The
+# matchgroup coverage gate identifies findings on its regenerated fixture.
+# This test excludes the committed synthetic fixture's known population so the
 # gate-count pin below stays about the families it has always pinned.  A
 # fixture refresh that changes this set re-derives it with:
 #   KCT_KICAD_DOCKER=1 uv run kct check <fixture> --mfr jlcpcb --format json
