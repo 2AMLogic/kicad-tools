@@ -219,13 +219,7 @@ class TestWeldDispatch:
         attempt = ClosureAttempt()
         closer._weld_pads(board, {"GNDA": {"C1.1"}, "OTHER": {"R2.1"}}, attempt)
         assert closer.exhausted_stitch_pads == {"C1.1"}
-        # Issue #9424: the class-width skip is retried at the pad-escape neck
-        # (the board width, for a class that declares none) before the pad
-        # is given up, and the last retry's reason is the one reported.
-        assert attempt.notes == [
-            "GNDA C1.1: no site (board-width 0.2 mm pad escape "
-            "(the class declares no neck_trace_width); no legal 0.5 mm stub either)"
-        ]
+        assert attempt.notes == ["GNDA C1.1: no site"]
 
 
 class TestWideCopperThatCannotFit:

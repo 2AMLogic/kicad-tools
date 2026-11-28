@@ -1618,8 +1618,8 @@ class PourLinkCloser:
             return float(value)
         return self.trace_width
 
-    def _declared_neck(self, net_name: str | None) -> float | None:
-        """The class's ``neck_trace_width`` when it narrows :meth:`pour_width`."""
+    def neck_width(self, net_name: str | None) -> float | None:
+        """The narrower pad escape explicitly permitted by this net's class (Issue #9424)."""
         cls = (self.net_class_map or {}).get(net_name or "")
         value = getattr(cls, "neck_trace_width", None) if cls is not None else None
         width = self.pour_width(net_name)
@@ -1627,34 +1627,10 @@ class PourLinkCloser:
             return float(value)
         return None
 
-    def neck_width(self, net_name: str | None) -> float | None:
-        """Pad-escape width for new pour-completion copper on ``net_name`` (Issue #9424).
-
-        The width :meth:`_weld_group` retries a stub at when no strategy can
-        place it at :meth:`pour_width`: a 0.50 mm stub cannot leave a 0.40 mm
-        pad on 0.65 mm pitch with 0.20 mm clearance (board 05's U2.16 and
-        U2.20), which #10627 turned from a weld into an open net.  It is the
-        class's declared ``neck_trace_width`` (:meth:`_declared_neck`) -- the
-        one width below class that the agreement audit
-        (:mod:`kicad_tools.validate.rules.netclass_agreement`) excuses for a
-        leg leaving a same-net pad -- and, for a class that declares none,
-        the board width every weld was written at before #10627 (never
-        thinner unless the class says so).  ``None`` when neither is narrower
-        than the class width: the pad keeps the routed-link path.
-        """
-        declared = self._declared_neck(net_name)
-        if declared is not None:
-            return declared
-        return self.trace_width if self.trace_width < self.pour_width(net_name) else None
-
     def neck_label(self, net_name: str | None) -> str:
-        """How :meth:`neck_width` resolved ``net_name``'s pad escape, for the closer notes."""
+        """Describe the permitted escape width in the closer notes."""
         neck = self.neck_width(net_name)
-        if neck is None:
-            return ""
-        if self._declared_neck(net_name) is not None:
-            return f"class pad-escape neck {neck:g} mm"
-        return f"board-width {neck:g} mm pad escape (the class declares no neck_trace_width)"
+        return f"class pad-escape neck {neck:g} mm" if neck is not None else ""
 
     def pair_clearance(self, pour_net: str, other_net: str | None) -> float:
         """``c(P, N)``: the clearance copper on ``pour_net`` keeps from ``other_net``."""
@@ -2212,7 +2188,7 @@ class PourLinkCloser:
             stranded = frozenset(
                 f"{p.reference}.{p.pad_number}" for p, _ in passes[-1].pads_skipped
             )
-            by_neck: dict[tuple[float, float, bool], tuple[list[str], set[str]]] = {}
+            by_neck: dict[tuple[float, float], tuple[list[str], set[str]]] = {}
             for net in nets:
                 neck = self.neck_width(net)
                 if neck is None:
@@ -2224,13 +2200,12 @@ class PourLinkCloser:
                         (
                             round(neck, 6),
                             round(float(getattr(cls, "clearance", None) or 0.0), 6),
-                            self._declared_neck(net) is not None,
                         ),
                         ([], set()),
                     )
                     group[0].append(net)
                     group[1].update(pads)
-            for (neck, class_clearance, _declared), (neck_nets, neck_pads) in by_neck.items():
+            for (neck, class_clearance), (neck_nets, neck_pads) in by_neck.items():
                 only_neck = frozenset(neck_pads)
                 passes.append(
                     stitch(

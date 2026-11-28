@@ -4,10 +4,8 @@ PR #10631 (Issue #10627) welds pour pads at the full class width.  A 0.50 mm
 stub cannot leave a 0.40 mm pad on 0.65 mm pitch with 0.20 mm clearance -- the
 geometry of board 05's U2 pins 16 (+5V) and 20 (GND) -- so those welds found
 no placement and the unattended route regressed to 44/46 nets.  A stub no
-strategy can place at the class width is now retried as a short pad escape at
-the class's pad-escape neck: its declared ``neck_trace_width`` (the width the
-agreement audit excuses for a leg leaving a same-net pad), else the board
-width every weld was written at before #10627.
+strategy can place at the class width is retried as a short pad escape only
+when the class declares a narrower ``neck_trace_width``.
 """
 
 from __future__ import annotations
@@ -105,6 +103,11 @@ def _fine_pitch_board(tmp_path: Path, *, thermal: bool = False) -> Path:
     text += '  (gr_rect (start 100 90) (end 140 130) (layer "Edge.Cuts") (width 0.1))\n)\n'
     path = tmp_path / "fine.kicad_pcb"
     path.write_text(text)
+    _write_ground_class(path, 0.5)
+    return path
+
+
+def _write_ground_class(path: Path, width: float) -> None:
     project = {
         "board": {},
         "meta": {"version": 1},
@@ -117,38 +120,129 @@ def _fine_pitch_board(tmp_path: Path, *, thermal: bool = False) -> Path:
                     "track_width": 0.2,
                     "priority": 2**31 - 1,
                 },
-                {"name": "Ground plane", "clearance": 0.2, "track_width": 0.5, "priority": 1},
+                {"name": "Ground plane", "clearance": 0.2, "track_width": width, "priority": 1},
             ],
             "netclass_assignments": {"GND": "Ground plane"},
             "netclass_patterns": [],
         },
     }
     path.with_suffix(".kicad_pro").write_text(json.dumps(project))
-    return path
+
+
+@pytest.fixture
+def fine_pitch_route_input(tmp_path):
+    from kicad_tools.cli.kicad_toolchain import PINNED_KICAD_VERSION, version_number
+    from kicad_tools.cli.runner import find_kicad_cli, get_kicad_version, run_refill_zones
+    from kicad_tools.pcb.editor import PCBEditor
+
+    cli = find_kicad_cli()
+    if cli is None or version_number(get_kicad_version(cli) or "") != PINNED_KICAD_VERSION:
+        pytest.skip(f"native pour-completion test requires KiCad {PINNED_KICAD_VERSION}")
+
+    # A back-side plane joins the through-hole header. Two signal nets beside
+    # U1.2 exercise the negotiated route before the ground-pad escape runs.
+    board = tmp_path / "stock.kicad_pcb"
+    pcb = PCB.create(width=37, height=36, center=False)
+    pcb.add_footprint("Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm", "U1", 17, 18)
+    pcb.add_footprint("Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical", "J1", 27, 26)
+    nets = {
+        "GND": [("U1", "2"), ("J1", "1")],
+        "GUARD": [("U1", "1"), ("U1", "3")],
+        "SIG": [("U1", "13"), ("U1", "15")],
+    }
+    for net, pads in nets.items():
+        for ref, pad in pads:
+            assert pcb.assign_net_to_footprint_pad(ref, pad, net)
+    pcb.save(board)
+    editor = PCBEditor(str(board))
+    editor.add_zone(
+        "GND", "B.Cu", [(1, 1), (36, 1), (36, 35), (1, 35)], clearance=0.2, min_thickness=0.15
+    )
+    editor.save()
+    _write_ground_class(board, 0.75)
+    assert run_refill_zones(board, require_save=True).success
+    return board
+
+
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize(("neck", "route_exit", "opens"), [(0.75, 3, 1), (0.2, 0, 0)])
+def test_public_route_and_audit_respect_the_declared_escape(
+    fine_pitch_route_input, tmp_path, neck, route_exit, opens
+):
+    from kicad_tools.cli import main
+    from kicad_tools.cli.runner import run_drc
+
+    board = fine_pitch_route_input
+    original = board.read_bytes()
+    rules = tmp_path / "rules.json"
+    rules.write_text(json.dumps({"GND": {**GND, "trace_width": 0.75, "neck_trace_width": neck}}))
+    routed = tmp_path / "routed.kicad_pcb"
+    assert (
+        main(
+            [
+                "route",
+                str(board),
+                "-o",
+                str(routed),
+                "--net-class-map",
+                str(rules),
+                "--no-optimize",
+                "--no-auto-pour",
+                "--no-auto-layers",
+                "--no-sync-check",
+                "--no-current-paths",
+                "--no-placement-feedback",
+                "--oracle-rounds",
+                "2",
+                "--format",
+                "json",
+            ]
+        )
+        == route_exit
+    )
+    assert board.read_bytes() == original
+    saved = PCB.load(routed)
+    ground = saved.get_net_by_name("GND").number
+    widths = [segment.width for segment in saved.segments if segment.net_number == ground]
+    assert widths == ([] if opens else [pytest.approx(neck)])
+    native = tmp_path / "native.json"
+    assert run_drc(routed, native, schematic_parity=False, refill_zones=True).success
+    assert len(json.loads(native.read_text())["unconnected_items"]) == opens
+
+    audit = tmp_path / "audit.json"
+    main(
+        [
+            "check",
+            str(routed),
+            "--mfr",
+            "jlcpcb",
+            "--only",
+            "netclass_agreement",
+            "--format",
+            "json",
+            "--output",
+            str(audit),
+        ]
+    )
+    report = json.loads(audit.read_text())
+    assert report["summary"]["rules_checked_by_rule"][RULE_TRACK_WIDTH_MISMATCH]
+    assert not any(row["rule_id"] == RULE_TRACK_WIDTH_MISMATCH for row in report["findings"])
 
 
 class TestNeckWidth:
     def test_declared_neck_below_the_class_width(self):
         closer = _closer({"GND": NetClassRouting(**GND)})
         assert closer.neck_width("GND") == pytest.approx(0.15)
-        assert closer._declared_neck("GND") == pytest.approx(0.15)
 
     def test_neck_is_relative_to_the_effective_class_width(self):
         narrow = NetClassRouting(name="S", trace_width=0.15, neck_trace_width=0.1)
         assert _closer({"SIG": narrow}).neck_width("SIG") == pytest.approx(0.1)
 
-    def test_undeclared_neck_is_the_board_width(self):
-        """A class that declares no neck never falls back thinner than the board."""
-        closer = _closer({"GND": NetClassRouting(name="Power", trace_width=0.5)})
-        assert closer._declared_neck("GND") is None
-        assert closer.neck_width("GND") == pytest.approx(0.2)
-
-    @pytest.mark.parametrize("neck", [0.5, 0.6, 0.0, -0.1])
-    def test_unusable_declared_neck_falls_back_to_the_board_width(self, neck):
+    @pytest.mark.parametrize("neck", [None, 0.5, 0.6, 0.0, -0.1, True])
+    def test_escape_requires_a_positive_declared_width_below_class(self, neck):
         cls = NetClassRouting(name="Ground plane", trace_width=0.5, neck_trace_width=neck)
         closer = _closer({"GND": cls})
-        assert closer._declared_neck("GND") is None
-        assert closer.neck_width("GND") == pytest.approx(0.2)
+        assert closer.neck_width("GND") is None
 
     def test_none_when_nothing_is_narrower_than_the_class(self):
         same = _closer({"SIG": NetClassRouting(name="D", trace_width=0.2)})
@@ -188,18 +282,14 @@ class TestFinePitchPadTakesTheNeck:
         assert _segs(board) == before
         assert closer.exhausted_stitch_pads == {"U1.2"}
 
-    def test_undeclared_neck_welds_at_the_board_width_and_the_audit_says_so(self, tmp_path):
-        """A class without a declared neck falls back to the pre-#10627 board width."""
-        classes = {"GND": NetClassRouting(name="Ground plane", trace_width=0.5, clearance=0.2)}
+    @pytest.mark.parametrize("neck", [None, 0.5, 0.6])
+    def test_weld_preserves_class_width_when_no_narrower_escape_is_permitted(self, tmp_path, neck):
+        classes = {"GND": NetClassRouting(**{**GND, "neck_trace_width": neck})}
         board, before, closer, attempt = self._weld(tmp_path, classes)
-        new = _new_segs(board, before)
-        assert attempt.applied >= 1, attempt.notes
-        assert new and all(w == pytest.approx(0.2) for _, _, w in new), new
-        assert closer.exhausted_stitch_pads == set()
-        assert any("board-width 0.2 mm pad escape" in n for n in attempt.notes), attempt.notes
-        (finding,) = check_netclass_agreement(board, PCB.load(str(board)), classes).violations
-        assert finding.rule_id == RULE_TRACK_WIDTH_MISMATCH
-        assert finding.actual_value == pytest.approx(0.2)
+        assert attempt.applied == 0
+        assert _segs(board) == before
+        assert not PCB.load(str(board)).vias
+        assert closer.exhausted_stitch_pads == {"U1.2"}
 
     def test_necked_stub_is_written_and_the_audit_excuses_it(self, tmp_path):
         classes = {"GND": NetClassRouting(**GND)}
@@ -321,19 +411,15 @@ class TestNeckedWeldDispatch:
         assert attempt.applied == 1 and closer.exhausted_stitch_pads == set()
         assert any("pad-escape neck 0.15" in n for n in attempt.notes), attempt.notes
 
-    def test_undeclared_neck_is_retried_at_the_board_width(self, tmp_path, rig):
-        calls = rig(full_skipped={0.5}, neck_skipped={0.2})
+    def test_undeclared_neck_keeps_the_class_width_skip(self, tmp_path, rig):
+        calls = rig(full_skipped={0.5})
         closer = _closer({"GNDA": NetClassRouting(name="P", trace_width=0.5, clearance=0.2)})
         attempt = ClosureAttempt()
         closer._weld_pads(self._board(tmp_path), {"GNDA": {"C1.1"}}, attempt)
-        full, neck = calls
+        (full,) = calls
         assert full["trace_width"] == 0.5 and full["pad_escape_class"] is None
-        assert neck["trace_width"] == pytest.approx(0.2)
-        assert neck["pad_escape_class"] == (pytest.approx(0.5), pytest.approx(0.2))
         assert closer.exhausted_stitch_pads == {"C1.1"}
-        (note,) = attempt.notes
-        assert note.startswith("GNDA C1.1: no site (board-width 0.2 mm pad escape")
-        assert "no legal 0.5 mm stub either" in note
+        assert attempt.notes == ["GNDA C1.1: no site"]
 
     def test_a_welded_pad_is_not_retried(self, tmp_path, rig):
         calls = rig()
@@ -437,15 +523,13 @@ class TestNeckedLink:
         ), attempt.notes
         assert check_netclass_agreement(board, pcb, classes).violations == []
 
-    def test_undeclared_neck_falls_back_to_the_board_width(self, tmp_path):
-        classes = {"GND": NetClassRouting(name="Ground plane", trace_width=0.5, clearance=0.2)}
-        board, _, closer, attempt = self._route(tmp_path, classes)
-        new = [s.width for s in PCB.load(str(board)).segments]
-        assert attempt.applied == 1, attempt.notes
-        assert new == [pytest.approx(0.2)]
-        assert any("board-width 0.2 mm pad escape" in n for n in attempt.notes), attempt.notes
-        (finding,) = check_netclass_agreement(board, PCB.load(str(board)), classes).violations
-        assert finding.actual_value == pytest.approx(0.2)
+    @pytest.mark.parametrize("neck", [None, 0.5, 0.6])
+    def test_link_stays_open_when_no_narrower_escape_is_permitted(self, tmp_path, neck):
+        classes = {"GND": NetClassRouting(**{**GND, "neck_trace_width": neck})}
+        board, before, _, attempt = self._route(tmp_path, classes)
+        assert attempt.applied == 0
+        assert any("no clearance-legal route" in n for n in attempt.notes), attempt.notes
+        assert board.read_bytes() == before
 
     def test_neck_is_not_consulted_at_the_board_width(self, tmp_path):
         """A class at the board width has nothing to neck down to: unchanged behaviour."""

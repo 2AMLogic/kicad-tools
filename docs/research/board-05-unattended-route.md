@@ -628,6 +628,12 @@ All rows completed 37/37 nets and 143/143 connections with clean native DRC, ERC
 
 ## Pour completion at the class width opened +5V and GND, 2026-11-28 (issue #9424)
 
+The Linux measurements below include the early PR commit `de2808bbe`,
+which allowed a board-width escape without a declared neck. The width audit
+identified four undersized segments. The corrected implementation requires a
+narrower width to be declared by the net class. Its measurements follow
+the original comparison.
+
 Measured on Linux x86_64 (`loom-crew-2`, Intel Xeon Platinum 8488C, 16 vCPU
 shared with other work; 1-minute load 8 to 27) with C++ router build 79 and
 pinned kicad-cli 10.0.6 (`KCT_KICAD_DOCKER=1`).
@@ -644,25 +650,20 @@ base.
 | Revision | Seed | Route exit | Nets | Connections | Native DRC err / warn / open | ERC | Nightly errors / warnings | Copper and label LVS | Vias | Wall (s) |
 | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | ---: |
 | `2d894a267` (base) | 42 | 3 | 44/46 | 141/143 | 0 / 0 / 2 | 0 | 0 / 12 | copper dirty | 120 | 397.6 |
-| this change (synced with `0bb1e449b`) | 42 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 15 | clean | 122 | 700.1 |
-| this change (synced with `0bb1e449b`) | 7 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 15 | clean | 122 | 700.1 |
-| this change (synced with `0bb1e449b`) | 1337 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 15 | clean | 122 | 699.9 |
+| `de2808bbe` | 42 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 15 | clean | 122 | 700.1 |
+| `de2808bbe` | 7 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 15 | clean | 122 | 700.1 |
+| `de2808bbe` | 1337 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 15 | clean | 122 | 699.9 |
 
-The three seeds of this change were routed in parallel on the same host,
+The three seeds of `de2808bbe` were routed in parallel on the same host,
 with a test run beside them, and saved byte-identical boards (SHA-256
 `34d639febe39d79e2ba856627b230f47807f627cd032da4e5dc73eaacb5fa967`). Each
 oracle stage converged in round 1 (43 -> 0). No route log carries a `per-net wall clock bound` or `stage
 deadline fired` line.
 
-A weld no strategy can place at the class width is now retried as a short pad
-escape at the class's pad-escape neck: its declared `neck_trace_width`, else
-the board width every weld was written at before #10627. The retry writes only
-a straight leg or one 45-degree dogleg landing inside the `netclass_agreement`
-rule's pad-escape reach. `run_stitch` seats it (`pad_escape_class`); where the
-stitcher's fixed via sites cannot reach -- `GND` U2.20, whose only exit is the
-0.5 mm gap to its own thermal pad U2.29 -- the link router searches the eight
-0/45/90-degree rays from the pad centre for the nearest same-net landing and
-writes that one leg.
+On that commit, a weld that did not fit at class width used the declared
+`neck_trace_width` or the board width. The stitcher accepted a straight leg
+or one 45-degree dogleg within the pad-escape reach. For `GND` U2.20, the
+link router used one straight leg across the 0.5 mm gap to thermal pad U2.29.
 
 On the graded seed-42 board four of the 45 new pour segments are below the
 0.50 mm class width, each one 0.20 mm pad escape: `+5V` U2.16 to its via at
@@ -679,3 +680,32 @@ bytes measured 14 warnings before this branch was synced with `origin/main`
 @ `0bb1e449b`, whose `3e453299a` made that rule detect acute branches.
 `--skip mask_to_copper` stays, and the full-mask counts were not re-measured
 here.
+
+### Requiring a declared escape width
+
+The corrected router attempts every stub at class width first. It tries a short
+pad escape only when the class declares a positive, smaller `neck_trace_width`.
+On a three-net board with a stock TSSOP-20 and a pin header, `kct route` left
+one ground pad open (exit 3) with a 0.75 mm class and a 0.75 mm neck. Omitting
+the neck gave the same result. Declaring 0.20 mm produced one 0.20 mm ground
+segment, zero native opens and exit 0. The public JLCPCB check found zero
+width mismatches in all three outputs.
+
+I ran seed 42 twice on macOS with pinned KiCad 10.0.6, router build 79 and
+the correction applied to `de2808bbe`. The control passed the released
+`redesign/net_class_map.json` to the same unattended harness using
+`--net-class-map`. Both runs used a 1,800-second limit.
+
+| Seed 42 routing input | Route exit | Nets | Connections | Native DRC errors / warnings / opens | ERC | JLCPCB errors / warnings | Width mismatches |
+| --- | ---: | ---: | ---: | --- | ---: | --- | ---: |
+| Nightly defaults | 3 | 43/46 | 140/143 | 0 / 0 / 3 | 0 | 1 / 19 | 0 |
+| Reviewed Board 05 class map | 2 | 45/46 | 141/143 | 0 / 0 / 2 | 0 | 1 / 20 | 0 |
+
+With the default Power class, U2.16 on +5V and U2.20 on GND stayed open.
+VM also had one open. The reviewed class map permits a 0.15 mm escape for
+both pour nets. On that run the pour stage closed all 43 links, and the two
+remaining native opens were on GND_SENSE. The full map also changes other
+nets' routing settings. Both runs hit a wall-clock routing limit within the
+sweep, so these counts describe the saved boards for this seed. Both passed
+label LVS and failed copper LVS. The unattended gate and its full-mask
+acceptance criteria remain open in #9424.
