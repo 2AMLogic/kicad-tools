@@ -11462,11 +11462,17 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
         def refill(path: Path) -> object:
             return run_fill_zones(path, kicad_cli=find_kicad_cli())
 
+        from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+        mask_request = default_request_for_manufacturer(getattr(args, "manufacturer", None))
         closer = PourLinkCloser(
             via_size=float(getattr(args, "via_diameter", 0.6)),
             via_drill=float(getattr(args, "via_drill", 0.3)),
             clearance=float(getattr(args, "clearance", 0.2)),
             trace_width=float(getattr(args, "trace_width", 0.2)),
+            mask_entry_clearance=mask_request.policy.clearance_mm
+            if mask_request and mask_request.policy
+            else 0.0,
             refill=refill,
             # Issue #6374: new pour copper keeps each net's class clearance.
             net_class_map=_pour_closer_net_class_map(router, args),

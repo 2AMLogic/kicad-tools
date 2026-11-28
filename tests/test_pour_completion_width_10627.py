@@ -309,52 +309,39 @@ class TestWeldReachUsesPourWidth:
         assert clearance(1.0) == pytest.approx(0.5)
 
 
-class TestWidthFitsPadLand:
-    """A land narrower than the class width keeps the board width (mask-to-copper)."""
+def test_wide_weld_starts_inside_a_real_narrow_land(tmp_path):
+    from shapely.affinity import translate
+    from shapely.geometry import LineString, Point
 
-    def test_fitted_width(self):
-        c = _closer(0.2, _classes(A=0.5))
-        assert c.fitted_width("A", 0.30) == 0.2  # Board 07: 0.30 mm land, 0.50 mm class
-        assert c.fitted_width("A", 0.50) == 0.5
-        assert c.fitted_width("A", 1.00) == 0.5
-        assert c.fitted_width("A", None) == 0.5  # unknown land: class width
-        assert c.fitted_width("B", 0.30) == 0.2  # classless net
+    from kicad_tools.router.link_router import terminal_for_pad
+    from kicad_tools.validate.mask_copper import clean_own_pad_entry
 
-    def test_land_minor(self):
-        from shapely.geometry import box
-
-        term = SimpleNamespace(lands={"F.Cu": box(0, 0, 0.7, 0.3)})
-        assert PourLinkCloser.land_minor_mm(term) == pytest.approx(0.3)
-        assert PourLinkCloser.land_minor_mm(None) is None
-
-    def test_weld_splits_narrow_pad_to_board_width(self, tmp_path, monkeypatch):
-        from shapely.geometry import box
-
-        from kicad_tools.cli import stitch_cmd
-        from kicad_tools.router import link_router
-
-        lands = {"U1.1": 0.3, "C1.1": 1.0}
-        monkeypatch.setattr(
-            link_router,
-            "terminal_for_pad",
-            lambda pcb, ref, num: SimpleNamespace(
-                lands={"F.Cu": box(0, 0, 2.0, lands[f"{ref}.{num}"])}
-            ),
-        )
-        calls = []
-
-        def fake(pcb_path, nets, **kw):
-            calls.append({"nets": list(nets), **kw})
-            return SimpleNamespace(
-                vias_added=[], already_connected=0, pads_skipped=[], traces_added=[]
-            )
-
-        monkeypatch.setattr(stitch_cmd, "run_stitch", fake)
-        board = tmp_path / "b.kicad_pcb"
-        shutil.copy(WELD_FIXTURE, board)
-        _closer(0.2, _classes(VCC=0.5))._weld_pads(
-            board, {"VCC": {"U1.1", "C1.1"}}, ClosureAttempt()
-        )
-        by_width = {c["trace_width"]: c["only_pads"] for c in calls}
-        assert by_width[0.5] == frozenset({"C1.1"})
-        assert by_width[0.2] == frozenset({"U1.1"})
+    board = tmp_path / "narrow.kicad_pcb"
+    board.write_text(WELD_FIXTURE.read_text().replace("(size 1 1)", "(size 0.7 0.3)"))
+    pcb = PCB.load(str(board))
+    terminal = terminal_for_pad(pcb, "C1", "1")
+    assert terminal is not None
+    land = translate(terminal.layers["F.Cu"], *pcb.board_origin)
+    before = _segs(board)
+    attempt = ClosureAttempt()
+    _closer(0.2, _classes(GNDA=0.5), mask_entry_clearance=0.09)._weld_pads(
+        board, {"GNDA": {"C1.1"}}, attempt
+    )
+    key = "pad:GNDA:C1.1"
+    caps = attempt.footprints[key][1:]  # discard the via disc
+    assert caps
+    x1, y1, x2, y2, radius = caps[0]
+    assert radius == 0.25
+    assert land.contains(Point(x1, y1))
+    assert clean_own_pad_entry(
+        land,
+        LineString([(x1, y1), (x2, y2)]).buffer(radius),
+        land,
+        "pad:rect",
+        2 * radius,
+        [(x1, y1), (x2, y2)],
+        clearance_mm=0.09,
+        uncertainty_mm=0.010004,
+    )
+    assert _new_widths(board, before) == [0.5] * len(caps)
+    assert caps[-1][2:4] == attempt.sites[key][0]
