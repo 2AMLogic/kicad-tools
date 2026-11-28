@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "boards" / "refresh_bundles_6404.py"
@@ -1081,3 +1083,144 @@ def test_parity_drc_keeps_committed_report_when_only_the_date_differs(mod, tmp_p
     before = committed.read_bytes()
     mod.gate_parity_drc(board, cfg, bundle)
     assert committed.read_bytes() == before
+
+
+# --------------------------------------------------------------------------- --check (#10692)
+def _tree(root: Path) -> dict[str, str]:
+    return {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in root.rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts
+    }
+
+
+@pytest.fixture
+def unanchored_clock(monkeypatch):
+    """``SOURCE_DATE_EPOCH`` absent, as on a fresh runner; whatever ``main`` writes is undone."""
+    saved = os.environ.get("SOURCE_DATE_EPOCH")
+    monkeypatch.delenv("SOURCE_DATE_EPOCH", raising=False)
+    yield
+    if saved is None:
+        os.environ.pop("SOURCE_DATE_EPOCH", None)
+    else:
+        os.environ["SOURCE_DATE_EPOCH"] = saved
+
+
+def test_drift_exit_status_names_the_board_and_its_files(mod, capsys):
+    assert mod.drift_exit_status({}) == 0
+    assert "DRIFT" not in capsys.readouterr().out
+
+    drift = {"04-stm32-devboard": ["output/readiness/kct-check.json", "readiness.json"]}
+    assert mod.drift_exit_status(drift) == 1
+    out = capsys.readouterr().out
+    assert "04-stm32-devboard" in out
+    for name in drift["04-stm32-devboard"]:
+        assert name in out
+
+
+def test_source_date_epoch_accepts_the_committed_z_suffix(mod):
+    assert mod._source_date_epoch("2026-11-27T01:36:26Z") == "1795743386"
+    assert mod._source_date_epoch("2026-10-13T00:00:00+00:00") == "1791849600"
+    with pytest.raises(ValueError):
+        mod._source_date_epoch("yesterday")
+
+
+def test_check_exits_one_on_drift_and_publishes_nothing(
+    mod, tmp_path, monkeypatch, unanchored_clock
+):
+    board = _repin_board(mod, tmp_path, monkeypatch)
+    checked_at = "2026-10-18T00:00:00+00:00"
+    before = _tree(board)
+
+    assert mod.main([str(board), "--checked-at", checked_at, "--check"]) == 1
+    assert _tree(board) == before
+    assert os.environ["SOURCE_DATE_EPOCH"] == "1792281600"
+
+    # A real publish reaches the fixed point, after which the same check is clean.
+    assert mod.main([str(board), "--checked-at", checked_at]) == 0
+    after = _tree(board)
+    assert after != before
+    assert mod.main([str(board), "--checked-at", checked_at, "--check"]) == 0
+    assert _tree(board) == after
+
+
+def test_check_exits_one_when_a_committed_report_is_edited(
+    mod, tmp_path, monkeypatch, unanchored_clock, capsys
+):
+    board = _repin_board(mod, tmp_path, monkeypatch)
+    assert mod.main([str(board), "--checked-at", "2026-10-18T00:00:00+00:00"]) == 0
+    report = board / "output" / "drc_report.json"
+    edited = b'{"refilled": true, "summary": {"warnings": 5}}'
+    report.write_bytes(edited)
+
+    # No --checked-at: the check anchors itself to the value the publish committed.
+    assert mod.main([str(board), "--check"]) == 1
+    assert report.read_bytes() == edited
+    out = capsys.readouterr().out
+    assert board.name in out and "output/drc_report.json" in out
+
+
+def test_check_anchors_each_board_to_its_committed_checked_at(
+    mod, tmp_path, monkeypatch, unanchored_clock
+):
+    seen = []
+
+    def record(board, checked_at, **kwargs):
+        seen.append((board.name, checked_at, os.environ["SOURCE_DATE_EPOCH"], kwargs["dry_run"]))
+        return []
+
+    monkeypatch.setattr(mod, "refresh_bundle", record)
+    anchors = {
+        "04-stm32-devboard": "2026-11-27T01:36:26Z",
+        "07-matchgroup-test": "2026-10-13T00:00:00+00:00",
+    }
+    for name, checked_at in anchors.items():
+        (tmp_path / name / "output").mkdir(parents=True)
+        (tmp_path / name / "output" / "readiness.json").write_text(
+            json.dumps({"checked_at": checked_at})
+        )
+
+    argv = [*(str(tmp_path / name) for name in anchors), "--check"]
+    assert mod.main(argv) == 0
+    assert seen == [
+        ("04-stm32-devboard", "2026-11-27T01:36:26Z", "1795743386", True),
+        ("07-matchgroup-test", "2026-10-13T00:00:00+00:00", "1791849600", True),
+    ]
+
+    # A caller's own SOURCE_DATE_EPOCH wins over every board's anchor.
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "caller")
+    assert mod.main(argv) == 0
+    assert {entry[2] for entry in seen[2:]} == {"caller"}
+
+
+def test_checked_at_is_required_unless_check_reads_the_committed_one(mod, tmp_path, monkeypatch):
+    board = _repin_board(mod, tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        mod.main([str(board)])
+    assert exc.value.code == 2
+
+    # The fake board's readiness.json carries no checked_at.
+    with pytest.raises(SystemExit) as exc:
+        mod.main([str(board), "--check"])
+    assert exc.value.code == 2
+
+    (board / "output" / "readiness.json").write_text(json.dumps({"checked_at": "soon"}))
+    with pytest.raises(SystemExit) as exc:
+        mod.main([str(board), "--check"])
+    assert exc.value.code == 2
+
+
+def test_drift_workflow_checks_every_bundle_and_never_runs_per_pr(mod):
+    workflow = yaml.safe_load((REPO / ".github/workflows/nightly-bundle-drift.yml").read_text())
+    triggers = workflow[True] if True in workflow else workflow["on"]
+    assert set(triggers) == {"schedule", "workflow_dispatch"}
+
+    job = workflow["jobs"]["bundle-drift"]
+    assert job["container"]["image"] == "${{ needs.kicad_pin.outputs.image }}"
+    run = next(
+        step["run"] for step in job["steps"] if "refresh_bundles_6404.py" in step.get("run", "")
+    )
+    assert "--check" in run.split()
+    assert {Path(word).name for word in run.split() if word.startswith("boards/")} == set(
+        mod.BUNDLES
+    )

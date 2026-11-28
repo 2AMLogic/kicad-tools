@@ -73,7 +73,11 @@ Usage (repository root, KiCad 10 ``kicad-cli`` on PATH or ``KICAD_CLI_DIR``)::
 A rerun with the same ``--checked-at`` and ``--reuse-erc`` publishes 0 files.
 ``--build-dir DIR`` keeps board 07's ``build.py`` output in DIR, and replays
 it when DIR already holds one.  ``--dry-run`` runs every gate and publishes
-nothing.
+nothing.  ``--check`` (Issue #10692) is a ``--dry-run`` that anchors each board
+to the ``checked_at`` its committed ``readiness.json`` already carries (so
+``--checked-at`` is optional) and exits 1 when any bundle would publish a
+file: a committed bundle can be self-consistent and still disagree with what
+the current rules emit, and only a fresh run on the pinned toolchain shows it.
 """
 
 from __future__ import annotations
@@ -1134,10 +1138,40 @@ def refresh_bundle(
         )
 
 
+def committed_checked_at(board: Path) -> str:
+    """The ``checked_at`` a board's committed ``readiness.json`` was pinned at (Issue #10692)."""
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    return report["checked_at"]
+
+
+def _source_date_epoch(checked_at: str) -> str:
+    """``SOURCE_DATE_EPOCH`` for an ISO ``checked_at``; the ``Z`` suffix parses on 3.10 too."""
+    return str(int(datetime.fromisoformat(checked_at.replace("Z", "+00:00")).timestamp()))
+
+
+def drift_exit_status(drift: dict[str, list[str]]) -> int:
+    """The ``--check`` verdict: 1 when any board would publish, else 0 (Issue #10692)."""
+    if not drift:
+        log("== --check: every bundle reproduces on the pinned toolchain; nothing to publish")
+        return 0
+    for name, files in drift.items():
+        log(f"== --check DRIFT {name}: a fresh run would publish {len(files)} file(s)")
+        for path in files:
+            log(f"    {path}")
+    log(
+        "  --check: the committed bundle disagrees with a fresh run. Refresh it with this "
+        "driver (without --check) on the pinned toolchain and commit the result."
+    )
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("boards", nargs="+", type=Path, help="board directories")
-    parser.add_argument("--checked-at", required=True, help="ISO timestamp for readiness.json")
+    parser.add_argument(
+        "--checked-at",
+        help="ISO timestamp for readiness.json (with --check: defaults to each board's committed value)",
+    )
     parser.add_argument("--reuse-erc", type=Path, help="replay ERC reports saved by --save-erc")
     parser.add_argument("--save-erc", type=Path, help="keep the native ERC reports here")
     parser.add_argument(
@@ -1149,6 +1183,11 @@ def main(argv: list[str] | None = None) -> int:
         "--force-replot", action="store_true", help="re-plot even if the bundle is current"
     )
     parser.add_argument("--dry-run", action="store_true", help="run every gate, publish nothing")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="publish nothing; exit 1 when any bundle would publish files (Issue #10692)",
+    )
     parser.add_argument(
         "--known-issue",
         action="append",
@@ -1164,41 +1203,58 @@ def main(argv: list[str] | None = None) -> int:
         help="drop a recorded known issue by number (repeatable, Issue #7323)",
     )
     args = parser.parse_args(argv)
+    if not args.checked_at and not args.check:
+        parser.error("--checked-at is required unless --check reads each board's committed value")
     # Issue #9536: anchor every exporter wall-clock stamp (manifest
     # ``generated_at``, README ``Generated at``, report date -- and weasyprint
-    # PDF metadata) to ``--checked-at`` via the reproducible-builds
+    # PDF metadata) to the board's ``checked_at`` via the reproducible-builds
     # ``SOURCE_DATE_EPOCH`` convention, so a repeated publish with the same
-    # inputs writes byte-identical evidence.  ``setdefault`` keeps an explicit
-    # caller override.
-    try:
-        from datetime import datetime as _dt
-
-        _anchored = str(int(_dt.fromisoformat(args.checked_at).timestamp()))
-        os.environ.setdefault("SOURCE_DATE_EPOCH", _anchored)
-    except ValueError:
-        parser.error(f"--checked-at is not an ISO timestamp: {args.checked_at}")
+    # inputs writes byte-identical evidence.  It is set per board, because
+    # ``--check`` takes each board's own committed anchor; a value already in
+    # the environment is an explicit caller override and is kept.
+    ambient_epoch = os.environ.get("SOURCE_DATE_EPOCH")
     status = 0
+    drift: dict[str, list[str]] = {}
     for board in args.boards:
         board = board.resolve()
         if board.name not in BUNDLES:
             parser.error(f"{board.name}: no bundle configuration (known: {sorted(BUNDLES)})")
         log(f"== {board.name}")
+        if args.checked_at:
+            checked_at, origin = args.checked_at, "--checked-at"
+        else:
+            origin = f"{board.name}: committed checked_at"
+            try:
+                checked_at = committed_checked_at(board)
+            except (OSError, KeyError, ValueError):
+                parser.error(f"{origin} is unreadable in output/readiness.json")
         try:
-            for name in refresh_bundle(
+            anchored = _source_date_epoch(checked_at)
+        except ValueError:
+            parser.error(f"{origin} is not an ISO timestamp: {checked_at}")
+        if ambient_epoch is None:
+            os.environ["SOURCE_DATE_EPOCH"] = anchored
+        try:
+            would_publish = refresh_bundle(
                 board,
-                args.checked_at,
+                checked_at,
                 reuse_erc=args.reuse_erc,
                 save_erc=args.save_erc,
                 build_dir=args.build_dir.resolve() if args.build_dir else None,
                 force_replot=args.force_replot,
-                dry_run=args.dry_run,
+                dry_run=args.dry_run or args.check,
                 known_issue=args.known_issue,
                 resolve_known_issue=args.resolve_known_issue,
-            ):
+            )
+            for name in would_publish:
                 log(f"    {name}")
+            if would_publish:
+                drift[board.name] = would_publish
         except GateFailure as exc:
             log(f"  REFUSED: {exc} -- nothing published for {board.name}")
             status = 1
+    if args.check:
+        status = drift_exit_status(drift) or status
     return status
 
 
