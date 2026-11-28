@@ -16,6 +16,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **PR #10652**: fix(report): pass Pandoc cover scalars as literal metadata
+- **PR #10651**: chore(boards): include the selected net-class map in the Board 04 editable project
+- **PR #10638**: chore(boards): deliver Board 06's selected net-class map in its legacy project ZIP
+- **Issue #10641** (closed): Pandoc PDF report parses front-matter title and subtitle as Markdown: angle brackets dropped, * and _ become emphasis
+- **Issue #10637** (closed): Board 06 registered replot discards the selected net-class map from its legacy editable project
+- **Issue #10632** (closed): Committed board packages omit the net-class map, so kct readiness --verify now fails project provenance
+- **Issue #10630** (closed): Pandoc PDF rendering fails for a report project name containing a literal backslash
+- **Issue #9135** (closed): silk_hole_overlap error regrade: wire the clearance pass into boards 02/03 route flows and refresh 02/03/07 committed artifacts
+- **Issue #9134** (closed): Retire board 05's silk_hole_overlap routed-DRC tolerance (13): re-route with the post-route silk clearance pass and re-issue evidence
+- **Issue #9033** (closed): Silkscreen-to-hole: kct reports far fewer findings than the fab DFM, and only as warnings
 - **PR #10644**: fix(report): keep literal backslashes in Pandoc PDF report titles
 - **PR #10642**: fix: HTML-escape report cover scalars and the <title> text
 - **PR #10634**: fix(router): read analysis pad plating and layer from parsed pad
