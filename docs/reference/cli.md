@@ -1101,9 +1101,11 @@ usage: kicad-tools fleet status [-h] [--boards-dir FLEET_BOARDS_DIR]
 | `--pattern GLOB` | Glob to identify the routed PCB inside `output/` (default: `*_routed.kicad_pcb`) |
 
 Each board is scored on net completion, DRC status, presence of the
-required manufacturing artifacts (gerbers, BOM, CPL), and open known defects
-recorded in `output/readiness.json` (a `known defect #N` blocker; ready boards
-with only disclosed exceptions/advisories show `YES*` / `known: #N`). A board
+required manufacturing artifacts (gerbers, BOM, CPL), and the verdict recorded
+in `output/readiness.json`: a receipt its producer published as `blocked` is a
+`readiness blocked: ...` blocker quoting the receipt's first one (Issue
+#10662), an open known defect a `known defect #N` blocker, and ready boards
+with only disclosed exceptions/advisories show `YES*` / `known: #N`. A board
 is "ship-ready" when every gate is green; otherwise the row lists the first blocker. The
 table view summarises one board per line; `--format json` emits the full
 per-board breakdown for downstream tooling.

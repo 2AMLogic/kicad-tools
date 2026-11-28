@@ -285,7 +285,9 @@ on later runs, keeping their `recorded` date, until
 `--generate` writes each entry into the bundle README's "Accepted-risk
 waivers" section as `#N [kind] summary`. `kct fleet status` shows `YES*` and a
 `known: #N,#M` cell for exceptions and advisories, and `NO (known defect #N)`
-for a defect. The site labels a ready board "Assembly ready · 2 known issues"
+for a defect. A receipt published `blocked` blocks the board on its own, as
+`NO (readiness blocked: <first recorded blocker>)` (Issue #10662). The site
+labels a ready board "Assembly ready · 2 known issues"
 and lists the issues with links.
 
 Board scripts that tolerate known `kct check` warnings should read the
@@ -351,6 +353,16 @@ these evidence files should also appear in `inputs`. The gallery presents
 check details and the verification timestamp. Missing, malformed, incomplete
 or changed evidence produces an `unverified` object with `blockers` explaining
 why; this object omits unverifiable timestamps and check results.
+
+A board whose producer runs a board-local process check in place of the
+generic one (Board 04's paid-drill checker, recorded as `kct_check`) also
+carries a `tier_check` entry (Issue #10662): the generic
+`kct check --mfr <tier>` that `kct readiness --verify` runs, judged by that
+verifier's own rule -- an `exception` known issue accounts for exactly the
+error identities it lists, any other error fails it -- with the report's
+findings bound as `evidence.tier_check`. When it fails, the report is
+`blocked` and `blockers` is the public verifier's own list, so the published
+verdict and a fresh `kct readiness --verify` agree on the board.
 
 An optional `metrics` object can supply current `drc_violations` (nonnegative
 integer), `nets_routed_pct` (0–100), `lvs_clean` (boolean), and
