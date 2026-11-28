@@ -49,6 +49,7 @@ Rule ID generated:
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ..violations import DRCResults, DRCViolation
@@ -77,7 +78,9 @@ def _copper_discs(pcb: PCB) -> list[tuple[str, tuple[str, ...], float, float, fl
     from .clearance import CopperElement
 
     discs: list[tuple[str, tuple[str, ...], float, float, float, Any]] = []
-    for fp in pcb.footprints:
+    # ``getattr``: rule tests drive this with duck-typed boards that carry
+    # tracks and vias but no footprints.
+    for fp in getattr(pcb, "footprints", None) or []:
         for pad in fp.pads:
             dx, dy = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
             try:
@@ -184,6 +187,87 @@ def _wedge_is_open(seg1, seg2, junction: tuple[float, float], angle_deg: float) 
     return True
 
 
+def _legs_at(segments: Iterable[Any], point: tuple[float, float]) -> list[Any]:
+    """Tracks with an end at ``point`` (within the junction tolerance)."""
+    return [
+        s
+        for s in segments
+        if min(math.dist(point, s.start), math.dist(point, s.end)) < _JUNCTION_TOL * 1.5
+    ]
+
+
+def _sharp_vertex(legs: list[Any], point: tuple[float, float]) -> tuple[float, int] | None:
+    """``(worst acute angle, distinct legs)`` at ``point``, or ``None``.
+
+    The per-vertex test of :class:`SharpTraceCornerRule`: the smallest open
+    acute wedge between two of ``legs`` (issue #8840), counting stacked
+    duplicate segments once (issue #9037).
+    """
+    from kicad_tools.explain.checks.acid_trap import (
+        ANGLE_TOLERANCE_DEG,
+        MIN_CORNER_ANGLE_DEG,
+        MIN_TRACE_ANGLE_DEG,
+        AcidTrapCheck,
+    )
+
+    check = AcidTrapCheck()
+    distinct: list = []
+    seen_edges: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+    for s in legs:
+        p_a = (round(s.start[0], 2), round(s.start[1], 2))
+        p_b = (round(s.end[0], 2), round(s.end[1], 2))
+        edge = (p_a, p_b) if p_a <= p_b else (p_b, p_a)
+        if edge not in seen_edges:
+            seen_edges.add(edge)
+            distinct.append(s)
+    worst: float | None = None
+    for i, s1 in enumerate(legs):
+        for s2 in legs[i + 1 :]:
+            angle = check._calculate_angle(s1, s2, point)
+            if angle is None or not (
+                MIN_CORNER_ANGLE_DEG <= angle < MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG
+            ):
+                continue
+            if _wedge_is_open(s1, s2, point, angle) and (worst is None or angle < worst):
+                worst = angle
+    return None if worst is None else (worst, len(distinct))
+
+
+def sharp_vertex(
+    pcb: PCB,
+    net_name: str,
+    layer: str,
+    point: tuple[float, float],
+    *,
+    added: Sequence[Any] = (),
+    removed: Sequence[Any] = (),
+) -> tuple[float, str] | None:
+    """``(angle, corner_class)`` were ``sharp_trace_corner`` to report ``point``.
+
+    The vertex ``pcb`` has at ``point`` on ``net_name`` / ``layer``, with the
+    tracks ``removed`` (by identity, as ``pcb.segments`` holds them) gone and
+    the ``added`` tracks (any objects with ``start`` / ``end`` / ``width``)
+    present.  A repair that puts an end on an existing node (``kct fix-drc
+    --only redundant-copper``, Issue #10667) uses it to decline a candidate
+    before it is applied, instead of applying it and letting the
+    saved-board re-check veto it.
+    """
+    tracks = [
+        s
+        for s in pcb.segments
+        if s.layer == layer
+        and getattr(s, "net_name", "") == net_name
+        and all(s is not gone for gone in removed)
+    ]
+    legs = _legs_at([*tracks, *added], point)
+    if _is_buried(_copper_discs(pcb), net_name, layer, point):
+        return None
+    found = _sharp_vertex(legs, point)
+    if found is None:
+        return None
+    return found[0], "junction" if found[1] >= 3 else "bend"
+
+
 class SharpTraceCornerRule(DRCRule):
     """Warn on acute angles where two traces of one net meet."""
 
@@ -194,12 +278,7 @@ class SharpTraceCornerRule(DRCRule):
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
         """Return one ``sharp_trace_corner`` warning per acute junction."""
         del design_rules
-        from kicad_tools.explain.checks.acid_trap import (
-            ANGLE_TOLERANCE_DEG,
-            MIN_CORNER_ANGLE_DEG,
-            MIN_TRACE_ANGLE_DEG,
-            AcidTrapCheck,
-        )
+        from kicad_tools.explain.checks.acid_trap import AcidTrapCheck
 
         results = DRCResults()
         results.rules_checked = 1
@@ -215,7 +294,7 @@ class SharpTraceCornerRule(DRCRule):
 
         # One report per (net, layer, location): stacked duplicate segments
         # would otherwise report the same vertex once per pair.
-        found: dict[tuple, tuple[float, str, str, tuple[float, float], str, int]] = {}
+        found: dict[tuple, tuple[float, str, str, tuple[float, float], int]] = {}
         for mistake in check.check(pcb):
             net_name, layer = mistake.components[0], mistake.components[1]
             loc = mistake.location
@@ -228,38 +307,13 @@ class SharpTraceCornerRule(DRCRule):
             key = (net_name, layer, round(loc[0], 2), round(loc[1], 2))
             if key in found:
                 continue
-            touching = [
-                s
-                for s in segs.get((net_numbers[net_name], layer), [])
-                if min(math.dist(loc, s.start), math.dist(loc, s.end)) < _JUNCTION_TOL * 1.5
-            ]
-            # Count distinct legs: stacked duplicate segments (issue #8840's
-            # art artifact) share one (start, end) pair and must not turn a
-            # two-segment bend into a "junction" (issue #9037).
-            distinct: list = []
-            seen_edges: set[tuple[tuple[float, float], tuple[float, float]]] = set()
-            for s in touching:
-                p_a = (round(s.start[0], 2), round(s.start[1], 2))
-                p_b = (round(s.end[0], 2), round(s.end[1], 2))
-                edge = (p_a, p_b) if p_a <= p_b else (p_b, p_a)
-                if edge not in seen_edges:
-                    seen_edges.add(edge)
-                    distinct.append(s)
-            corner_class = "junction" if len(distinct) >= 3 else "bend"
-            worst = None
-            for i, s1 in enumerate(touching):
-                for s2 in touching[i + 1 :]:
-                    angle = check._calculate_angle(s1, s2, loc)
-                    if angle is None or not (
-                        MIN_CORNER_ANGLE_DEG <= angle < MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG
-                    ):
-                        continue
-                    if _wedge_is_open(s1, s2, loc, angle) and (worst is None or angle < worst):
-                        worst = angle
-            if worst is not None:
-                found[key] = (worst, net_name, layer, loc, corner_class, len(distinct))
+            touching = _legs_at(segs.get((net_numbers[net_name], layer), []), loc)
+            vertex = _sharp_vertex(touching, loc)
+            if vertex is not None:
+                found[key] = (vertex[0], net_name, layer, loc, vertex[1])
 
-        for angle, net_name, layer, loc, corner_class, n_legs in found.values():
+        for angle, net_name, layer, loc, n_legs in found.values():
+            corner_class = "junction" if n_legs >= 3 else "bend"
             kind = f"; {n_legs}-segment junction" if corner_class == "junction" else ""
             results.add(
                 DRCViolation(

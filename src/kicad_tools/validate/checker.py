@@ -1167,6 +1167,32 @@ class DRCChecker:
         rule = PlaneSplitRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
+    def redundant_copper_rule(self) -> RedundantCopperRule:
+        """The ``redundant_copper`` rule as this checker configures it.
+
+        ``kct fix-drc --only redundant-copper`` (Issue #10667) binds this
+        exact rule to the board it edits, so a shortcut it applies is judged
+        by the same mask-clearance and gap policy that reported it.
+        """
+        from .mask_copper import default_request_for_manufacturer
+
+        request = self.mask_copper_request or default_request_for_manufacturer(self.manufacturer)
+        policy = request.policy if request is not None else None
+        mask_clearance = (
+            max(policy.clearance_mm, policy.warning_clearance_mm or 0.0)
+            if policy is not None
+            else 0.0
+        )
+        return RedundantCopperRule(
+            mask_clearance_mm=mask_clearance,
+            # Issue #9862: the staircase gate mirrors check_physical_copper_gap
+            # -- the explicit threshold wins, the fab bands apply only in fab
+            # view; with neither active there is no slit floor to match.
+            physical_copper_gap_mm=self.physical_copper_gap_mm,
+            fab_view_gap_policy=self.fab_view_gap_policy if self.fab_view else None,
+            prove_pour_stubs=self.prove_pour_stubs,
+        )
+
     def check_redundant_copper(self) -> DRCResults:
         """Report avoidable copper (Issue #8218).
 
@@ -1181,25 +1207,7 @@ class DRCChecker:
         open no ``physical_copper_gap`` slit against the copper that
         remains (Issue #9862).
         """
-        from .mask_copper import default_request_for_manufacturer
-
-        request = self.mask_copper_request or default_request_for_manufacturer(self.manufacturer)
-        policy = request.policy if request is not None else None
-        mask_clearance = (
-            max(policy.clearance_mm, policy.warning_clearance_mm or 0.0)
-            if policy is not None
-            else 0.0
-        )
-        rule = RedundantCopperRule(
-            mask_clearance_mm=mask_clearance,
-            # Issue #9862: the staircase gate mirrors check_physical_copper_gap
-            # -- the explicit threshold wins, the fab bands apply only in fab
-            # view; with neither active there is no slit floor to match.
-            physical_copper_gap_mm=self.physical_copper_gap_mm,
-            fab_view_gap_policy=self.fab_view_gap_policy if self.fab_view else None,
-            prove_pour_stubs=self.prove_pour_stubs,
-        )
-        return self._absolutize(rule.check(self.pcb, self.design_rules))
+        return self._absolutize(self.redundant_copper_rule().check(self.pcb, self.design_rules))
 
     def check_diffpair_clearance_intra(self) -> DRCResults:
         """Check within-pair clearance for differential pairs.

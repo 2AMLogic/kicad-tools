@@ -5828,7 +5828,13 @@ def _add_fix_drc_parser(subparsers) -> None:
     )
     fix_drc_parser.add_argument(
         "--only",
-        choices=["clearance", "drill-clearance", "mask-copper", "copper-gap"],
+        choices=[
+            "clearance",
+            "drill-clearance",
+            "mask-copper",
+            "copper-gap",
+            "redundant-copper",
+        ],
         help=(
             "Only fix a specific violation type. 'mask-copper' re-centres a "
             "track that enters its own pad off-centre (mask_to_copper); it is "
@@ -5836,7 +5842,14 @@ def _add_fix_drc_parser(subparsers) -> None:
             "of the default set when the report carries such findings. "
             "'copper-gap' moves a via that sits too close to its own pad or "
             "track (same-net physical_copper_gap slits), also detected with "
-            "kct check's rules and part of the default set."
+            "kct check's rules and part of the default set. "
+            "'redundant-copper' removes a track hidden under a longer "
+            "collinear one and replaces a staircase or detour with the "
+            "redundant_copper rule's own fewer-bend path (findings are "
+            "warnings, so only --only targets them); each edit is re-checked "
+            "on the saved board and put back when it leaves a new error or a "
+            "new sharp_trace_corner / track_dangling / physical_copper_gap "
+            "warning (Issue #10667)."
         ),
     )
     fix_drc_parser.add_argument(

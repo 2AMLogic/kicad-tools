@@ -39,7 +39,7 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | | `net-status` | Report net connectivity status for a PCB |
 | | `constraints` | Constraint conflict detection and management |
 | | `detect-mistakes` | Detect common PCB design mistakes |
-| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill + mask-copper + copper-gap) |
+| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill + mask-copper + copper-gap + redundant-copper) |
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
 | | `fix-silkscreen` | Repair silk widths and text heights. After routing, `--clip-to-pads` trims lines near pads and `--clip-to-holes` clips graphics off drilled holes. `--all` combines width, text, pad and drilled-pad repairs with reference placement. Its JSON `rules_covered` lists the repair scope. Use `kct check <board> --only silkscreen` for a full silk check. |
@@ -950,14 +950,17 @@ the run to a single repair pass:
 | `drill-clearance` | Hole-to-hole clearance violations (de-duplicate or slide vias) |
 | `mask-copper` | A track entering its own pad's opening off-centre (see below) |
 | `copper-gap` | Same-net `physical_copper_gap` slits: a via beside its own pad, a track tangent to its own via, or a short trace shelf at a routed branch (see below) |
+| `redundant-copper` | The `redundant_copper` warnings `kct readiness` refuses: a track hidden under a longer collinear one, a staircase, a detour (see below) |
 
 ```bash
 kct fix-drc board.kicad_pcb --only mask-copper --dry-run
 kct fix-drc board.kicad_pcb --only copper-gap --dry-run
+kct fix-drc board.kicad_pcb --only redundant-copper --mfr jlcpcb-tier1
 ```
 
-Without `--drc-report`, the mask-copper and copper-gap passes detect their
-findings themselves by running the pure-Python `kct check` on the board. For
+Without `--drc-report`, the mask-copper, copper-gap and redundant-copper passes
+detect their findings themselves by running the pure-Python `kct check` on the
+board. For
 the other `--only` values (and the default set), detection resolves in order:
 `--drc-report` if given, else kicad-cli's DRC if it is installed, else the
 pure-Python checker.
@@ -1009,6 +1012,43 @@ see a pair-level property such as skew. Detection and the
 post-repair re-check use `kct check`'s rules with the stackup's fab-view gap
 bands resolved (kicad-cli has no such rule), and the pass also runs in the
 default set when the report carries such findings.
+
+`redundant-copper` (Issue #10667) clears the trace-quality warnings the
+readiness gate refuses without a per-rule acknowledgement: a
+`redundant_copper_covered` track is removed and the covering track is *not*
+split, so no tap becomes an explicit acute junction (the new
+`sharp_trace_corner` findings `kct pcb prune` leaves behind), and a
+`redundant_copper_staircase` or `redundant_copper_detour` chain is replaced by
+the rule's own fewer-bend path (a 45-degree leg and an H/V leg, either order,
+or one straight leg) at the chain's widest width. Before an edit is applied it
+must pass the rule's own gates -- clearance at the net-class pair requirement,
+mask-opening zones, terminal contact, the physical-gap slit oracle -- plus the
+acute-corner test `sharp_trace_corner` applies, so a chain whose only shorter
+paths open a 45-degree corner at a tap is never rewritten. A chain the rule cut
+at a tap either replaces its cut segment whole, running on through the tap so
+the tap stays mid-span, or is trimmed at the tap, whichever is corner-clean.
+Locked, generator-owned and grouped copper is never touched
+(`locked_segment`, `generator_owned`, `group_member`), and a differential-pair
+member's rewrite may not widen the pair's length skew (`would_widen_pair_skew`).
+What the gates cannot see is judged on the saved, refilled board: `kct check`'s
+rule set with the mask assessment and native DRC must report nothing new next
+to the edit's copper -- no error, and no new `sharp_trace_corner` /
+`track_dangling` / `physical_copper_gap` warning; with `--no-new-warnings`, no
+new warning of any rule. An edit that fails is put back copper-for-copper and
+the chain's next legal path is planned in its place; a covered edit whose
+removal left a stub dangling widens to take the stub off when the stub's copper
+lies inside same-net copper that stays. Findings still on the final board are
+reported with the last reason (`new_sharp_trace_corner`, `new_track_dangling`,
+`new_mask_to_copper`, `new_drc_error`, `native_open`, `pad_connection_lost`,
+`recheck_unavailable`) and make the exit 2. A new `mask_to_copper` *warning*
+does not refuse an edit unless `--no-new-warnings` is given, as for
+`mask-copper` itself. `kct readiness` runs this pass as the last step of its
+copper cleanup, after `dedupe`, `prune` and `optimize-traces --drc-aware`, and
+records it as `not-needed` on a board with none of its findings. The `prune`
+and `optimize-traces` steps are kept only when they add no `sharp_trace_corner`
+or `redundant_copper` finding: both verify with native DRC, which accepts the
+explicit acute junction a split covered track becomes, so a pass that would
+add one is put back (`not-applied`, with what it would have introduced).
 
 ---
 

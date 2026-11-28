@@ -13,7 +13,9 @@ import csv
 import hashlib
 import json
 import subprocess
+import sys
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,7 +23,7 @@ import pytest
 from kicad_tools._shapely import has_shapely
 from kicad_tools.cli import readiness_cmd
 from kicad_tools.cli.board_readiness import read_readiness, readiness_input_hash
-from kicad_tools.cli.readiness_cmd import EngineRun, Engines
+from kicad_tools.cli.readiness_cmd import EngineRun, Engines, ReadinessOptions
 from tests.creepage.fixtures import board_close_hv_source, board_no_hv_source, board_source
 
 PCB_NAME = "demo_routed.kicad_pcb"
@@ -1820,7 +1822,6 @@ def test_ready_is_unreachable_when_a_required_check_is_absent():
     from kicad_tools.cli.readiness_cmd import (
         CheckOutcome,
         EngineFingerprint,
-        ReadinessOptions,
         build_report,
     )
 
@@ -2253,7 +2254,6 @@ class TestRequireSavedFillMatchesRefill:
 
 def test_bundled_pcb_never_references_a_kiprjmod_model_missing_from_the_archive(tmp_path):
     """A ``${KIPRJMOD}`` 3D body travels in kicad_project.zip (Issue #7685)."""
-    from kicad_tools.cli.readiness_cmd import ReadinessOptions
 
     board = make_board(tmp_path)
     output = board / "output"
@@ -2290,7 +2290,6 @@ def test_bundled_pcb_never_references_a_kiprjmod_model_missing_from_the_archive(
 
 
 def _provenance_options(tmp_path, *, pcb_in_zip=True):
-    from kicad_tools.cli.readiness_cmd import ReadinessOptions
 
     board = make_board(tmp_path)
     output = board / "output"
@@ -2396,10 +2395,14 @@ def test_copper_cleanup_runs_dedupe_and_records_counts(tmp_path, monkeypatch):
     monkeypatch.setattr(
         readiness_cmd, "_cleanup_optimize_step", lambda o: {"status": "applied", "corners_after": 2}
     )
+    monkeypatch.setattr(
+        readiness_cmd, "_cleanup_redundant_step", lambda o: {"status": "not-needed", "findings": 0}
+    )
     gen = readiness_cmd._copper_cleanup(_cleanup_options(tmp_path, operation="generate"))
     assert gen["removed"] == {"segments": 15, "vias": 1} and saved
-    assert list(gen["steps"]) == ["dedupe", "prune", "optimize_traces"]
+    assert list(gen["steps"]) == ["dedupe", "prune", "optimize_traces", "redundant_copper"]
     assert gen["steps"]["prune"]["segments_removed"] == 4
+    assert gen["steps"]["redundant_copper"]["status"] == "not-needed"
     saved.clear()
     ver = readiness_cmd._copper_cleanup(_cleanup_options(tmp_path))
     assert ver["copper_cleanup"] == "verify-count-only" and not saved
@@ -2424,6 +2427,242 @@ def test_copper_cleanup_step_failure_is_recorded(tmp_path, monkeypatch):
     rec = readiness_cmd._copper_cleanup(_cleanup_options(tmp_path, operation="generate"))
     assert rec["steps"]["prune"] == {"status": "failed", "detail": "no kicad-cli"}
     assert rec["removed"] == {"segments": 0, "vias": 0}  # 0 is a valid result
+
+
+# --- issue #10667: the verified redundant-copper repair is a cleanup step --
+
+
+def _rule_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "kct_rule_tests_10667_readiness",
+        Path(__file__).with_name("test_validate_redundant_copper.py"),
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _redundant_board(path: Path, segments) -> Path:
+    """Write ``segments`` to ``path`` (the options' board, already built)."""
+    body = "".join(
+        f"  (segment (start {s.start[0]} {s.start[1]}) (end {s.end[0]} {s.end[1]}) "
+        f'(width {s.width}) (layer "{s.layer}") (net {s.net_number}) '
+        f'(uuid "s{index:04d}-0000-4000-8000-000000000000"))\n'
+        for index, s in enumerate(segments)
+    )
+    path.write_text(
+        '(kicad_pcb (version 20240108) (generator "test")\n'
+        '  (net 0 "") (net 1 "PWR")\n' + body + ")\n"
+    )
+    return path
+
+
+def _staircase(module) -> list:
+    return [
+        module._Seg(a, b, width=2.6, net_name="PWR")
+        for a, b in zip(module._STAIR_PTS, module._STAIR_PTS[1:], strict=False)
+    ]
+
+
+def _tier1_options(tmp_path, segments) -> ReadinessOptions:
+    """Tier-1 options whose board holds ``segments``.
+
+    The tier-1 profile, as Board 03 runs: the plain ``jlcpcb`` profile adds
+    the fab-view slit oracle, which fails closed on a board with no declared
+    stackup and reports no staircase at all.
+    """
+    options = replace(_cleanup_options(tmp_path), manufacturer="jlcpcb-tier1")
+    _redundant_board(options.pcb, segments)
+    return options
+
+
+def _staircase_board(path: Path) -> Path:
+    return _redundant_board(path, _staircase(_rule_module()))
+
+
+def _sharp_corner_board(path: Path) -> Path:
+    """A 45-degree fold-back: a 0.3 mm track doubling back at 45 degrees."""
+    module = _rule_module()
+    return _redundant_board(
+        path,
+        [
+            module._Seg((0, 0), (4, 0), width=0.3),
+            module._Seg((4, 0), (3.4, 0.6), width=0.3),
+        ],
+    )
+
+
+# --- a cleanup pass is kept only when it adds no finding (Issue #10667) -------
+
+
+def test_avoidable_copper_counts_both_rules(tmp_path):
+    clean = _redundant_board(tmp_path / "clean.kicad_pcb", [_rule_module()._Seg((0, 0), (5, 0))])
+    assert readiness_cmd._avoidable_copper(clean) == (0, 0)
+    assert readiness_cmd._avoidable_copper(_staircase_board(tmp_path / "stair.kicad_pcb")) == (0, 1)
+    assert readiness_cmd._avoidable_copper(_sharp_corner_board(tmp_path / "fold.kicad_pcb"))[0] == 1
+
+
+def test_cleanup_pass_that_adds_a_sharp_corner_is_put_back(tmp_path):
+    """Prune/optimize verify with native DRC, which accepts an explicit acute
+    junction; the board goes back and the step is recorded, not silently kept."""
+    options = _tier1_options(tmp_path, [_rule_module()._Seg((0, 0), (5, 0))])
+    before = options.pcb.read_bytes()
+    worse = _sharp_corner_board(tmp_path / "worse.kicad_pcb").read_bytes()
+
+    def dirty(options):
+        options.pcb.write_bytes(worse)
+        return {"status": "applied", "segments_removed": 3}
+
+    record = readiness_cmd._guarded_cleanup_step(options, dirty)
+    assert record["status"] == "not-applied"
+    assert record["detail"] == "would introduce 1 sharp_trace_corner finding(s)"
+    assert record["segments_removed"] == 3  # what it would have done
+    assert options.pcb.read_bytes() == before
+
+
+def test_cleanup_pass_that_removes_a_finding_is_kept(tmp_path):
+    options = _tier1_options(tmp_path, _staircase(_rule_module()))
+
+    def improves(options):
+        options.pcb.write_bytes(
+            _redundant_board(
+                tmp_path / "clean.kicad_pcb", [_rule_module()._Seg((24, 10), (30, 10))]
+            ).read_bytes()
+        )
+        return {"status": "applied", "segments_removed": 7}
+
+    record = readiness_cmd._guarded_cleanup_step(options, improves)
+    assert record == {"status": "applied", "segments_removed": 7}
+
+
+def test_cleanup_pass_that_only_trades_findings_is_put_back(tmp_path):
+    options = _tier1_options(tmp_path, [_rule_module()._Seg((0, 0), (5, 0))])
+    options.pcb.write_bytes(_sharp_corner_board(tmp_path / "fold.kicad_pcb").read_bytes())
+    before = options.pcb.read_bytes()
+
+    def trades(options):
+        options.pcb.write_bytes(_staircase_board(tmp_path / "stair.kicad_pcb").read_bytes())
+        return {"status": "applied"}
+
+    record = readiness_cmd._guarded_cleanup_step(options, trades)
+    assert record["status"] == "not-applied"
+    assert "1 redundant_copper" in record["detail"]
+    assert options.pcb.read_bytes() == before
+
+
+def test_cleanup_guard_keeps_the_step_when_the_rules_cannot_run(tmp_path, monkeypatch):
+    options = _tier1_options(tmp_path, [_rule_module()._Seg((0, 0), (5, 0))])
+    monkeypatch.setattr(readiness_cmd, "_avoidable_copper", lambda path: None)
+    record = readiness_cmd._guarded_cleanup_step(options, lambda o: {"status": "applied", "x": 1})
+    assert record == {"status": "applied", "x": 1}
+
+
+def test_cleanup_guard_leaves_a_step_that_did_not_apply_alone(tmp_path):
+    options = _tier1_options(tmp_path, [_rule_module()._Seg((0, 0), (5, 0))])
+    record = readiness_cmd._guarded_cleanup_step(
+        options, lambda o: {"status": "not-applied", "detail": "unverified"}
+    )
+    assert record == {"status": "not-applied", "detail": "unverified"}
+
+
+def test_copper_cleanup_guards_prune_and_optimize_but_not_the_verified_repair(
+    tmp_path, monkeypatch
+):
+    """The sequence: dedupe -> prune -> optimize-traces (each kept only when it
+    adds nothing) -> the verified repair, which judges its own edits."""
+    from kicad_tools.schema import pcb as pcb_mod
+
+    class _P:
+        def dedupe_copper(self):
+            return {"segments": 0, "vias": 0}
+
+        def save(self, path):
+            pass
+
+    monkeypatch.setattr(pcb_mod.PCB, "load", classmethod(lambda cls, p: _P()))
+    guarded: list[str] = []
+    monkeypatch.setattr(
+        readiness_cmd,
+        "_guarded_cleanup_step",
+        lambda o, step: guarded.append(step.__name__) or {"status": "applied"},
+    )
+    monkeypatch.setattr(
+        readiness_cmd, "_cleanup_redundant_step", lambda o: {"status": "not-needed"}
+    )
+    record = readiness_cmd._copper_cleanup(_cleanup_options(tmp_path, operation="generate"))
+    assert guarded == ["_cleanup_prune_step", "_cleanup_optimize_step"]
+    assert list(record["steps"]) == ["dedupe", "prune", "optimize_traces", "redundant_copper"]
+
+
+def test_cleanup_redundant_step_is_skipped_when_nothing_is_left_to_repair(tmp_path, monkeypatch):
+    """The pre-check is one rule run; the repair is a mask assessment and a
+    native DRC per round, so a clean board never pays for it."""
+    options = _tier1_options(tmp_path, [_rule_module()._Seg((0, 0), (5, 0))])
+    monkeypatch.setattr(
+        "kicad_tools.cli.fix_drc_cmd.main", lambda argv: pytest.fail("fix-drc must not run")
+    )
+    record = readiness_cmd._cleanup_redundant_step(options)
+    assert record == {"status": "not-needed", "findings": 0}
+
+
+def _stub_fix_drc(monkeypatch, rc: int, doc):
+    from kicad_tools.cli import fix_drc_cmd
+
+    calls: list[list[str]] = []
+
+    def fake(argv: list[str]) -> int:
+        calls.append(list(argv))
+        print(json.dumps(doc) if doc is not None else "fix-drc: unreadable")
+        return rc
+
+    monkeypatch.setattr(fix_drc_cmd, "main", fake)
+    return calls
+
+
+def test_cleanup_redundant_step_reads_the_json_not_the_exit_status(tmp_path, monkeypatch):
+    """``fix-drc`` exits 2 on a board with any warning outside the category;
+    the step is judged by the findings it left, not by that exit."""
+    options = _tier1_options(tmp_path, _staircase(_rule_module()))
+    calls = _stub_fix_drc(
+        monkeypatch, 2, {"redundant_copper": {"violations": 1, "repaired": 1, "unrepaired": []}}
+    )
+    record = readiness_cmd._cleanup_redundant_step(options)
+    assert record == {"status": "applied", "findings": 1, "repaired": 1, "unrepaired": 0}
+    (argv,) = calls
+    assert argv[:5] == [str(options.pcb), "--only", "redundant-copper", "--mfr", "jlcpcb-tier1"]
+    assert "--format" in argv and "json" in argv and "--quiet" not in argv
+
+
+def test_cleanup_redundant_step_records_what_could_not_be_cleared(tmp_path, monkeypatch):
+    options = _tier1_options(tmp_path, _staircase(_rule_module()))
+    _stub_fix_drc(
+        monkeypatch,
+        2,
+        {
+            "redundant_copper": {
+                "violations": 1,
+                "repaired": 0,
+                "unrepaired": [
+                    {"rule": "redundant_copper_staircase", "reason": "new_track_dangling"}
+                ],
+            }
+        },
+    )
+    record = readiness_cmd._cleanup_redundant_step(options)
+    assert record["status"] == "partial"
+    assert record["detail"] == "new_track_dangling=1"
+    assert record["unrepaired"] == 1
+
+
+def test_cleanup_redundant_step_records_a_failed_run(tmp_path, monkeypatch):
+    options = _tier1_options(tmp_path, _staircase(_rule_module()))
+    _stub_fix_drc(monkeypatch, 4, None)
+    record = readiness_cmd._cleanup_redundant_step(options)
+    assert record["status"] == "failed"
+    assert "unreadable" in record["detail"]
 
 
 # --- issue #9747: cleanup prune uses the sidecar the check gate loads ------
@@ -2987,7 +3226,6 @@ def test_unloadable_spec_is_reported_not_silent_8727(tmp_path):
 
 def test_real_project_zip_carries_local_footprint_library_and_skips_siblings_8727(tmp_path):
     """The real exporter zip (not the fake bundler) satisfies readiness provenance."""
-    from kicad_tools.cli.readiness_cmd import ReadinessOptions
     from kicad_tools.export.manufacturing import _create_project_zip
 
     board = make_board(tmp_path)
