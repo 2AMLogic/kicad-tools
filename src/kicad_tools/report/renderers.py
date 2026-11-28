@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import html
+import json
 import logging
 import re
 import shutil
@@ -165,10 +167,47 @@ def render_pdf(html_content: str, output_path: Path | str) -> None:
     weasyprint.HTML(string=html_content).write_pdf(str(output_path))
 
 
+_JSON_QUOTED_FRONT_MATTER_KEYS = frozenset({"title", "subtitle", "author", "date"})
+
 # Pattern pandoc prints to stderr (exit 0) when it cannot resolve a
 # referenced image/resource. Each occurrence names one dropped figure, e.g.
 #   [WARNING] Could not fetch resource images/pcb_front.png: replacing ...
 _PANDOC_DROPPED_RESOURCE_RE = re.compile(r"Could not fetch resource ([^:]+):")
+
+_PANDOC_METADATA_BOOLEANS = frozenset({"true", "True", "TRUE", "false", "False", "FALSE"})
+
+
+def _front_matter_cover_scalars(markdown_path: Path) -> dict[str, str]:
+    """Decode the JSON-quoted cover scalars of a Markdown file's YAML front matter.
+
+    Only top-level ``key: "..."`` lines for the scalars the bundled template
+    emits (``title``, ``subtitle``, ``author``, ``date``) are returned, in
+    file order. Plain or single-quoted scalars, other keys and nested
+    structures are left for pandoc to read.
+
+    Args:
+        markdown_path: Path to the Markdown source file.
+
+    Returns:
+        The decoded scalars keyed by front-matter field name; a malformed
+        JSON value is skipped rather than failing the render.
+    """
+    scalars: dict[str, str] = {}
+    with markdown_path.open(encoding="utf-8") as source:
+        if source.readline().strip() != "---":
+            return scalars
+        for line in source:
+            if line.rstrip() in {"---", "..."}:
+                break
+            key, separator, scalar = line.partition(":")
+            if (
+                separator
+                and key in _JSON_QUOTED_FRONT_MATTER_KEYS
+                and scalar.strip().startswith('"')
+            ):
+                with contextlib.suppress(json.JSONDecodeError):
+                    scalars[key] = json.loads(scalar)
+    return scalars
 
 
 def render_pdf_pandoc(
@@ -191,6 +230,15 @@ def render_pdf_pandoc(
     the image with its alt text. This function inspects stderr for that
     pattern and raises so the failure is never silently swallowed.
 
+    Pandoc parses the strings of a YAML metadata block as Markdown, so a
+    cover scalar holding a literal backslash (a project named ``Panel A\\B``)
+    reaches the TeX engine as a raw control sequence and the build fails
+    (issue #10630). The JSON-quoted cover scalars are therefore decoded from
+    the front matter and re-supplied as command-line ``--metadata`` values,
+    which pandoc treats as literal text and which override the block; the TeX
+    writer then escapes them. A scalar spelled as a YAML boolean is left to
+    the block, because a boolean would suppress the template field.
+
     Args:
         markdown_path: Path to the Markdown source file.
         output_path: Destination path for the PDF file.
@@ -211,6 +259,7 @@ def render_pdf_pandoc(
         "-o",
         str(output_path),
         f"--pdf-engine={pdf_engine}",
+        "--standalone",
         "--from=markdown+yaml_metadata_block+pipe_tables+raw_tex",
         "--variable=geometry:margin=1in",
         "--variable=colorlinks:true",
@@ -218,6 +267,11 @@ def render_pdf_pandoc(
         # not the caller's cwd. This is the core fix for issue #4023.
         f"--resource-path={markdown_path.parent}",
     ]
+    cmd.extend(
+        f"--metadata={key}:{value}"
+        for key, value in _front_matter_cover_scalars(markdown_path).items()
+        if value and value not in _PANDOC_METADATA_BOOLEANS
+    )
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -334,7 +388,13 @@ def _strip_yaml_front_matter(content: str) -> tuple[str, dict]:
         line = line.strip()
         if ":" in line and not line.startswith("-") and not line.startswith("#"):
             key, _, value = line.partition(":")
-            value = value.strip().strip('"').strip("'")
+            scalar = value.strip()
+            value = scalar.strip('"').strip("'")
+            if key.strip() in _JSON_QUOTED_FRONT_MATTER_KEYS and scalar.startswith('"'):
+                # Generated cover scalars are JSON-quoted YAML. Older or custom
+                # templates may not be, so keep the stripped value on failure.
+                with contextlib.suppress(json.JSONDecodeError):
+                    value = json.loads(scalar)
             if value:
                 metadata[key.strip()] = value
 
@@ -346,13 +406,17 @@ def _metadata_to_title_block(metadata: dict) -> str:
     parts = []
     parts.append('<div class="cover-block">')
     if "title" in metadata:
-        parts.append(f"<h1>{metadata['title']}</h1>")
+        parts.append(f"<h1>{html.escape(str(metadata['title']), quote=False)}</h1>")
     if "subtitle" in metadata:
-        parts.append(f'<p class="cover-meta">{metadata["subtitle"]}</p>')
+        parts.append(
+            f'<p class="cover-meta">{html.escape(str(metadata["subtitle"]), quote=False)}</p>'
+        )
     if "date" in metadata:
-        parts.append(f'<p class="cover-meta">{metadata["date"]}</p>')
+        parts.append(f'<p class="cover-meta">{html.escape(str(metadata["date"]))}</p>')
     if "author" in metadata:
-        parts.append(f'<p class="cover-meta">{metadata["author"]}</p>')
+        parts.append(
+            f'<p class="cover-meta">{html.escape(str(metadata["author"]), quote=False)}</p>'
+        )
     parts.append("</div>")
     return "\n".join(parts)
 
@@ -436,7 +500,7 @@ def _wrap_html(body: str, css: str, title: str = "KiCad Design Report") -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="generator" content="kicad-tools report renderer">
-<title>{title}</title>
+<title>{html.escape(str(title), quote=False)}</title>
 <style>
 {css}
 </style>

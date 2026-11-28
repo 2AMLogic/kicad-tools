@@ -38,6 +38,7 @@ Step-by-step guides for common tasks:
 | [Netclass Diagnostics](guides/netclass-diagnostics.md) | Read-only netclass diagnostics |
 | [Footprint Arc Coordinates](guides/footprint-arc-schema.md) | How footprint arc midpoints are preserved |
 | [Analog Threshold Budgets](guides/analog-threshold-budgets.md) | Evaluate reviewed analog threshold sidecars |
+| [Analog Pin Ranges](guides/analog-pin-ranges.md) | Compare simulated pin voltages with supply-state limits |
 | [Drive Budget](guides/drive-budget.md) | Weak-source and gate-drive budget review |
 | [Resistor Rating](guides/resistor-rating.md) | Resistor operating budgets from a reviewed sidecar |
 | [Factory Selection](guides/factory-selection.md) | Compare factory-selected component evidence |

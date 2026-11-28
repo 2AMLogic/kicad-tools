@@ -32,6 +32,13 @@ def _junit(path: Path) -> Path:
     return path
 
 
+def test_junit_group_suffix_preserves_the_collected_id_and_parameter():
+    updater = _load_updater()
+    case = "test_shipped_routed_board_saved_fill_is_not_fragmented[bench@one]"
+    for name in (case, case + "@board05_recipe_staged"):
+        assert updater.node_id("tests.test_saved_fill_connectivity_6078", name) == f"{GATE}::{case}"
+
+
 def test_updater_skips_pr_required_tests(tmp_path, monkeypatch):
     mod = _load_updater()
     gate_id = f"{GATE}::test_shipped_routed_board_saved_fill_is_not_fragmented[board-01]"

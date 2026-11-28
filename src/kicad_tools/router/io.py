@@ -46,7 +46,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.core.geometry import rotate_pad_offset
-from kicad_tools.sexp.scan import find_unquoted, iter_unquoted
+from kicad_tools.geometry.copper import pad_chamfered_outline as _pad_chamfered_outline
+from kicad_tools.sexp.scan import iter_unquoted
 
 logger = logging.getLogger(__name__)
 
@@ -2767,9 +2768,9 @@ def load_pads_for_analysis(
     # Split by footprint for easier parsing
     from kicad_tools.schema.pcb import PCB as IdentityPCB
     from kicad_tools.schema.physical_identity import footprint_keys
-    from kicad_tools.sexp import parse_string as parse_identity_document
+    from kicad_tools.sexp import parse_string
 
-    identity_document = IdentityPCB(parse_identity_document(pcb_text))
+    identity_document = IdentityPCB(parse_string(pcb_text))
     source_keys = footprint_keys(identity_document.footprints)
     footprint_sections = _footprint_source_sections(pcb_text, identity_document.footprints)
     for section, component_id, footprint in zip(
@@ -2801,45 +2802,39 @@ def load_pads_for_analysis(
         pad_blocks = _extract_pad_blocks(section)
 
         for pad_block in pad_blocks:
-            # Extract pad number/pin
-            pin_match = re.search(r'\(pad\s+"?([^"\s)]+)"?', pad_block)
-            pin = pin_match.group(1) if pin_match else ""
-            pad_shape = _pad_shape_from_block(pad_block, ref, pin, placement_only=placement_only)
+            pad_node = parse_string(pad_block)
+            pin = _pad_number(pad_node) or ""
+            pad_shape = _pad_shape_from_block(pad_node, ref, pin, placement_only=placement_only)
 
-            # Extract pad type for through_hole detection
-            is_thru = "thru_hole" in pad_block
+            # Issue #10629: decide plating from the parsed pad type atom, the
+            # same strict-equality rule load_pcb_for_routing uses. A raw
+            # substring test also matched ``np_thru_hole`` (and any quoted
+            # "thru_hole" in a child property), so an NPTH loaded here read as
+            # plated and LatticePathfinder.from_board dropped its hole keep-out.
+            is_thru = pad_node.get_value(1) == "thru_hole"
+            authored_layers = _pad_authored_layers(pad_node)
 
-            # Extract at position
-            pad_at = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", pad_block)
-            if not pad_at:
+            at = _pad_at(pad_node)
+            if at is None:
                 continue
-
-            pad_x = float(pad_at.group(1))
-            pad_y = float(pad_at.group(2))
+            pad_x, pad_y, pad_rot = at
 
             # Transform to absolute position
             abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
             abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
 
-            # Extract pad size
-            size_match = re.search(r"\(size\s+([-\d.]+)\s+([-\d.]+)\)", pad_block)
-            width = float(size_match.group(1)) if size_match else 0.3
-            height = float(size_match.group(2)) if size_match else 0.3
+            width, height = _pad_size(pad_node) or (0.3, 0.3)
 
             # Rotate pad dimensions to PCB space. The pad angle is stored
             # ABSOLUTE in the file (KiCad already folds the footprint rotation
             # into it -- issue #3902), so it IS the board-frame orientation;
             # do NOT add fp_rot on top of it (same fix as load_pcb_for_routing).
-            pad_rot_match = re.search(r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block)
-            pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
             width, height, pad_rotation = _resolve_pad_dims_and_rotation(pad_rot, width, height)
 
             net_num, net_name = _resolve_pad_net(pad_block, net_name_to_num)
 
-            # Determine layer
-            layer = Layer.F_CU
-            if "B.Cu" in pad_block and "F.Cu" not in pad_block:
-                layer = Layer.B_CU
+            # Determine layer (shared with load_pcb_for_routing, Issue #10629)
+            layer = _pad_copper_layer(authored_layers)
 
             pads.append(
                 PadObj(
@@ -2854,14 +2849,16 @@ def load_pads_for_analysis(
                     pin=pin,
                     layer=layer,
                     through_hole=is_thru,
+                    drill=_pad_drill_size(pad_node),
                     side=fp_side,
                     footprint_name=footprint_name,
                     footprint_origin=(fp_x, fp_y),
                     rotation=pad_rotation,
                     shape=pad_shape,
-                    roundrect_rratio=_pad_rratio_from_block(pad_block, pad_shape),
-                    chamfered_outline=_pad_chamfered_outline(pad_block),
-                    copper_offset=_pad_copper_offset_from_block(pad_block, pad_rot),
+                    roundrect_rratio=_pad_radius_ratio(pad_node, pad_shape),
+                    **_chamfered_outlines(pad_node),
+                    authored_layers=authored_layers,
+                    copper_offset=_pad_copper_offset(pad_node, pad_rot),
                 )
             )
 
@@ -5002,6 +4999,8 @@ def route_pcb(
                     "shape": pad.get("shape", "rect"),
                     "roundrect_rratio": pad.get("roundrect_rratio"),
                     "chamfered_outline": pad.get("chamfered_outline", ()),
+                    "mask_chamfered_outline": pad.get("mask_chamfered_outline", ()),
+                    "authored_layers": pad.get("authored_layers", ()),
                     "copper_offset": pad.get("copper_offset", (0.0, 0.0)),
                     "height": pad.get("height", 0.5),
                     "net": net_num,
@@ -5063,7 +5062,42 @@ def _routing_pad_shape(shape: str, *, ref: str, pin: str, has_padstack: bool = F
     return shape
 
 
-def _is_rectangular_trapezoid(pad_block: str) -> bool:
+def _pad_number(node: SExp) -> str | None:
+    value = node.get_value(0)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        # A bare numeric pin is an identifier: keep its spelling (e.g. 001).
+        return node.children[0].to_string()
+    return None
+
+
+def _pad_at(node: SExp) -> tuple[float, float, float] | None:
+    at = node.find_child("at")
+    if at is None:
+        return None
+    x, y = at.get_float(0), at.get_float(1)
+    if x is None or y is None:
+        return None
+    return x, y, at.get_float(2) or 0.0
+
+
+def _pad_size(node: SExp) -> tuple[float, float] | None:
+    size = node.find_child("size")
+    if size is None:
+        return None
+    width, height = size.get_float(0), size.get_float(1)
+    if width is None or height is None:
+        return None
+    return width, height
+
+
+def _pad_drill_size(node: SExp) -> float:
+    drill = node.find_child("drill")
+    return (drill.get_float(0) or 0.0) if drill is not None else 0.0
+
+
+def _is_rectangular_trapezoid(node: SExp) -> bool:
     """Is this ``trapezoid`` pad's copper exactly its nominal rectangle?
 
     KiCad's trapezoid is the nominal rectangle with each corner shifted by
@@ -5073,17 +5107,12 @@ def _is_rectangular_trapezoid(pad_block: str) -> bool:
     on the pinned dataset-srj18 OCULINK / USB-C boards, issue #5863), and
     reducing them to ``rect`` is exact, not an approximation.
     """
-    match = re.search(r"\(rect_delta\s+([^\s()]+)\s+([^\s()]+)\s*\)", pad_block)
-    if match is None:
-        return True
-    try:
-        return float(match.group(1)) == 0.0 and float(match.group(2)) == 0.0
-    except ValueError:
-        return False
+    delta = node.find_child("rect_delta")
+    return delta is None or (delta.get_float(0) == 0 and delta.get_float(1) == 0)
 
 
 def _pad_shape_from_block(
-    pad_block: str, ref: str, pin: str, *, placement_only: bool = False
+    pad_block: str | SExp, ref: str, pin: str, *, placement_only: bool = False
 ) -> str:
     """Read the physical shape token, including empty or unquoted pad numbers.
 
@@ -5091,39 +5120,22 @@ def _pad_shape_from_block(
     cannot represent instead of raising: the caller reads the pad's position,
     never its outline.
     """
-    match = re.match(r'\(pad\s+(?:"[^\"]*"|[^\s()]+)\s+\w+\s+([^\s()]+)', pad_block)
-    shape = match.group(1) if match else ""
-    if shape == "trapezoid" and _is_rectangular_trapezoid(pad_block):
+    from kicad_tools.sexp import parse_string
+
+    node = parse_string(pad_block) if isinstance(pad_block, str) else pad_block
+    token = node.get_value(2)
+    shape = token if isinstance(token, str) else ""
+    if shape == "trapezoid" and _is_rectangular_trapezoid(node):
         shape = "rect"
-    if placement_only and (
-        shape not in {"circle", "rect", "oval", "roundrect"}
-        or re.search(r"\(padstack(?:\s|\))", pad_block) is not None
-    ):
+    has_padstack = node.find_child("padstack") is not None
+    if placement_only and (has_padstack or shape not in {"circle", "rect", "oval", "roundrect"}):
         return "rect"
-    return _routing_pad_shape(
-        shape,
-        ref=ref,
-        pin=pin,
-        has_padstack=re.search(r"\(padstack(?:\s|\))", pad_block) is not None,
-    )
+    return _routing_pad_shape(shape, ref=ref, pin=pin, has_padstack=has_padstack)
 
 
-def _pad_rratio_from_block(pad_block: str, shape: str) -> float | None:
-    """The file's ``(roundrect_rratio X)`` for a ``roundrect`` pad (issue #6718).
-
-    Returns ``None`` for any other shape, and for a roundrect whose block
-    carries no parseable ratio -- the clearance kernel then measures it as its
-    rectangle (conservative) rather than assuming KiCad's 0.25 default.
-    """
-    if shape != "roundrect":
-        return None
-    match = re.search(r"\(roundrect_rratio\s+([-+\d.eE]+)\s*\)", pad_block)
-    if match is None:
-        return None
-    try:
-        return float(match.group(1))
-    except ValueError:
-        return None
+def _pad_radius_ratio(node: SExp, shape: str) -> float | None:
+    ratio = node.find_child("roundrect_rratio")
+    return ratio.get_float(0) if shape == "roundrect" and ratio is not None else None
 
 
 def _schema_pad_rratio(pad) -> float | None:
@@ -5145,63 +5157,43 @@ def _schema_pad_shape(pad, ref: str) -> str:
     )
 
 
-def _pad_copper_offset_from_block(block: str, rotation: float) -> tuple[float, float]:
-    """KiCad stores the copper displacement in pad-local axes under ``drill``."""
-    if "(offset" not in block:
-        return (0.0, 0.0)
-    from kicad_tools.sexp import parse_string
+def _pad_authored_layers(node: SExp) -> tuple[str, ...]:
+    layers = node.find_child("layers")
+    return tuple(str(item.value) for item in layers.children) if layers is not None else ()
 
-    drill = parse_string(block).find_child("drill")
+
+def _pad_copper_layer(authored_layers: tuple[str, ...]) -> Layer:
+    """Copper layer a pad is attributed to, from its authored ``(layers ...)``.
+
+    The first ``*.Cu`` entry other than the all-copper wildcard ``"*.Cu"``
+    (through-hole pads author the wildcard and are attributed to the top layer,
+    their ``through_hole`` / ``drill`` fields say they span the stack). Pads
+    with no resolvable copper entry default to ``Layer.F_CU``. Shared by
+    :func:`load_pcb_for_routing` and :func:`load_pads_for_analysis` so the two
+    loaders cannot disagree on a pad's layer (Issue #10629).
+    """
+    first_copper = next((name for name in authored_layers if name.endswith(".Cu")), None)
+    if first_copper and first_copper != "*.Cu":
+        with contextlib.suppress(ValueError):
+            return Layer.from_kicad_name(first_copper)
+    return Layer.F_CU
+
+
+def _pad_copper_offset(node: SExp, rotation: float) -> tuple[float, float]:
+    """KiCad stores the copper displacement in pad-local axes under drill."""
+    drill = node.find_child("drill")
     offset = drill.find_child("offset") if drill is not None else None
     if offset is None:
         return (0.0, 0.0)
     return rotate_pad_offset(offset.get_float(0) or 0.0, offset.get_float(1) or 0.0, rotation)
 
 
-def _pad_chamfered_outline(source: str | SExp | None) -> tuple[tuple[float, float], ...]:
-    """Copper of a mixed chamfered/rounded pad, relative to its centre in board axes."""
-    from kicad_tools.sexp import parse_string
-
-    if isinstance(source, str):
-        if "(chamfer" not in source:
-            return ()
-        source = parse_string(source)
-    if source is None or (corners := source.find_child("chamfer")) is None:
-        return ()
-    ratio = source.find_child("chamfer_ratio")
-    size = source.find_child("size")
-    if ratio is None or size is None:
-        return ()
-    width, height = size.get_float(0) or 0.0, size.get_float(1) or 0.0
-    short = min(width, height)
-    cut = min(0.5, ratio.get_float(0) or 0.0) * short
-    if cut <= 0:
-        return ()
-    rounding = source.find_child("roundrect_rratio")
-    rratio = rounding.get_float(0) if rounding is not None else None
-    rounded = (0.5 if rratio is None else max(0.0, min(0.5, rratio))) * short
-    at = source.find_child("at")
-    rotation = (at.get_float(2) or 0.0) if at is not None else 0.0
-    selected = {item.value for item in corners.children}
-    vertices: list[tuple[float, float]] = []
-    for name, sx, sy, angle in (
-        ("top_left", -1, -1, 180),
-        ("top_right", 1, -1, 270),
-        ("bottom_right", 1, 1, 0),
-        ("bottom_left", -1, 1, 90),
-    ):
-        # A chamfer replaces the round on that corner. Its two tangent
-        # points describe one straight cut. Uncut corners retain the same
-        # inscribed arc resolution as pad_gate_polygon.
-        chamfered = name in selected
-        radius = cut if chamfered else rounded
-        steps = 1 if chamfered or radius == 0 else 32
-        cx, cy = sx * (width / 2 - radius), sy * (height / 2 - radius)
-        for i in range(steps + 1):
-            theta = math.radians(angle + 90 * i / steps)
-            x, y = cx + radius * math.cos(theta), cy + radius * math.sin(theta)
-            vertices.append(rotate_pad_offset(x, y, rotation))
-    return tuple(vertices)
+def _chamfered_outlines(node: SExp | None) -> dict:
+    contact = _pad_chamfered_outline(node, 0.5)
+    mask: tuple[tuple[float, float], ...] = ()
+    if contact and node is not None and node.find_child("roundrect_rratio") is None:
+        mask = _pad_chamfered_outline(node, 0.25)
+    return {"chamfered_outline": contact, "mask_chamfered_outline": mask}
 
 
 def _schema_pad_shape_fields(pad, ref: str) -> dict:
@@ -5210,7 +5202,8 @@ def _schema_pad_shape_fields(pad, ref: str) -> dict:
     return {
         "shape": _schema_pad_shape(pad, ref),
         "roundrect_rratio": _schema_pad_rratio(pad),
-        "chamfered_outline": _pad_chamfered_outline(getattr(pad, "_sexp_node", None)),
+        **_chamfered_outlines(getattr(pad, "_sexp_node", None)),
+        "authored_layers": tuple(pad.layers),
         "copper_offset": rotate_pad_offset(offset_x, offset_y, pad.rotation),
     }
 
@@ -5274,16 +5267,11 @@ def _extract_pad_blocks(section: str) -> list[str]:
     """
     pad_blocks: list[str] = []
 
-    # Find all positions where "(pad " starts *outside* a quoted string.
-    # A plain ``str.find`` would also match text such as
-    # ``(descr "Heatsink pins (pad 4, net HS) ...")`` (Issues #6740, #6873).
-    # Each scan resumes just past a completed block, which is always outside
-    # a string, as :func:`find_unquoted` requires.
+    # Match the whole pad tag with the same whitespace the parser accepts.
+    # Start each search outside strings so pad-like text in a descr is ignored.
     start_pos = 0
-    while True:
-        pad_start = find_unquoted(section, "(pad ", start_pos)
-        if pad_start == -1:
-            break
+    while match := next(iter_unquoted(section, r"\([ \t\r\n]*pad[ \t\r\n]", start_pos), None):
+        pad_start = match.start()
 
         # Count parentheses to find the matching closing paren
         depth = 0
@@ -5407,6 +5395,7 @@ def _install_fine_pitch_regions_from_components(
                         shape=pad_info.get("shape", "rect"),
                         roundrect_rratio=pad_info.get("roundrect_rratio"),
                         chamfered_outline=pad_info.get("chamfered_outline", ()),
+                        mask_chamfered_outline=pad_info.get("mask_chamfered_outline", ()),
                         copper_offset=pad_info.get("copper_offset", (0.0, 0.0)),
                     )
                 )
@@ -5814,9 +5803,9 @@ def load_pcb_for_routing(
     # Split by footprint for easier parsing
     from kicad_tools.schema.pcb import PCB as IdentityPCB
     from kicad_tools.schema.physical_identity import footprint_keys, validate_netlist_selectors
-    from kicad_tools.sexp import parse_string as parse_identity_document
+    from kicad_tools.sexp import parse_string
 
-    identity_document = IdentityPCB(parse_identity_document(pcb_text))
+    identity_document = IdentityPCB(parse_string(pcb_text))
     source_keys = footprint_keys(identity_document.footprints)
     validate_netlist_selectors(identity_document.footprints, netlist or {})
     footprint_sections = _footprint_source_sections(pcb_text, identity_document.footprints)
@@ -5857,16 +5846,11 @@ def load_pcb_for_routing(
         pad_blocks = _extract_pad_blocks(section)
 
         for pad_block in pad_blocks:
-            # Extract pad number and type
-            # Handle both quoted ("A1") and unquoted (1) pad numbers
-            # KiCad uses unquoted numbers for numeric pads, quoted for alphanumeric (BGA)
-            pad_start = re.match(r'\(pad\s+(?:"([^"]*)"|(\S+))\s+(\w+)', pad_block)
-            if not pad_start:
+            pad_node = parse_string(pad_block)
+            pad_num = _pad_number(pad_node)
+            pad_type = pad_node.get_value(1)
+            if pad_num is None or not isinstance(pad_type, str):
                 continue
-            # A matched empty quoted number is a mechanical pad, not a
-            # missing capture. Preserve the schema's empty-string identity.
-            pad_num = pad_start.group(1) if pad_start.group(1) is not None else pad_start.group(2)
-            pad_type = pad_start.group(3)  # smd or thru_hole
             # Issue #5357: a routable pad still must reduce to supported router
             # geometry, but placement-excluded copper is only ever an obstacle.
             # Defer the refusal until the pad's EFFECTIVE net is known, so the
@@ -5874,51 +5858,29 @@ def load_pcb_for_routing(
             pad_shape = ""
             pad_shape_error: ValueError | None = None
             try:
-                pad_shape = _pad_shape_from_block(pad_block, ref, pad_num)
+                pad_shape = _pad_shape_from_block(pad_node, ref, pad_num)
             except ValueError as exc:
                 pad_shape_error = exc
 
-            # Extract at position (now searches entire multi-line block)
-            at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", pad_block)
-            if not at_match:
+            at = _pad_at(pad_node)
+            size = _pad_size(pad_node)
+            if at is None or size is None:
                 if pad_shape_error is not None:
                     raise pad_shape_error
                 continue
-            pad_x = float(at_match.group(1))
-            pad_y = float(at_match.group(2))
-
-            # Extract size
-            size_match = re.search(r"\(size\s+([\d.]+)\s+([\d.]+)\)", pad_block)
-            if not size_match:
-                if pad_shape_error is not None:
-                    raise pad_shape_error
-                continue
-            pad_w = float(size_match.group(1))
-            pad_h = float(size_match.group(2))
+            pad_x, pad_y, pad_rot = at
+            pad_w, pad_h = size
 
             net_num, net_name = _resolve_pad_net(pad_block, net_map)
             authored_net_name = net_name
             authored_net_num = net_num
 
-            # Extract drill size if present
-            drill_match = re.search(r"\(drill\s+([\d.]+)", pad_block)
-            drill_size = float(drill_match.group(1)) if drill_match else 0.0
-
             # Extract copper layer from pad layers
             # KiCad pads have: (layers "F.Cu" "F.Paste" "F.Mask") or (layers "B.Cu" ...)
             # For thru-hole pads: (layers "*.Cu" "*.Paste" "*.Mask") - means all copper layers
             # We need to find the copper layer name (*.Cu pattern)
-            pad_layer = Layer.F_CU  # Default to top layer
-            layers_match = re.search(r"\(layers\s+([^)]+)\)", pad_block)
-            if layers_match:
-                layers_str = layers_match.group(1)
-                # Find copper layer names (ending with .Cu)
-                copper_layers = re.findall(r'"([^"]+\.Cu)"', layers_str)
-                if copper_layers:
-                    # Check for wildcard (*.Cu means all copper layers - thru-hole)
-                    if copper_layers[0] != "*.Cu":
-                        with contextlib.suppress(ValueError):
-                            pad_layer = Layer.from_kicad_name(copper_layers[0])
+            authored_layers = _pad_authored_layers(pad_node)
+            pad_layer = _pad_copper_layer(authored_layers)  # default top layer
 
             # Override with netlist if provided
             if netlist:
@@ -5948,10 +5910,6 @@ def load_pcb_for_routing(
             cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
             abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
             abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
-
-            # Also extract per-pad rotation if present
-            pad_rot_match = re.search(r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block)
-            pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
 
             if pad_shape_error is not None:
                 # Issue #5357: a pad whose EFFECTIVE net is placement-invalid
@@ -6029,14 +5987,15 @@ def load_pcb_for_routing(
                     "net": net_num,
                     "net_name": net_name,
                     "through_hole": pad_type == "thru_hole",
-                    "drill": drill_size,
+                    "drill": _pad_drill_size(pad_node),
                     "layer": pad_layer,
                     "side": fp_side,
                     "rotation": pad_rotation,
                     "shape": pad_shape,
-                    "roundrect_rratio": _pad_rratio_from_block(pad_block, pad_shape),
-                    "chamfered_outline": _pad_chamfered_outline(pad_block),
-                    "copper_offset": _pad_copper_offset_from_block(pad_block, pad_rot),
+                    "roundrect_rratio": _pad_radius_ratio(pad_node, pad_shape),
+                    **_chamfered_outlines(pad_node),
+                    "authored_layers": authored_layers,
+                    "copper_offset": _pad_copper_offset(pad_node, pad_rot),
                 }
             )
 

@@ -393,7 +393,8 @@ class LCSCClient:
                 silent no-op, so the live-API path is byte-for-byte unchanged
                 when no catalog has been synced (default: True).
             catalog_path: Override path to the local jlcparts SQLite catalog
-                (default: ``~/.cache/kicad-tools/jlcparts.sqlite3``).
+                (default: ``$KCT_JLCPARTS_CATALOG``, else
+                ``~/.cache/kicad-tools/jlcparts.sqlite3``).
             use_official_api: Whether to consult the official JLCPCB
                 open-platform API (BYO key) ahead of the anonymous scrape API
                 for ``lookup()``/``lookup_many()``. This tier only activates

@@ -2,7 +2,7 @@ Manufacturing package for voltage_divider_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-11-26T19:43:14Z
+Generated        : 2026-11-27T20:57:03+00:00
 
 Assembly package: BOM and CPL are included.
 CPL rotations combine the KiCad angle with a catalog-part or footprint table offset.

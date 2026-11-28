@@ -20,6 +20,14 @@ links route against the board as it really is.  Exit 1 if any link was rolled
 back or unroutable; exit 2 (nothing written) when the pinned kicad-cli is
 unavailable.
 
+``--join-track`` (Issue #10486) opts one link in to end on a track that is
+already electrically connected to the destination pad, at a junction outside
+every pad, instead of entering the pad -- a second track entering a pad corner
+leaves slivers at the pad's mask opening.  The exact-endpoint default is kept
+for intentional routes such as Kelvin sensing.  The chosen junction and its
+layer are reported per link, the host track is split there when the link is
+committed, and the ordinary pad route is kept when no such branch routes.
+
 Coordinates on the command line are the board file's (absolute) millimetres,
 as KiCad shows them.
 """
@@ -28,15 +36,23 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
+import re
+import shutil
+import stat
 import sys
 from collections import Counter
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.router.current_paths import CurrentPathSpec
+    from kicad_tools.router.link_router import LinkRoute, LinkRouteRules, PlaneCorridor
+    from kicad_tools.schema.pcb import PCB
 
 from .format_options import FORMAT_JSON, emit_json, stdout_to_stderr_when
 
@@ -47,6 +63,8 @@ __all__ = [
     "LinkAction",
     "ViaAtAction",
     "LinkLayersAction",
+    "JoinTrackAction",
+    "PlaneCorridorAction",
     "NetClearanceAction",
     "add_route_link_arguments",
     "parse_link_spec",
@@ -81,11 +99,28 @@ class LinkSpec:
     b: EndSpec
     via_at: tuple[float, float] | None = None
     layers: list[str] | None = None
+    #: ``--join-track`` (Issue #10486): end B names a pad whose electrically
+    #: connected track the link joins, outside every pad, instead of the pad.
+    join_track: bool = False
     #: ``--net-clearance NET=MM`` entries that follow this ``--link`` (Issue #8546).
     net_clearance: list[str] = field(default_factory=list)
     text: str = field(default="", compare=False)
     current_path: str | None = None
     branch: _BranchSizing | None = field(default=None, compare=False)
+    plane_corridor: PlaneCorridor | None = None
+
+    def relative_corridor(self, origin: tuple[float, float]) -> PlaneCorridor | None:
+        corridor = self.plane_corridor
+        if corridor is None:
+            return None
+        ox, oy = origin
+        return replace(
+            corridor,
+            x0=corridor.x0 - ox,
+            y0=corridor.y0 - oy,
+            x1=corridor.x1 - ox,
+            y1=corridor.y1 - oy,
+        )
 
 
 @dataclass
@@ -186,6 +221,32 @@ class LinkLayersAction(_ModifierAction):
         link.layers = layers
 
 
+class JoinTrackAction(_ModifierAction):
+    """``--join-track``: the preceding ``--link`` ends on a track joined to its pad."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        self._last(parser, namespace, option_string).join_track = True
+
+
+class PlaneCorridorAction(_ModifierAction):
+    def __call__(self, parser, namespace, values, option_string=None):
+        from kicad_tools.router.link_router import PlaneCorridor
+
+        link = self._last(parser, namespace, option_string)
+        layer, _, bounds = values.partition("=")
+        if link.plane_corridor is not None:
+            parser.error(f"{option_string}: only one rectangle per link")
+        try:
+            x0, y0, x1, y1 = map(float, bounds.split(","))
+        except ValueError:
+            parser.error(f"{option_string}: expected LAYER=X0,Y0,X1,Y1")
+        if not layer or layer in ("F.Cu", "B.Cu"):
+            parser.error(f"{option_string}: expected an inner copper layer")
+        if not all(map(math.isfinite, (x0, y0, x1, y1))) or x0 >= x1 or y0 >= y1:
+            parser.error(f"{option_string}: expected finite bounds with X0<X1 and Y0<Y1")
+        link.plane_corridor = PlaneCorridor(layer, x0, y0, x1, y1)
+
+
 class NetClearanceAction(argparse.Action):
     """``--net-clearance NET=MM``: scoped to the preceding ``--link`` (Issue #8546).
 
@@ -221,8 +282,8 @@ def add_route_link_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "A link to route: 'NET REF.PAD|x,y[@layer] REF.PAD|x,y[@layer]'. "
             "Repeatable; links are routed in the order given. An x,y end must "
-            "lie on same-net copper (a via or track). --via-at and "
-            "--link-layers apply to the --link before them."
+            "lie on same-net copper (a via or track). --via-at, --link-layers "
+            "and --join-track apply to the --link before them."
         ),
     )
     parser.add_argument(
@@ -238,6 +299,25 @@ def add_route_link_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="LAYERS",
         default=None,
         help="Comma-separated copper layers the preceding --link may use (e.g. F.Cu).",
+    )
+    parser.add_argument(
+        "--join-track",
+        action=JoinTrackAction,
+        nargs=0,
+        default=False,
+        help=(
+            "End the preceding --link on a straight track electrically connected "
+            "to its destination pad, at a junction outside every pad, instead of "
+            "in the pad; the track is split there. The junction is reported; the "
+            "pad route is kept when no such branch routes."
+        ),
+    )
+    parser.add_argument(
+        "--plane-corridor",
+        action=PlaneCorridorAction,
+        metavar="LAYER=X0,Y0,X1,Y1",
+        help="Permit the preceding link's track copper inside this rectangle on one inner "
+        "layer (absolute board mm). Commit checks plane connectivity and gap after refill.",
     )
     parser.add_argument(
         "--probe",
@@ -612,15 +692,21 @@ def _resolve_end(
     pcb: Any, end: EndSpec, net_number: int, net: str, origin: tuple[float, float]
 ) -> tuple[Any, str | None]:
     """The :class:`LinkTerminal` for ``end``, or ``(None, why)``."""
-    from kicad_tools.router.link_router import LinkTerminal, terminal_at_copper, terminal_for_pad
+    from kicad_tools.router.link_router import terminal_at_copper, terminal_for_pad
+    from kicad_tools.router.pad_geometry import routing_pad_chamfer
 
     if end.xy is None:
         assert end.ref is not None and end.pad is not None
         term = terminal_for_pad(pcb, end.ref, end.pad)
-        if term is None:
-            return None, f"pad {end.ref}.{end.pad} not found (or has no copper layer)"
         fp = pcb.get_footprint(end.ref)
-        pad = next((p for p in fp.pads if str(p.number) == str(end.pad)), None)
+        pad = next((p for p in fp.pads if str(p.number) == str(end.pad)), None) if fp else None
+        if term is None:
+            if pad is not None and routing_pad_chamfer(pad) is None:
+                return None, (
+                    f"pad {end.ref}.{end.pad} has an unsupported chamfer definition "
+                    "(expected named corners and a finite ratio from 0 to 0.5)"
+                )
+            return None, f"pad {end.ref}.{end.pad} not found (or has no copper layer)"
         if pad is not None and pad.net_number != net_number:
             return None, f"pad {end.ref}.{end.pad} is on net {pad.net_name!r}, not {net!r}"
     else:
@@ -634,7 +720,7 @@ def _resolve_end(
     if end.layer is not None:
         if end.layer not in term.layers:
             return None, f"{end.describe()} has no copper on layer {end.layer}"
-        term = LinkTerminal(term.label, term.point, {end.layer: term.layers[end.layer]})
+        term = replace(term, layers={end.layer: term.layers[end.layer]})
     return term, None
 
 
@@ -642,19 +728,35 @@ def _route_length(route: Any) -> float:
     return sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2, _ in route.segments)
 
 
-def _commit_to_model(model: Any, route: Any, net_number: int) -> None:
-    """Make later links see ``route``'s copper (mirrors the oracle's commit)."""
+def _commit_to_model(model: Any, route: Any, net_number: int, origin: tuple[float, float]) -> None:
+    """Make later links see the same copper they would reload from the file."""
     from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
-    from kicad_tools.router.link_router import _Item
+    from kicad_tools.router.link_router import _Item, _written_point
+    from kicad_tools.schema.pcb import Segment
+    from kicad_tools.sexp.builders import fmt
 
     for x1, y1, x2, y2, layer in route.segments:
-        line = LineString([(x1, y1), (x2, y2)]) if (x1, y1) != (x2, y2) else Point(x1, y1)
-        model.items.append(_Item(net_number, {layer: line.buffer(route.width_for(layer) / 2)}))
+        start = _written_point(x1, y1, origin, route.coordinate_digits)
+        end = _written_point(x2, y2, origin, route.coordinate_digits)
+        if start == end:
+            continue
+        width = fmt(route.width_for(layer))
+        model.extra_segments.append(Segment(start, end, width, layer, net_number))
+        model.items.append(_Item(net_number, {layer: LineString([start, end]).buffer(width / 2)}))
     for vx, vy in route.vias:
-        disk = Point(vx, vy).buffer(route.via_size / 2)
+        vx, vy = _written_point(vx, vy, origin, route.coordinate_digits)
+        size = fmt(route.via_size)
+        disk = Point(vx, vy).buffer(size / 2)
         model.items.append(_Item(net_number, dict.fromkeys(model.copper, disk)))
-        model.drills.append((vx, vy, route.via_drill))
+        model.drills.append((vx, vy, fmt(route.via_drill)))
+        model.extra_vias.append((vx, vy, size, net_number))
+
+
+def _junction_report(junction: Any, origin: tuple[float, float]) -> dict[str, Any]:
+    """The junction in the board file's millimetres, as the writer will keep them."""
+    x, y = junction.file_point(origin)
+    return {"x": x, "y": y, "layer": junction.layer}
 
 
 def _route_one(
@@ -671,6 +773,7 @@ def _route_one(
         _via_site_blocker,
         explain_link_failure,
         route_link,
+        route_link_junction,
         route_link_via,
     )
 
@@ -699,19 +802,68 @@ def _route_one(
             entry["reason"] = f"unknown copper layer(s) {', '.join(bad)}"
             return entry, None
         allowed = spec.layers
+    if spec.join_track and (spec.b.xy is not None or spec.via_at is not None):
+        entry["reason"] = "--join-track needs a pad as the destination and no --via-at"
+        return entry, None
+    corridor = spec.relative_corridor(origin)
+    if corridor is not None and corridor.layer not in model.copper:
+        entry["reason"] = f"unknown corridor layer {corridor.layer}"
+        return entry, None
     ta, why = _resolve_end(pcb, spec.a, net_number, spec.net, origin)
-    tb, why_b = _resolve_end(pcb, spec.b, net_number, spec.net, origin)
+    destination = replace(spec.b, layer=None) if spec.join_track else spec.b
+    tb, why_b = _resolve_end(pcb, destination, net_number, spec.net, origin)
     if ta is None or tb is None:
         entry["reason"] = why or why_b
         return entry, None
-    if allowed is not None:
-        for label, term in (("A", ta), ("B", tb)):
+
+    def _no_allowed_copper(ends: tuple[tuple[str, Any], ...]) -> str | None:
+        if allowed is None:
+            return None
+        for label, term in ends:
             if not any(layer in allowed for layer in term.layers):
-                entry["reason"] = (
-                    f"endpoint {label} has no copper on the allowed layers {','.join(allowed)}"
-                )
+                return f"endpoint {label} has no copper on the allowed layers {','.join(allowed)}"
+        return None
+
+    # Issue #10486: a joined track may reach the destination pad on a layer
+    # the pad itself lacks, so its own layers are checked only if the pad
+    # route is what is left.
+    why_layers = _no_allowed_copper((("A", ta),) if spec.join_track else (("A", ta), ("B", tb)))
+    if why_layers is not None:
+        entry["reason"] = why_layers
+        return entry, None
+    route = None
+    if spec.join_track:
+        # Issue #10486: join a track connected to the destination pad.  Without
+        # a clearance-legal branch the ordinary pad route below is kept, and
+        # a junction is reported only when one was selected.
+        skipped: dict[str, str] = {}
+        route = route_link_junction(
+            pcb,
+            net_number,
+            spec.net,
+            ta,
+            tb,
+            rules,
+            endpoint_layer=spec.b.layer,
+            allowed_layers=allowed,
+            model=model,
+            plane_corridor=corridor,
+            failure=skipped,
+        )
+        if route is None:
+            entry["join_track_skipped"] = skipped["reason"]
+            if spec.b.layer is not None:
+                tb, why_b = _resolve_end(pcb, spec.b, net_number, spec.net, origin)
+                if tb is None:
+                    entry["reason"] = why_b
+                    return entry, None
+            why_layers = _no_allowed_copper((("B", tb),))
+            if why_layers is not None:
+                entry["reason"] = why_layers
                 return entry, None
-    if spec.via_at is not None:
+        else:
+            entry["junction"] = _junction_report(route.junction, origin)
+    if route is None and spec.via_at is not None:
         site = (spec.via_at[0] - origin[0], spec.via_at[1] - origin[1])
         site_why = _via_site_blocker(model, net_number, site, rules)
         if site_why is not None:
@@ -728,19 +880,35 @@ def _route_one(
             rules,
             model=model,
             allowed_layers=allowed,
+            plane_corridor=corridor,
             failure=failure,
         )
         if failure:
             entry.update(failure)
             return entry, None
-    else:
+    elif route is None:
         route = route_link(
-            pcb, net_number, spec.net, ta, tb, rules, model=model, allowed_layers=allowed
+            pcb,
+            net_number,
+            spec.net,
+            ta,
+            tb,
+            rules,
+            model=model,
+            allowed_layers=allowed,
+            plane_corridor=corridor,
         )
     if route is None:
         entry.update(
             explain_link_failure(
-                pcb, net_number, ta, tb, rules, model=model, allowed_layers=allowed
+                pcb,
+                net_number,
+                ta,
+                tb,
+                rules,
+                model=model,
+                allowed_layers=allowed,
+                plane_corridor=corridor,
             )
         )
         return entry, None
@@ -787,8 +955,8 @@ def _drc_finding_counts(pcb_path: Path, opens: Counter[str] | None = None) -> An
         if v.get("severity") not in ("error", "warning"):
             continue
         if v.get("type") == "unconnected_items":
-            # A link cannot create a connectivity error; its description moves with
-            # the ratsnest anchor, which would cause false rollbacks.
+            # Descriptions move with the ratsnest anchor. Corridor links check
+            # saved plane islands and their terminal groups separately.
             continue
         items = sorted(str(i.get("description", "")) for i in v.get("items", []))
         counts[(v.get("type"), v.get("severity"), tuple(items))] += 1
@@ -978,24 +1146,67 @@ def _commit_links(
     Returns ``(written path | None, refusal message | None)``.
     """
     created = out_path != pcb_path and not out_path.exists()
+    has_corridor = any(spec.plane_corridor is not None for spec in links)
     previous = (
         out_path.read_bytes()
-        if out_path != pcb_path and not created and any(link.branch for link in links)
+        if out_path != pcb_path
+        and not created
+        and not has_corridor
+        and any(link.branch for link in links)
         else None
     )
-    if out_path != pcb_path:
-        out_path.write_bytes(pcb_path.read_bytes())
+    out_mode: int | None = None
+    if has_corridor:
+        # Publishing replaces the file, so check write access first and keep its mode.
+        try:
+            if created or not out_path.exists():
+                out_mode = stat.S_IMODE(pcb_path.stat().st_mode)
+            else:
+                with out_path.resolve().open("r+b"):
+                    pass
+                out_mode = stat.S_IMODE(out_path.resolve().stat().st_mode)
+        except OSError as exc:
+            return None, f"cannot write {out_path}: {exc}"
     staged = _stage_project_files(pcb_path, out_path)
-    try:
+    with ExitStack() as stack:
+        for f in staged:
+            stack.callback(f.unlink, missing_ok=True)
+        trial = None
+        baseline = out_path
+        if has_corridor:
+            directory = stack.enter_context(
+                TemporaryDirectory(prefix=".kct-plane-", dir=out_path.resolve().parent)
+            )
+            trial = Path(directory) / pcb_path.name
+            _stage_project_files(pcb_path, trial)
+            if out_path != pcb_path:
+                # Keep the destination intact until a link passes all gates.
+                baseline = Path(directory) / "baseline" / out_path.name
+                baseline.parent.mkdir()
+                # Both sides of the comparison use the input project's rules;
+                # an output-side project file is never read or changed here.
+                _stage_project_files(pcb_path, baseline)
+        if baseline != pcb_path:
+            baseline.write_bytes(pcb_path.read_bytes())
         written, refusal = _commit_links_gated(
-            args, links, pcb, model, rules, origin, net_ids, pcb_path, out_path, entries, created
+            args,
+            links,
+            pcb,
+            model,
+            rules,
+            origin,
+            net_ids,
+            pcb_path,
+            out_path,
+            entries,
+            baseline,
+            created and baseline == out_path,
+            trial,
+            out_mode,
         )
         if previous is not None and written is None:
             out_path.write_bytes(previous)
         return written, refusal
-    finally:
-        for f in staged:
-            f.unlink(missing_ok=True)
 
 
 def _stage_project_files(pcb_path: Path, out_path: Path) -> list[Path]:
@@ -1013,7 +1224,91 @@ def _stage_project_files(pcb_path: Path, out_path: Path) -> list[Path]:
         if src.is_file() and not dst.exists():
             dst.write_bytes(src.read_bytes())
             staged.append(dst)
+    table = pcb_path.parent / "fp-lib-table"
+    target = out_path.parent / "fp-lib-table"
+    if table.is_file() and not target.exists():
+        project = str(pcb_path.resolve().parent)
+
+        def absolute(match: re.Match[str]) -> str:
+            raw = match["quoted"] if match["quoted"] is not None else match["bare"]
+            uri = raw.replace("${KIPRJMOD}", project)
+            if "${" not in uri and not uri.startswith("/") and not re.match(r"[A-Za-z]:", uri):
+                uri = f"{project}/{uri}"
+            return f'(uri "{uri}")'
+
+        text = table.read_text(encoding="utf-8")
+        # KiCad accepts the URI quoted or as a bare token.
+        uri_value = r'\(uri\s+(?:"(?P<quoted>[^"]*)"|(?P<bare>[^\s()"]+))\s*\)'
+        target.write_text(re.sub(uri_value, absolute, text), encoding="utf-8")
+        staged.append(target)
     return staged
+
+
+def _native_refill(path: Path) -> PCB:
+    """Read only a verified native save, including its hole-aware fill polygons."""
+    from kicad_tools.schema.pcb import PCB
+
+    from .runner import _run_fill_zones_via_drc, find_kicad_cli
+
+    cli = find_kicad_cli()
+    if cli is None:
+        raise RuntimeError("kicad-cli is required to verify the plane refill")
+    result = _run_fill_zones_via_drc(path, None, cli, timeout=120)
+    if not result.success or not result.refill_saved:
+        raise RuntimeError(f"plane refill was not saved: {result.stderr}")
+    return PCB.load(path)
+
+
+def _verify_corridor_candidate(
+    path: Path,
+    before: PCB,
+    route: LinkRoute,
+    rules: LinkRouteRules,
+    corridor: PlaneCorridor,
+) -> tuple[PCB, float | None]:
+    from kicad_tools.core.sexp_file import load_pcb, save_pcb
+    from kicad_tools.router.plane_corridor import check_plane_refill
+    from kicad_tools.sexp import SExp
+
+    after = _native_refill(path)
+    retained = None
+    # Native removal can erase a severed lobe. Refill a separate copy keeping
+    # all islands for the overlap test. Only the project-settings fill is published.
+    zones = {z.uuid for z in before.zones if corridor.layer in z.filled_polygon_layers}
+    if zones:
+        doc = load_pcb(path)
+        changed = False
+        for zone in doc.find_all("zone"):
+            uid, fill = zone.find("uuid"), zone.find("fill")
+            if uid is None or uid.get_string(0) not in zones or fill is None:
+                continue
+            mode = fill.find("island_removal_mode")
+            if mode is not None and mode.get_int(0) == 1:
+                continue
+            if mode is not None:
+                fill.remove(mode)
+            fill.append(SExp.list("island_removal_mode", 1))
+            changed = True
+        if changed:
+            with TemporaryDirectory(dir=path.parent) as tmp:
+                check = Path(tmp) / path.name
+                _stage_project_files(path, check)
+                save_pcb(doc, check)
+                retained = _native_refill(check)
+    return after, check_plane_refill(before, after, route, rules, corridor, retained)
+
+
+def _refilled_routing_inputs(args: argparse.Namespace, pcb: Any) -> tuple:
+    # A native save may renumber nets. Resolve the next search and its
+    # clearance floors from the same board whose geometry it will write.
+    from kicad_tools.router.link_router import _build_model
+
+    return (
+        _build_model(pcb),
+        _rules_from_args(args, pcb),
+        pcb.board_origin,
+        {net.name: num for num, net in pcb.nets.items() if net.name},
+    )
 
 
 def _check_branch_candidate(
@@ -1072,7 +1367,10 @@ def _commit_links_gated(
     pcb_path: Path,
     out_path: Path,
     entries: list[dict[str, Any]],
+    baseline: Path,
     created: bool,
+    plane_trial: Path | None,
+    out_mode: int | None = None,
 ) -> tuple[str | None, str | None]:
     from kicad_tools.router.link_router import (
         append_link_routes,
@@ -1082,32 +1380,52 @@ def _commit_links_gated(
 
     check_connectivity = any(link.branch is not None for link in links)
 
-    def read_state() -> tuple[Any, Any, Counter[str]]:
+    def read_state(path: Path) -> tuple[Any, Any, Counter[str]]:
         opens: Counter[str] = Counter()
         state = (
-            _gate_state(out_path, args, opens=opens)
-            if check_connectivity
-            else _gate_state(out_path, args)
+            _gate_state(path, args, opens=opens) if check_connectivity else _gate_state(path, args)
         )
         return state[0], state[1], opens
 
     try:
-        base_drc, base_census, base_opens = read_state()
+        base_drc, base_census, base_opens = read_state(baseline)
     except Exception as exc:  # the gate cannot run: refuse, leave nothing behind
         if created:
             out_path.unlink(missing_ok=True)
         return None, f"cannot establish the DRC/creepage baseline: {exc}"
 
     n_committed = 0
+    accepted = (pcb, model, rules, origin, net_ids)
     accepted_branches: dict[str, _BranchSizing] = {}
     for spec in links:
+        pcb, model, rules, origin, net_ids = accepted
+        path = baseline
+        if spec.plane_corridor is not None:
+            try:
+                assert plane_trial is not None
+                path = plane_trial
+                path.write_bytes(baseline.read_bytes())
+                pcb = _native_refill(path)
+                model, rules, origin, net_ids = _refilled_routing_inputs(args, pcb)
+            except Exception as exc:
+                entries.append(
+                    {
+                        "link": spec.text,
+                        "net": spec.net,
+                        "routable": False,
+                        "status": "unroutable",
+                        "failed_check": "gate-error",
+                        "reason": f"cannot establish plane baseline: {exc}",
+                    }
+                )
+                continue
         entry, route = _route_one(args, pcb, model, rules, spec, origin, net_ids)
         entry["status"] = "unroutable"
         entry["failed_check"] = None
         entries.append(entry)
         if route is None:
             continue
-        snapshot = out_path.read_bytes()
+        snapshot = path.read_bytes()
         failed: str | None = None
         reason = ""
         # Issue #8523: commit the collapsed geometry (collinear runs and grid
@@ -1126,10 +1444,20 @@ def _commit_links_gated(
         candidates = [collapsed, route] if collapsed.segments != route.segments else [route]
         for candidate in candidates:
             failed, reason = None, ""
-            out_path.write_bytes(snapshot)
+            path.write_bytes(snapshot)
             try:
-                append_link_routes(out_path, [candidate], origin)
-                drc, census, opens = read_state()
+                append_link_routes(path, [candidate], origin)
+                if spec.plane_corridor is not None:
+                    from kicad_tools.router.plane_corridor import PlaneCheckError
+
+                    try:
+                        refilled, gap = _verify_corridor_candidate(
+                            path, pcb, candidate, link_rules, spec.plane_corridor
+                        )
+                    except PlaneCheckError as exc:
+                        failed, reason = "plane-corridor", str(exc)
+                        continue
+                drc, census, opens = read_state(path)
                 new_drc = drc - base_drc
                 if new_drc:
                     failed = "drc"
@@ -1152,7 +1480,7 @@ def _commit_links_gated(
                         )
                 if failed is None and (spec.branch or accepted_branches):
                     failed, reason = _check_branch_candidate(
-                        out_path, pcb_path, spec, accepted_branches, base_opens, opens
+                        path, pcb_path, spec, accepted_branches, base_opens, opens
                     )
             except Exception as exc:
                 failed = "gate-error"
@@ -1161,14 +1489,35 @@ def _commit_links_gated(
                 route = candidate
                 break
         if failed is not None:
-            out_path.write_bytes(snapshot)
+            # The board does not hold this link; it holds no junction of its own.
+            entry.pop("junction", None)
+            if path == baseline:
+                path.write_bytes(snapshot)
             entry.update(routable=False, status="rolled-back", failed_check=failed, reason=reason)
             continue
         entry["status"] = "committed"
         base_drc, base_census, base_opens = drc, census, opens
         if spec.branch is not None:
             accepted_branches[spec.branch.spec.name] = spec.branch
-        _commit_to_model(model, route, net_ids[spec.net])
+        if spec.plane_corridor is not None:
+            entry["min_plane_gap_mm"] = gap
+            accepted = (refilled, *_refilled_routing_inputs(args, refilled))
+        else:
+            _commit_to_model(model, route, net_ids[spec.net], origin)
+        if path != out_path:
+            destination = out_path.resolve()
+            # Stage beside the resolved destination: a symlink may cross filesystems.
+            with TemporaryDirectory(prefix=".publish-", dir=destination.parent) as directory:
+                staging = Path(directory) / destination.name
+                shutil.copyfile(path, staging)
+                if out_mode is not None:
+                    staging.chmod(out_mode)
+                os.replace(staging, destination)
+            if baseline != out_path and path != baseline:
+                # The next link must start from the accepted board; sidecars stay.
+                baseline.write_bytes(destination.read_bytes())
+        if plane_trial is None:
+            baseline = out_path
         n_committed += 1
     if not n_committed and created:
         out_path.unlink(missing_ok=True)  # nothing committed: leave no unchanged copy
@@ -1231,13 +1580,15 @@ def run_route_link_command(args: argparse.Namespace) -> int:
                 entries.append(entry)
                 if route is not None:
                     # Later probes must see this copper.
-                    _commit_to_model(model, route, net_ids[spec.net])
+                    _commit_to_model(model, route, net_ids[spec.net], origin)
         else:
             from .kicad_toolchain import KiCadEnvironmentError, evidence_toolchain
 
             out_path = Path(args.output) if args.output else pcb_path
             try:
-                with evidence_toolchain(mounts=[out_path.resolve().parent]):
+                with evidence_toolchain(
+                    mounts=[out_path.resolve().parent, pcb_path.resolve().parent]
+                ):
                     written, refused = _commit_links(
                         args, links, pcb, model, rules, origin, net_ids, pcb_path, out_path, entries
                     )
@@ -1268,12 +1619,20 @@ def run_route_link_command(args: argparse.Namespace) -> int:
                 print(
                     f"  {verb}: {e['link']}  {e['length_mm']:.3f} mm, {e['vias']} via(s), "
                     f"layers {','.join(e['layers'])}"
+                    + (
+                        f", refilled plane gap {e['min_plane_gap_mm']:.6f} mm"
+                        if e.get("min_plane_gap_mm") is not None
+                        else ""
+                    )
                 )
                 if "current_path" in e:
                     sizes = ", ".join(
                         f"{layer} {e['widths_mm'][layer]:.2f} mm" for layer in e["layers"]
                     )
                     print(f"    {e['current_path']}: {sizes}")
+                if "junction" in e:
+                    j = e["junction"]
+                    print(f"    junction: {j['x']:g},{j['y']:g} on {j['layer']}")
             else:
                 print(f"  UNROUTABLE: {e['link']}: {e['reason']}")
                 b = e.get("blocker")
@@ -1283,6 +1642,8 @@ def run_route_link_command(args: argparse.Namespace) -> int:
                         f"{b['distance_mm']:.3f} mm from the straight line; needs "
                         f">= {b['required_mm']:.3f} mm"
                     )
+            if "join_track_skipped" in e:
+                print(f"    --join-track skipped: {e['join_track_skipped']}")
         if not args.probe:
             print(f"route-link: creepage census: {census_mode}")
         if written:

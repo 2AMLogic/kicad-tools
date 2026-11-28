@@ -2,9 +2,12 @@ Manufacturing package for charlieplex_3x3_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-11-23T06:10:43Z
+Generated        : 2026-11-28T00:00:43Z
 
 Assembly package: BOM and CPL are included.
+CPL rotations combine the KiCad angle with a catalog-part or footprint table offset.
+Project overrides in cpl_rotations.yaml take precedence. Before ordering, open the JLCPCB placement preview.
+Check each part's leads against its pads and verify pin 1 or polarity against the board markings.
 
 Contents
 --------
@@ -38,6 +41,7 @@ Contents
   renders/3d-front.png
   renders/pcb-back.svg
   renders/pcb-front.svg
+  renders/render-provenance.json
   report.md
   report.pdf
   schematic.pdf
@@ -51,7 +55,7 @@ Warning review (per rule)
 -------------------------
   mask_to_copper: 2
   tht_smd_spacing: 5
-  All assembly-affecting warning counts are zero.
+  ACCEPTED RISK: tht_smd_spacing (5 warning(s)) explicitly acknowledged via --ack-warnings.
 
 Copper cleanup
 --------------
@@ -64,6 +68,7 @@ LCSC stock order
 ----------------
   order size: 5 board(s)
   no parts declared as held in operator inventory
+  parts data sources: parts cache searched, match found; offline catalog searched, match found
   stock check WARN: 1 LCSC part(s) show insufficient stock for 5 board(s) on unverified data (stale cache/offline catalog)
 
 Assembly prep
@@ -73,6 +78,7 @@ Assembly prep
 
 Accepted-risk waivers
 ---------------------
+  see the 1 line(s) above
   #8399 [advisory] Genuine routing detours (obstacle-avoiding) that dedupe and DRC-verified prune cannot remove; removing them needs a re-route
 
 Sign-off

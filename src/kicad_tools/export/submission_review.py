@@ -43,7 +43,10 @@ nor supplies), the page adds a ``purchasing.json`` with each row's per-board
 and build quantity and a "Purchasing list" section in ``index.md`` whose
 "Outstanding selections" part names every row whose part is not chosen yet,
 by description and linked designators. The list is the buyer's; it is kept
-apart from the assembly demand and never counted as a stock observation.
+apart from the assembly demand and never counted as a stock observation. A
+row that maps a purchased part's terminals to board landings (Issue #10514)
+adds a "Terminal map" table whose columns separate the project's own terminal
+declarations from the landings checked against the PCB at export.
 
 States use the same terse vocabulary as ``submission_plan.py``'s own
 ``states`` block: ``preparation``, ``inventory``, ``human_approval``,
@@ -430,6 +433,7 @@ def _purchasing_section(purchasing: Mapping[str, Any] | None) -> list[str]:
             f"| {_cell(item['description'])} | {item['per_board']} | {item['required']} | "
             f"{_cell(', '.join(item['refs']) or '(none)')} | {_cell(selection)} |"
         )
+    lines += _terminal_map_lines(items)
     outstanding = [item for item in items if item["status"] == "pending"]
     lines.append("")
     lines.append(
@@ -445,6 +449,48 @@ def _purchasing_section(purchasing: Mapping[str, Any] | None) -> list[str]:
             f" -- {_cell(item['pending'])}"
         )
     return lines + [""]
+
+
+def _terminal_map_lines(items: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Render the terminal maps of the rows that declare one (Issue #10514).
+
+    Each association names its source: the terminal is the project's own
+    declaration for the purchased part, while the landing and its net were
+    checked against the exported PCB when the list was written and are not
+    looked up again here. An unused terminal is listed with no landing.
+    """
+    mapped = [item for item in items if item.get("terminals")]
+    if not mapped:
+        return []
+    lines = [
+        "",
+        "### Terminal map (project declarations)",
+        "",
+        "Terminal numbers are the project's declaration for the selected part, read by",
+        "hand from its datasheet; nothing here derives them from a part number. Each board",
+        "landing and its net was checked against the exported PCB by `kct export` when the",
+        "list was written and is not looked up again here. The same assignments apply to",
+        "every board of this build.",
+        "",
+        "| Description | Part | Terminal (declared in project) | Board landing (checked on the PCB) "
+        "| Net (checked on the PCB) | Disposition |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for item in mapped:
+        part = f"{item['manufacturer']} {item['mpn']}"
+        for assignment in item["terminals"]:
+            if assignment.get("unused"):
+                landing = net = "(none)"
+                disposition = "unused"
+            else:
+                landing = f"{assignment['ref']} pad {assignment['pad']}"
+                net = assignment["net"]
+                disposition = "mapped"
+            lines.append(
+                f"| {_cell(item['description'])} | {_cell(part)} | {_cell(assignment['terminal'])} "
+                f"| {_cell(landing)} | {_cell(net)} | {disposition} |"
+            )
+    return lines
 
 
 def render_review_page(

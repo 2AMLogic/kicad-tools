@@ -394,6 +394,50 @@ class TestManufacturingResult:
         result = ManufacturingResult(output_dir=tmp_path)
         assert result.all_files == []
 
+    def test_existing_positional_results_and_simulation_share_the_manifest(self, tmp_path):
+        purchasing = tmp_path / "purchasing.json"
+        declaration = tmp_path / "simulation" / "declaration.json"
+        declaration.parent.mkdir()
+        purchasing.write_text("[]")
+        declaration.write_text("{}")
+        clearance = {"minimum_clearance_mm": 0.4}
+        reviewed = {"pcb_sha256": "1" * 64}
+        simulation = {"cases": []}
+        # The original positional layout extends through reviewed_copper on main.
+        result = ManufacturingResult(
+            tmp_path,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            [],
+            [],
+            [],
+            [],
+            [],
+            None,
+            None,
+            None,
+            None,
+            clearance,
+            purchasing,
+            ["front panel gasket"],
+            reviewed,
+            simulation=simulation,
+            simulation_paths=[declaration],
+        )
+        assert result.reinforcement_clearance == clearance
+        assert result.purchasing_path == purchasing
+        assert result.purchasing_pending == ["front panel gasket"]
+        assert set(result.all_files) == {purchasing, declaration}
+        manifest = _build_manifest(result, tmp_path / "board.kicad_pcb", "jlcpcb")
+        assert manifest["reviewed_copper"] == reviewed
+        assert manifest["simulation"] == simulation
+        assert set(manifest["files"]) == {"purchasing.json", "simulation/declaration.json"}
+
     def test_all_files_includes_everything(self, tmp_path):
         from kicad_tools.export.assembly import AssemblyPackageResult
 
@@ -2694,6 +2738,67 @@ FUSE_PER_BOARD = {
     ],
 }
 
+SWITCH_LAND = """\
+(kicad_pcb
+  (version 20241229)
+  (generator "kct")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "VDD_CTRL")
+  (net 2 "ARMED_3V3")
+  (footprint "Connector:WireLand_2pin"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-00000000000a1")
+    (at 25 20)
+    (property "Reference" "SW1"
+      (at 0 -1.5 0) (layer "F.SilkS") (uuid "00000000-0000-0000-0000-00000000000a2"))
+    (property "Value" "Panel switch"
+      (at 0 1.5 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-00000000000a3"))
+    (pad "1" thru_hole rect (at -2.5 0) (size 1.7 1.7) (drill 1)
+      (layers "*.Cu" "*.Mask") (net 1 "VDD_CTRL"))
+    (pad "2" thru_hole oval (at 2.5 0) (size 1.7 1.7) (drill 1)
+      (layers "*.Cu" "*.Mask") (net 2 "ARMED_3V3"))
+  )
+)
+"""
+SWITCH_ROW = (
+    "  - description: Panel toggle switch for the arm position\n"
+    "    quantity: 1\n"
+    "    refs: [SW1]\n"
+    "    manufacturer: Example Switch Co\n"
+    "    mpn: SYN-TOGGLE-1\n"
+)
+SWITCH_MAP = (
+    "    terminals:\n"
+    "      - terminal: 3\n"
+    "        ref: SW1\n"
+    "        pad: 1\n"
+    "        net: VDD_CTRL\n"
+    "      - terminal: 2\n"
+    "        ref: SW1\n"
+    "        pad: 2\n"
+    "        net: ARMED_3V3\n"
+    "      - terminal: 1\n"
+    "        unused: true\n"
+)
+SWITCH_ITEM = {
+    "description": "Panel toggle switch for the arm position",
+    "per_board": 1,
+    "refs": ["SW1"],
+    "status": "selected",
+    "manufacturer": "Example Switch Co",
+    "mpn": "SYN-TOGGLE-1",
+    "terminals": [
+        {"terminal": "3", "ref": "SW1", "pad": "1", "net": "VDD_CTRL"},
+        {"terminal": "2", "ref": "SW1", "pad": "2", "net": "ARMED_3V3"},
+        {"terminal": "1", "unused": True},
+    ],
+}
+SWITCH_PER_BOARD = {"schema_version": 1, "items": [*FUSE_PER_BOARD["items"], SWITCH_ITEM]}
+
 
 def _fuse_assembly_export(self, output_dir=None):
     """Stand in for AssemblyPackage.export: the holders and the land are placed."""
@@ -3143,6 +3248,228 @@ class TestPurchasingList:
         assert result.purchasing_pending == ["5 x 20 mm cartridge, DC"]
         assert not out.exists()
 
+    @classmethod
+    def _land_project(cls, pcb, purchasing):
+        """Give the project the switch's wire landing and declare ``purchasing``."""
+        pcb.write_text(SWITCH_LAND)
+        cls._write_spec(pcb, purchasing)
+
+    def test_export_freezes_the_checked_terminal_map(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        """Each landing is checked against the board, then frozen with the row (Issue #10514)."""
+        self._land_project(local_symbol_project, FUSE_PURCHASING + SWITCH_ROW + SWITCH_MAP)
+        out = tmp_path / "out"
+        _, result = self._export(monkeypatch, local_symbol_project, out)
+
+        assert result.success, result.errors
+        assert self._read_exported_list(result.purchasing_path) == SWITCH_PER_BOARD
+        assert self._manifest(result)["purchasing.json"] == {
+            "sha256": _sha256_file(result.purchasing_path),
+            "size": result.purchasing_path.stat().st_size,
+        }
+        assert verify_manifest(result.manifest_path) == []
+
+    def test_terminal_map_leaves_bom_and_cpl_byte_identical(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        """The switch is bought separately: a map changes no fabricator file."""
+        self._land_project(local_symbol_project, "purchasing:\n" + SWITCH_ROW)
+        _, control = self._export(monkeypatch, local_symbol_project, tmp_path / "control")
+        self._land_project(local_symbol_project, "purchasing:\n" + SWITCH_ROW + SWITCH_MAP)
+        _, mapped = self._export(monkeypatch, local_symbol_project, tmp_path / "mapped")
+        assert control.success and mapped.success
+
+        def fabricator_files(result):
+            return [
+                (path.read_bytes(), self._manifest(result)[name])
+                for name, path in (
+                    ("bom_jlcpcb.csv", result.assembly_result.bom_path),
+                    ("cpl_jlcpcb.csv", result.assembly_result.pnp_path),
+                )
+            ]
+
+        assert fabricator_files(mapped) == fabricator_files(control)
+        for path in (mapped.assembly_result.bom_path, mapped.assembly_result.pnp_path):
+            text = path.read_text(encoding="utf-8-sig").lower()
+            assert "toggle" not in text and "syn-toggle-1" not in text
+        (item,) = self._read_exported_list(control.purchasing_path)["items"]
+        assert item == {key: value for key, value in SWITCH_ITEM.items() if key != "terminals"}
+
+    @pytest.mark.parametrize(
+        ("landing", "fault"),
+        [
+            ("{terminal: 3, ref: SW9, pad: 1, net: VDD_CTRL}\n", "SW9 is not on the board"),
+            ("{terminal: 3, ref: SW1, pad: 3, net: VDD_CTRL}\n", "SW1 has no pad 3"),
+            (
+                "{terminal: 3, ref: SW1, pad: 1, net: ARMED_3V3}\n",
+                "SW1 pad 1 carries VDD_CTRL on the board, not ARMED_3V3",
+            ),
+        ],
+        ids=["unknown-reference", "unknown-pad", "other-net"],
+    )
+    def test_landing_that_disagrees_with_the_board_refuses_the_export(
+        self, tmp_path, monkeypatch, local_symbol_project, landing, fault
+    ):
+        """One reference, pad or net at a time, each fault names row, terminal and landing."""
+        # List the landing's reference on the row so the fault is the board's, not the row's.
+        row = SWITCH_ROW.replace("refs: [SW1]", "refs: [SW1, SW9]")
+        self._land_project(
+            local_symbol_project,
+            "purchasing:\n" + row + "    terminals:\n      - " + landing,
+        )
+        out = tmp_path / "out"
+        _, result = self._export(monkeypatch, local_symbol_project, out)
+
+        assert not result.success
+        [error] = result.errors
+        assert "project.kct" in error
+        assert "purchasing row 1 (Panel toggle switch for the arm position) terminal '3'" in error
+        assert fault in error
+        assert not out.exists()
+
+    @pytest.mark.parametrize(
+        ("terminals", "fault"),
+        [
+            (
+                "      - {terminal: 2, ref: SW1, pad: 1, net: VDD_CTRL}\n"
+                "      - {terminal: 2, ref: SW1, pad: 2, net: ARMED_3V3}\n",
+                "terminal '2' is declared more than once: SW1 pad 1 (VDD_CTRL) and "
+                "SW1 pad 2 (ARMED_3V3)",
+            ),
+            (
+                "      - {terminal: 3, ref: SW1, pad: 1, net: VDD_CTRL}\n"
+                "      - {terminal: 3, unused: true}\n",
+                "terminal '3' is declared more than once: SW1 pad 1 (VDD_CTRL) and unused",
+            ),
+        ],
+        ids=["one-terminal-two-nets", "mapped-and-unused"],
+    )
+    def test_conflicting_terminals_refuse_the_export_and_name_the_row(
+        self, tmp_path, monkeypatch, local_symbol_project, terminals, fault
+    ):
+        self._land_project(
+            local_symbol_project, "purchasing:\n" + SWITCH_ROW + "    terminals:\n" + terminals
+        )
+        out = tmp_path / "out"
+        _, result = self._export(monkeypatch, local_symbol_project, out)
+
+        assert not result.success
+        [error] = result.errors
+        assert "purchasing row 1 (Panel toggle switch for the arm position) terminals" in error
+        assert fault in error
+        assert not out.exists()
+
+    def test_invalid_terminal_map_keeps_the_previous_bundle(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        self._land_project(local_symbol_project, "purchasing:\n" + SWITCH_ROW + SWITCH_MAP)
+        out = tmp_path / "bundle"
+        _, first = self._export(monkeypatch, local_symbol_project, out)
+        assert first.success, first.errors
+        before = {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()}
+
+        self._land_project(
+            local_symbol_project,
+            "purchasing:\n" + SWITCH_ROW + SWITCH_MAP.replace("net: VDD_CTRL", "net: ARMED_3V3"),
+        )
+        _, refused = self._export(monkeypatch, local_symbol_project, out)
+
+        assert not refused.success and "not ARMED_3V3" in str(refused.errors)
+        assert {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()} == before
+        assert verify_manifest(out / "manifest.json") == []
+        assert self._read_exported_list(out / "purchasing.json") == {
+            "schema_version": 1,
+            "items": [SWITCH_ITEM],
+        }
+
+    def test_mapped_list_follows_a_rerun_and_is_withdrawn(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        """The exporter reads back its own mapped rows, then withdraws the list."""
+        rewired = SWITCH_MAP.replace(
+            "      - terminal: 1\n        unused: true\n",
+            "      - terminal: 1\n        ref: SW1\n        pad: 2\n        net: ARMED_3V3\n",
+        )
+        self._land_project(local_symbol_project, "purchasing:\n" + SWITCH_ROW + SWITCH_MAP)
+        out = tmp_path / "bundle"
+        _, first = self._export(monkeypatch, local_symbol_project, out, include_manifest=False)
+        assert first.success, first.errors
+
+        self._land_project(local_symbol_project, "purchasing:\n" + SWITCH_ROW + rewired)
+        _, updated = self._export(monkeypatch, local_symbol_project, out, include_manifest=False)
+        assert updated.success, updated.errors
+        assert self._read_exported_list(updated.purchasing_path)["items"][0]["terminals"] == [
+            SWITCH_ITEM["terminals"][0],
+            SWITCH_ITEM["terminals"][1],
+            {"terminal": "1", "ref": "SW1", "pad": "2", "net": "ARMED_3V3"},
+        ]
+
+        self._write_spec(local_symbol_project, "purchasing: []\n")
+        _, removed = self._export(monkeypatch, local_symbol_project, out, include_manifest=False)
+        assert removed.success, removed.errors
+        assert not (out / "purchasing.json").exists()
+
+    def test_only_a_mapped_row_reads_the_board(self, tmp_path, monkeypatch, local_symbol_project):
+        """Accessory rows add no board read; a map reads the board it is checked against."""
+        from kicad_tools.exceptions import ParseError
+        from kicad_tools.schema.pcb import PCB
+
+        reads = []
+        load = PCB.load
+
+        def spy(path):
+            reads.append(Path(path).name)
+            return load(path)
+
+        monkeypatch.setattr(PCB, "load", spy)
+        local_symbol_project.write_text(SWITCH_LAND)
+
+        def export(label, purchasing):
+            self._write_spec(local_symbol_project, purchasing)
+            before = len(reads)
+            _, result = self._export(monkeypatch, local_symbol_project, tmp_path / label)
+            assert result.success, result.errors
+            return reads[before:]
+
+        accessory = export("accessory", FUSE_PURCHASING)
+        mapped = export("mapped", "purchasing:\n" + SWITCH_ROW + SWITCH_MAP)
+
+        assert len(mapped) == len(accessory) + 1
+
+        def unreadable(path):
+            raise ParseError("Unexpected end of input")
+
+        monkeypatch.setattr(PCB, "load", unreadable)
+        _, refused = self._export(monkeypatch, local_symbol_project, tmp_path / "refused")
+
+        assert not refused.success
+        [error] = refused.errors
+        assert "purchasing list" in error and "board.kicad_pcb" in error
+        assert not (tmp_path / "refused").exists()
+
+    def test_dry_run_refuses_an_invalid_terminal_map(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        from kicad_tools.export import assembly
+
+        self._land_project(
+            local_symbol_project,
+            "purchasing:\n" + SWITCH_ROW + SWITCH_MAP.replace("net: VDD_CTRL", "net: ARMED_3V3"),
+        )
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", _fuse_assembly_export)
+        pkg = ManufacturingPackage(
+            pcb_path=local_symbol_project,
+            manufacturer="jlcpcb",
+            config=ManufacturingConfig(include_report=False),
+        )
+        out = tmp_path / "out"
+
+        result = pkg.export(out, dry_run=True)
+
+        assert not result.success and "terminal '3'" in str(result.errors)
+        assert not out.exists()
+
     @pytest.mark.skipif(find_kicad_cli() is None, reason="Native KiCad CLI is not installed")
     def test_real_assembly_output_is_untouched_by_purchasing_rows(self, tmp_path):
         """The real BOM/CPL pipeline sees no supplementary row, whatever the spec declares."""
@@ -3212,6 +3539,371 @@ class TestPurchasingList:
         }
         assert control.purchasing_path is None
         assert not (tmp_path / "control" / "purchasing.json").exists()
+
+    @pytest.mark.skipif(find_kicad_cli() is None, reason="Native KiCad CLI is not installed")
+    def test_real_pipeline_sees_no_terminal_map(self, tmp_path):
+        """The real BOM/CPL pipeline sees no terminal map; the real board still checks it (Issue #10514)."""
+        design = tmp_path / "board" / "output"
+        shutil.copytree(Path(__file__).parent / "fixtures" / "project_archive_10108", design)
+        spec = design.parent / "project.kct"
+        row = (
+            "purchasing:\n"
+            "  - description: Chassis network wired to R1's landings\n"
+            "    quantity: 1\n"
+            "    refs: [R1]\n"
+            "    manufacturer: Example\n"
+            "    mpn: SYN-NETWORK-1\n"
+        )
+
+        def export(label, purchasing):
+            spec.write_text("kct_version: '1.0'\nproject:\n  name: t\n" + purchasing)
+            config = ManufacturingConfig(
+                output_dir=tmp_path / label,
+                include_gerbers=False,
+                include_report=False,
+                silk_fix=False,
+                emit_drc_constraints=False,
+                auto_lcsc=False,
+                preflight=PreflightConfig(skip_all=True),
+            )
+            return ManufacturingPackage(
+                design / "board_v07.kicad_pcb", design / "board.kicad_sch", config=config
+            ).export()
+
+        control = export("control", row)
+        mapped = export(
+            "mapped",
+            row + "    terminals:\n"
+            "      - {terminal: B, ref: R1, pad: 1, net: VCC}\n"
+            "      - {terminal: A, ref: R1, pad: 2, net: GND}\n"
+            "      - {terminal: C, unused: true}\n",
+        )
+        assert control.success and mapped.success, (control.errors, mapped.errors)
+
+        for name in ("bom_jlcpcb.csv", "cpl_jlcpcb.csv"):
+            assert (tmp_path / "mapped" / name).read_bytes() == (
+                tmp_path / "control" / name
+            ).read_bytes()
+        placement = list(
+            csv.reader(io.StringIO(mapped.assembly_result.pnp_path.read_text("utf-8-sig")))
+        )
+        assert [cells[0] for cells in placement[1:]] == ["R1", "R2"]
+        assert self._read_exported_list(mapped.purchasing_path)["items"][0]["terminals"] == [
+            {"terminal": "B", "ref": "R1", "pad": "1", "net": "VCC"},
+            {"terminal": "A", "ref": "R1", "pad": "2", "net": "GND"},
+            {"terminal": "C", "unused": True},
+        ]
+        assert verify_manifest(mapped.manifest_path) == []
+
+        refused = export(
+            "refused", row + "    terminals:\n      - {terminal: B, ref: R1, pad: 1, net: GND}\n"
+        )
+
+        assert not refused.success
+        assert "R1 pad 1 carries VCC on the board, not GND" in str(refused.errors)
+        assert not (tmp_path / "refused").exists()
+
+    def test_landing_on_a_footprint_the_row_does_not_declare_keeps_the_previous_bundle(
+        self, tmp_path
+    ):
+        """R1 and R2 both have pad 1 on VCC, so only the row can tell them apart (Issue #10582)."""
+        design = tmp_path / "board" / "output"
+        shutil.copytree(Path(__file__).parent / "fixtures" / "project_archive_10108", design)
+        spec = design.parent / "project.kct"
+
+        def row(refs):
+            return (
+                "purchasing:\n"
+                "  - description: Chassis network wired to two landings\n"
+                "    quantity: 1\n"
+                f"    refs: {refs}\n"
+                "    manufacturer: Example\n"
+                "    mpn: SYN-NETWORK-1\n"
+                "    terminals:\n"
+                "      - {terminal: 3, ref: R1, pad: 1, net: VCC}\n"
+                "      - {terminal: 1, ref: R2, pad: 1, net: VCC}\n"
+                "      - {terminal: 2, unused: true}\n"
+            )
+
+        def export(purchasing, out_dir):
+            spec.write_text("kct_version: '1.0'\nproject:\n  name: t\n" + purchasing)
+            config = ManufacturingConfig(
+                output_dir=out_dir,
+                include_gerbers=False,
+                include_report=False,
+                silk_fix=False,
+                emit_drc_constraints=False,
+                auto_lcsc=False,
+                preflight=PreflightConfig(skip_all=True),
+            )
+            return ManufacturingPackage(
+                design / "board_v07.kicad_pcb", design / "board.kicad_sch", config=config
+            ).export()
+
+        bundle = tmp_path / "bundle"
+        valid = export(row("[R2, R1]"), bundle)
+        assert valid.success, valid.errors
+        (item,) = self._read_exported_list(valid.purchasing_path)["items"]
+        assert item["refs"] == ["R2", "R1"] and item["per_board"] == 1
+        assert {"terminal": "3", "ref": "R1", "pad": "1", "net": "VCC"} in item["terminals"]
+        before = {p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+
+        refused = export(row("[R2]"), bundle)
+
+        assert not refused.success
+        [error] = refused.errors
+        assert (
+            "purchasing row 1 (Chassis network wired to two landings): "
+            "terminal '3' maps to R1, which is not among the row's declared refs (R2)"
+        ) in error
+        assert {
+            p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()
+        } == before
+        assert verify_manifest(bundle / "manifest.json") == []
+
+        # An omitted refs list declares nothing to compare, so the PCB check alone decides.
+        undeclared = export(row("[]").replace("    refs: []\n", ""), tmp_path / "undeclared")
+        assert undeclared.success, undeclared.errors
+
+    @pytest.mark.parametrize(
+        ("layers", "net_clause", "fault"),
+        [
+            ('"F.Paste"', '(net 1 "no net")', "has no copper"),
+            ('"F.Cu" "F.Paste"', "", "is unconnected"),
+        ],
+        ids=["paste-only", "unconnected"],
+    )
+    def test_invalid_pad_preserves_named_net_handoff(
+        self, tmp_path, monkeypatch, local_symbol_project, layers, net_clause, fault
+    ):
+        purchasing = "purchasing:\n" + SWITCH_ROW + SWITCH_MAP.replace("VDD_CTRL", "no net")
+        self._write_spec(local_symbol_project, purchasing)
+        board = SWITCH_LAND.replace("VDD_CTRL", "no net").replace(
+            "thru_hole rect (at -2.5 0) (size 1.7 1.7) (drill 1)",
+            "smd rect (at -2.5 0) (size 1.7 1.7)",
+        )
+        pad = '(layers "*.Cu" "*.Mask") (net 1 "no net")'
+        assert board.count(pad) == 1
+        local_symbol_project.write_text(
+            board.replace(pad, '(layers "F.Cu" "F.Paste") (net 1 "no net")')
+        )
+        bundle = tmp_path / "bundle"
+        _, valid = self._export(monkeypatch, local_symbol_project, bundle)
+        assert valid.success, valid.errors
+        terminals = self._read_exported_list(valid.purchasing_path)["items"][0]["terminals"]
+        assert {"terminal": "3", "ref": "SW1", "pad": "1", "net": "no net"} in terminals
+        before = {p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+
+        local_symbol_project.write_text(board.replace(pad, f"(layers {layers}) {net_clause}"))
+        _, refused = self._export(monkeypatch, local_symbol_project, bundle)
+        assert not refused.success
+        assert f"SW1 pad 1 {fault}" in refused.errors[0]
+        assert {
+            p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()
+        } == before
+        assert verify_manifest(valid.manifest_path) == []
+
+    def test_multi_pad_landing_checks_every_physical_pad(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        """Every physical pad of a mapped landing must agree with the declared net."""
+        net_numbers = {"": 0, "VDD_CTRL": 1, "ARMED_3V3": 2}
+        pad_one = (
+            '    (pad "1" thru_hole rect (at -2.5 0) (size 1.7 1.7) (drill 1)\n'
+            '      (layers "*.Cu" "*.Mask") (net 1 "VDD_CTRL"))'
+        )
+
+        def two_pad_board(first_net: str, second_net: str) -> str:
+            replacement = (
+                f'    (pad "1" thru_hole rect (at -2.5 0) (size 1.7 1.7) (drill 1)\n'
+                f'      (layers "*.Cu" "*.Mask") (net {net_numbers[first_net]} "{first_net}"))\n'
+                f'    (pad "1" thru_hole rect (at -2.5 5) (size 1.7 1.7) (drill 1)\n'
+                f'      (layers "*.Cu" "*.Mask") (net {net_numbers[second_net]} "{second_net}"))'
+            )
+            return SWITCH_LAND.replace(pad_one, replacement, 1)
+
+        purchasing = "purchasing:\n" + SWITCH_ROW + SWITCH_MAP
+        local_symbol_project.write_text(two_pad_board("VDD_CTRL", "VDD_CTRL"))
+        self._write_spec(local_symbol_project, purchasing)
+        bundle = tmp_path / "bundle"
+        _, valid = self._export(monkeypatch, local_symbol_project, bundle)
+
+        assert valid.success, valid.errors
+        assert self._read_exported_list(valid.purchasing_path) == {
+            "schema_version": 1,
+            "items": [SWITCH_ITEM],
+        }
+        assert verify_manifest(valid.manifest_path) == []
+        before = {p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+
+        for label, nets, observed in (
+            ("declared-first", ("VDD_CTRL", "ARMED_3V3"), "VDD_CTRL and ARMED_3V3"),
+            ("declared-second", ("ARMED_3V3", "VDD_CTRL"), "ARMED_3V3 and VDD_CTRL"),
+            ("second-unconnected", ("VDD_CTRL", ""), "VDD_CTRL and (unconnected)"),
+        ):
+            local_symbol_project.write_text(two_pad_board(*nets))
+            fresh = tmp_path / label
+            _, refused = self._export(monkeypatch, local_symbol_project, fresh)
+            assert not refused.success
+            [error] = refused.errors
+            assert (
+                "purchasing row 1 (Panel toggle switch for the arm position) terminal '3'" in error
+            )
+            assert "SW1 pad 1" in error
+            assert observed in error
+            assert not fresh.exists()
+
+        # Re-exporting a mixed landing whose first pad matches must preserve a valid bundle.
+        local_symbol_project.write_text(two_pad_board("VDD_CTRL", "ARMED_3V3"))
+        _, over_valid = self._export(monkeypatch, local_symbol_project, bundle)
+        assert not over_valid.success
+        [over_error] = over_valid.errors
+        assert (
+            "purchasing row 1 (Panel toggle switch for the arm position) terminal '3'" in over_error
+        )
+        assert "SW1 pad 1" in over_error
+        assert "VDD_CTRL and ARMED_3V3" in over_error
+        assert {
+            p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()
+        } == before
+        assert verify_manifest(bundle / "manifest.json") == []
+        assert self._read_exported_list(bundle / "purchasing.json") == {
+            "schema_version": 1,
+            "items": [SWITCH_ITEM],
+        }
+
+        # Duplicate footprint instances sharing the reference cannot hide a conflicting net.
+        second_fp = (
+            '  (footprint "Connector:WireLand_2pin"\n'
+            '    (layer "F.Cu")\n'
+            '    (uuid "00000000-0000-0000-0000-0000000000b1")\n'
+            "    (at 25 25)\n"
+            '    (property "Reference" "SW1"\n'
+            '      (at 0 -1.5 0) (layer "F.SilkS") (uuid "00000000-0000-0000-0000-0000000000b2"))\n'
+            '    (pad "1" thru_hole rect (at -2.5 0) (size 1.7 1.7) (drill 1)\n'
+            '      (layers "*.Cu" "*.Mask") (net 2 "ARMED_3V3"))\n'
+            "  )\n)"
+        )
+        local_symbol_project.write_text(SWITCH_LAND[:-2] + second_fp + "\n")
+        _, dup_refused = self._export(monkeypatch, local_symbol_project, tmp_path / "dup")
+        assert not dup_refused.success
+        assert "VDD_CTRL and ARMED_3V3" in dup_refused.errors[0]
+        assert not (tmp_path / "dup").exists()
+
+        # A bare non-plated hole has no copper to carry a net.
+        npth = SWITCH_LAND.replace(
+            '    (pad "1" thru_hole rect (at -2.5 0) (size 1.7 1.7) (drill 1)\n'
+            '      (layers "*.Cu" "*.Mask") (net 1 "VDD_CTRL"))',
+            '    (pad "1" np_thru_hole circle (at -2.5 0) (size 1.7 1.7) (drill 1)\n'
+            '      (layers "*.Mask") (net 1 "VDD_CTRL"))',
+            1,
+        )
+        local_symbol_project.write_text(npth)
+        _, npth_refused = self._export(monkeypatch, local_symbol_project, tmp_path / "npth")
+        assert not npth_refused.success
+        assert "SW1 pad 1 has no copper" in npth_refused.errors[0]
+        assert not (tmp_path / "npth").exists()
+
+    @pytest.mark.skipif(find_kicad_cli() is None, reason="Native KiCad CLI is not installed")
+    def test_real_pipeline_rejects_mixed_pad_landing_in_both_orders(self, tmp_path):
+        """Real manufacturing export with normal preflight checks every physical pad of R1.1."""
+        design = tmp_path / "board" / "output"
+        shutil.copytree(Path(__file__).parent / "fixtures" / "project_archive_10108", design)
+        pcb = design / "board_v07.kicad_pcb"
+        base_pcb = pcb.read_text()
+        net_numbers = {"VCC": 1, "GND": 2}
+        original_pad = (
+            '\t\t(pad "1" smd roundrect\n'
+            "\t\t\t(at -1.25 0)\n"
+            "\t\t\t(size 1.2 1.4)\n"
+            '\t\t\t(layers "F.Cu" "F.Paste" "F.Mask")\n'
+            "\t\t\t(roundrect_rratio 0.25)\n"
+            '\t\t\t(pintype "passive")\n'
+            '\t\t\t(uuid "abababab-0000-4000-8000-000000000011")\n'
+            '\t\t\t(net 1 "VCC")\n'
+            "\t\t)"
+        )
+        assert base_pcb.count(original_pad) == 1
+
+        def write_r1_pads(first_net: str, second_net: str) -> None:
+            replacement = (
+                '\t\t(pad "1" smd roundrect\n'
+                "\t\t\t(at -1.25 0)\n"
+                "\t\t\t(size 1.2 1.4)\n"
+                '\t\t\t(layers "F.Cu" "F.Paste" "F.Mask")\n'
+                "\t\t\t(roundrect_rratio 0.25)\n"
+                '\t\t\t(pintype "passive")\n'
+                '\t\t\t(uuid "abababab-0000-4000-8000-000000000011")\n'
+                f'\t\t\t(net {net_numbers[first_net]} "{first_net}")\n'
+                "\t\t)\n"
+                '\t\t(pad "1" smd roundrect\n'
+                "\t\t\t(at -1.25 5)\n"
+                "\t\t\t(size 1.2 1.4)\n"
+                '\t\t\t(layers "F.Cu" "F.Paste" "F.Mask")\n'
+                "\t\t\t(roundrect_rratio 0.25)\n"
+                '\t\t\t(pintype "passive")\n'
+                '\t\t\t(uuid "abababab-0000-4000-8000-000000000019")\n'
+                f'\t\t\t(net {net_numbers[second_net]} "{second_net}")\n'
+                "\t\t)"
+            )
+            pcb.write_text(base_pcb.replace(original_pad, replacement, 1))
+
+        (design.parent / "project.kct").write_text(
+            "kct_version: '1.0'\n"
+            "project:\n"
+            "  name: t\n"
+            "purchasing:\n"
+            "  - description: Chassis network wired to R1's landings\n"
+            "    quantity: 1\n"
+            "    refs: [R1]\n"
+            "    manufacturer: Example\n"
+            "    mpn: SYN-NETWORK-1\n"
+            "    terminals:\n"
+            "      - {terminal: B, ref: R1, pad: 1, net: VCC}\n"
+        )
+
+        def run_export(out_dir: Path):
+            config = ManufacturingConfig(
+                output_dir=out_dir,
+                include_gerbers=False,
+                include_report=False,
+                silk_fix=False,
+                emit_drc_constraints=False,
+                auto_lcsc=False,
+            )
+            return ManufacturingPackage(pcb, design / "board.kicad_sch", config=config).export()
+
+        bundle = tmp_path / "bundle"
+        write_r1_pads("VCC", "VCC")
+        same_net = run_export(bundle)
+        assert same_net.success, same_net.errors
+        assert self._read_exported_list(same_net.purchasing_path)["items"][0]["terminals"] == [
+            {"terminal": "B", "ref": "R1", "pad": "1", "net": "VCC"}
+        ]
+        assert verify_manifest(same_net.manifest_path) == []
+        before = {p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+
+        write_r1_pads("VCC", "GND")
+        vcc_first = run_export(bundle)
+        assert not vcc_first.success
+        [vcc_err] = vcc_first.errors
+        assert "purchasing row 1 (Chassis network wired to R1's landings) terminal 'B'" in vcc_err
+        assert "R1 pad 1" in vcc_err
+        assert "VCC and GND" in vcc_err
+        assert {
+            p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()
+        } == before
+        assert verify_manifest(bundle / "manifest.json") == []
+
+        fresh = tmp_path / "gnd-first"
+        write_r1_pads("GND", "VCC")
+        gnd_first = run_export(fresh)
+        assert not gnd_first.success
+        [gnd_err] = gnd_first.errors
+        assert "purchasing row 1 (Chassis network wired to R1's landings) terminal 'B'" in gnd_err
+        assert "R1 pad 1" in gnd_err
+        assert "GND and VCC" in gnd_err
+        assert not fresh.exists()
 
 
 class TestSimulationEvidence:

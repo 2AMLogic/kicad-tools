@@ -24,6 +24,33 @@ from pathlib import Path
 from kicad_tools.cli.format_options import add_format_flag, emit_json
 
 
+def add_stock_parser(subparsers) -> None:
+    """Register authorized-distributor stock options on either parts parser."""
+    stock_parser = subparsers.add_parser(
+        "stock",
+        help="Distributor stock/price/lead time (Mouser, DigiKey; BYO API keys)",
+        description=(
+            "Look up manufacturer part numbers at authorised distributors via their "
+            "official APIs. Credentials come from the environment only: "
+            "MOUSER_API_KEY; DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET. Sources "
+            "without credentials are skipped. Several MPNs give a comparison sorted "
+            "by availability, then unit price."
+        ),
+    )
+    stock_parser.add_argument("mpns", nargs="+", help="Manufacturer part number(s)")
+    stock_parser.add_argument(
+        "-q", "--quantity", type=int, default=1, help="Quantity to price (default: 1)"
+    )
+    stock_parser.add_argument("--no-cache", action="store_true", help="Bypass the local cache")
+    stock_parser.add_argument(
+        "--cache-ttl-minutes",
+        type=float,
+        default=60.0,
+        help="Reuse cached offers younger than this (default: 60)",
+    )
+    add_format_flag(stock_parser, choices=("text", "table", "json"))
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parts command entry point."""
     parser = argparse.ArgumentParser(
@@ -174,7 +201,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Suggest Basic/Preferred JLCPCB alternatives for an LCSC part (offline)",
         description=(
             "Suggest in-stock substitutes from the offline jlcparts catalog "
-            "(same package and value). Candidates rank Basic, then Preferred, "
+            "(same manufacturer and MPN, or chip resistors/MLCCs with matching catalog "
+            "ratings and package). Candidates rank Basic, then Preferred, "
             "then Extended, then lowest unit price; only a strictly better "
             "library tier, or the same tier at a lower price, is shown. "
             "Requires 'kct parts sync-catalog'."
@@ -184,30 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     alt_parser.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
     add_format_flag(alt_parser)
 
-    # stock subcommand
-    stock_parser = subparsers.add_parser(
-        "stock",
-        help="Distributor stock/price/lead time (Mouser, DigiKey; BYO API keys)",
-        description=(
-            "Look up manufacturer part numbers at authorised distributors via their "
-            "official APIs. Credentials come from the environment only: "
-            "MOUSER_API_KEY; DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET. Sources "
-            "without credentials are skipped. Several MPNs give a comparison sorted "
-            "by availability, then unit price."
-        ),
-    )
-    stock_parser.add_argument("mpns", nargs="+", help="Manufacturer part number(s)")
-    stock_parser.add_argument(
-        "-q", "--quantity", type=int, default=1, help="Quantity to price (default: 1)"
-    )
-    stock_parser.add_argument("--no-cache", action="store_true", help="Bypass the local cache")
-    stock_parser.add_argument(
-        "--cache-ttl-minutes",
-        type=float,
-        default=60.0,
-        help="Reuse cached offers younger than this (default: 60)",
-    )
-    add_format_flag(stock_parser, choices=("text", "table", "json"))
+    add_stock_parser(subparsers)
 
     # cache subcommand
     cache_parser = subparsers.add_parser("cache", help="Cache management")
@@ -248,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.action == "suggest":
         return _suggest(args)
     elif args.action == "stock":
-        return _stock(args)
+        return run_stock(args)
     elif args.action == "alternatives":
         return _alternatives(args)
     elif args.action == "cache":
@@ -269,7 +274,7 @@ def _format_age(seconds: float | None) -> str:
     return f"{seconds / 3600:.1f}h ago"
 
 
-def _stock(args) -> int:
+def run_stock(args) -> int:
     """Handle the stock command (Mouser/DigiKey official APIs)."""
     from ..parts.distributors import query_stock
 
@@ -358,6 +363,7 @@ def _alternatives(args) -> int:
             "package": p.package,
             "library_type": library_tier_name(p),
             "stock": p.stock,
+            "inventory": p.inventory_provenance(),
             "unit_price": p.best_price,
         }
 
@@ -377,15 +383,19 @@ def _alternatives(args) -> int:
         f"({source.package}, {library_tier_name(source)})"
     )
     if not alts:
-        print("No better in-stock alternatives found.")
+        print("No better alternatives with matching catalog specifications and stock found.")
         return 0
-    print(f"{'LCSC':<10} {'MFR Part':<25} {'Package':<12} {'Type':<10} {'Stock':>8} {'Price':>9}")
-    print("-" * 78)
+    header = (
+        f"{'LCSC':<10} {'MFR Part':<25} {'Package':<12} {'Type':<10} "
+        f"{'Offline catalog stock':>21} {'Price':>9}"
+    )
+    print(header)
+    print("-" * len(header))
     for p in alts:
         price = f"${p.best_price:.4f}" if p.best_price is not None else "N/A"
         print(
             f"{p.lcsc_part:<10} {p.mfr_part[:25]:<25} {p.package:<12} "
-            f"{library_tier_name(p):<10} {p.stock:>8} {price:>9}"
+            f"{library_tier_name(p):<10} {p.stock:>21} {price:>9}"
         )
     return 0
 

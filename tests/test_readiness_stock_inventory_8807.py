@@ -21,7 +21,7 @@ from kicad_tools.export.preflight import (
     summarize_lookup_states,
 )
 from kicad_tools.parts.cache import PartsCache
-from kicad_tools.parts.jlcparts_catalog import JlcpartsCatalog, get_catalog_path
+from kicad_tools.parts.jlcparts_catalog import CATALOG_ENV_VAR, JlcpartsCatalog, get_catalog_path
 from kicad_tools.parts.models import Part
 from kicad_tools.schema.bom import BOM, BOMItem
 
@@ -104,6 +104,40 @@ def test_only_covered_part_does_not_hide_other_shortfall(tmp_path):
     )
     assert r.status == "FAIL"
     assert "C2" in r.details
+
+
+def test_mixed_resolved_and_unresolved_stock(tmp_path):
+    refs = [("J12", "C1"), ("R1", "C999")]
+    covered = frozenset({"C999"})
+    for strict, expected in [(False, "WARN"), (True, "FAIL")]:
+        result = _run(tmp_path, [_part("C1", 100)], refs, strict_report_source=strict)
+        assert result.status == expected and "C999" in result.details
+        held = evaluate_lcsc_stock(result.data, 5, covered, strict)
+        assert held.status == "OK" and "held in operator inventory" in held.details
+
+
+@pytest.mark.parametrize(
+    ("source", "strict", "expected"),
+    [
+        ("live", False, "FAIL"),
+        ("live", True, "FAIL"),
+        ("cache", False, "WARN"),
+        ("cache", True, "FAIL"),
+    ],
+)
+def test_mixed_stock_shortfall_reports_unresolved_code(tmp_path, source, strict, expected):
+    result = _run(
+        tmp_path,
+        [_part("C1", 2, source=source)],
+        [("J12", "C1"), ("R1", "C999")],
+        order_boards=5,
+        strict_report_source=strict,
+    )
+    assert result.status == expected
+    assert "J12 -> C1: needs 5, stock 2" in result.details
+    assert "stock also unresolved: C999" in result.details
+    if source == "cache":
+        assert "unverified cache" in result.details
 
 
 def test_evaluator_parity_from_recorded_data(tmp_path):
@@ -254,14 +288,14 @@ def test_partial_coverage_keeps_observations_and_unresolved_ids(tmp_path):
     refs = [("Y2", "C1"), ("R1", "C2"), ("R2", "C3")]
     r = _run(tmp_path, [_part("C1", 500)], refs)
 
-    assert r.status == "OK"  # an unresolvable id beside a checked part (issue #8121)
+    assert r.status == "WARN" and "C3" in r.details
     assert [(p["lcsc"], p["source"]) for p in r.data["parts"]] == [
         ("C1", "live"),
         ("C2", "offline_catalog"),
     ]
     assert r.data["unresolved"] == ["C3"]
     assert r.data["sources"] == {"parts_cache": "hit", "offline_catalog": "hit"}
-    assert r.message == "2 LCSC part(s) have recorded stock for 5 board(s)"
+    assert "2 other part(s) have recorded stock" in r.message
 
 
 def test_verdict_carries_where_each_lookup_reached(tmp_path):
@@ -308,6 +342,82 @@ def test_unreadable_parts_cache_is_not_recorded_as_searched(tmp_path):
     assert r.status == "WARN"
     assert r.data["sources"] == {"parts_cache": "unreadable", "offline_catalog": "missing"}
     assert "parts cache could not be read on the generating host" in r.message
+
+
+def _checker_on_default_cache(tmp_path, refs) -> PreflightChecker:
+    """A checker that injects nothing, as ``kct export`` builds it: the default cache path."""
+    checker = PreflightChecker(
+        pcb_path=tmp_path / "board.kicad_pcb",
+        config=PreflightConfig(skip_drc=True, skip_erc=True),
+    )
+    checker._bom = BOM(
+        items=[
+            BOMItem(reference=r, value="137k", footprint=FP, lib_id="Device:R", lcsc=lc)
+            for r, lc in refs
+        ]
+    )
+    return checker
+
+
+def test_default_cache_path_is_pinned_by_env_under_redirected_xdg(tmp_path, monkeypatch):
+    """A runtime's redirected ``XDG_CACHE_HOME`` hides the host catalog (#10655).
+
+    ``KCT_JLCPARTS_CATALOG`` is how a dispatched session points the default
+    path back at it, for both checks that consult the catalog.
+    """
+    monkeypatch.delenv(CATALOG_ENV_VAR, raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "redirected"))
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    _give_host_catalog(shared, "hit", [_row("C999")])
+
+    unpinned = _checker_on_default_cache(tmp_path, [("R1", "C999")])
+    assert unpinned.check_bom_lcsc_stock().data["sources"]["offline_catalog"] == "missing"
+    values = unpinned._check_bom_lcsc_values()
+    assert values.status == "WARN"
+    assert "1 unverifiable (not in parts cache or offline catalog)" in values.message
+
+    monkeypatch.setenv(CATALOG_ENV_VAR, str(shared / "jlcparts.sqlite3"))
+    pinned = _checker_on_default_cache(tmp_path, [("R1", "C999")])
+    stock = pinned.check_bom_lcsc_stock()
+    assert stock.data["sources"] == {"parts_cache": "miss", "offline_catalog": "hit"}
+    assert stock.data["parts"][0]["source"] == "offline_catalog"
+    values = pinned._check_bom_lcsc_values()
+    assert values.status == "OK"
+    assert "1 of 1 assigned item(s) verified against offline catalog" in values.message
+
+
+def test_injected_cache_keeps_its_own_catalog_whatever_the_pin(tmp_path, monkeypatch):
+    """The pin is for the default path: an injected ``parts_cache`` stays hermetic."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    _give_host_catalog(shared, "hit", [_row("C999")])
+    monkeypatch.setenv(CATALOG_ENV_VAR, str(shared / "jlcparts.sqlite3"))
+
+    injected = tmp_path / "injected"
+    injected.mkdir()
+    assert _run(injected, [], [("R1", "C999")]).data["sources"] == {
+        "parts_cache": "miss",
+        "offline_catalog": "missing",
+    }
+    values = _checker(injected, [], [("R1", "C999")])._check_bom_lcsc_values()
+    assert values.status == "WARN"
+    assert "1 unverifiable (not in parts cache or offline catalog)" in values.message
+
+
+def test_no_parts_cache_object_leaves_the_pinned_catalog_unread(tmp_path, monkeypatch):
+    """With no parts cache to sit beside, no catalog is read, pin or not."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    _give_host_catalog(shared, "hit", [_row("C999")])
+    monkeypatch.setenv(CATALOG_ENV_VAR, str(shared / "jlcparts.sqlite3"))
+    monkeypatch.setattr("kicad_tools.parts.cache.PartsCache", lambda: None)
+
+    r = _checker_on_default_cache(tmp_path, [("R1", "C999")]).check_bom_lcsc_stock()
+    assert r.data["sources"] == {
+        "parts_cache": "not_consulted",
+        "offline_catalog": "not_consulted",
+    }
 
 
 @pytest.mark.parametrize(
@@ -512,21 +622,26 @@ def _host_with_catalog(lookup_dir: Path, monkeypatch, lcsc: str = "C999") -> Non
     producer's -- is checked rather than assumed.
     """
     _give_host_catalog(lookup_dir, "hit", [_row(lcsc)])
+    monkeypatch.delenv(CATALOG_ENV_VAR, raising=False)
     local = lambda: lookup_dir / "parts.db"  # noqa: E731
     monkeypatch.setattr("kicad_tools.parts.cache.get_default_cache_path", local)
     monkeypatch.setattr("kicad_tools.parts.jlcparts_catalog.get_default_cache_path", local)
     assert JlcpartsCatalog(get_catalog_path()).lookup(lcsc) is not None
 
 
-@pytest.mark.parametrize("condition", CATALOG_CONDITIONS)
+@pytest.mark.parametrize("condition", ["miss"])
 def test_bundle_names_the_catalog_condition(tmp_path, condition):
-    # Same assignment, empty cache: only the host's catalog differs.
+    # A catalog that was searched and does not list the part is an honest
+    # result about the part, so it still publishes and explains itself.  A
+    # catalog the lookups never reached (``missing`` / ``unreadable``) says
+    # something about the host instead, and is refused: issue #10646, covered
+    # by ``test_readiness_catalog_precondition_10646.py``.
     entry = _produced_entry(tmp_path / "producer", [], [("R1", "C999")], condition)
     assert entry["status"] == "WARN"
 
     board = make_board(tmp_path)
     code, report = _gate(board, entry)
-    assert code == 0  # the WARN never blocked; it now explains itself too
+    assert code == 0
     metric = report["metrics"]["lcsc_stock_order"]
     assert metric["sources"] == {"parts_cache": "miss", "offline_catalog": condition}
     assert metric["message"] == entry["message"]
@@ -541,13 +656,13 @@ def test_bundle_names_the_catalog_condition(tmp_path, condition):
 
 
 def test_verify_keeps_the_producers_provenance_whatever_this_host_has(tmp_path, monkeypatch):
-    # Produced on a worker with no offline catalog, the situation in #10386.
-    entry = _produced_entry(tmp_path / "producer", [], [("R1", "C999")])
+    # Produced on a worker whose catalog does not list the part.
+    entry = _produced_entry(tmp_path / "producer", [], [("R1", "C999")], "miss")
     board = make_board(tmp_path)
     code, report = _gate(board, entry)
     assert code == 0
     metric = report["metrics"]["lcsc_stock_order"]
-    assert metric["sources"] == {"parts_cache": "miss", "offline_catalog": "missing"}
+    assert metric["sources"] == {"parts_cache": "miss", "offline_catalog": "miss"}
 
     # This host's catalog lists the part: had verification looked, it would
     # have found it.  The record stays the producer's.
@@ -557,18 +672,19 @@ def test_verify_keeps_the_producers_provenance_whatever_this_host_has(tmp_path, 
 
 def test_bundle_keeps_partial_coverage_with_its_provenance(tmp_path):
     refs = [("Y2", "C1"), ("R1", "C999")]
-    entry = _produced_entry(tmp_path / "producer", [_part("C1", 500)], refs)
+    entry = _produced_entry(tmp_path / "producer", [_part("C1", 500)], refs, "miss")
+    assert entry["status"] == "WARN" and "C999" in entry["details"]
 
     board = make_board(tmp_path)
     code, report = _gate(board, entry)
     assert code == 0
     metric = report["metrics"]["lcsc_stock_order"]
     assert (metric["status"], metric["message"]) == (entry["status"], entry["message"])
-    assert metric["sources"] == {"parts_cache": "hit", "offline_catalog": "missing"}
+    assert metric["sources"] == {"parts_cache": "hit", "offline_catalog": "miss"}
     recorded, readme = _bundle_record(board)
     assert [p["lcsc"] for p in recorded["data"]["parts"]] == ["C1"]
     assert recorded["data"]["unresolved"] == ["C999"]
-    assert CATALOG_CONDITION_TEXT["missing"] in readme
+    assert CATALOG_CONDITION_TEXT["miss"] in readme
     assert _verify(board)["metrics"]["lcsc_stock_order"] == metric
 
 

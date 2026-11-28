@@ -395,7 +395,7 @@ def test_finished_board_that_regresses_after_refill_reverts_to_input(
     original = pcb.read_bytes().replace(b"\n", b"\r\n")
     pcb.write_bytes(original)
 
-    def fake_refill(path):
+    def fake_refill(path, rules_from=None):
         text = Path(path).read_text()
         # An LV stub 0.5 mm from the HV stub: a new failing pair at 1.6 mm.
         Path(path).write_text(text[: text.rindex(")")] + _seg(110.5, 98, 110.5, 108, 2) + ")\n")
@@ -492,7 +492,7 @@ def test_final_census_failure_preserves_boards(
     finished = False
     real_census = CreepageAudit.census
 
-    def finish(path):
+    def finish(path, rules_from=None):
         nonlocal finished
         assert Path(path).read_text() != baseline
         finished = True

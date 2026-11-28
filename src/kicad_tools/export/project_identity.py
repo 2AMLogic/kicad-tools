@@ -77,6 +77,14 @@ class ArchiveLayout:
     record: bytes | None
     record_name: str
 
+    @property
+    def net_class_map_member(self) -> str:
+        """The preferred map name beside the delivered (possibly renamed) board."""
+        from kicad_tools.sidecars import net_class_map_sidecar_names
+
+        pcb = PurePosixPath(self.names[self.identity.pcb])
+        return str(pcb.with_name(net_class_map_sidecar_names(pcb.stem)[0]))
+
     def checked(self, source: Path) -> str:
         """The member name *source* has when it is archived under its own name."""
         return str(PurePosixPath(self.directories[source]) / source.name)
@@ -232,8 +240,13 @@ def archive_layout(
     identity: ProjectIdentity,
     sources: Iterable[Path],
     directory_of: Callable[[Path], str],
+    aliases: Iterable[Path] = (),
 ) -> ArchiveLayout:
     """Map every checked source to its archive member name.
+
+    *aliases* are in-project symlinked library members.  They are keyed by
+    their own (unresolved) path, so each keeps the library-relative name it was
+    discovered under instead of collapsing onto its target.
 
     *directory_of* gives the archive directory a source is delivered in, as a
     POSIX path. The ``VERSION.md`` record lands beside the delivered project
@@ -258,6 +271,17 @@ def archive_layout(
             )
         directories[real] = directory
         names[real] = member
+    for alias in sorted({Path(a) for a in aliases}):
+        directory = directory_of(alias)
+        member = str(PurePosixPath(directory) / alias.name)
+        previous = holders.setdefault(member, alias)
+        if previous != alias:
+            raise ProjectIdentityError(
+                f"kicad_project.zip cannot hold {previous.name} and {alias.name}: "
+                f"both would be archived as {member}"
+            )
+        directories[alias] = directory
+        names[alias] = member
     return ArchiveLayout(
         identity,
         directories,

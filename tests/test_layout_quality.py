@@ -1283,14 +1283,27 @@ def test_count_corners_serpentine_4000_under_budget():
     # Issue #9658: the all-pairs junction search cost ~3 s (and ~x4 per
     # doubling) at n=4000 same-net/same-layer segments; the bucketed
     # candidate search must stay well under a second.
+    #
+    # Issue #10587: a single wall-clock sample flaked (1.754 s) on a contended
+    # xdist runner. Gate on the best of several runs instead: a contention
+    # spike inflates one sample, but a real regression (the all-pairs search,
+    # ~3 s) makes *every* sample exceed the budget, so the min still fails it.
     import time
 
     from kicad_tools.analysis.layout_quality import _count_corners
 
+    budget_s = 1.0
+    repeats = 3
     pcb = _load_pcb(_serpentine_pcb_text(4000))
     assert len(pcb.segments) == 4000
-    t0 = time.perf_counter()
-    totals, per_net = _count_corners(pcb)
-    elapsed = time.perf_counter() - t0
-    assert totals["right_angle"] == 3999  # every serpentine vertex is a 90 deg bend
-    assert elapsed < 1.0, f"_count_corners took {elapsed:.3f}s at n=4000"
+    samples: list[float] = []
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        totals, per_net = _count_corners(pcb)
+        samples.append(time.perf_counter() - t0)
+        assert totals["right_angle"] == 3999  # every serpentine vertex is a 90 deg bend
+    best = min(samples)
+    assert best < budget_s, (
+        f"_count_corners best of {repeats} took {best:.3f}s at n=4000 "
+        f"(budget {budget_s:.1f}s; samples: {', '.join(f'{s:.3f}s' for s in samples)})"
+    )

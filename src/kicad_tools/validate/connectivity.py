@@ -1750,7 +1750,7 @@ class ConnectivityValidator:
         return False
 
     # Erosion (mm) for pad shapes the shared outline primitive does not model
-    # exactly (trapezoid, chamfered roundrect, custom), and for the eroded via
+    # exactly (trapezoid, custom), and for the eroded via
     # disk legacy net-status still uses.  Exact outlines are never eroded
     # (Issue #6453); see :data:`kicad_tools.geometry.copper.PAD_FALLBACK_ERODE`.
     POUR_PAD_ERODE: float = PAD_FALLBACK_ERODE

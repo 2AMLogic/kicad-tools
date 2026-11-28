@@ -48,7 +48,7 @@ def test_manufacturer_check_and_meta_gates_pass():
     assert accepted == []
     assert found == []
     assert check["summary"]["warnings"] == 0
-    for gate in ("drc", "erc", "lvs"):
+    for gate in ("drc", "erc", "lvs", "manifest"):
         assert check["meta_checks"][gate]["status"] == "PASSED", gate
 
 

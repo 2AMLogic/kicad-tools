@@ -1,7 +1,7 @@
 """Shared utility helpers for report generation.
 
-Provides schematic file discovery logic used by both the data collector
-and the report CLI command.
+Provides schematic file discovery and board revision resolution used by
+the data collector, the report CLI command, and manufacturing export.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import logging
 import re
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -187,3 +188,38 @@ def walk_schematic_hierarchy(
         for name in re.findall(r'\(file\s+"([^"\n]+\.kicad_sch)"\)', text):
             pending.append((sheet.parent / name).resolve())
     return SchematicHierarchy(sorted(found), outside, missing)
+
+
+def resolve_report_revision(
+    pcb_path: Path | str | None,
+    explicit_revision: Any = None,
+    default: str = "1",
+) -> str:
+    """Resolve the printable design revision for a report header.
+
+    Precedence:
+
+    1. Non-empty *explicit_revision* (for example from ``--data-dir``
+       ``metadata.json``).
+    2. Authored ``(title_block (rev ...))`` on *pcb_path* when it is an
+       existing ``.kicad_pcb`` file with a non-empty revision.
+    3. *default* (``"1"``).
+    """
+    if explicit_revision is not None:
+        override = str(explicit_revision).strip()
+        if override:
+            return override
+
+    if pcb_path is not None:
+        path = Path(pcb_path)
+        if path.suffix == ".kicad_pcb" and path.is_file():
+            try:
+                from kicad_tools.schema.pcb import PCB
+
+                authored = PCB.load(path).revision.strip()
+                if authored:
+                    return authored
+            except Exception:
+                logger.debug("Could not read PCB revision from %s", path, exc_info=True)
+
+    return default

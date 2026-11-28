@@ -2,9 +2,9 @@
 
 JLCDFM flags acute trace corners ("acid traps") that ``kct check`` never
 reported: the only detector was the ``explain``-mode
-:class:`~kicad_tools.explain.checks.acid_trap.AcidTrapCheck`.  This rule runs
-that same junction/angle logic (no second copy) and reports each finding as a
-``sharp_trace_corner`` warning.
+:class:`~kicad_tools.explain.checks.acid_trap.AcidTrapCheck`. This rule uses
+its angle calculation at shared endpoints and at branch endpoints along
+continuous tracks (issue #10675).
 
 Threshold: :data:`~kicad_tools.explain.checks.acid_trap.MIN_TRACE_ANGLE_DEG`
 (90 deg, less ``ANGLE_TOLERANCE_DEG``).  **Unverified** -- this value was not
@@ -25,13 +25,20 @@ that board look like the flagged three; they are unknown, not negatives, so
 they were not used to narrow the rule.  The angle threshold was not changed.
 
 Sub-types (issue #9037): every finding carries ``corner_class`` --
-``"bend"`` when exactly two segments meet at the vertex (the population
-JLCDFM was observed to flag) or ``"junction"`` when three or more do.
-Reporting is unchanged -- the tag only makes the populations separable, so
-a consumer can gate on the fab-equivalent two-segment subset.  Stacked
-duplicate segments count once, so a duplicated bend is not misclassified
-as a junction.  The fab-DFM parity table attributes only the bend
-population to JLCDFM's category (``sharp_trace_corner#bend``).
+``"bend"`` when exactly two track directions meet at the vertex (the
+population JLCDFM was observed to flag) or ``"junction"`` when three or
+more do.  A direction is a distinct bearing leaving the vertex
+(``_TraceJunction.leg_count``), not a ``(segment ...)`` element: a
+continuous track contributes a direction on each side of a tap, and
+overlapping same-bearing tracks -- a stacked duplicate, or a shorter track
+lying on a longer one -- count as one direction (issue #10675).  Reporting
+is unchanged -- the tag only makes the populations separable, so a consumer
+can gate on the fab-equivalent two-direction subset.  Because duplicates
+count once, a duplicated bend is not misclassified as a junction.  The
+``junction`` message names that count as ``"N-way junction"``
+(issue #10704), so ``N`` can exceed the number of segments ending at the
+vertex.  The fab-DFM parity table attributes only the bend population to
+JLCDFM's category (``sharp_trace_corner#bend``).
 
 Inner layers (issue #9037 decision): in scope.  The fab's three flagged
 vertices on the consumer board were all on outer layers (F.Cu/B.Cu), so
@@ -49,14 +56,20 @@ Rule ID generated:
 from __future__ import annotations
 
 import math
+from collections import defaultdict
+from collections.abc import Iterator
+from dataclasses import dataclass, field, replace
+from itertools import combinations
+from operator import itemgetter
 from typing import TYPE_CHECKING, Any
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
 
 if TYPE_CHECKING:
+    from kicad_tools.explain.checks.acid_trap import AcidTrapCheck
     from kicad_tools.manufacturers import DesignRules
-    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.schema.pcb import PCB, Segment
 
 SHARP_TRACE_CORNER_RULE_ID = "sharp_trace_corner"
 
@@ -184,6 +197,127 @@ def _wedge_is_open(seg1, seg2, junction: tuple[float, float], angle_deg: float) 
     return True
 
 
+def _nearby_pairs(segments: list[Segment]) -> Iterator[tuple[int, int]]:
+    from ..spatial import candidate_pairs
+
+    bounds = []
+    for seg in segments:
+        ax, ay = seg.start
+        bx, by = seg.end
+        bounds.append((min(ax, bx), min(ay, by), max(ax, bx), max(ay, by)))
+    return candidate_pairs(bounds, _JUNCTION_TOL)
+
+
+@dataclass
+class _TraceJunction:
+    """Incident copper at one vertex, grouped by direction and width."""
+
+    location: tuple[float, float]
+    legs: dict[tuple[float, float], Segment] = field(default_factory=dict)
+
+    def add_leg(self, seg: Segment, end: tuple[float, float]) -> None:
+        dx, dy = end[0] - self.location[0], end[1] - self.location[1]
+        length = math.hypot(dx, dy)
+        if max(abs(dx), abs(dy)) < _JUNCTION_TOL:
+            return
+        # Overlapping tracks of the same width on one ray contribute their
+        # full extent. A shorter duplicate must not hide an open wedge.
+        bearing = round(math.degrees(math.atan2(dy, dx)), 6) % 360
+        key = (bearing, seg.width)
+        current = self.legs.get(key)
+        if current is None or length > math.dist(self.location, current.end):
+            self.legs[key] = replace(seg, start=self.location, end=end)
+
+    @property
+    def leg_count(self) -> int:
+        return len({bearing for bearing, _width in self.legs})
+
+    def open_angles(self, check: AcidTrapCheck) -> Iterator[float]:
+        from kicad_tools.explain.checks.acid_trap import is_acute_corner_angle
+
+        for first, second in combinations(self.legs.values(), 2):
+            angle = check._calculate_angle(first, second, self.location)
+            if (
+                angle is not None
+                and is_acute_corner_angle(angle)
+                and _wedge_is_open(first, second, self.location, angle)
+            ):
+                yield angle
+
+
+def _junctions(pcb: PCB, check: AcidTrapCheck) -> Iterator[tuple[str, str, _TraceJunction]]:
+    """Find same-net, same-layer contacts, including taps on continuous tracks."""
+    groups: dict[tuple[int, str, str], list[Segment]] = defaultdict(list)
+    for seg in pcb.segments:
+        net = pcb.get_net(seg.net_number)
+        name = seg.net_name or (net.name if net else f"Net {seg.net_number}")
+        groups[(seg.net_number, name, seg.layer)].append(seg)
+    for (_, name, layer), segments in groups.items():
+        for junction in _group_junctions(segments, check):
+            yield name, layer, junction
+
+
+def _group_junctions(segments: list[Segment], check: AcidTrapCheck) -> Iterator[_TraceJunction]:
+    from ...geometry.copper import collinear_overlap_length
+    from ...router.connectivity import _UnionFind
+
+    vertices: dict[tuple[float, float], tuple[tuple[float, float], set[int]]] = {}
+    runs = _UnionFind()
+    for i, j in _nearby_pairs(segments):
+        first, second = segments[i], segments[j]
+        if (
+            first.width == second.width
+            and collinear_overlap_length(first.start, first.end, second.start, second.end)
+            is not None
+        ):
+            runs.union(i, j)
+        for point in _contacts(first, second, check):
+            # Same location precision as the sharp-corner finding identity.
+            key = (round(point[0], 2), round(point[1], 2))
+            _, incident = vertices.setdefault(key, (point, set()))
+            incident.update((i, j))
+
+    # A split close to a branch does not shorten its physical wedge. Use
+    # the extent of each continuous, same-width run, but retain its actual
+    # contact sites (including crossings with explicit vertices).
+    ends: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    for i, seg in enumerate(segments):
+        ends[runs.find(i)].extend((seg.start, seg.end))
+    spans = {}
+    for root, points in ends.items():
+        a, b = segments[root].start, segments[root].end
+        axis = 0 if abs(b[0] - a[0]) >= abs(b[1] - a[1]) else 1
+        spans[root] = min(points, key=itemgetter(axis)), max(points, key=itemgetter(axis))
+    for point, incident in vertices.values():
+        joint = _TraceJunction(point)
+        for i in sorted(incident):
+            for end in spans[runs.find(i)]:
+                joint.add_leg(segments[i], end)
+        yield joint
+
+
+def _contacts(
+    first: Segment, second: Segment, check: AcidTrapCheck
+) -> Iterator[tuple[float, float]]:
+    shared = check._find_junction(first, second)
+    if shared is not None:
+        yield shared
+    for carrier, branch in ((first, second), (second, first)):
+        ax, ay = carrier.start
+        dx, dy = carrier.end[0] - ax, carrier.end[1] - ay
+        length_sq = dx * dx + dy * dy
+        tolerance = _JUNCTION_TOL * math.sqrt(length_sq)
+        for px, py in (branch.start, branch.end):
+            x, y = px - ax, py - ay
+            along, across = x * dx + y * dy, x * dy - y * dx
+            # Dot and cross products divided by length give the distances
+            # along and across the carrier. Strict interior excludes its
+            # endpoints and zero-length tracks.
+            if tolerance < along < length_sq - tolerance and abs(across) < tolerance:
+                t = along / length_sq
+                yield ax + t * dx, ay + t * dy
+
+
 class SharpTraceCornerRule(DRCRule):
     """Warn on acute angles where two traces of one net meet."""
 
@@ -194,73 +328,20 @@ class SharpTraceCornerRule(DRCRule):
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
         """Return one ``sharp_trace_corner`` warning per acute junction."""
         del design_rules
-        from kicad_tools.explain.checks.acid_trap import (
-            ANGLE_TOLERANCE_DEG,
-            MIN_CORNER_ANGLE_DEG,
-            MIN_TRACE_ANGLE_DEG,
-            AcidTrapCheck,
-        )
+        from kicad_tools.explain.checks.acid_trap import AcidTrapCheck
 
         results = DRCResults()
         results.rules_checked = 1
         discs = _copper_discs(pcb)
         check = AcidTrapCheck()
-        segs: dict[tuple[int, str], list] = {}
-        for seg in pcb.segments:
-            segs.setdefault((seg.net_number, seg.layer), []).append(seg)
-        net_numbers = {}
-        for num, _layer in segs:
-            net = pcb.get_net(num)
-            net_numbers[net.name if net else f"Net {num}"] = num
-
-        # One report per (net, layer, location): stacked duplicate segments
-        # would otherwise report the same vertex once per pair.
-        found: dict[tuple, tuple[float, str, str, tuple[float, float], str, int]] = {}
-        for mistake in check.check(pcb):
-            net_name, layer = mistake.components[0], mistake.components[1]
-            loc = mistake.location
-            if not loc or net_name not in net_numbers:
+        for net_name, layer, junction in _junctions(pcb, check):
+            loc = junction.location
+            angle = min(junction.open_angles(check), default=None)
+            if angle is None or _is_buried(discs, net_name, layer, loc):
                 continue
-            # A vertex under same-net pad/via copper has no etchant-trapping
-            # wedge (pad-centre fan-in): not a fab defect.
-            if _is_buried(discs, net_name, layer, loc):
-                continue
-            key = (net_name, layer, round(loc[0], 2), round(loc[1], 2))
-            if key in found:
-                continue
-            touching = [
-                s
-                for s in segs.get((net_numbers[net_name], layer), [])
-                if min(math.dist(loc, s.start), math.dist(loc, s.end)) < _JUNCTION_TOL * 1.5
-            ]
-            # Count distinct legs: stacked duplicate segments (issue #8840's
-            # art artifact) share one (start, end) pair and must not turn a
-            # two-segment bend into a "junction" (issue #9037).
-            distinct: list = []
-            seen_edges: set[tuple[tuple[float, float], tuple[float, float]]] = set()
-            for s in touching:
-                p_a = (round(s.start[0], 2), round(s.start[1], 2))
-                p_b = (round(s.end[0], 2), round(s.end[1], 2))
-                edge = (p_a, p_b) if p_a <= p_b else (p_b, p_a)
-                if edge not in seen_edges:
-                    seen_edges.add(edge)
-                    distinct.append(s)
-            corner_class = "junction" if len(distinct) >= 3 else "bend"
-            worst = None
-            for i, s1 in enumerate(touching):
-                for s2 in touching[i + 1 :]:
-                    angle = check._calculate_angle(s1, s2, loc)
-                    if angle is None or not (
-                        MIN_CORNER_ANGLE_DEG <= angle < MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG
-                    ):
-                        continue
-                    if _wedge_is_open(s1, s2, loc, angle) and (worst is None or angle < worst):
-                        worst = angle
-            if worst is not None:
-                found[key] = (worst, net_name, layer, loc, corner_class, len(distinct))
-
-        for angle, net_name, layer, loc, corner_class, n_legs in found.values():
-            kind = f"; {n_legs}-segment junction" if corner_class == "junction" else ""
+            n_legs = junction.leg_count
+            corner_class = "junction" if n_legs >= 3 else "bend"
+            kind = f"; {n_legs}-way junction" if corner_class == "junction" else ""
             results.add(
                 DRCViolation(
                     rule_id=SHARP_TRACE_CORNER_RULE_ID,

@@ -23,6 +23,7 @@ from contextlib import contextmanager, nullcontext
 from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +46,7 @@ from .preflight import (
     PreflightResult,
     report_source_mismatch,
 )
+from .reviewed_copper import ReviewedCopperExport
 from .rotation_overrides import placement_preview_instructions
 
 if TYPE_CHECKING:
@@ -67,6 +69,13 @@ class ManufacturingConfig(AssemblyConfig):
     ``via_land_overlap`` opts the export into the ``via_land_overlap`` preflight
     measurement of the shipped archive (``kct export --via-land-overlap``, Issue
     #10357); it is off by default.
+
+    ``verify_reviewed_copper`` opts the export into publishing only when every
+    copper layer of the staged Gerber archive equals a native plot of the saved
+    board (``kct export --verify-reviewed-copper``, Issue #10492); it is off by
+    default. An export of that kind prepares rules, refill and silk on a
+    private working copy, so the checked-out board and its siblings are never
+    written, and it needs ``include_gerbers`` and ``emit_drc_constraints``.
     """
 
     # Report settings
@@ -142,6 +151,17 @@ class ManufacturingConfig(AssemblyConfig):
 
     via_land_overlap: bool = False
 
+    # When True (``kct export --verify-reviewed-copper``, Issue #10492), the
+    # package is published only when the copper of the staged Gerber archive
+    # equals a native plot of the saved board on every layer, taken before any
+    # rule was written or any zone refilled.  Rules, refill and the silk pass
+    # then run on a private working copy: the checked-out board, project and
+    # rule files keep their bytes whether the export publishes or withholds.
+    verify_reviewed_copper: bool = False
+
+    # Readiness can supply its explicitly selected map.
+    net_class_map_path: Path | None = None
+
 
 @dataclass
 class ManufacturingResult:
@@ -186,12 +206,6 @@ class ManufacturingResult:
     # compared against.  Read-only: broken links are surfaced as warnings,
     # never repaired here.
     instance_links: dict | None = None
-    # Issue #10468: externally produced simulation evidence for the declared
-    # cases (``SimulationEvidence.to_dict()``), or ``None`` when the board
-    # declares none.  Reported independently of native DRC.
-    simulation: dict | None = None
-    simulation_paths: list[Path] = field(default_factory=list)
-    simulation_evidence: Any | None = field(default=None, repr=False)
     # Issue #10422: nominal reinforcement-clearance measurements of the
     # shipped Gerber archive (``to_dict()`` of
     # :class:`~kicad_tools.export.reinforcement_clearance.ReinforcementClearanceReport`),
@@ -204,6 +218,17 @@ class ManufacturingResult:
     purchasing_path: Path | None = None
     # Descriptions of the purchasing rows whose part is not selected yet.
     purchasing_pending: list[str] = field(default_factory=list)
+    # Issue #10492: the reviewed-copper comparison of a ``verify_reviewed_copper``
+    # export (:func:`kicad_tools.export.reviewed_copper.reviewed_copper_record`),
+    # or ``None`` for any other export.  Bound into ``manifest.json`` when the
+    # package is published; on a refusal the diagnostic report is written from it.
+    reviewed_copper: dict | None = None
+    # Issue #10468: externally produced simulation evidence for the declared
+    # cases (``SimulationEvidence.to_dict()``), or ``None`` when the board
+    # declares none.  Reported independently of native DRC.
+    simulation: dict | None = None
+    simulation_paths: list[Path] = field(default_factory=list)
+    simulation_evidence: Any | None = field(default=None, repr=False)
 
     @property
     def success(self) -> bool:
@@ -718,6 +743,11 @@ def _project_symbol_files(project_dir: Path) -> list[Path]:
     return files
 
 
+def is_project_library_directory(name: str) -> bool:
+    """Recognize project-local KiCad footprint, symbol and 3D library directories."""
+    return name in {"footprints", "symbols"} or name.endswith((".pretty", ".3dshapes"))
+
+
 def project_library_members(directory: Path, boundary: Path) -> list[Path]:
     """Files under a library directory that stay inside *boundary* (#8763).
 
@@ -750,7 +780,7 @@ def project_library_members(directory: Path, boundary: Path) -> list[Path]:
 def _project_footprint_files(project_dir: Path) -> list[Path]:
     """Project-local footprint library inventory (#8727).
 
-    ``fp-lib-table``, ``*.pretty`` / ``footprints`` / ``symbols`` directories and
+    ``fp-lib-table``, local footprint, symbol and 3D library directories, and
     the in-project ``${KIPRJMOD}`` (or relative) libraries the table references.
     This mirrors the footprint half of ``kct readiness``'s dependency inventory
     so ``kct export`` writes every file readiness requires of
@@ -764,9 +794,7 @@ def _project_footprint_files(project_dir: Path) -> list[Path]:
     if table.is_file():
         files.add(table)
     for directory in project_dir.iterdir():
-        if directory.is_dir() and (
-            directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
-        ):
+        if directory.is_dir() and is_project_library_directory(directory.name):
             files.update(project_library_members(directory, root))
     if table.is_file():
         for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text(errors="replace")):
@@ -793,6 +821,7 @@ def _create_project_zip(
     schematic_path: Path | None = None,
     *,
     project_root: Path | None = None,
+    net_class_map: bytes | None = None,
 ) -> Path:
     """Create a ZIP containing the KiCad project files.
 
@@ -892,8 +921,11 @@ def _create_project_zip(
     if not project_files:
         raise FileNotFoundError(f"No KiCad project files found in {project_dir}")
 
-    project_files.extend(_project_symbol_files(project_dir))
-    project_files.extend(_project_footprint_files(project_dir))
+    library_files = [*_project_symbol_files(project_dir), *_project_footprint_files(project_dir)]
+    # In-project symlinked library members keep the library path they were found
+    # under; the archive layout is keyed by real path for everything else.
+    aliases = sorted({f for f in library_files if f != f.resolve()})
+    project_files.extend(f for f in library_files if f not in aliases)
     project_files = sorted(set(project_files))
 
     project_file = pcb_path.with_suffix(".kicad_pro")
@@ -909,7 +941,10 @@ def _create_project_zip(
         else boundary
     )
     layout = archive_layout(
-        identity, project_files, lambda source: source.parent.relative_to(archive_base).as_posix()
+        identity,
+        project_files,
+        lambda source: source.parent.relative_to(archive_base).as_posix(),
+        aliases,
     )
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for source in project_files:
@@ -919,10 +954,14 @@ def _create_project_zip(
                 zf.writestr(member, layout.member_bytes(real, real.read_bytes()))
             else:
                 zf.write(source, member)
+        for alias in aliases:
+            zf.write(alias, layout.names[alias])
+        if net_class_map is not None:
+            zf.writestr(layout.net_class_map_member, net_class_map)
         if layout.record is not None:
             zf.writestr(layout.record_name, layout.record)
 
-    logger.info(f"Created project ZIP: {zip_path} ({len(project_files)} files)")
+    logger.info(f"Created project ZIP: {zip_path} ({len(project_files) + len(aliases)} files)")
     return zip_path
 
 
@@ -982,12 +1021,41 @@ def _build_manifest(
     if result.ordered_copper is not None:
         manifest["ordered_copper"] = result.ordered_copper
 
+    # Issue #10492: name the exact board whose saved copper was verified, and
+    # the reference plot each copper layer was compared with.
+    if result.reviewed_copper is not None:
+        manifest["reviewed_copper"] = result.reviewed_copper
+
     # Issue #10468: simulation verdicts live in their own field, never inside
     # ``preflight``; the evidence files are hashed in ``files`` above.
     if result.simulation is not None:
         manifest["simulation"] = result.simulation
 
     return manifest
+
+
+def _frozen_terminals(entry: PurchasingEntry) -> list[dict[str, Any]]:
+    """Freeze a row's terminal map as the handoff reads it back (Issue #10514).
+
+    Each entry keeps the external terminal the project declared and either the
+    landing it was checked against or its disposition as unused. The submission
+    handoff rebuilds the map from these exact keys (``submission_plan``'s
+    ``_purchasing_terminals``); the two change together.
+    """
+    assignments: list[dict[str, Any]] = []
+    for assignment in entry.terminals or ():
+        if assignment.unused:
+            assignments.append({"terminal": assignment.terminal, "unused": True})
+        else:
+            assignments.append(
+                {
+                    "terminal": assignment.terminal,
+                    "ref": assignment.ref,
+                    "pad": assignment.pad,
+                    "net": assignment.net,
+                }
+            )
+    return assignments
 
 
 def _purchasing_document(entries: list[PurchasingEntry]) -> dict[str, Any]:
@@ -1012,6 +1080,8 @@ def _purchasing_document(entries: list[PurchasingEntry]) -> dict[str, Any]:
         else:
             row["manufacturer"] = entry.manufacturer
             row["mpn"] = entry.mpn
+        if entry.terminals is not None:
+            row["terminals"] = _frozen_terminals(entry)
         items.append(row)
     document = {"schema_version": 1, "items": items}
     return {**document, "kct_export_sha256": purchasing_export_digest(document)}
@@ -1401,6 +1471,20 @@ class _StagedSource:
             raise
 
 
+@dataclass
+class _ReviewedCopper:
+    """What a ``verify_reviewed_copper`` export borrows while it runs (Issue #10492)."""
+
+    workspace: ReviewedCopperExport
+    #: Copper layers both plots must carry, in plot order.
+    layers: list[str]
+    #: The package is always built as a candidate, never written to the destination first.
+    layout: _PackageOutputs
+    live_pcb: Path
+    live_schematic: Path | None
+    live_config: ManufacturingConfig
+
+
 class ManufacturingPackage:
     """
     Generate a complete manufacturing package for PCB production.
@@ -1429,6 +1513,8 @@ class ManufacturingPackage:
         # Live board path while ``pcb_path`` points at a staged copy (#10091).
         self._live_pcb_path: Path | None = None
         self._pending_mutation_notices: list[tuple[int, str]] = []
+        # Set while a ``verify_reviewed_copper`` export runs (Issue #10492).
+        self._reviewed: _ReviewedCopper | None = None
         self.schematic_path = Path(schematic_path) if schematic_path else None
         self.manufacturer = manufacturer.lower()
         self.config = config or ManufacturingConfig()
@@ -1460,6 +1546,11 @@ class ManufacturingPackage:
         """
         out_dir = Path(output_dir) if output_dir else self.config.output_dir
         result = ManufacturingResult(output_dir=out_dir)
+        # A reused writer takes a fresh snapshot for each export.
+        self.__dict__.pop("_net_class_map_input", None)
+
+        if self.config.verify_reviewed_copper and not self._reviewed_copper_request(result):
+            return result
 
         selected_stackup_source_hash: str | None = None
         if self.config.stackup_id:
@@ -1529,6 +1620,25 @@ class ManufacturingPackage:
             logger.error(f"Assembly generation failed: {e}")
             return result
 
+        # Issue #10492: a reviewed-copper export prepares everything below on
+        # a private working copy, so none of it reaches the checkout.
+        if self.config.verify_reviewed_copper and not self._open_reviewed_copper(result, out_dir):
+            return result
+        if self._reviewed is not None:
+            layout = self._reviewed.layout
+        try:
+            return self._export_prepared(out_dir, result, selected_stackup_source_hash, layout)
+        finally:
+            self._close_reviewed_copper(result)
+
+    def _export_prepared(
+        self,
+        out_dir: Path,
+        result: ManufacturingResult,
+        selected_stackup_source_hash: str | None,
+        layout: _PackageOutputs | None,
+    ) -> ManufacturingResult:
+        """Steps 0a-4, on ``self.pcb_path``: the checked-out board or a staged copy."""
         # Steps 0a-0c.  A named-stackup export with the default silk repair
         # runs them on a scratch copy and publishes only on success, so a
         # refused repair leaves the board and its siblings untouched (#10091).
@@ -1536,7 +1646,8 @@ class ManufacturingPackage:
         self._pending_mutation_notices = []
         live_pcb = self.pcb_path
         if (
-            self.config.emit_drc_constraints
+            self._reviewed is None
+            and self.config.emit_drc_constraints
             and self.config.stackup_id
             and self.config.silk_fix
             and self.manufacturer != "generic"
@@ -1557,8 +1668,9 @@ class ManufacturingPackage:
                 staged.close()
             raise
         finally:
-            self.pcb_path = live_pcb
-            self._live_pcb_path = None
+            if self._reviewed is None:
+                self.pcb_path = live_pcb
+                self._live_pcb_path = None
         if staged is not None:
             try:
                 if proceed:
@@ -1656,6 +1768,15 @@ class ManufacturingPackage:
                 writer.config = layout.config
                 result.output_dir = work_bundle
                 writer._write_package(work_bundle, result, source_hash)
+                if result.success and writer._reviewed is not None:
+                    # Issue #10492: the manifest names the reviewed bytes, so
+                    # publish only while they are still what is saved.
+                    if not writer._reviewed.workspace.source_unchanged():
+                        result.errors.append(
+                            f"{writer._reviewed.live_pcb.name} changed during manufacturing "
+                            "export; the reviewed-copper package was not published. Export "
+                            "again from the saved board."
+                        )
                 if result.success:
                     layout.publish(candidate, existing, before)
         except (OSError, RuntimeError) as exc:
@@ -1716,6 +1837,15 @@ class ManufacturingPackage:
         # package on disk.
         assembly_ok = self._generate_assembly(out_dir, result)
         if not assembly_ok:
+            return result
+
+        # Issue #10492: from here on the package is only staged, and nothing
+        # of it may be published unless the staged copper equals the saved board.
+        if (
+            self._reviewed is not None
+            and result.success
+            and not self._check_reviewed_copper(result)
+        ):
             return result
 
         # Step 1.5: Reconcile the recorded ``bom_fields`` preflight result
@@ -1924,6 +2054,161 @@ class ManufacturingPackage:
             result.errors.append(f"Stackup ordering validation failed: {exc}")
             return None
 
+    def _reviewed_copper_request(self, result: ManufacturingResult) -> bool:
+        """Refuse a reviewed-copper export that could not verify anything (Issue #10492)."""
+        if not self.config.include_gerbers:
+            result.errors.append(
+                "Reviewed-copper verification compares the package's Gerber copper with "
+                "the saved board, so it cannot be combined with --no-gerbers"
+            )
+            return False
+        if not self.config.emit_drc_constraints:
+            result.errors.append(
+                "Reviewed-copper verification keeps the manufacturer rule generation "
+                "(emit_drc_constraints), so the two cannot be combined"
+            )
+            return False
+        return True
+
+    def _open_reviewed_copper(self, result: ManufacturingResult, out_dir: Path) -> bool:
+        """Stage the working copy and plot the reviewed reference (Issue #10492).
+
+        On success ``self.pcb_path`` is the working copy until
+        :meth:`_close_reviewed_copper`.  On failure nothing stays staged and
+        the reason is recorded on *result*.
+        """
+        from ..manufacturers import get_fab_family
+        from .assembly import resolve_gerber_config
+        from .gerber import GerberExporter, _pcb_copper_layers
+
+        live = self.pcb_path
+        try:
+            workspace = ReviewedCopperExport(
+                live,
+                project_root=self.config.project_root,
+                output_dir=out_dir,
+                schematic_path=self.schematic_path,
+            )
+        except (OSError, ValueError) as exc:
+            result.errors.append(f"Could not stage a working copy of {live.name}: {exc}")
+            return False
+        try:
+            # The reference shows the saved copper under the plot options the
+            # candidate will have, taken before any rule or refill.
+            layers = _pcb_copper_layers(workspace.snapshot)
+            GerberExporter(workspace.snapshot).plot_saved(
+                resolve_gerber_config(get_fab_family(self.manufacturer), self.config),
+                workspace.reference_dir,
+            )
+            config = copy(self.config)
+            config.project_root = workspace.dir
+            # Always staged: with --no-project-zip the ordinary path writes the
+            # destination directly, which a verification must never do first.
+            layout = _PackageOutputs(
+                out_dir,
+                config,
+                self.manufacturer,
+                purchasing=bool(self._purchasing or self._prior_purchasing_digest),
+            )
+        except (KiCadToolsError, OSError, ValueError) as exc:
+            workspace.close()
+            result.errors.append(
+                f"The saved copper of {live.name} could not be plotted for review: {exc}"
+            )
+            return False
+        logger.info(
+            "Reviewed-copper export: %s is prepared in a private working copy; the "
+            "checked-out board is not modified",
+            live.name,
+        )
+        self._reviewed = _ReviewedCopper(
+            workspace=workspace,
+            layers=layers,
+            layout=layout,
+            live_pcb=live,
+            live_schematic=self.schematic_path,
+            live_config=self.config,
+        )
+        self.pcb_path = workspace.pcb
+        self._live_pcb_path = live
+        self.schematic_path = workspace.rebase(self.schematic_path)
+        self.config = config
+        return True
+
+    def _close_reviewed_copper(self, result: ManufacturingResult) -> None:
+        """Return to the checked-out board and remove the scratch (Issue #10492)."""
+        reviewed = self._reviewed
+        if reviewed is None:
+            return
+        self._reviewed = None
+        self.pcb_path = reviewed.live_pcb
+        self.schematic_path = reviewed.live_schematic
+        self.config = reviewed.live_config
+        self._live_pcb_path = None
+        reviewed.workspace.close()
+        if result.success and self._pending_mutation_notices:
+            # Held back because nothing was written to the checkout; the notes
+            # still describe the prepared sources the package was made from.
+            result.warnings.append(
+                "The checked-out sources were not modified; these export notes describe "
+                "the scratch copy the package was prepared from:"
+            )
+            for level, message in self._pending_mutation_notices:
+                logger.log(level, message)
+                result.warnings.append(message)
+
+    def _check_reviewed_copper(self, result: ManufacturingResult) -> bool:
+        """Compare the staged Gerber archive with the reviewed reference (Issue #10492).
+
+        Returns whether the package may proceed.  The comparison is recorded
+        on *result* either way; on anything but identical copper the evidence
+        is copied out of scratch and an error withholds the package.
+        """
+        from .reviewed_copper import (
+            compare_copper,
+            load_copper,
+            preflight_result,
+            refusal_message,
+            reviewed_copper_record,
+            unreadable_record,
+        )
+
+        reviewed = self._reviewed
+        if reviewed is None:  # the caller checks this only for a reviewed-copper export
+            return True
+        workspace = reviewed.workspace
+        archive = result.assembly_result.gerber_path if result.assembly_result is not None else None
+        reference: dict | None = None
+        try:
+            reference = load_copper(workspace.reference_dir, reviewed.layers)
+            if archive is None:
+                raise OSError("the export produced no Gerber archive")
+            candidate = load_copper(Path(archive), reviewed.layers)
+            record: dict = reviewed_copper_record(
+                reviewed_pcb=workspace.identity, records=compare_copper(reference, candidate)
+            )
+        except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile) as exc:
+            record = unreadable_record(
+                reviewed_pcb=workspace.identity,
+                layers=reviewed.layers,
+                side="reference plot" if reference is None else "candidate archive",
+                reason=str(exc),
+            )
+        result.reviewed_copper = record
+        result.preflight_results.append(preflight_result(record))
+        if record["status"] == "identical":
+            return True
+        diagnostics = None
+        if archive is not None:
+            try:
+                diagnostics = workspace.write_diagnostics(record, Path(archive))
+            except OSError as exc:
+                result.warnings.append(
+                    f"The reviewed-copper diagnostic report could not be written: {exc}"
+                )
+        result.errors.append(refusal_message(record, diagnostics))
+        return False
+
     def _refresh_zone_fill(
         self,
         result: ManufacturingResult,
@@ -2023,7 +2308,19 @@ class ManufacturingPackage:
                     _restore_board(self.pcb_path, original)
                 cannot_refresh(str(exc))
                 return None
-            note = f"Export refilled the zone fills in {self.pcb_path.name} to match the generated DRC rules."
+            if self._reviewed is not None:
+                # Issue #10492: only the working copy was refilled; the saved
+                # board keeps the copper that was reviewed.
+                note = (
+                    f"The zone fills in the working copy of {self.pcb_path.name} were "
+                    "refilled to match the generated DRC rules; the checked-out board "
+                    "keeps its saved fill (--verify-reviewed-copper)"
+                )
+            else:
+                note = (
+                    f"Export refilled the zone fills in {self.pcb_path.name} to match "
+                    "the generated DRC rules."
+                )
             result.warnings.append(note)
             logger.info(note)
 
@@ -2792,6 +3089,28 @@ class ManufacturingPackage:
             logger.debug("Could not read stackup copper for DRU: %s", e)
             return rules
 
+    @cached_property
+    def _net_class_map_input(self) -> tuple[Path, bytes] | None:
+        """Read once so rule generation and the editable ZIP use identical bytes."""
+        from ..cli.check_cmd import _discover_net_class_map_sidecar
+
+        config = self._reviewed.live_config if self._reviewed is not None else self.config
+        pcb = self._lookup_pcb_path
+        board_dir = pcb.parent.resolve()
+        path = config.net_class_map_path or _discover_net_class_map_sidecar(board_dir / pcb.name)
+        if path is None:
+            return None
+        boundary = (config.project_root or board_dir).resolve()
+        if config.project_root is None and config.net_class_map_path is None:
+            # Discovery also supports a sibling output directory. Keep the
+            # literal directory as the boundary so a symlink cannot move it.
+            if path.parent == board_dir.parent / "output":
+                boundary = board_dir.parent / "output"
+        resolved = path.resolve()
+        if not resolved.is_relative_to(boundary):
+            raise PermissionError(f"Net-class map {path} resolves outside {boundary}")
+        return resolved, resolved.read_bytes()
+
     def _load_net_classes(self, result: ManufacturingResult) -> list | None:
         """Load the board's net-class-map sidecar as deduped classes (#8393).
 
@@ -2800,20 +3119,24 @@ class ManufacturingPackage:
         ``track_width`` floors that build-time DRC checked.  Returns
         ``None`` when there is no sidecar or it is malformed (warned).
         """
-        from ..cli.check_cmd import (
-            _discover_net_class_map_sidecar,
-            resolve_net_class_map_for_board,
-        )
+        from ..cli.check_cmd import resolve_net_class_map_for_board
         from ..manufacturers.project_generator import dedupe_net_classes
 
-        ncm_path = _discover_net_class_map_sidecar(Path(self._lookup_pcb_path))
-        if ncm_path is None:
+        try:
+            selected = self._net_class_map_input
+        except OSError as exc:
+            result.warnings.append(f"Could not read net-class-map sidecar: {exc}")
             return None
+        if selected is None:
+            return None
+        ncm_path, data = selected
         try:
             from ..router.rules import net_class_map_from_path
             from ..schema.pcb import PCB
 
-            net_class_map = net_class_map_from_path(ncm_path, pcb_path=self._lookup_pcb_path)
+            net_class_map = net_class_map_from_path(
+                ncm_path, pcb_path=self._lookup_pcb_path, source_bytes=data
+            )
             net_class_map, _ = resolve_net_class_map_for_board(
                 net_class_map, PCB.load(str(self.pcb_path))
             )
@@ -3023,8 +3346,86 @@ class ManufacturingPackage:
             )
             return
         rows = spec.purchasing or []
+        if any(row.terminals for row in rows):
+            map_faults = self._terminal_map_faults(rows)
+            if map_faults:
+                message = "; ".join(map_faults)
+                result.errors.append(
+                    f"Invalid project spec; the purchasing list cannot be read from "
+                    f"{spec_path}: {message}"
+                )
+                logger.error("Purchasing list could not be read from %s: %s", spec_path, message)
+                return
         self._purchasing = rows or None
         result.purchasing_pending = [row.description for row in rows if row.pending is not None]
+
+    def _terminal_map_faults(self, rows: list[PurchasingEntry]) -> list[str]:
+        """Check each mapped landing against the board being exported (Issue #10514).
+
+        The terminal numbers are the project's declaration and are not checked
+        here; the board side of each assignment is. Every physical copper pad
+        matching the reference and pad number must carry the declared net; a
+        reference or pad the board does not have, a non-copper pad, or a pad on
+        another or mixed net is reported by row, terminal and landing.
+        """
+        from ..core.layers import is_declared_copper_layer
+        from ..schema.pcb import PCB
+
+        try:
+            board = PCB.load(str(self.pcb_path))
+        except (OSError, KiCadToolsError) as exc:
+            return [f"terminal maps cannot be checked: {self.pcb_path} could not be read ({exc})"]
+        copper_layers = {
+            layer.name
+            for layer in board.layers.values()
+            if is_declared_copper_layer(layer.name, layer.type)
+        }
+        if copper_layers & {"F.Cu", "B.Cu"}:
+            copper_layers.add("F&B.Cu")
+        if copper_layers:
+            copper_layers.add("*.Cu")
+        faults: list[str] = []
+        for index, row in enumerate(rows, 1):
+            for assignment in row.terminals or ():
+                landing = assignment.landing
+                if landing is None:
+                    continue
+                ref, pad_number, net = landing
+                where = (
+                    f"purchasing row {index} ({row.description}) terminal '{assignment.terminal}'"
+                )
+                footprints = [fp for fp in board.footprints if fp.reference == ref]
+                if not footprints:
+                    faults.append(f"{where}: {ref} is not on the board")
+                    continue
+                pads = [pad for fp in footprints for pad in fp.pads if pad.number == pad_number]
+                if not pads:
+                    faults.append(f"{where}: {ref} has no pad {pad_number}")
+                    continue
+                copper_pads = [
+                    pad
+                    for pad in pads
+                    if pad.type != "np_thru_hole" and not copper_layers.isdisjoint(pad.layers)
+                ]
+                if not copper_pads:
+                    faults.append(f"{where}: {ref} pad {pad_number} has no copper")
+                    continue
+                observed = list(dict.fromkeys(pad.net_name for pad in copper_pads))
+                if len(observed) > 1:
+                    labels = [name or "(unconnected)" for name in observed]
+                    nets = ", ".join(labels[:-1]) + f" and {labels[-1]}"
+                    faults.append(
+                        f"{where}: {ref} pad {pad_number} carries conflicting nets "
+                        f"on the board ({nets}); expected {net}"
+                    )
+                elif not observed[0]:
+                    faults.append(f"{where}: {ref} pad {pad_number} is unconnected; expected {net}")
+                elif observed[0] != net:
+                    faults.append(
+                        f"{where}: {ref} pad {pad_number} carries {observed[0]} "
+                        f"on the board, not {net}"
+                    )
+        return faults
 
     def _write_purchasing(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Stage the per-board purchasing list, or withdraw an earlier one."""
@@ -3058,7 +3459,7 @@ class ManufacturingPackage:
             from ..report.generator import ReportGenerator
             from ..report.models import ReportData
             from ..report.net_class_map import resolve_committed_net_class_map
-            from ..report.utils import find_schematic
+            from ..report.utils import find_schematic, resolve_report_revision
         except ImportError as exc:
             # The optional ``report`` extra is missing.  Record a hard error
             # (not just a log line) so ``kct export`` exits non-zero instead
@@ -3118,7 +3519,10 @@ class ManufacturingPackage:
             project_name = self.pcb_path.stem
             data = ReportData(
                 project_name=project_name,
-                revision=data_kwargs.pop("revision", "1"),
+                revision=resolve_report_revision(
+                    self.pcb_path,
+                    data_kwargs.pop("revision", None),
+                ),
                 date=data_kwargs.pop(
                     "date",
                     _now_utc().strftime("%Y-%m-%d"),
@@ -3409,6 +3813,17 @@ class ManufacturingPackage:
                     result[key] = val
         else:
             result.pop("_narrative", None)
+
+        meta_path = data_dir / "metadata.json"
+        if meta_path.exists():
+            with open(meta_path, encoding="utf-8") as f:
+                meta = _json.load(f)
+                if "revision" in meta:
+                    result["revision"] = meta["revision"]
+                if "date" in meta:
+                    result["date"] = meta["date"]
+                if "git_hash" in meta:
+                    result["git_hash"] = meta["git_hash"]
 
         return result
 
@@ -3752,6 +4167,16 @@ class ManufacturingPackage:
             )
             lines.append("")
 
+        # Issue #10492: only a reviewed-copper export carries this block.
+        if result.reviewed_copper:
+            from .reviewed_copper import summary_lines as reviewed_copper_lines
+
+            title = "Reviewed copper (verified before this package was published):"
+            lines.append(title)
+            lines.append("-" * len(title))
+            lines.extend(reviewed_copper_lines(result.reviewed_copper)[1:])
+            lines.append("")
+
         readme_path = out_dir / "README.txt"
         readme_path.write_text("\n".join(lines), encoding="utf-8")
         result.readme_path = readme_path
@@ -3760,12 +4185,14 @@ class ManufacturingPackage:
     def _generate_project_zip(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Create ZIP of KiCad project files."""
         try:
+            selected = self._net_class_map_input
             result.project_zip_path = _create_project_zip(
                 self.pcb_path,
                 out_dir,
                 self.config.project_zip_name,
                 schematic_path=self.schematic_path,
                 project_root=self.config.project_root,
+                net_class_map=selected[1] if selected is not None else None,
             )
         except Exception as e:
             result.errors.append(f"Project ZIP creation failed: {e}")

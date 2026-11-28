@@ -1,4 +1,17 @@
 {
+  "meta": {
+    "kct_attach_zone_excluded_nets": [
+      "unconnected-(U1-ADC6-Pad19)",
+      "unconnected-(U1-ADC7-Pad22)",
+      "unconnected-(U1-PC4-Pad27)",
+      "unconnected-(U1-PD1-Pad31)",
+      "unconnected-(U1-XTAL1{slash}PB6-Pad7)",
+      "unconnected-(U1-XTAL2{slash}PB7-Pad8)",
+      "unconnected-(U2-NC-Pad21)",
+      "unconnected-(U3-DNC-Pad2)",
+      "unconnected-(U3-NC-Pad6)"
+    ]
+  },
   "board": {
     "design_settings": {
       "rules": {

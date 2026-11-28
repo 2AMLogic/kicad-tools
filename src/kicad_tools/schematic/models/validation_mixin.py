@@ -80,6 +80,26 @@ class SchematicValidationMixin:
             refs.setdefault(sym.reference, []).append(sym)
 
         for ref, instances in refs.items():
+            # Native BOM export treats any reference that does not end in an
+            # ASCII digit (``Q1A``, ``Q1_A``, ``D3.A``, ``LED_RED``, ``R99Ω``)
+            # as unannotated and appends ``?``. A reference already ending in
+            # ``?`` is exported unchanged. Real multi-unit lettering lives in
+            # the unit field and leaves the common reference unchanged.
+            if ref and not ref.startswith("#") and ref[-1] not in "0123456789?":
+                listed = next((sym for sym in instances if sym.in_bom), None)
+                if listed is not None:
+                    issues.append(
+                        {
+                            "severity": "warning",
+                            "type": "native_bom_reference",
+                            "message": (
+                                f"KiCad's native BOM exports '{ref}' as '{ref}?'. "
+                                "Use a reference ending in a number to match placement data."
+                            ),
+                            "location": (listed.x, listed.y),
+                            "fix_applied": False,
+                        }
+                    )
             if len(instances) < 2:
                 continue
             seen_units: dict[tuple[str, int], object] = {}

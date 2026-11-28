@@ -289,10 +289,12 @@ def _state_after(router, key, *, upto: int):
 
 
 class TestRoutedFixtures:
+    @pytest.mark.xdist_group("access_witness_replay_kelvin")
     def test_routed_kelvin_matches_the_reference(self):
         router = _routed_kelvin()
         _assert_identical(router, [U3, ("R10", "1"), ("Q1", "1"), ("U2", "1")])
 
+    @pytest.mark.xdist_group("access_witness_replay_kelvin")
     def test_stranding_kelvin_matches_the_reference(self):
         router = _stranding_kelvin()
         keys = sorted(set(router.pads))

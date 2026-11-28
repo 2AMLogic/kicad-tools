@@ -61,9 +61,12 @@ class DRCViolation:
             concept.  Labels the population only -- it never enters
             :attr:`key`, so waiver identity is band-independent.
         corner_class: The population of the ``sharp_trace_corner`` rule a
-            finding belongs to, ``"bend"`` (two segments meet at the vertex)
-            or ``"junction"`` (three or more do) (Issue #9037).  ``None``
-            when the emitting rule does not classify.  Labels the population
+            finding belongs to, ``"bend"`` (two track directions meet at the
+            vertex) or ``"junction"`` (three or more do) (Issue #9037).  A
+            direction is a distinct bearing, not a segment: a continuous
+            track contributes one on each side of a tap, and overlapping
+            same-bearing tracks count as one (Issue #10675).  ``None`` when
+            the emitting rule does not classify.  Labels the population
             only -- it never enters :attr:`key`, so waiver identity is
             class-independent.
     """
@@ -77,6 +80,11 @@ class DRCViolation:
     required_value: float | None = None
     items: tuple[str, ...] = ()
     nets: tuple[str, ...] = ()
+    # Identity of the copper (UUID, else geometry) a finding is about, so the
+    # fix-drc repair guard can compare the same copper across a move (Issue
+    # #9424).  Never part of :attr:`key` -- ``items`` alone feeds waiver and
+    # ``--diff`` identity, and UUIDs there would break existing waivers.
+    witnesses: tuple[str, ...] = field(default=(), kw_only=True)
     # Issue #8938: True when every side of the finding sits on one net (a
     # same-net slit).  The fab cannot see nets and fails the board on such a
     # gap regardless, so the gap is still severity-graded -- this flag only
@@ -95,15 +103,17 @@ class DRCViolation:
     # the zone-fill ``info`` branch).
     fab_band: str | None = None
     # Issue #9037: which population of the ``sharp_trace_corner`` rule a
-    # finding belongs to -- ``"bend"`` (exactly two segments meet at the
-    # vertex, the subset JLCDFM was observed to flag) or ``"junction"``
+    # finding belongs to -- ``"bend"`` (exactly two track directions meet at
+    # the vertex, the subset JLCDFM was observed to flag) or ``"junction"``
     # (three or more do, reported by operator ruling on PR #8848 but not
-    # observed fab behaviour).  Like ``fab_band`` this only labels the
-    # population so consumers can gate on the fab-equivalent subset without
-    # splitting the user-visible ``rule_id`` -- ``DRCViolation.key`` embeds
-    # ``rule_id``, so an id split would break every existing
-    # ``.kct_waivers.json`` entry for this rule.  ``None`` when the emitting
-    # rule does not classify.
+    # observed fab behaviour).  A direction is a distinct bearing, not a
+    # segment: a continuous track contributes one on each side of a tap, and
+    # overlapping same-bearing tracks count as one (issue #10675).  Like
+    # ``fab_band`` this only labels the population so consumers can gate on
+    # the fab-equivalent subset without splitting the user-visible
+    # ``rule_id`` -- ``DRCViolation.key`` embeds ``rule_id``, so an id split
+    # would break every existing ``.kct_waivers.json`` entry for this rule.
+    # ``None`` when the emitting rule does not classify.
     corner_class: str | None = None
     waived: bool = False
     waiver_reason: str | None = None
@@ -177,6 +187,7 @@ class DRCViolation:
             "required_value": self.required_value,
             "items": list(self.items),
             "nets": list(self.nets),
+            "witnesses": list(self.witnesses),
             # Issue #8938: labels the same-net class without re-deriving it
             # from ``nets`` (and stays None for rules that do not classify).
             "same_net": self.same_net,

@@ -2,7 +2,7 @@
 title: "diffpair_test_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.29.0"
-date: "Rev 1 | 2026-11-22 | jlcpcb-tier1"
+date: "Rev C | 2026-11-27 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true

@@ -79,7 +79,7 @@ def _pcb_has_filled_zones(pcb_path: Path) -> bool:
 # ordinal distinguishes these from per-pad/per-via ``(layers "F.Cu" ...)``
 # lists, and the type token guards against ``(net 4 "...")`` entries.
 _COPPER_LAYER_DEF_RE = re.compile(
-    r'\(\s*\d+\s+"((?:F|B|In\d+)\.Cu)"\s+(?:signal|power|mixed|jumper)\b'
+    r'\(\s*\d+\s+(?:"((?:F|B|In\d+)\.Cu)"|((?:F|B|In\d+)\.Cu))\s+(?:signal|power|mixed|jumper)\b'
 )
 
 
@@ -153,7 +153,7 @@ def _pcb_copper_layers(pcb_path: Path) -> list[str]:
         )
         return fallback
 
-    found = set(_COPPER_LAYER_DEF_RE.findall(text))
+    found = {m[1] or m[2] for m in _COPPER_LAYER_DEF_RE.finditer(text)}
     if not found:
         logger.warning(
             "No copper layer definitions found in %s; assuming 2-layer (F.Cu, B.Cu)",
@@ -1119,6 +1119,21 @@ class GerberExporter:
                     "Compare `kicad-cli pcb drc` with and without --refill-zones on the board",
                 ],
             )
+
+    def plot_saved(self, config: GerberConfig, output_dir: Path) -> None:
+        """Plot the copper exactly as the board saves it, with ``config``'s options.
+
+        The same plot command ``export`` runs, and nothing else: no safety-net
+        fill of outlined zones (issue #2516) and no saved-fill check (#6078),
+        because a reviewed-copper reference must show the copper that was saved,
+        not what an export would make of it (Issue #10492). Only the Gerber
+        plot runs; drill files are not compared.
+        """
+        output_dir.mkdir(parents=True, exist_ok=True)
+        self._export_gerbers_impl(config, output_dir, self.pcb_path)
+        # The same stamping ``export`` applies, so a recorded reference digest
+        # is reproducible under SOURCE_DATE_EPOCH like the package's own.
+        _normalize_gerber_timestamps(output_dir, config.source_date_epoch or _source_date_epoch())
 
     def _export_gerbers_impl(
         self,

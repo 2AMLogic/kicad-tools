@@ -29,7 +29,14 @@ from design_spec import (
     LED_CONNECTIONS,
 )
 
-from kicad_tools.core.project_file import create_minimal_project, save_project
+from kicad_tools.core.project_clearance import netclass_assignment_value
+from kicad_tools.core.project_file import (
+    add_netclass_definition,
+    add_netclass_patterns,
+    create_minimal_project,
+    get_net_settings,
+    save_project,
+)
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
 from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
@@ -41,6 +48,20 @@ warn_if_stale()
 
 # Staging directory for a not-yet-gated manufacturing export (#9800).
 CANDIDATE_DIRNAME = "manufacturing-candidate"
+
+#: The classes the reviewed board routes at (Issue #10663): 0.20 mm signal
+#: copper and 0.50 mm power copper, as the reviewed PCB and the authored
+#: ``output/net_class_map.json`` agree.  class -> (track width, the router's
+#: own clearance, the nets it covers).
+SIGNAL_TRACK_WIDTH_MM = 0.2
+POWER_TRACK_WIDTH_MM = 0.5
+REVIEWED_NETCLASSES = {
+    "Audio": (SIGNAL_TRACK_WIDTH_MM, 0.15, ("LINE_A", "LINE_B", "LINE_C", "LINE_D")),
+    "Clock": (SIGNAL_TRACK_WIDTH_MM, 0.2, ("ISP_SCK",)),
+    "Debug": (SIGNAL_TRACK_WIDTH_MM, 0.15, ("RESET",)),
+    "Digital": (SIGNAL_TRACK_WIDTH_MM, 0.15, ("NODE_A", "NODE_B", "NODE_C", "NODE_D")),
+    "Power": (POWER_TRACK_WIDTH_MM, 0.2, ("GND", "VCC")),
+}
 
 
 # =============================================================================
@@ -65,6 +86,34 @@ def create_charlieplex_pcb(output_dir: Path) -> Path:
 # =============================================================================
 
 
+def author_reviewed_netclasses(project_data: dict) -> dict:
+    """Declare the five net classes the reviewed board routes at.
+
+    While the recipe left these classes to ``kct route``, each reached the
+    routed project as a clone of ``Default`` -- whose ``track_width`` is the
+    fabrication floor, 0.127 mm -- and the publisher's cleanup, which honours
+    project class widths (Issue #10189), narrowed all 144 reviewed segments to
+    it (Issue #10663).  A router-declared class never replaces an authored
+    one, so the recipe states the classes it reviewed: their track widths, the
+    router's own clearances, and the nets each covers, both as
+    schematic-visible literal patterns and as the PCB assignment cache.
+
+    Args:
+        project_data: Project data from ``create_minimal_project``.
+
+    Returns:
+        The same ``project_data`` dict.
+    """
+    settings = get_net_settings(project_data)
+    assignments: dict[str, object] = {}
+    for name, (width, clearance, nets) in REVIEWED_NETCLASSES.items():
+        add_netclass_definition(project_data, name, track_width=width, clearance=clearance)
+        add_netclass_patterns(project_data, name, list(nets))
+        assignments.update({net: netclass_assignment_value(settings, name) for net in nets})
+    settings["netclass_assignments"] = dict(sorted(assignments.items()))
+    return project_data
+
+
 def create_project(output_dir: Path, project_name: str) -> Path:
     """Create a KiCad project file."""
     print("\n" + "=" * 60)
@@ -74,7 +123,7 @@ def create_project(output_dir: Path, project_name: str) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     filename = f"{project_name}.kicad_pro"
-    project_data = create_minimal_project(filename)
+    project_data = author_reviewed_netclasses(create_minimal_project(filename))
 
     project_path = output_dir / filename
     save_project(project_data, project_path)

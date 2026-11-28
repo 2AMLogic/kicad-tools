@@ -43,36 +43,36 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "d1791370956962913fac6bd16314506702a6021bfb14b9e396bc02e90a1a592f",
-      "size": 2212
+      "sha256": "886961007c4f80db7d445c46f727bfa9f800f1be5542533a829bb46fcd2bb420",
+      "size": 2217
     },
     "assembly-back.pdf": {
-      "sha256": "762635aca8889ca42736c0092b14ba962cd829e534f554c04e9c0d802593f6d0",
+      "sha256": "1b87a266377db1dadf6539c1799f0cd9ae1881ba978d8b27405e55a268670240",
       "size": 8804
     },
     "assembly-front.pdf": {
-      "sha256": "1aeabcc7772acd60b33c6f5348db4aceddc474e372229824bba5c05a0b7a8575",
-      "size": 19669
+      "sha256": "9b42685b0a8d78e10340e23ca8288005ee698174a60d92f213a8fe965fba260a",
+      "size": 18775
     },
     "bom_jlcpcb.csv": {
       "sha256": "e27d3eb62752fff2b81d590930c5034c38cef022b4bf458891f038622e6ee878",
       "size": 175
     },
     "check-report.json": {
-      "sha256": "1c99bb3e249fe9daa4f60be1a36befc2e0fac508f2b952fafce473837a306c41",
-      "size": 116399
+      "sha256": "47ce77067243f7a697df39d3ad75817a0f64fe6847564b6044b6f7c076cdd813",
+      "size": 116944
     },
     "cpl_jlcpcb.csv": {
       "sha256": "847457252c291c9086804931f5016de06f78dc1aa1020d4a0068bc98ddd89c36",
       "size": 377
     },
     "gerbers/gerbers.zip": {
-      "sha256": "a9075c048558c25c990f61b40a1fa3168ddc238166e8b19f9300b0eae69af919",
-      "size": 15902
+      "sha256": "395bc1258d3ab549ffe5e9ef37ee2bac8d14725fe17eb91c4966382034f38703",
+      "size": 15369
     },
     "images/assembly.png": {
-      "sha256": "60b15db7f93126c43276d0af80512fe40d610deb9cccaeb0fd48f8b07ea9c3ce",
-      "size": 155720
+      "sha256": "f0c4de5a247b999348a7344d65ec81fd4bae5282cf8c9f8e47d78ae3ba0c1255",
+      "size": 139362
     },
     "images/layer_B_Cu.png": {
       "sha256": "f69304aa8bfbc00c89ed7418621fc7891872f7fff53446aabb7c4d8e412c6f85",
@@ -91,19 +91,19 @@
       "size": 86201
     },
     "images/pcb_front.png": {
-      "sha256": "461bfafaa5d858ab1cd561beba685e544dde212eed5eb238b378187749fbded0",
-      "size": 202618
+      "sha256": "d103e665aeadc91f1cce58b8e0a400e219d2941cef4d5ec72bcf9b1aa5a96c22",
+      "size": 187057
     },
     "images/schematic_voltage_divider.png": {
-      "sha256": "02421af6d6d8fcfc31b5d5d4ddbb02bba24ae16635caccd9e9c90b4acb05e10b",
-      "size": 118121
+      "sha256": "27f0d0565c634d8f676c0d0b5e2edc214da86fdaa29c5f495a58dde423e213bf",
+      "size": 118129
     },
     "kicad_project.zip": {
-      "sha256": "8fd6c865dc088d580c9b729aada791afa3cff50d6bf5e0cb830c71b79cf71d46",
-      "size": 15832
+      "sha256": "1c47363d5dacdf776b6bf0e11fed89209584abd0cd1dc3131522d3913cc46657",
+      "size": 16876
     },
     "native-drc.json": {
-      "sha256": "0d0ff51f63234a71f5779b1134f7bf328cb4f4db5c00fdabb5780cc695813b11",
+      "sha256": "c2f690f878ac5005ac87651f4abbbf73331371de3adc1a8ac4257388415256a9",
       "size": 252
     },
     "procurement-review.md": {
@@ -111,19 +111,19 @@
       "size": 13488
     },
     "report.md": {
-      "sha256": "ef85489504ab8ef97900b23ee09c6fa3ce40a6b3210f55e0ab89881a68c86e49",
+      "sha256": "bf599350c4d789b2dc9e4f6f2c00d3554aae89a0a63b254f0712edfea37c6019",
       "size": 2464
     },
     "report.pdf": {
-      "sha256": "be21e7683751f06608e7fffbc0a41824551c012cb10daab54f5d46db87e8c882",
-      "size": 925915
+      "sha256": "ef303078fa09f5c7c1f4d68abfa169f69d0048811e6047ac235a76df89a1c171",
+      "size": 903153
     },
     "schematic.pdf": {
-      "sha256": "f5d79356a1d6c5ca854e3d4fce1ccb70e5f445cb5de9ef2180ebd23fbaebba1a",
+      "sha256": "a991e62113ca25938e8bf7a93f51c3aec574ba70aeeea71b1b57dedf48fba403",
       "size": 47852
     }
   },
-  "generated_at": "2026-11-26T19:43:14Z",
+  "generated_at": "2026-11-27T20:57:03+00:00",
   "kicad_tools_version": "0.29.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -197,7 +197,8 @@
             "pad": "1",
             "reason": "no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ",
             "reference": "J2",
-            "status": "unassessed"
+            "status": "unassessed",
+            "wire": null
           },
           {
             "hole": {
@@ -209,7 +210,8 @@
             "pad": "2",
             "reason": "no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ",
             "reference": "J2",
-            "status": "unassessed"
+            "status": "unassessed",
+            "wire": null
           },
           {
             "hole": {
@@ -221,7 +223,8 @@
             "pad": "1",
             "reason": "no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ",
             "reference": "J1",
-            "status": "unassessed"
+            "status": "unassessed",
+            "wire": null
           },
           {
             "hole": {
@@ -233,7 +236,8 @@
             "pad": "2",
             "reason": "no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ",
             "reference": "J1",
-            "status": "unassessed"
+            "status": "unassessed",
+            "wire": null
           }
         ],
         "summary": {
@@ -243,12 +247,107 @@
           "pads": 4,
           "tolerance_unassessed": 0,
           "unassessed": 4
-        }
+        },
+        "wire_terminations_not_applied": []
       },
       "details": "J1 pad 1 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ\nJ1 pad 2 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ\nJ2 pad 1 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 1 of ZX-PZ2.54-1-2PZZ\nJ2 pad 2 [ZX-PZ2.54-1-2PZZ]: unassessed: no verified lead dimensions declared for pad 2 of ZX-PZ2.54-1-2PZZ\nAssessment covers centred geometric fit only (not lead pitch or placement tolerances).",
-      "message": "Through-hole lead fit unverified: 4 pad(s) unassessed (no verified lead dimensions or unsupported geometry); no failures",
+      "message": "Through-hole lead fit unverified: 4 pad(s) unassessed (no verified lead or prepared wire dimensions, or unsupported geometry); no failures",
       "name": "assembly_lead_fit",
       "status": "WARN"
+    },
+    {
+      "data": {
+        "components": [
+          {
+            "expected": null,
+            "footprint": "Resistor_SMD:R_0805_2012Metric",
+            "measured": {
+              "outer_span_mm": 3.0,
+              "pads": [
+                {
+                  "depth_mm": 1.0,
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "width_mm": 1.3
+                },
+                {
+                  "depth_mm": 1.0,
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0
+            },
+            "mismatched_fields": [],
+            "mpn": "0805W8F1002T5E",
+            "reason": "no verified SMD land pattern declared for MPN 0805W8F1002T5E",
+            "reference": "R1",
+            "source": null,
+            "status": "unassessed"
+          },
+          {
+            "expected": null,
+            "footprint": "Resistor_SMD:R_0805_2012Metric",
+            "measured": {
+              "outer_span_mm": 3.0,
+              "pads": [
+                {
+                  "depth_mm": 1.0,
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "width_mm": 1.3
+                },
+                {
+                  "depth_mm": 1.0,
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0
+            },
+            "mismatched_fields": [],
+            "mpn": "0805W8F1002T5E",
+            "reason": "no verified SMD land pattern declared for MPN 0805W8F1002T5E",
+            "reference": "R2",
+            "source": null,
+            "status": "unassessed"
+          }
+        ],
+        "summary": {
+          "components": 2,
+          "failed": 0,
+          "passed": 0,
+          "unassessed": 2
+        },
+        "tolerance_mm": 0.001
+      },
+      "details": "R1 [0805W8F1002T5E]: unassessed: no verified SMD land pattern declared for MPN 0805W8F1002T5E (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nR2 [0805W8F1002T5E]: unassessed: no verified SMD land pattern declared for MPN 0805W8F1002T5E (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nDimensional comparison tolerance: +/-0.001 mm (two-terminal SMD copper pads; placement rotation and mirroring undone).",
+      "message": "SMD land pattern unverified: 2 two-terminal SMD component(s) unassessed (missing MPN, source, or usable geometry); no failures",
+      "name": "assembly_smd_land_pattern",
+      "status": "WARN"
+    },
+    {
+      "data": {
+        "diameters": [],
+        "invalid_declarations": [],
+        "pitch": [],
+        "summary": {
+          "failed": 0,
+          "finished_hole_tolerance_mm": null,
+          "finished_hole_tolerance_source": null,
+          "finished_hole_tolerance_upper_mm": null,
+          "holes": 0,
+          "invalid_declarations": 0,
+          "order_unassessed": 0,
+          "pitch_pairs": 0,
+          "unassessed": 0
+        }
+      },
+      "message": "No placed references with a mounting-hole declaration; mounting-hole fit not applicable",
+      "name": "assembly_mounting_hole_fit",
+      "status": "OK"
     },
     {
       "message": "No usable stackup copper to reconcile; profile default copper applies",
@@ -289,7 +388,7 @@
         "order_boards": 5,
         "parts": [
           {
-            "age_days": 0,
+            "age_days": 2,
             "lcsc": "C17414",
             "per_board": 2,
             "refs": [
@@ -297,8 +396,8 @@
               "R2"
             ],
             "source": "live",
-            "stock": 43938128,
-            "verified": true
+            "stock": 43985975,
+            "verified": false
           },
           {
             "age_days": null,

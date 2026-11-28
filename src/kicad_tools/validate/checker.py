@@ -28,7 +28,7 @@ from .rules.match_group_length_skew import MatchGroupLengthSkewRule
 from .rules.path_ampacity import PathAmpacityRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.plane_split import PlaneSplitRule
-from .rules.pour_slot import PourSlotRule
+from .rules.pour_slot import PourSlotClearances, PourSlotRule
 from .rules.redundant_copper import RedundantCopperRule
 from .rules.reinforcement_courtyard import ReinforcementCourtyardRule
 from .rules.reinforcement_incomplete import ReinforcementIncompleteRule
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from .rules.physical_gap import FabGapPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Sequence
     from pathlib import Path
 
     from kicad_tools.router.current_paths import CurrentPathSpec, OperatingCase
@@ -874,6 +874,8 @@ class DRCChecker:
         self,
         filters: list[ViolationFilter] | None = None,
         pad_grid_auto_derive: bool = False,
+        *,
+        pour_slot_clearances: PourSlotClearances | None = None,
     ) -> DRCResults:
         """Run all DRC checks.
 
@@ -889,6 +891,9 @@ class DRCChecker:
                 Python-API behaviour; gating consumers that must agree
                 with ``kct check`` (e.g. ``ManufacturingAudit``) opt in
                 so report and CLI verdicts cannot drift (issue #3497).
+            pour_slot_clearances: Project and custom clearance rules for
+                track-to-zone gaps. When omitted the rule combines the
+                zone clearance with KiCad's default net-class clearance.
 
         Returns:
             DRCResults containing all violations found (after filtering,
@@ -905,6 +910,8 @@ class DRCChecker:
             method = getattr(self, method_name)
             if method_name == "check_pad_grid_alignment":
                 results.merge(method(auto_derive_threshold=pad_grid_auto_derive))
+            elif method_name == "check_pour_slot" and pour_slot_clearances is not None:
+                results.merge(method(pour_slot_clearances))
             else:
                 results.merge(method())
 
@@ -1150,11 +1157,11 @@ class DRCChecker:
         rule = DanglingCopperRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
-    def check_pour_slot(self, netclass_clearances: Mapping[str, float] | None = None) -> DRCResults:
+    def check_pour_slot(self, netclass_clearances: PourSlotClearances | None = None) -> DRCResults:
         """Report parallel tracks too close for the zone fill (Issue #8435).
 
         Own CLI category (``pour_slot``) so ``--skip pour_slot`` works.
-        ``netclass_clearances`` maps net name to authored netclass clearance.
+        Accepts board clearance rules or a mapping of per-net clearances.
         """
         rule = PourSlotRule(netclass_clearances)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
