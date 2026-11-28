@@ -11,6 +11,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
+- **#9711**: fix: routed-DRC identity gate fails on incomplete mask_to_copper pass, CI runs it pinned
 - **#10427**: Reject incompatible automatic parts in assembly BOM exports
 - **#10474**: feat(export): report revision-bound simulation limits and fault-case evidence
 - **#10497**: ci: retry the pinned actionlint download on a transient 504
@@ -36,7 +37,6 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#9033**: Silkscreen-to-hole: kct reports far fewer findings than the fab DFM, and only as warnings
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
 
 ## In Progress
@@ -44,7 +44,6 @@ Human-approved issues ready for implementation (`loom:issue`).
 Issues currently being built (`loom:building`).
 
 - **#8486**: Reduce repeated full-budget reroutes of six narrow nets on the 97-net board
-- **#8900**: CI red on main: board 03 gates fail on default-on mask_to_copper (334 errors)
 - **#9381**: Committed demo-board BOMs still carry the pre-#9323 duplicate-LCSC lines
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410)
 - **#10424**: BOM enrichment assigns incompatible packages, tolerance and wattage despite explicit schematic intent
@@ -56,37 +55,42 @@ Issues currently being built (`loom:building`).
 - **#10604**: Default route-link misses a rotated, offset plated source pad
 - **#10611**: Board 03 exporter appends a second rules filename that makes the editable project fail readiness
 - **#10627**: Pour completion writes power-plane welds and routed links at the board width instead of their net class width
-- **#10629**: load_pads_for_analysis still reads is_thru/layer from the raw pad block, diverging from load_pcb_for_routing
-- **#10630**: Pandoc PDF rendering fails for a report project name containing a literal backslash
-- **#10632**: Committed board packages omit the net-class map, so kct readiness --verify now fails project provenance
-- **#10637**: Board 06 registered replot discards the selected net-class map from its legacy editable project
-- **#10639**: Report HTML cover escapes only the date scalar; title/subtitle/author are interpolated raw
-- **#10641**: Pandoc PDF report parses front-matter title and subtitle as Markdown: angle brackets dropped, * and _ become emphasis
 - **#10645**: mask_to_copper reports a new error when a straight own-pad entry is split at the pad edge
-- **#10646**: Board 01's committed stock/BOM evidence regressed OK -> WARN because the generating host had no offline parts catalog
 - **#10649**: Design reports ignore project clearance rules when counting pour slots
 - **#10650**: DRC preflight counts informational findings as warnings in a manufacturing manifest
+- **#10656**: Current-path check accepts a disconnected offset pad and rejects a bonded one
+- **#10662**: Board 04 reports ready in fleet status but fails public readiness on the same PCB
+- **#10663**: Board 02 release cleanup narrows all 12 routed nets to 0.127 mm
+- **#10664**: Board 04: clear the ten same-net mask_to_copper errors the public readiness check reports
+- **#10667**: Board 03: 90 redundant_copper warnings outlive the mask-copper repair and readiness's cleanup, so the reissue cannot reach ready
+- **#10669**: pad_outline_is_exact() misses a single-corner chamfer, so pad copper is over-reported
+- **#10675**: Report acute branches on unsplit same-net tracks in the sharp-corner check
+- **#10677**: Make the sharp-corner check's 89-degree boundary consistent on macOS and Linux
+- **#10679**: Rendered EE-review skill refers to model metadata absent in Codex and opencode
+- **#10681**: Installed help, HV, readiness and tapeout skills point to a missing model hint
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
-- **#9112**: fix: distinguish silk over vias and component drill holes under JLCPCB profiles
-- **#9711**: fix: routed-DRC identity gate fails on incomplete mask_to_copper pass, CI runs it pinned
 - **#10507**: fix(boards): declare Board 07's reviewed class widths and re-pin its SDRAM evidence
 - **#10608**: fix: land named route-link endpoints on the pad copper outline
-- **#10634**: fix(router): read analysis pad plating and layer from parsed pad
-- **#10638**: chore(boards): deliver Board 06's selected net-class map in its legacy project ZIP
-- **#10644**: fix(report): keep literal backslashes in Pandoc PDF report titles
-- **#10651**: chore(boards): include the selected net-class map in the Board 04 editable project
-- **#10652**: fix(report): pass Pandoc cover scalars as literal metadata
-- **#10653**: fix: read a pad-edge-split own-pad entry through its authored continuation
+- **#10631**: fix: write pour-completion copper at the net-class width
+- **#10657**: fix(router): validate declared current paths on offset pad copper
+- **#10668**: fix(readiness): publish the public verdict for boards with a board-local check
+- **#10670**: fix(boards): group Board 06 connector headers in the JLCPCB BOM
+- **#10672**: fix(boards): author board 02's reviewed net classes so release cleanup keeps its track widths
+- **#10673**: fix(drc): count only warning-severity findings as warnings
+- **#10674**: fix(geometry): cut chamfered corners from the shared pad copper outline
+- **#10678**: fix: detect acute branches on continuous copper tracks
+- **#10682**: docs: clarify model selection in the installed EE-review skill
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
+- **#9711**: fix: routed-DRC identity gate fails on incomplete mask_to_copper pass, CI runs it pinned
 - **#10427**: Reject incompatible automatic parts in assembly BOM exports
 - **#10474**: feat(export): report revision-bound simulation limits and fault-case evidence
 - **#10497**: ci: retry the pinned actionlint download on a transient 504
@@ -95,7 +99,7 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 - **#10526**: chore(loom): resync installed Loom to v0.20.37
 - **#10532**: Expand BOM reference intervals with matching designator suffixes
 - **#10544**: perf(router): prove a timed-out connection from its goal side before repeating its search
-- **#10642**: fix: HTML-escape report cover scalars and the <title> text
+- **#10666**: fix(report): apply project clearance rules to pour-slot warnings
 
 ## Proposed
 
@@ -107,7 +111,6 @@ Issues carrying `loom:curated`.
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
 - **#8900**: CI red on main: board 03 gates fail on default-on mask_to_copper (334 errors) *(curated)*
 - **#8943**: Record JLCDFM silkscreen line-width selection criterion and per-item rows (residue of #8844) *(curated)*
-- **#9033**: Silkscreen-to-hole: kct reports far fewer findings than the fab DFM, and only as warnings *(curated)*
 - **#9065**: Wire the silk-vs-drill tools into board 03's recipe and gate silk_hole_overlap = 0 in CI *(curated)*
 - **#9093**: submit-jlcpcb: attended, exact-total-approved JLC parts purchase leg *(curated)*
 - **#9298**: Repository moved to the 2AMLogic organization: update hard-coded owner slug and the PyPI trusted publisher *(curated)*
@@ -132,17 +135,18 @@ Issues carrying `loom:curated`.
 - **#10604**: Default route-link misses a rotated, offset plated source pad *(curated)*
 - **#10611**: Board 03 exporter appends a second rules filename that makes the editable project fail readiness *(curated)*
 - **#10627**: Pour completion writes power-plane welds and routed links at the board width instead of their net class width *(curated)*
-- **#10629**: load_pads_for_analysis still reads is_thru/layer from the raw pad block, diverging from load_pcb_for_routing *(curated)*
-- **#10630**: Pandoc PDF rendering fails for a report project name containing a literal backslash *(curated)*
-- **#10632**: Committed board packages omit the net-class map, so kct readiness --verify now fails project provenance *(curated)*
-- **#10637**: Board 06 registered replot discards the selected net-class map from its legacy editable project *(curated)*
-- **#10639**: Report HTML cover escapes only the date scalar; title/subtitle/author are interpolated raw *(curated)*
-- **#10641**: Pandoc PDF report parses front-matter title and subtitle as Markdown: angle brackets dropped, * and _ become emphasis *(curated)*
 - **#10645**: mask_to_copper reports a new error when a straight own-pad entry is split at the pad edge *(curated)*
-- **#10646**: Board 01's committed stock/BOM evidence regressed OK -> WARN because the generating host had no offline parts catalog *(curated)*
 - **#10647**: config-resolver.sh passes config tiers as single jq arguments, so a >128 KiB defaults tier breaks create-issue.sh on Linux *(curated)*
 - **#10649**: Design reports ignore project clearance rules when counting pour slots *(curated)*
 - **#10650**: DRC preflight counts informational findings as warnings in a manufacturing manifest *(curated)*
+- **#10664**: Board 04: clear the ten same-net mask_to_copper errors the public readiness check reports *(curated)*
+- **#10667**: Board 03: 90 redundant_copper warnings outlive the mask-copper repair and readiness's cleanup, so the reissue cannot reach ready *(curated)*
+- **#10669**: pad_outline_is_exact() misses a single-corner chamfer, so pad copper is over-reported *(curated)*
+- **#10675**: Report acute branches on unsplit same-net tracks in the sharp-corner check *(curated)*
+- **#10677**: Make the sharp-corner check's 89-degree boundary consistent on macOS and Linux *(curated)*
+- **#10679**: Rendered EE-review skill refers to model metadata absent in Codex and opencode *(curated)*
+- **#10681**: Installed help, HV, readiness and tapeout skills point to a missing model hint *(curated)*
+- **#10684**: Board 04's committed DRC evidence records 5 pour_slot warnings; a fresh pinned run reportedly gives 4 *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -159,13 +163,13 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 7 |
+| Operator merge-risk holds | 8 |
 | Very important | 1 |
 | Important | 2 |
-| Ready (`loom:issue`) | 2 |
-| In Progress (`loom:building`) | 23 |
-| PRs awaiting review | 11 |
-| Approved PRs awaiting merge | 9 |
+| Ready (`loom:issue`) | 1 |
+| In Progress (`loom:building`) | 25 |
+| PRs awaiting review | 12 |
+| Approved PRs awaiting merge | 10 |
 | Curated | 42 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |

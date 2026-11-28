@@ -32,6 +32,12 @@ unless every gate passes:
      process the generic tier cannot model (board 04's paid 0.15 mm drill)
      sets ``check_script`` instead; that board-local check must meet the same
      bar (Issue #6269);
+   * ``tier_check`` (Issue #10662): the generic ``kct check --mfr <tier>``
+     that ``kct readiness --verify`` runs, judged by that verifier's own
+     ``judge_kct_check_report`` -- an ``exception`` known issue accounts for
+     exactly the error identities it lists (#7355); any other error blocks.
+     A board-local check models one process and must not let a ``ready``
+     receipt be published for a board the public verifier blocks;
    * ``kct net-status``: every net complete;
    * ``kct validate --sync``: 0 schematic/PCB sync errors.
 5. Refuse if any measured metric (``drc_violations``, ``nets_routed_pct``,
@@ -40,6 +46,16 @@ unless every gate passes:
 6. Re-hash every ``readiness.json`` input, set ``checked_at``, and validate
    the staged report with ``read_readiness()``.  Only then copy the changed
    files back into the board.
+
+A refusing gate publishes nothing, so a board whose evidence moved keeps the
+receipt it had.  For a board with ``publish_blocked`` (board 04) the two check
+gates are the exception: when either measures findings the recorded
+exceptions do not account for, the verdict itself is published -- a
+``blocked`` receipt naming them, beside every other gate's evidence -- instead
+of leaving a ``ready`` receipt on a board the public verifier blocks (Issue
+#10662), and the script exits 1.  An infrastructure failure (a native run that
+produced no report, a divergent saved fill, a metric that moved) still
+publishes nothing.
 
 Every kicad-cli call runs on the pinned evidence toolchain (Issue #6962): an
 isolated ``KICAD_CONFIG_HOME`` with the pinned library tables, and a refusal
@@ -80,7 +96,7 @@ import sys
 import tempfile
 import zipfile
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 #: Fixed archive member timestamp (the earliest ZIP can represent).
@@ -134,6 +150,16 @@ class BoardConfig:
     # it must write a ``kct check``-format JSON report, which is gated exactly
     # like ``gate_kct_check``'s.
     check_script: str | None = None
+    # Board-relative evidence file for the generic ``kct check --mfr <tier>``
+    # the public verifier runs (``kct readiness --verify``), judged by the
+    # verifier's own ``judge_kct_check_report`` (Issue #10662).  A board-local
+    # check models one process; this gate is what keeps a published ``ready``
+    # from disagreeing with the public verdict on the same board.
+    tier_check: str | None = None
+    # Publish a ``blocked`` receipt when a check gate measures findings the
+    # recorded exceptions do not account for, instead of refusing and leaving
+    # the previous receipt in place (Issue #10662).  Other gates still refuse.
+    publish_blocked: bool = False
     # ``(mirror_dir, source_dir)``: every file already in ``mirror_dir`` is
     # refreshed from ``source_dir`` before the archives are rebuilt.
     mirrors: tuple[tuple[str, str], ...] = ()
@@ -167,6 +193,11 @@ BOARDS: dict[str, BoardConfig] = {
     # rewritten: its committed reports also carry a Linux-container run).
     # Its native DRC evidence is owned here (Issue #7435): the pintype
     # annotator no longer writes it (Issue #7409).
+    # The paid-drill checker selects its rules and never evaluates
+    # ``mask_to_copper``, which the public verifier runs by default (#8842),
+    # so the generic tier check is judged here too: exactly the #6269
+    # exception identities pass, anything else publishes a blocked receipt
+    # (Issue #10662).
     "04-stm32-devboard": BoardConfig(
         routed_pcb="output/stm32_devboard_routed.kicad_pcb",
         schematic="output/stm32_devboard.kicad_sch",
@@ -177,6 +208,8 @@ BOARDS: dict[str, BoardConfig] = {
         ),
         erc=(ErcJob("04-native-erc.json", "output", "stm32_devboard.kicad_sch", ()),),
         check_script="check_manufacturing.py",
+        tier_check="output/readiness/tier-check.json",
+        publish_blocked=True,
         mirrors=(("output/manufacturing/design-source", "."),),
         archives=(("output/manufacturing/kicad_project.zip", ("output", ".")),),
     ),
@@ -317,6 +350,44 @@ BOARDS: dict[str, BoardConfig] = {
 
 class GateFailure(RuntimeError):
     """A gate failed; nothing is published."""
+
+
+@dataclass(frozen=True)
+class GateOutcome:
+    """What a check gate measured: one receipt ``checks[]`` entry and its blockers.
+
+    ``status`` is a readiness ``checks[]`` status (``passed`` / ``failed`` /
+    ``not_run``).  A non-passing outcome is a *board finding* -- it may be
+    published as a ``blocked`` receipt (``BoardConfig.publish_blocked``) --
+    where a :class:`GateFailure` means the gate could not measure at all.
+    """
+
+    name: str
+    status: str
+    detail: str
+    blockers: tuple[str, ...] = ()
+
+
+#: The reproducible part of a ``kct check`` report.  ``violations`` carry every
+#: finding with its identity; the assessment blocks left out (``findings``, the
+#: native mask geometry provenance) re-hash the freshly plotted films, which
+#: kicad-cli stamps with the plot time, so binding them would make every
+#: refresh rewrite the evidence (the #7384 fixed point).
+TIER_EVIDENCE_FIELDS = (
+    "file",
+    "manufacturer",
+    "pcb_sha256",
+    "layers",
+    "summary",
+    "violations",
+    "meta_checks",
+    "coverage",
+)
+
+
+def tier_check_evidence(report: dict) -> dict:
+    """The verdict-bearing projection of a generic-tier ``kct check`` report."""
+    return {name: report[name] for name in TIER_EVIDENCE_FIELDS if name in report}
 
 
 def log(message: str) -> None:
@@ -696,17 +767,18 @@ def warning_mismatch(
     return {k: v for k, v in (("unaccepted", unaccepted), ("stale", stale)) if v}
 
 
-def check_report_verdict(
+def check_report_outcome(
     data: dict, label: str, allowance: dict[tuple[str, str, str], int] | None = None
-) -> tuple[bool, int]:
-    """Gate a ``kct check``-format report: 0 errors, meta all PASSED, and no
+) -> tuple[GateOutcome, bool, int]:
+    """Measure a ``kct check``-format report: 0 errors, meta all PASSED, and no
     warnings beyond *allowance*.
 
     The allowance is the board's own recorded ``known_issues`` warning
     identities from ``readiness.json`` (Issues #7261, #7389): the same record
     that discloses the issue is the one that tolerates its warnings.  Without
     one, any warning refuses; a recorded identity that no longer fires refuses
-    as stale.
+    as stale.  Returns the outcome plus ``(lvs_clean, lvs_mismatches)``.  A
+    report without counts cannot be measured at all and raises.
     """
     summary, meta = data.get("summary", {}), data.get("meta_checks", {})
     statuses = {k: meta.get(k, {}).get("status") for k in ("drc", "erc", "lvs", "manifest")}
@@ -719,17 +791,54 @@ def check_report_verdict(
     extra = warning_mismatch(data, allowance or {})
     if extra:
         log(f"  warnings do not match the recorded known_issues allowance: {extra}")
-    if errors != 0 or extra or any(s != "PASSED" for s in statuses.values()):
+    failed_meta = sorted(k for k, s in statuses.items() if s != "PASSED")
+    if errors != 0 or extra or failed_meta:
+        parts = [f"{label}: {errors} error(s)"]
+        if extra:
+            parts.append("warning(s) outside the recorded allowance: " + "; ".join(extra))
+        if failed_meta:
+            parts.append("sub-check(s) not PASSED: " + ", ".join(failed_meta))
+        detail = "; ".join(parts)
+        return (
+            GateOutcome("kct_check", "failed", detail, (detail,)),
+            statuses["lvs"] == "PASSED",
+            mismatches,
+        )
+    return (
+        GateOutcome(
+            "kct_check",
+            "passed",
+            f"{label}: 0 error(s), no warning outside the recorded allowance, "
+            "drc/erc/lvs/manifest PASSED",
+        ),
+        True,
+        mismatches,
+    )
+
+
+def check_report_verdict(
+    data: dict, label: str, allowance: dict[tuple[str, str, str], int] | None = None
+) -> tuple[bool, int]:
+    """:func:`check_report_outcome`, refusing on anything but a pass."""
+    outcome, lvs_clean, mismatches = check_report_outcome(data, label, allowance)
+    if outcome.status != "passed":
         raise GateFailure(f"{label} failed")
-    return statuses["lvs"] == "PASSED", mismatches
+    return lvs_clean, mismatches
+
+
+def recorded_known_issues(board: Path) -> list[dict]:
+    """The board's validated ``known_issues`` entries, as ``readiness.json`` records them."""
+    from kicad_tools.cli.known_issues import validate_known_issues
+
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    return validate_known_issues(report.get("known_issues"))
 
 
 def known_issue_allowance(board: Path) -> dict[tuple[str, str, str], int]:
     """The ``{(rule, ref, pad): issue}`` the board's recorded ``known_issues`` account for."""
-    from kicad_tools.cli.known_issues import known_warning_allowance, validate_known_issues
+    from kicad_tools.cli.known_issues import known_warning_allowance
 
-    report = json.loads((board / "output" / "readiness.json").read_text())
-    return known_warning_allowance(validate_known_issues(report.get("known_issues")))
+    return known_warning_allowance(recorded_known_issues(board))
 
 
 def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
@@ -753,8 +862,8 @@ def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
     return check_report_verdict(data, f"kct check --mfr {cfg.tier}", known_issue_allowance(board))
 
 
-def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
-    """Run the board's own manufacturing check in place of ``kct check`` (Issue #6269)."""
+def _run_board_check(board: Path, cfg: BoardConfig) -> tuple[dict, int]:
+    """Run the board's own manufacturing check (Issue #6269): its report and exit code."""
     assert cfg.check_script is not None
     script = board / cfg.check_script
     with tempfile.TemporaryDirectory(prefix="refresh-readiness-board-check-") as tmp:
@@ -767,9 +876,15 @@ def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
         if not report.is_file():
             raise GateFailure(f"{cfg.check_script} did not produce a report: {proc.stderr[-2000:]}")
         data = json.loads(report.read_text())
+    return data, proc.returncode
+
+
+def gate_board_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
+    """Run the board's own manufacturing check in place of ``kct check`` (Issue #6269)."""
+    data, code = _run_board_check(board, cfg)
     verdict = check_report_verdict(data, cfg.check_script, known_issue_allowance(board))
-    if proc.returncode != 0:
-        raise GateFailure(f"{cfg.check_script} exited {proc.returncode}")
+    if code != 0:
+        raise GateFailure(f"{cfg.check_script} exited {code}")
     return verdict
 
 
@@ -778,6 +893,88 @@ def gate_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
     if cfg.check_script is not None:
         return gate_board_check(board, cfg)
     return gate_kct_check(board, cfg)
+
+
+def gate_check_outcome(board: Path, cfg: BoardConfig) -> tuple[GateOutcome, bool, int]:
+    """``gate_check`` for a ``publish_blocked`` board: the measured outcome, never a
+    refusal on a board finding.
+
+    The check's own exit code stays authoritative in one direction only: a
+    passing report from a check that exited non-zero is a checker that cannot be
+    trusted, not a finding to publish, so it refuses like every unmeasurable gate.
+    """
+    if cfg.check_script is None:
+        raise GateFailure("publish_blocked requires a board-local check_script")
+    data, code = _run_board_check(board, cfg)
+    outcome, lvs_clean, mismatches = check_report_outcome(
+        data, cfg.check_script, known_issue_allowance(board)
+    )
+    if code != 0 and outcome.status == "passed":
+        raise GateFailure(f"{cfg.check_script} exited {code}")
+    return outcome, lvs_clean, mismatches
+
+
+def gate_tier_check(board: Path, cfg: BoardConfig) -> GateOutcome:
+    """Judge the generic ``kct check --mfr <tier>`` exactly as ``kct readiness --verify`` does.
+
+    Issue #10662: a board-local check models one fabrication process, so on its
+    own it can pin ``ready`` for a board the public verifier blocks.  The report
+    is judged by the verifier's own ``judge_kct_check_report`` (the #7355 exact
+    exception match) and kept, in its reproducible projection, as the receipt's
+    evidence.  Paths are board-relative, as the public verifier records them.
+    """
+    from kicad_tools.cli.readiness_cmd import judge_kct_check_report
+
+    assert cfg.tier_check is not None
+    report = board / cfg.tier_check
+    report.parent.mkdir(parents=True, exist_ok=True)
+    # The public verifier's own wording, PCB path elided as it elides it (#8826).
+    invocation = f"kct check <pcb> --mfr {cfg.tier} --schematic {cfg.schematic}"
+    # Run into a fresh path: the staged board already holds the last published
+    # report, so a checker that dies before writing (missing PCB, crash) must not
+    # be able to leave that old report to be judged as this run's evidence.
+    with tempfile.TemporaryDirectory(prefix="refresh-readiness-tier-") as tmp:
+        fresh = Path(tmp) / "tier-check.json"
+        proc = run(
+            kct(
+                "check",
+                cfg.routed_pcb,
+                "--mfr",
+                cfg.tier,
+                "--schematic",
+                cfg.schematic,
+                "--format",
+                "json",
+                "--output",
+                str(fresh),
+            ),
+            cwd=board,
+        )
+        # A genuine finding exits non-zero WITH a new report; no report is no evidence.
+        if not fresh.is_file():
+            raise GateFailure(
+                f"kct check exited {proc.returncode} without producing a report: "
+                f"{proc.stderr.strip()[-300:]}"
+            )
+        try:
+            raw = json.loads(fresh.read_text())
+        except json.JSONDecodeError as exc:
+            raise GateFailure(f"kct check wrote an unreadable report: {exc}") from exc
+        if not isinstance(raw, dict) or ("summary" not in raw and "violations" not in raw):
+            raise GateFailure("kct check wrote a report without a verdict")
+    evidence = tier_check_evidence(raw)
+    report.write_text(json.dumps(evidence, indent=2) + "\n")
+    judged = judge_kct_check_report(evidence, recorded_known_issues(board))
+    outcome = GateOutcome("tier_check", judged.status, judged.detail, tuple(judged.blockers))
+    if outcome.status != "passed":
+        note = f" [invocation: {invocation}]"
+        outcome = replace(
+            outcome,
+            detail=outcome.detail + note,
+            blockers=tuple(blocker + note for blocker in outcome.blockers),
+        )
+    log(f"  gate {invocation} (the public verifier's check): {outcome.status}; {outcome.detail}")
+    return outcome
 
 
 def gate_net_status(board: Path, cfg: BoardConfig) -> float:
@@ -824,6 +1021,48 @@ def compare_metrics(recorded: dict, measured: dict) -> list[str]:
 
 
 # --------------------------------------------------------------------------- refresh
+def record_check_outcomes(
+    report: dict, outcomes: list[GateOutcome], known_issues: list[dict]
+) -> str:
+    """Write the measured check gates into a receipt and return its status.
+
+    Each outcome replaces the receipt's entry of that name, except that a check
+    which still passes keeps its recorded wording.  An entry no outcome covers
+    (one a person recorded) keeps the receipt blocked, so a later pass never
+    clears a finding this script did not re-measure.  An open ``defect`` known
+    issue blocks whatever the checks say, with ``kct readiness``'s own blocker.
+    """
+    from kicad_tools.cli.known_issues import defects
+
+    entries = {c["name"]: c for c in report.get("checks", []) if isinstance(c, dict)}
+    for outcome in outcomes:
+        recorded = entries.get(outcome.name, {}).get("status")
+        if not (outcome.status == recorded == "passed"):
+            entries[outcome.name] = {
+                "name": outcome.name,
+                "status": outcome.status,
+                "detail": outcome.detail,
+            }
+    unpassed = [c for c in entries.values() if c.get("status") != "passed"]
+    known_defects = defects(known_issues)
+    report["checks"] = list(entries.values())
+    if not unpassed and not known_defects:
+        report["status"], report["blockers"] = "ready", []
+        return "ready"
+    measured = {o.name for o in outcomes}
+    report["status"] = "blocked"
+    report["blockers"] = (
+        [b for o in outcomes if o.status != "passed" for b in o.blockers]
+        + [
+            c.get("detail") or f"{c['name']} did not pass"
+            for c in unpassed
+            if c["name"] not in measured
+        ]
+        + [f"known defect #{entry['issue']}: {entry['summary']}" for entry in known_defects]
+    )
+    return "blocked"
+
+
 def apply_known_issues(
     staged: Path,
     checked_at: str,
@@ -876,6 +1115,7 @@ def refresh(
     dry_run: bool = False,
     known_issue: list[str] | None = None,
     resolve_known_issue: list[str] | None = None,
+    on_verdict: Callable[[str], None] | None = None,
 ) -> list[str]:
     cfg = BOARDS[board.name]
     with tempfile.TemporaryDirectory(prefix="refresh-readiness-") as tmp:
@@ -891,6 +1131,7 @@ def refresh(
             dry_run=dry_run,
             known_issue=known_issue,
             resolve_known_issue=resolve_known_issue,
+            on_verdict=on_verdict,
         )
 
 
@@ -906,6 +1147,7 @@ def repin_staged(
     known_issue: list[str] | None = None,
     resolve_known_issue: list[str] | None = None,
     after_manifest: Callable[[], None] | None = None,
+    on_verdict: Callable[[str], None] | None = None,
 ) -> list[str]:
     """Gate a staged copy of ``board`` and re-pin its ``readiness.json`` (Issue #7353).
 
@@ -916,7 +1158,7 @@ def repin_staged(
     re-plots).  ``after_manifest`` runs once the manifest has been re-hashed, and
     the manifest is re-hashed again afterwards (the bundle's check report records
     the manifest meta-check).  Returns the paths that were (or, on ``dry_run``,
-    would be) published.
+    would be) published.  ``on_verdict`` receives the receipt's status.
     """
     from kicad_tools.cli.board_readiness import read_readiness
 
@@ -1006,26 +1248,45 @@ def repin_staged(
     )
     log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
 
-    lvs_clean, lvs_mismatches = gate_check(staged, cfg)
+    outcomes: list[GateOutcome] = []
+    if cfg.publish_blocked:
+        process, lvs_clean, lvs_mismatches = gate_check_outcome(staged, cfg)
+        outcomes.append(process)
+    else:
+        lvs_clean, lvs_mismatches = gate_check(staged, cfg)
+    if cfg.tier_check is not None:
+        tier = gate_tier_check(staged, cfg)
+        if tier.status != "passed" and not cfg.publish_blocked:
+            raise GateFailure(tier.detail)
+        outcomes.append(tier)
     routed_pct = gate_net_status(staged, cfg)
     gate_sync(staged, cfg)
 
     report_path = out / "readiness.json"
     report = json.loads(report_path.read_text())
-    measured = {
+    metrics = {
         "drc_violations": drc_errors,
         "nets_routed_pct": routed_pct,
         "lvs_clean": lvs_clean,
         "lvs_mismatches": lvs_mismatches,
     }
-    differs = compare_metrics(report.get("metrics", {}), measured)
+    differs = compare_metrics(report.get("metrics", {}), metrics)
     if differs:
         raise GateFailure(
             f"measured metrics differ from readiness.json: "
-            f"{ {k: (report['metrics'][k], measured[k]) for k in differs} }"
+            f"{ {k: (report['metrics'][k], metrics[k]) for k in differs} }"
         )
-    if report.get("status") != "ready" or report.get("blockers"):
+    status = "ready"
+    if cfg.publish_blocked:
+        # Issue #10662: the measured verdict is published, blocked or ready.
+        status = record_check_outcomes(report, outcomes, recorded_known_issues(staged))
+        if on_verdict is not None:
+            on_verdict(status)
+    elif report.get("status") != "ready" or report.get("blockers"):
         raise GateFailure("readiness.json is not a ready report; refusing to re-pin")
+    if cfg.tier_check is not None:
+        report.setdefault("evidence", {})["tier_check"] = cfg.tier_check
+        report["inputs"].setdefault(cfg.tier_check, "")
 
     if cfg.drc_targets:
         # Issue #7283: record which PCB bytes the report copies were produced
@@ -1059,9 +1320,9 @@ def repin_staged(
     report["checked_at"] = checked_at
     report_path.write_text(json.dumps(report, indent=2) + "\n")
     verdict = read_readiness(staged)
-    if verdict["status"] != "ready":
+    if verdict["status"] != status:
         raise GateFailure(f"staged report does not validate: {verdict['blockers']}")
-    log(f"  read_readiness(staged): ready, metrics {verdict.get('metrics')}")
+    log(f"  read_readiness(staged): {status}, metrics {verdict.get('metrics')}")
 
     new_bundle_files = {p for p in bundle_files if not (board / p.relative_to(staged)).exists()}
     published = sorted(
@@ -1078,12 +1339,12 @@ def repin_staged(
         )
     )
     removed: list[str] = []
-    if known_rel is not None:
-        # The evidence file may be new (not yet in the board) or resolved away.
-        if (staged / known_rel).is_file():
-            if known_rel not in published and not (board / known_rel).is_file():
-                published = sorted([*published, known_rel])
-        elif (board / known_rel).is_file():
+    # Evidence a gate first measured in this run is new to the board.
+    for rel in filter(None, (known_rel, cfg.tier_check)):
+        if (staged / rel).is_file() and not (board / rel).is_file() and rel not in published:
+            published = sorted([*published, rel])
+    if known_rel is not None and not (staged / known_rel).is_file():
+        if (board / known_rel).is_file():
             removed.append(known_rel)
     if not dry_run:
         for name in published:
@@ -1126,6 +1387,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
+class Verdict:
+    """The receipt status one refresh measured (Issue #10662)."""
+
+    status: str = "ready"
+
+    def publish(self, status: str) -> None:
+        self.status = status
+
+
 def _refresh_all(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     status = 0
     for board in args.boards:
@@ -1133,6 +1403,7 @@ def _refresh_all(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
         if board.name not in BOARDS:
             parser.error(f"{board.name}: no refresh configuration (known: {sorted(BOARDS)})")
         log(f"== {board.name}")
+        verdict = Verdict()
         try:
             for name in refresh(
                 board,
@@ -1142,10 +1413,15 @@ def _refresh_all(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
                 dry_run=args.dry_run,
                 known_issue=args.known_issue,
                 resolve_known_issue=args.resolve_known_issue,
+                on_verdict=verdict.publish,
             ):
                 log(f"    {name}")
         except GateFailure as exc:
             log(f"  REFUSED: {exc} -- nothing published for {board.name}")
+            status = 1
+            continue
+        if verdict.status != "ready":
+            log(f"  BLOCKED: {board.name} does not verify ready (exit 1)")
             status = 1
     return status
 

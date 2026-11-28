@@ -2,7 +2,7 @@
 title: "charlieplex_3x3_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.29.0"
-date: "Rev 1 | 2026-11-23 | jlcpcb"
+date: "Rev B | 2026-11-28 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -114,6 +114,11 @@ ATtiny85 Charlieplex LED Grid
 
 **Status**: PASS
 
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| silk_hole_overlap | 5 |
 
 
 

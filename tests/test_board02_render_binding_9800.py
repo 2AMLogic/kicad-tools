@@ -2,15 +2,17 @@
 
 ``boards/02-charlieplex-led/package_release.py`` carries ``renders/``
 forward only while the board content is unchanged from the PCB archived in
-the previous package's ``kicad_project.zip``.  Since the shared silk pass
-(#10001) the committed candidate PCB differs from the ready package's
+the previous package's ``kicad_project.zip``.  After the shared silk pass
+(#10001) the committed candidate PCB differed from the ready package's
 archived PCB by front-silk artwork alone, so the publisher needs a second,
 *changed-artwork* branch: fresh renders ship only when ``kct render`` bound
 them to the checked PCB's bytes through ``renders/render-provenance.json``.
 
-These tests replay that branch KiCad-free over fixture trees shaped like the
-committed board (previous package + candidate PCB + fresh renders), plus the
-committed tree itself.
+That branch published the candidate once the routed project carried the
+reviewed track widths (#10663), so the committed tree now shows the
+published state.  The fixtures below still replay the changed-artwork branch
+KiCad-free over trees shaped like the pre-publication board (previous
+package + candidate PCB + fresh renders).
 """
 
 from __future__ import annotations
@@ -425,20 +427,25 @@ def test_committed_renders_are_bound_to_the_candidate_pcb():
         assert provenance["outputs"][name] == _sha((renders_dir / name).read_bytes())
 
 
-def test_committed_state_exercises_the_changed_artwork_branch():
+def test_committed_package_is_bound_to_the_candidate_pcb():
+    """The shipped package archives the committed candidate and the renders bound to it."""
+    from kicad_tools.export.project_identity import archived_pcb_member
+
     pcb = BOARD / "output" / "charlieplex_3x3_routed.kicad_pcb"
-    with zipfile.ZipFile(BOARD / "output" / "manufacturing" / "kicad_project.zip") as zf:
-        archived = zf.read(pcb.name)
-    assert board_content(archived, ignore=PIN_ANNOTATION_NODES) != board_content(
+    package = BOARD / "output" / "manufacturing"
+    with zipfile.ZipFile(package / "kicad_project.zip") as zf:
+        member = archived_pcb_member(zf.namelist(), pcb)
+        assert member is not None
+        archived = zf.read(member)
+    assert board_content(archived, ignore=PIN_ANNOTATION_NODES) == board_content(
         pcb.read_bytes(), ignore=PIN_ANNOTATION_NODES
     )
-    # The previous ready package stays complete and reviewable on every
-    # refused run (#9800: publication waits on the warning review); its
-    # renders predate the provenance sidecar, which is exactly why the
-    # changed-artwork branch needs a fresh binding.
+    # The binding that admitted the changed artwork travels inside the package.
+    provenance = json.loads((package / "renders" / PROVENANCE).read_text())
+    assert provenance["pcb_sha256"] == _sha(pcb.read_bytes())
     for name in RENDERS:
-        assert (BOARD / "output" / "manufacturing" / "renders" / name).is_file(), name
+        assert _sha((package / "renders" / name).read_bytes()) == provenance["outputs"][name]
     for name in ("README.txt", "manifest.json", "kicad_project.zip"):
-        assert (BOARD / "output" / "manufacturing" / name).is_file(), name
+        assert (package / name).is_file(), name
     assert (BOARD / "output" / "readiness.json").is_file()
     assert (BOARD / "output" / "manufacturing.zip").is_file()

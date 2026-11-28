@@ -90,7 +90,10 @@ def test_committed_copper_carries_only_the_repairable_kinds_and_duplicates():
     exact duplicates ``kct pcb dedupe`` takes off before this repair runs."""
     findings = _findings(PCB.load(BOARD))
     assert findings["redundant_copper_covered"] >= 40
-    assert findings["redundant_copper_staircase"] >= 40
+    # 37 once the corner gate sees a branch landing inside a continuous track
+    # (#10675): a staircase whose only shorter path would tap a straight run at
+    # 45 deg is no longer offered (it was 45 before; PR #10698 review).
+    assert findings["redundant_copper_staircase"] >= 30
     assert set(findings) <= REPAIRED_RULES | {"redundant_copper_duplicate"}
 
 
