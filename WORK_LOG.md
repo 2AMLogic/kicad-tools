@@ -16,6 +16,18 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-28
 
+- **PR #10707**: fix: report sharp_trace_corner junctions as N-way, not N-segment
+- **PR #10686**: docs: describe model selection in the installed workflow skills
+- **PR #10674**: fix(geometry): cut chamfered corners from the shared pad copper outline
+- **PR #10668**: fix(readiness): publish the public verdict for boards with a board-local check
+- **PR #10653**: fix: read a pad-edge-split own-pad entry through its authored continuation
+- **PR #10608**: fix: land named route-link endpoints on the pad copper outline
+- **Issue #10704** (closed): sharp_trace_corner: 'N-segment junction' text now counts directions, not segments
+- **Issue #10681** (closed): Installed help, HV, readiness and tapeout skills point to a missing model hint
+- **Issue #10669** (closed): pad_outline_is_exact() misses a single-corner chamfer, so pad copper is over-reported
+- **Issue #10662** (closed): Board 04 reports ready in fleet status but fails public readiness on the same PCB
+- **Issue #10645** (closed): mask_to_copper reports a new error when a straight own-pad entry is split at the pad edge
+- **Issue #10604** (closed): Default route-link misses a rotated, offset plated source pad
 - **Issue #10627** (closed): Pour completion writes power-plane welds and routed links at the board width instead of their net class width
 - **Issue #10675** (closed): Report acute branches on unsplit same-net tracks in the sharp-corner check
 - **PR #10678**: fix: detect acute branches on continuous copper tracks
