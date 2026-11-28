@@ -16,6 +16,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-28
 
+- **PR #10736**: fix: guard both sharp-corner window edges against 1 nm coordinate rounding
+- **PR #10731**: fix(boards): preserve unchanged Board 04 editable project archives
+- **Issue #10729** (closed): scripts/boards: a forced re-plot republishes Board 04's kicad_project.zip with unchanged members, and report.pdf
+- **Issue #10702** (closed): create-issue.sh fails on every invocation: config-resolver passes a 208 KB config tier as one argv string (E2BIG)
+- **Issue #10696** (closed): Record the first pinned-toolchain --check verdict for every bundle board (live verification for #10692)
+- **Issue #10690** (closed): Sharp-corner window: the 1-degree lower edge and 1 nm coordinate rounding still give host-dependent verdicts
+- **Issue #10689** (closed): Verify the sharp-corner 89-degree boundary fix on macOS arm64 (#10677 acceptance)
 - **Issue #10667** (closed): Board 03: 90 redundant_copper warnings outlive the mask-copper repair and readiness's cleanup, so the reissue cannot reach ready
 - **PR #10698**: feat: add fix-drc --only redundant-copper and run it in the readiness cleanup
 - **PR #10726**: ci(board-05): declare the pour neck in the unattended route
