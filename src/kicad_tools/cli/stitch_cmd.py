@@ -74,6 +74,7 @@ from kicad_tools.sexp.builders import fmt, segment_node, via_node
 
 if TYPE_CHECKING:
     from kicad_tools.analysis.net_status import NetStatus
+    from kicad_tools.validate.mask_geometry import MaskOpening
 
 #: KiCad's board-setup hole-to-copper clearance default, in mm.  Neither the
 #: manufacturer ``DesignRules`` schema nor the generated ``.kicad_pro``
@@ -378,6 +379,9 @@ class TraceSegment:
     intermediate_y: float | None = None
     # For extended escape traces: list of (x, y) waypoints between pad and via
     waypoints: list[tuple[float, float]] | None = None
+
+    # Optional land-edge start for a full-width pour weld.
+    entry: tuple[float, float] | None = None
 
     @property
     def is_dogleg(self) -> bool:
@@ -4503,7 +4507,7 @@ def trace_points(trace: TraceSegment) -> list[tuple[float, float]]:
     its three nominal points), so this is a no-op for them; it only
     guards a hand-built :class:`TraceSegment`.
     """
-    points: list[tuple[float, float]] = [(trace.pad.x, trace.pad.y)]
+    points: list[tuple[float, float]] = [trace.entry or (trace.pad.x, trace.pad.y)]
     if trace.is_extended_escape:
         points.extend(trace.waypoints or [])
     elif trace.is_dogleg:
@@ -4515,6 +4519,32 @@ def trace_points(trace: TraceSegment) -> list[tuple[float, float]]:
         points.append((ix, iy))
     points.append((trace.via_x, trace.via_y))
     return legalize_stub_path(points)
+
+
+def _wide_entry_paths(trace: TraceSegment, land: Any):
+    """Candidate written paths starting inside the landing, leaving the via fixed."""
+    from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
+
+    points = trace_points(trace)
+    if len(points) < 2:
+        return
+    first, second = points[:2]
+    leg = LineString([first, second])
+    # Keep a printed endpoint inside the land even after 0.01 mm rounding.
+    core = land.buffer(-0.02)
+    inside = core.intersection(leg)
+    if inside.geom_type != "LineString" or inside.is_empty or core.covers(Point(second)):
+        return
+    tip = max(inside.coords, key=lambda point: leg.project(Point(point)))
+    dx = (second[0] - first[0]) / leg.length
+    dy = (second[1] - first[1]) / leg.length
+    # Try the centred exit, then move toward either corner. The diagonal
+    # returns to the selected via/path away from the mask opening.
+    printed_core = land.buffer(-0.01)
+    for offset in (0, trace.width / 8, -trace.width / 8, trace.width / 4, -trace.width / 4):
+        entry = _as_written((tip[0] - dy * offset, tip[1] + dx * offset))
+        if printed_core.contains(Point(entry)):
+            yield legalize_stub_path([entry, second], axis_first=True) + points[2:]
 
 
 def add_trace_to_pcb(sexp: SExp, trace: TraceSegment, name_only: bool = False) -> None:
@@ -6643,6 +6673,8 @@ def run_stitch(
     same_net_pad_gap_mm: float = 0.0,
     same_net_trace_gap_mm: float = 0.0,
     fill_verified: bool = False,
+    mask_entry_clearance: float = 0.0,
+    entry_lands: Mapping[tuple[str, str], "MaskOpening"] | None = None,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -6951,9 +6983,21 @@ def run_stitch(
         """Per-pad obstacle pools = pre-existing other-net copper plus the
         pads/drills of SIBLING stitch nets (every target net except the pad's
         own)."""
-        pads_pool = other_net_pads + [p for p in target_pad_circles if p[3] != pad.net_number]
+        protect_openings = bool(entry_lands)
+        pads_pool = other_net_pads + [
+            p
+            for p in target_pad_circles
+            if p[3] != pad.net_number
+            or (protect_openings and math.hypot(p[0] - pad.x, p[1] - pad.y) > 1e-5)
+        ]
         bboxes_pool = other_net_pad_bboxes + [
-            b for b in target_pad_bboxes if b[4] != pad.net_number
+            b
+            for b in target_pad_bboxes
+            if b[4] != pad.net_number
+            or (
+                protect_openings
+                and math.hypot((b[0] + b[2]) / 2 - pad.x, (b[1] + b[3]) / 2 - pad.y) > 1e-5
+            )
         ]
         drills_pool = other_net_drills + [d for d in target_pad_drills if d[3] != pad.net_number]
         return pads_pool, bboxes_pool, drills_pool
@@ -7875,6 +7919,56 @@ def run_stitch(
                 width=trace_width,
                 layer=pad.layer,
             )
+
+        opening = (entry_lands or {}).get((pad_key, pad.layer))
+        if opening is not None and trace.width > min(pad.width, pad.height) + 1e-6:
+            from shapely.geometry import LineString
+
+            from kicad_tools.validate.mask_copper import clean_own_pad_entry
+
+            pads_pool, boxes_pool, _ = _sibling_pools(pad)
+            land = opening.copper
+            for path in (trace_points(trace), *_wide_entry_paths(trace, land)):
+                if len(path) < 2:
+                    continue
+                start, end = path[:2]
+                if not clean_own_pad_entry(
+                    opening.geometry,
+                    LineString([start, end]).buffer(trace.width / 2),
+                    land,
+                    opening.kind,
+                    trace.width,
+                    (start, end),
+                    clearance_mm=mask_entry_clearance,
+                    uncertainty_mm=0.0,
+                    margin_mm=opening.margin_mm,
+                ):
+                    continue
+                if (
+                    len(path) > 2
+                    and LineString(path[1:]).distance(opening.geometry)
+                    < trace.width / 2 + mask_entry_clearance
+                ):
+                    continue
+                if _check_stub_path_clearance(
+                    path,
+                    trace.width / 2,
+                    eff_other_net_tracks,
+                    eff_other_net_vias,
+                    pads_pool,
+                    clearance,
+                    pad_other_fill,
+                    eff_track_index,
+                    stub_layer=trace.layer,
+                    other_net_pad_bboxes=boxes_pool,
+                ) and _keepouts_allow_path(path, trace.width / 2, trace.layer, keepout_polys):
+                    trace.entry = start
+                    trace.intermediate_x = trace.intermediate_y = None
+                    trace.waypoints = path[1:-1]
+                    break
+            else:
+                result.pads_skipped.append((pad, "no clearance-legal full-width pad entry"))
+                continue
 
         # Issue #6684: decide keep-or-drop BEFORE recording anything, so a
         # dropped via never counts as connectivity for a later same-net pad,

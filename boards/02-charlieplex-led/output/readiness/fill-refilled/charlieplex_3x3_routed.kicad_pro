@@ -59,30 +59,7 @@
     "filename": "charlieplex_3x3.kicad_pro",
     "version": 1,
     "manufacturer": "jlcpcb",
-    "kct_router_netclasses": {
-      "classes": [
-        "Audio",
-        "Clock",
-        "Debug",
-        "Digital",
-        "Power"
-      ],
-      "assignments": [
-        "GND",
-        "ISP_SCK",
-        "LINE_A",
-        "LINE_B",
-        "LINE_C",
-        "LINE_D",
-        "NODE_A",
-        "NODE_B",
-        "NODE_C",
-        "NODE_D",
-        "RESET",
-        "VCC"
-      ]
-    },
-    "kct_sidecar_sha256": "5680f7b5919103cdfc4f3448796dce84e262752e6662808aeca48a2277a13056"
+    "kct_sidecar_sha256": "f87673d42924735ccf6e8dfcb936f41815da8040d182db3796f42f6610b50be6"
   },
   "net_settings": {
     "classes": [
@@ -115,7 +92,7 @@
         "name": "Audio",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.127,
+        "track_width": 0.2,
         "via_diameter": 0.6,
         "via_drill": 0.3,
         "wire_width": 6
@@ -132,7 +109,7 @@
         "name": "Clock",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.127,
+        "track_width": 0.2,
         "via_diameter": 0.6,
         "via_drill": 0.3,
         "wire_width": 6
@@ -149,7 +126,7 @@
         "name": "Debug",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.127,
+        "track_width": 0.2,
         "via_diameter": 0.6,
         "via_drill": 0.3,
         "wire_width": 6
@@ -166,7 +143,7 @@
         "name": "Digital",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.127,
+        "track_width": 0.2,
         "via_diameter": 0.6,
         "via_drill": 0.3,
         "wire_width": 6
@@ -183,7 +160,7 @@
         "name": "Power",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.127,
+        "track_width": 0.5,
         "via_diameter": 0.6,
         "via_drill": 0.3,
         "wire_width": 6
@@ -207,7 +184,56 @@
       "RESET": "Debug",
       "VCC": "Power"
     },
-    "netclass_patterns": []
+    "netclass_patterns": [
+      {
+        "netclass": "Audio",
+        "pattern": "LINE_A"
+      },
+      {
+        "netclass": "Audio",
+        "pattern": "LINE_B"
+      },
+      {
+        "netclass": "Audio",
+        "pattern": "LINE_C"
+      },
+      {
+        "netclass": "Audio",
+        "pattern": "LINE_D"
+      },
+      {
+        "netclass": "Clock",
+        "pattern": "ISP_SCK"
+      },
+      {
+        "netclass": "Debug",
+        "pattern": "RESET"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "NODE_A"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "NODE_B"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "NODE_C"
+      },
+      {
+        "netclass": "Digital",
+        "pattern": "NODE_D"
+      },
+      {
+        "netclass": "Power",
+        "pattern": "GND"
+      },
+      {
+        "netclass": "Power",
+        "pattern": "VCC"
+      }
+    ]
   },
   "pcbnew": {
     "last_paths": {
