@@ -137,7 +137,8 @@ def export_strict_preflight_result(
     # Give strict preflight recorded stock for every assigned code in a scratch cache.
     xdg_cache = tmp_path_factory.mktemp("export_strict_preflight_cache")
     _seed_parts_cache(staged_dir, xdg_cache)
-    env = {**os.environ, "XDG_CACHE_HOME": str(xdg_cache)}
+    env = {k: v for k, v in os.environ.items() if k != "KCT_JLCPARTS_CATALOG"}
+    env["XDG_CACHE_HOME"] = str(xdg_cache)
     cmd = [
         sys.executable,
         "-m",
