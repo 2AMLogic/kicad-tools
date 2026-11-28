@@ -279,7 +279,14 @@ def _square_acute_entries(
             continue
         for index, on in enumerate((branch.start, branch.end)):
             via_at = branch.end if index == 0 else branch.start
-            via = next((v for v in vias if math.dist((v.x, v.y), via_at) <= ON_LINE_TOL_MM), None)
+            via = next(
+                (
+                    v
+                    for v in vias
+                    if _spans(v, branch.layer) and math.dist((v.x, v.y), via_at) <= ON_LINE_TOL_MM
+                ),
+                None,
+            )
             if via is None:
                 continue
             others = [item for item in group if item is not leg and not item.drop]
