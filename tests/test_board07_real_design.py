@@ -37,6 +37,193 @@ def test_reviewed_project_keeps_clearance_and_via_floors_when_emitting_factory_r
     assert default["via_drill"] >= 0.2
 
 
+BOARD = ROOT.parent
+ROUTED = BOARD / "output/matchgroup_test_routed.kicad_pcb"
+#: The reviewed class of every net the sidecar declares (Issue #10451), and
+#: the one width every class is reviewed at.  ``apply_router_netclasses``
+#: clones ``Default`` for each router class and overrides only its name and
+#: clearance, so the authored ``Default`` width is what the classes resolve
+#: to: the project, the sidecar and the copper must agree on it.
+REVIEWED_WIDTH_MM = 0.18
+REVIEWED_CLASSES = {
+    "SDRAM_BYTE0": (*(f"DQ{i}" for i in range(8)), "LDQM"),
+    "SDRAM_BYTE1": (*(f"DQ{i}" for i in range(8, 16)), "UDQM"),
+    "SDRAM_ADDRESS": (*(f"A{i}" for i in range(12)), "BA0", "BA1"),
+    "SDRAM_COMMAND": ("SDNWE", "SDNRAS", "SDNCAS", "SDNE1", "SDCKE1", "SDCLK"),
+    "SWD_CLOCK": ("SWCLK",),
+    "AUX": (
+        "+5V",
+        "+3V3",
+        "+3V3_A",
+        "GND",
+        "VCAP1",
+        "VCAP2",
+        "BOOT0",
+        "NRST",
+        "SWDIO",
+        "SWO",
+        "UART_TX",
+        "UART_RX",
+        "LED_PASS",
+        "LED_PASS_A",
+        "LED_FAIL",
+        "LED_FAIL_A",
+    ),
+}
+
+
+def _sidecar():
+    """The sidecar the validator checks under, resolved onto board net names."""
+    import json
+
+    from kicad_tools.router.rules import net_class_map_from_dict
+
+    sidecar = ROOT / "authored-source/net_class_map.json"
+    return net_class_map_from_dict(json.loads(sidecar.read_text()))
+
+
+def _stage_reviewed_rules(tmp_path):
+    """``validate.check``'s first write: the routed candidate under the authored project."""
+    import shutil
+
+    candidate = tmp_path / "checked.kicad_pcb"
+    shutil.copy2(ROUTED, candidate)
+    authored = ROOT / "authored-source/sdram_demo.kicad_pro"
+    shutil.copy2(authored, candidate.with_suffix(".kicad_pro"))
+    validate = load("validate")
+    validate.write_reviewed_rules(candidate, ROOT / "authored-source/net_class_map.json")
+    return validate, candidate
+
+
+def test_reviewed_widths_resolve_before_the_first_zone_fill(tmp_path):
+    import json
+
+    import pytest
+
+    from kicad_tools.core.project_clearance import authored_netclass_widths
+    from kicad_tools.schema.pcb import PCB
+
+    validate, candidate = _stage_reviewed_rules(tmp_path)
+    sidecar = _sidecar()
+    members = sorted(net for nets in REVIEWED_CLASSES.values() for net in nets)
+    assert sorted(sidecar) == members
+    project = json.loads(candidate.with_suffix(".kicad_pro").read_text())
+    widths = authored_netclass_widths(
+        project, [net.name for net in PCB.load(candidate).nets.values()]
+    )
+    for net, entry in sidecar.items():
+        reviewed = next(name for name, nets in REVIEWED_CLASSES.items() if net in nets)
+        assert entry.name == reviewed
+        assert entry.trace_width == REVIEWED_WIDTH_MM
+        # No pad escape narrows below its class, so none declares a neck.
+        assert entry.neck_trace_width is None
+        assert widths[net].source_class == reviewed
+        assert widths[net].width == pytest.approx(REVIEWED_WIDTH_MM)
+    assert validate.class_width_errors(candidate, sidecar) == []
+    # The published routed sidecars are these same rules (refresh_bundles_6404
+    # refuses evidence checked under any other).
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        assert candidate.with_suffix(suffix).read_bytes() == ROUTED.with_suffix(suffix).read_bytes()
+
+
+def test_reviewed_widths_survive_constraint_re_emission(tmp_path):
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.manufacturers.project_generator import (
+        dedupe_net_classes,
+        write_drc_constraints,
+    )
+
+    validate, candidate = _stage_reviewed_rules(tmp_path)
+    written = {
+        suffix: candidate.with_suffix(suffix).read_bytes()
+        for suffix in (".kicad_pro", ".kicad_dru")
+    }
+    # The later ``kct check --emit-drc-constraints`` write, on the validated fill.
+    write_drc_constraints(
+        candidate,
+        get_profile("jlcpcb").get_design_rules(layers=6),
+        manufacturer_id="jlcpcb",
+        layers=6,
+        write_dru=True,
+        net_classes=dedupe_net_classes(
+            validate.router_net_classes(candidate, ROOT / "authored-source/net_class_map.json")
+        ),
+    )
+    for suffix, data in written.items():
+        assert candidate.with_suffix(suffix).read_bytes() == data
+    assert validate.class_width_errors(candidate, _sidecar()) == []
+
+
+def test_class_width_errors_name_the_net_whose_class_width_drifted(tmp_path):
+    from kicad_tools.router.rules import NetClassRouting
+
+    validate, candidate = _stage_reviewed_rules(tmp_path)
+    sidecar = _sidecar()
+    drifted = dict(sidecar, GND=NetClassRouting(name="AUX", trace_width=0.2))
+    assert validate.class_width_errors(candidate, drifted) == [
+        "GND: project class 'AUX' track_width 0.180mm but the sidecar declares 0.200mm"
+    ]
+    assert validate.class_width_errors(candidate, {}) == []
+
+
+def test_committed_copper_meets_its_reviewed_class_width():
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.base import DRC_TOLERANCE
+    from kicad_tools.validate.rules.netclass_agreement import (
+        NETCLASS_AGREEMENT_RULE_IDS,
+        check_netclass_agreement,
+    )
+
+    sidecar = _sidecar()
+    pcb = PCB.load(ROUTED)
+    results = check_netclass_agreement(ROUTED, pcb, sidecar)
+    assert results.violations == []
+    assert set(results.rules_checked_by_rule) == set(NETCLASS_AGREEMENT_RULE_IDS)
+    names = {number: net.name for number, net in pcb.nets.items()}
+    bus = {net for name, nets in REVIEWED_CLASSES.items() if name != "AUX" for net in nets}
+    widths = set()
+    for segment in (*pcb.segments, *pcb.arcs):
+        name = names.get(segment.net_number)
+        if name in sidecar:
+            assert segment.width + DRC_TOLERANCE >= sidecar[name].trace_width, name
+            if name in bus:
+                assert segment.width == REVIEWED_WIDTH_MM
+            else:
+                # The 0.200 mm AUX links are wider than their class, never narrower.
+                widths.add(segment.width)
+    assert widths == {0.18, 0.2}
+
+
+def test_agreement_rule_flags_a_narrow_trunk_segment(tmp_path):
+    """A too-narrow non-escape segment must fail the agreement rule (Issue #10451)."""
+    import re
+    import shutil
+
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.netclass_agreement import (
+        RULE_TRACK_WIDTH_MISMATCH,
+        check_netclass_agreement,
+    )
+
+    sidecar = _sidecar()
+    assert sidecar["DQ0"].neck_trace_width is None
+    narrowed = tmp_path / "checked.kicad_pcb"
+    shutil.copy2(ROUTED, narrowed)
+    shutil.copy2(ROUTED.with_suffix(".kicad_pro"), narrowed.with_suffix(".kicad_pro"))
+    text, count = re.subn(
+        r'(\(segment\s+\(start [^)]+\)\s+\(end [^)]+\)\s+\(width )0\.18(\)\s+\(layer "In2\.Cu"\)\s+\(net "DQ0"\))',
+        r"\g<1>0.16\g<2>",
+        narrowed.read_text(),
+        count=1,
+    )
+    assert count == 1
+    narrowed.write_text(text)
+    results = check_netclass_agreement(narrowed, PCB.load(narrowed), sidecar)
+    assert [v.rule_id for v in results.violations] == [RULE_TRACK_WIDTH_MISMATCH]
+    assert results.violations[0].nets == ("DQ0",)
+    assert "narrowest 0.160mm" in results.violations[0].message
+
+
 def test_clock_relative_budget_cannot_hide_behind_individually_matched_groups():
     validate = load("validate")
     constraints = {

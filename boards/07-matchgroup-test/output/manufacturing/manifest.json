@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.29.0",
-  "generated_at": "2026-11-22T22:26:11+00:00",
+  "generated_at": "2026-11-26T21:43:48+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "README.txt": {
@@ -9,11 +9,11 @@
       "size": 2462
     },
     "assembly-back.pdf": {
-      "sha256": "a9c1b81c64ef0bc090f2de93a1db881e49273897d87a0732b126fd186f7ce6b8",
+      "sha256": "90816fd86f2d3ca6352921dd49f4a12664eb9e54b1d98b9a4ad343e55e6efbca",
       "size": 73690
     },
     "assembly-front.pdf": {
-      "sha256": "9e15b2affde8e67bbcdbd3a0da86a6ae3d69a052a45c10f733000921485c4b66",
+      "sha256": "3d2c4fe3f37807c3583466fe8bdc8ff5b2923e6695dbc692fc64f3f3c1f81832",
       "size": 102558
     },
     "bom_jlcpcb.csv": {
@@ -21,16 +21,16 @@
       "size": 1079
     },
     "check-report.json": {
-      "sha256": "53ab896837403c52864b4a43615dc11fa015a055340223a4764b055d5e480c10",
-      "size": 2158392
+      "sha256": "04ea3f31ad02965fb4edf941815abacec06ca622e9d30cab2410f6661e135287",
+      "size": 2376092
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "7a368280866bb60d701da97927018ea1483b2660ba49ee58794951a3277304e8",
+      "sha256": "f31483ec5d24ceef3208334eb783590d09ac05f2e6ce37cfc85e114d0ae4d6a7",
       "size": 3356
     },
     "design-source.zip": {
-      "sha256": "721150898a4a0b353ffcb4aacb9b15517d45dd4749e9112b38f38fc183d7ab19",
-      "size": 1055816
+      "sha256": "98c274c85dd9d112742c2b3c89650e7adef31f82b5d77329b8948d531f2aec90",
+      "size": 1075894
     },
     "engineering/README.md": {
       "sha256": "01d740ab03c93becd281066b1141366ad00287c0e91725e1eca6bf843876ec0e",
@@ -173,8 +173,8 @@
       "size": 2237
     },
     "gerbers/gerbers.zip": {
-      "sha256": "404b52097e327f04cf8e71ea6d718cfe5bf8f20122fb18281b2ecd3447bafbb8",
-      "size": 149336
+      "sha256": "4a00ef08b3409d2a249dc16280bbe34df24d76017500adcee54d88c6db1a6c25",
+      "size": 149334
     },
     "images/assembly.png": {
       "sha256": "c96b9a351d57295ee65116ae6033f032f8aa76e3b8239b5f2e554e89570d110f",
@@ -217,12 +217,12 @@
       "size": 412385
     },
     "images/schematic_matchgroup_test.png": {
-      "sha256": "359cd1772fb3bd8ec0443518f3406ce0cae7e4a05027137dfc06c03c1ccaad5c",
-      "size": 394937
+      "sha256": "d75f45309823f99362d959e33ec21561dd077624b645238241cd26f446546381",
+      "size": 394913
     },
     "kicad_project.zip": {
-      "sha256": "e1c15c18c729c8aadae9c323874012f2e7d49ef5ae701acf774eee3e6509eacc",
-      "size": 239594
+      "sha256": "92a8e566716a0fee77544e36e02d9ca00982904b29ef8e6db7fa68a4f794c677",
+      "size": 240302
     },
     "lvs.json": {
       "sha256": "590e87395d997669151b91020f3a030c33cd470fb216132160e7144ff711fc4d",
@@ -237,24 +237,24 @@
       "size": 988
     },
     "procurement-review.md": {
-      "sha256": "e25ef62423d3e8cd477799b215a7d787c40ff9f1fb88626f690e156372fa7457",
-      "size": 11717
+      "sha256": "d8a3314112eee7312d0e2a04bbf107890405b900f00140fa7da42ae6231f7f48",
+      "size": 12653
     },
     "procurement.json": {
       "sha256": "bf93404c4f9bbcb5f1ec27ed6457cef9b455d01d1615809763c74a378a53509d",
       "size": 5172
     },
     "report.md": {
-      "sha256": "066d6d6d2152591ef4ee7ea23eb0686209cf19bee69b9754fbc3dd3570c9b0ef",
+      "sha256": "74259eaf4f7b59445d15b5beea58236c8812a6ff26cca1736380fbf86f0dc352",
       "size": 4678
     },
     "report.pdf": {
-      "sha256": "b6c2d2f5b193c38343299f179de4a699c0fc3af5d8672fc055e0f3aa22f282cc",
-      "size": 3841813
+      "sha256": "132c7f685fb6153160f3ac81c3084e0fedd37f7d4443abe51cebc3e0832dac41",
+      "size": 3888929
     },
     "schematic.pdf": {
-      "sha256": "88a25aa7dd761729bc7d897d8fbfacc50bf7754a04ad8233111550e8f223eb97",
-      "size": 196313
+      "sha256": "027f188db009be4db331007ea9982e48180457e867ac30eac21c8aef385d4ea8",
+      "size": 196679
     }
   },
   "board": {
@@ -299,6 +299,156 @@
       "message": "Drill holes present (213 vias, 11 TH pads)"
     },
     {
+      "name": "assembly_lead_fit",
+      "status": "WARN",
+      "message": "Through-hole lead fit unverified: 11 pad(s) unassessed (no verified lead dimensions or unsupported geometry); no failures",
+      "details": "J1 pad 1 [B-2100S02P-A110]: unassessed: no verified lead dimensions declared for pad 1 of B-2100S02P-A110\nJ1 pad 2 [B-2100S02P-A110]: unassessed: no verified lead dimensions declared for pad 2 of B-2100S02P-A110\nJ2 pad 1 [2.54-1x6P]: unassessed: no verified lead dimensions declared for pad 1 of 2.54-1x6P\nJ2 pad 2 [2.54-1x6P]: unassessed: no verified lead dimensions declared for pad 2 of 2.54-1x6P\nJ2 pad 3 [2.54-1x6P]: unassessed: no verified lead dimensions declared for pad 3 of 2.54-1x6P\nJ2 pad 4 [2.54-1x6P]: unassessed: no verified lead dimensions declared for pad 4 of 2.54-1x6P\nJ2 pad 5 [2.54-1x6P]: unassessed: no verified lead dimensions declared for pad 5 of 2.54-1x6P\nJ2 pad 6 [2.54-1x6P]: unassessed: no verified lead dimensions declared for pad 6 of 2.54-1x6P\nJ3 pad 1 [2.54-1*3P]: unassessed: no verified lead dimensions declared for pad 1 of 2.54-1*3P\nJ3 pad 2 [2.54-1*3P]: unassessed: no verified lead dimensions declared for pad 2 of 2.54-1*3P\nJ3 pad 3 [2.54-1*3P]: unassessed: no verified lead dimensions declared for pad 3 of 2.54-1*3P\nAssessment covers centred geometric fit only (not lead pitch or placement tolerances).",
+      "data": {
+        "pads": [
+          {
+            "reference": "J1",
+            "pad": "1",
+            "mpn": "B-2100S02P-A110",
+            "hole": {
+              "shape": "round",
+              "diameter_mm": 1.0
+            },
+            "lead": null,
+            "status": "unassessed",
+            "reason": "no verified lead dimensions declared for pad 1 of B-2100S02P-A110"
+          },
+          {
+            "reference": "J1",
+            "pad": "2",
+            "mpn": "B-2100S02P-A110",
+            "hole": {
+              "shape": "round",
+              "diameter_mm": 1.0
+            },
+            "lead": null,
+            "status": "unassessed",
+            "reason": "no verified lead dimensions declared for pad 2 of B-2100S02P-A110"
+          },
+          {
+            "reference": "J2",
+            "pad": "1",
+            "mpn": "2.54-1x6P",
+            "hole": {
+              "shape": "round",
+              "diameter_mm": 1.0
+            },
+            "lead": null,
+            "status": "unassessed",
+            "reason": "no verified lead dimensions declared for pad 1 of 2.54-1x6P"
+          },
+          {
+            "reference": "J2",
+            "pad": "2",
+            "mpn": "2.54-1x6P",
+            "hole": {
+              "shape": "round",
+              "diameter_mm": 1.0
+            },
+            "lead": null,
+            "status": "unassessed",
+            "reason": "no verified lead dimensions declared for pad 2 of 2.54-1x6P"
+          },
+          {
+            "reference": "J2",
+            "pad": "3",
+            "mpn": "2.54-1x6P",
+            "hole": {
+              "shape": "round",
+              "diameter_mm": 1.0
+            },
+            "lead": null,
+            "status": "unassessed",
+            "reason": "no verified lead dimensions declared for pad 3 of 2.54-1x6P"
+          },
+          {
+            "reference": "J2",
+            "pad": "4",
+            "mpn": "2.54-1x6P",
+            "hole": {
+              "shape": "round",
+              "diameter_mm": 1.0
+            },
+            "lead": null,
+            "status": "unassessed",
+            "reason": "no verified lead dimensions declared for pad 4 of 2.54-1x6P"
+          },
+          {
+            "reference": "J2",
+            "pad": "5",
+            "mpn": "2.54-1x6P",
+            "hole": {
+              "shape": "round",
+              "diameter_mm": 1.0
+            },
+            "lead": null,
+            "status": "unassessed",
+            "reason": "no verified lead dimensions declared for pad 5 of 2.54-1x6P"
+          },
+          {
+            "reference": "J2",
+            "pad": "6",
+            "mpn": "2.54-1x6P",
+            "hole": {
+              "shape": "round",
+              "diameter_mm": 1.0
+            },
+            "lead": null,
+            "status": "unassessed",
+            "reason": "no verified lead dimensions declared for pad 6 of 2.54-1x6P"
+          },
+          {
+            "reference": "J3",
+            "pad": "1",
+            "mpn": "2.54-1*3P",
+            "hole": {
+              "shape": "round",
+              "diameter_mm": 1.0
+            },
+            "lead": null,
+            "status": "unassessed",
+            "reason": "no verified lead dimensions declared for pad 1 of 2.54-1*3P"
+          },
+          {
+            "reference": "J3",
+            "pad": "2",
+            "mpn": "2.54-1*3P",
+            "hole": {
+              "shape": "round",
+              "diameter_mm": 1.0
+            },
+            "lead": null,
+            "status": "unassessed",
+            "reason": "no verified lead dimensions declared for pad 2 of 2.54-1*3P"
+          },
+          {
+            "reference": "J3",
+            "pad": "3",
+            "mpn": "2.54-1*3P",
+            "hole": {
+              "shape": "round",
+              "diameter_mm": 1.0
+            },
+            "lead": null,
+            "status": "unassessed",
+            "reason": "no verified lead dimensions declared for pad 3 of 2.54-1*3P"
+          }
+        ],
+        "summary": {
+          "pads": 11,
+          "failed": 0,
+          "unassessed": 11,
+          "tolerance_unassessed": 0,
+          "finished_hole_tolerance_mm": null,
+          "finished_hole_tolerance_source": null
+        }
+      }
+    },
+    {
       "name": "stackup_copper",
       "status": "OK",
       "message": "Stackup copper matches the jlcpcb order (outer 1 oz, inner 0.5 oz)"
@@ -328,40 +478,19 @@
     },
     {
       "name": "bom_lcsc_values",
-      "status": "OK",
-      "message": "43 of 43 assigned item(s) verified against offline catalog and parts cache; no LCSC value/package mismatches"
+      "status": "WARN",
+      "message": "23 of 43 assigned item(s) verified (parts cache); 20 unverifiable (not in parts cache or offline catalog)",
+      "details": "unverified: U1 -> C84808, U2 -> C17216754, U3 -> C51118, J1 -> C124375, J2 -> C37208, J3 -> C49257, C20 -> C1705, C21 -> C1705 (and 12 more)"
     },
     {
       "name": "bom_lcsc_stock",
       "status": "OK",
-      "message": "17 LCSC part(s) have recorded stock for 5 board(s)",
+      "message": "2 LCSC part(s) have recorded stock for 5 board(s)",
       "data": {
         "order_boards": 5,
         "inventory_covered": [],
         "strict": true,
         "parts": [
-          {
-            "lcsc": "C124375",
-            "refs": [
-              "J1"
-            ],
-            "per_board": 1,
-            "stock": 88986,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
-          },
-          {
-            "lcsc": "C125094",
-            "refs": [
-              "D1"
-            ],
-            "per_board": 1,
-            "stock": 82942,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
-          },
           {
             "lcsc": "C14663",
             "refs": [
@@ -388,79 +517,10 @@
               "C9"
             ],
             "per_board": 21,
-            "stock": 53657540,
-            "verified": false,
+            "stock": 42354855,
+            "verified": true,
             "source": "live",
-            "age_days": 1
-          },
-          {
-            "lcsc": "C15849",
-            "refs": [
-              "C23"
-            ],
-            "per_board": 1,
-            "stock": 13131967,
-            "verified": false,
-            "source": "live",
-            "age_days": 16
-          },
-          {
-            "lcsc": "C1589",
-            "refs": [
-              "C29",
-              "C30"
-            ],
-            "per_board": 2,
-            "stock": 1517641,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
-          },
-          {
-            "lcsc": "C1705",
-            "refs": [
-              "C20",
-              "C21"
-            ],
-            "per_board": 2,
-            "stock": 1734642,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
-          },
-          {
-            "lcsc": "C17216754",
-            "refs": [
-              "U2"
-            ],
-            "per_board": 1,
-            "stock": 54,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
-          },
-          {
-            "lcsc": "C19702",
-            "refs": [
-              "C26",
-              "C27"
-            ],
-            "per_board": 2,
-            "stock": 10061272,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
-          },
-          {
-            "lcsc": "C21189",
-            "refs": [
-              "R1"
-            ],
-            "per_board": 1,
-            "stock": 19226360,
-            "verified": false,
-            "source": "live",
-            "age_days": 16
+            "age_days": 0
           },
           {
             "lcsc": "C21190",
@@ -469,92 +529,33 @@
               "R5"
             ],
             "per_board": 2,
-            "stock": 40918095,
-            "verified": false,
+            "stock": 37696256,
+            "verified": true,
             "source": "live",
-            "age_days": 1
-          },
-          {
-            "lcsc": "C23630",
-            "refs": [
-              "C24",
-              "C25"
-            ],
-            "per_board": 2,
-            "stock": 2363695,
-            "verified": false,
-            "source": "live",
-            "age_days": 16
-          },
-          {
-            "lcsc": "C25804",
-            "refs": [
-              "R2",
-              "R3"
-            ],
-            "per_board": 2,
-            "stock": 32380385,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
-          },
-          {
-            "lcsc": "C37208",
-            "refs": [
-              "J2"
-            ],
-            "per_board": 1,
-            "stock": 279306,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
-          },
-          {
-            "lcsc": "C49257",
-            "refs": [
-              "J3"
-            ],
-            "per_board": 1,
-            "stock": 253882,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
-          },
-          {
-            "lcsc": "C51118",
-            "refs": [
-              "U3"
-            ],
-            "per_board": 1,
-            "stock": 10752,
-            "verified": false,
-            "source": "live",
-            "age_days": 12
-          },
-          {
-            "lcsc": "C84808",
-            "refs": [
-              "U1"
-            ],
-            "per_board": 1,
-            "stock": 7,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
-          },
-          {
-            "lcsc": "C94869",
-            "refs": [
-              "D2"
-            ],
-            "per_board": 1,
-            "stock": 275662,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
+            "age_days": 0
           }
         ],
-        "unresolved": []
+        "unresolved": [
+          "C124375",
+          "C125094",
+          "C15849",
+          "C1589",
+          "C1705",
+          "C17216754",
+          "C19702",
+          "C21189",
+          "C23630",
+          "C25804",
+          "C37208",
+          "C49257",
+          "C51118",
+          "C84808",
+          "C94869"
+        ],
+        "sources": {
+          "parts_cache": "hit",
+          "offline_catalog": "missing"
+        }
       }
     },
     {

@@ -373,6 +373,11 @@ def router_net_classes(board_path: Path, net_class_map: Path) -> dict:
     against the fab floor alone leaves saved fills that fail native DRC
     without ``--refill-zones``.  Kept in step with
     ``scripts/boards/declare_router_netclasses_6390.py:router_net_class_map``.
+
+    A declared class takes its ``track_width`` from the project's ``Default``
+    class (Issue #10451), so the authored ``Default`` width is the reviewed
+    width every sidecar ``trace_width`` names; :func:`class_width_errors`
+    checks the two agree.
     """
     from kicad_tools.manufacturers.project_generator import board_net_names
     from kicad_tools.router.net_class import classify_and_apply_rules
@@ -386,15 +391,62 @@ def router_net_classes(board_path: Path, net_class_map: Path) -> dict:
     return effective
 
 
-def write_reviewed_rules(board_path: Path, net_class_map: Path) -> None:
-    """Declare the six-layer production rules used for native fill and DRC."""
+def write_reviewed_rules(board_path: Path, net_class_map: Path) -> dict:
+    """Declare the six-layer production rules used for native fill and DRC.
+
+    Returns the router's effective class map the rules were written under.
+    """
+    effective = router_net_classes(board_path, net_class_map)
     write_drc_constraints(
         board_path,
         get_profile("jlcpcb").get_design_rules(layers=6),
         manufacturer_id="jlcpcb",
         layers=6,
-        router_net_classes=router_net_classes(board_path, net_class_map),
+        router_net_classes=effective,
     )
+    return effective
+
+
+def class_width_errors(board_path: Path, net_class_map: dict) -> list[str]:
+    """Nets whose written project class disagrees with the routing sidecar (Issue #10451).
+
+    ``apply_router_netclasses`` clones ``Default`` for every router class and
+    overrides only its name and clearance, so each class resolves to the
+    ``track_width`` the authored project gives ``Default``.  ``kct check``'s
+    ``netclass_agreement`` rule warns once per net when that width or class
+    differs from the sidecar, which fails the zero-warning design gate only
+    after the native refill has run.  Resolving the same netclass assignments
+    here names the drift before any native step.
+    """
+    from kicad_tools.core.project_clearance import authored_netclass_widths
+    from kicad_tools.manufacturers.project_generator import board_net_names
+    from kicad_tools.validate.rules.base import DRC_TOLERANCE
+
+    # The effective map also carries the router's defaults for nets this
+    # board does not have; only its own nets are declared.
+    nets = board_net_names(board_path) or set()
+    declared = {net: routing for net, routing in net_class_map.items() if net in nets}
+    if not declared:
+        return []
+    try:
+        project = json.loads(board_path.with_suffix(".kicad_pro").read_text())
+        widths = authored_netclass_widths(project, declared)
+    except (OSError, ValueError) as error:
+        return [f"Project net classes cannot be resolved: {error}"]
+    errors = []
+    for net, routing in sorted(declared.items()):
+        resolved = widths.get(net)
+        if resolved is None or resolved.source_class != routing.name:
+            source = resolved.source_class if resolved else "Default"
+            errors.append(
+                f"{net}: project resolves {source!r} but the sidecar declares {routing.name!r}"
+            )
+        elif abs(resolved.width - routing.trace_width) > DRC_TOLERANCE:
+            errors.append(
+                f"{net}: project class {resolved.source_class!r} track_width {resolved.width:.3f}mm "
+                f"but the sidecar declares {routing.trace_width:.3f}mm"
+            )
+    return errors
 
 
 def kct_design_gate_passes(report: dict, returncode: int, manifest_present: bool) -> bool:
@@ -480,7 +532,11 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
     # Fill with the final native project AND custom rules before any copper
     # measurements. A later .dru clearance can change plane fills even when
     # the project minima are preserved (#5023).
-    write_reviewed_rules(board_path, source / "net_class_map.json")
+    # The refill below and the shipped sidecars must resolve the reviewed
+    # class widths; name any drift before the native steps (Issue #10451).
+    errors = class_width_errors(
+        board_path, write_reviewed_rules(board_path, source / "net_class_map.json")
+    )
     subprocess.run(
         [
             "kicad-cli",
@@ -518,7 +574,7 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
         subprocess.run(refill, check=True, timeout=120)
     native = json.loads((evidence / "native-drc.json").read_text())
     erc = json.loads((evidence / "erc.json").read_text())
-    errors = [
+    errors += [
         f"Native DRC: {v['description']}" for v in native["violations"] if v["severity"] == "error"
     ]
     errors.extend(f"Native open: {v['description']}" for v in native["unconnected_items"])

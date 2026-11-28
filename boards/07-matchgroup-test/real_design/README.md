@@ -101,6 +101,12 @@ all vias are ordinary 0.5/0.2 mm full-span through vias. Native project rules
 remain the acceptance floor. The project sets `KCT_PRESERVE_BOARD_RULES=1`
 so constraint emission retains its 0.15 mm clearance and 0.5/0.2 mm via rules;
 lower factory capability values must not change reviewed plane fills (#5023).
+Every net class is reviewed at 0.18 mm: the project's `Default` track width,
+which the router classes the rule writer declares inherit, and every
+`trace_width` in the routing sidecar say so. The validator names any net
+whose written project class resolves to another width before it fills zones
+(Issue #10451; see
+[reviewed class widths](reviewed-routing/README.md#reviewed-class-widths-issue-10451)).
 The source preserves 25 capacitors on the back,
 including local VCAP decoupling and two 10 nF interplane capacitors. Assembly
 requires both sides and manual insertion of three through-hole headers.

@@ -59,6 +59,228 @@
     "filename": "sdram_demo",
     "version": 1,
     "manufacturer": "jlcpcb",
+    "kct_netclass_patterns": {
+      "+3V3": {
+        "netclass": "AUX",
+        "pattern": "^\\x2B3V3\\z$"
+      },
+      "+3V3_A": {
+        "netclass": "AUX",
+        "pattern": "^\\x2B3V3_A\\z$"
+      },
+      "+5V": {
+        "netclass": "AUX",
+        "pattern": "^\\x2B5V\\z$"
+      },
+      "A0": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A0"
+      },
+      "A1": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A1"
+      },
+      "A10": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A10"
+      },
+      "A11": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A11"
+      },
+      "A2": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A2"
+      },
+      "A3": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A3"
+      },
+      "A4": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A4"
+      },
+      "A5": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A5"
+      },
+      "A6": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A6"
+      },
+      "A7": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A7"
+      },
+      "A8": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A8"
+      },
+      "A9": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A9"
+      },
+      "BA0": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "BA0"
+      },
+      "BA1": {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "BA1"
+      },
+      "BOOT0": {
+        "netclass": "AUX",
+        "pattern": "BOOT0"
+      },
+      "DQ0": {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ0"
+      },
+      "DQ1": {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ1"
+      },
+      "DQ10": {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ10"
+      },
+      "DQ11": {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ11"
+      },
+      "DQ12": {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ12"
+      },
+      "DQ13": {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ13"
+      },
+      "DQ14": {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ14"
+      },
+      "DQ15": {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ15"
+      },
+      "DQ2": {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ2"
+      },
+      "DQ3": {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ3"
+      },
+      "DQ4": {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ4"
+      },
+      "DQ5": {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ5"
+      },
+      "DQ6": {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ6"
+      },
+      "DQ7": {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ7"
+      },
+      "DQ8": {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ8"
+      },
+      "DQ9": {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ9"
+      },
+      "GND": {
+        "netclass": "AUX",
+        "pattern": "GND"
+      },
+      "LDQM": {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "LDQM"
+      },
+      "LED_FAIL": {
+        "netclass": "AUX",
+        "pattern": "LED_FAIL"
+      },
+      "LED_FAIL_A": {
+        "netclass": "AUX",
+        "pattern": "LED_FAIL_A"
+      },
+      "LED_PASS": {
+        "netclass": "AUX",
+        "pattern": "LED_PASS"
+      },
+      "LED_PASS_A": {
+        "netclass": "AUX",
+        "pattern": "LED_PASS_A"
+      },
+      "NRST": {
+        "netclass": "AUX",
+        "pattern": "NRST"
+      },
+      "SDCKE1": {
+        "netclass": "SDRAM_COMMAND",
+        "pattern": "SDCKE1"
+      },
+      "SDCLK": {
+        "netclass": "SDRAM_COMMAND",
+        "pattern": "SDCLK"
+      },
+      "SDNCAS": {
+        "netclass": "SDRAM_COMMAND",
+        "pattern": "SDNCAS"
+      },
+      "SDNE1": {
+        "netclass": "SDRAM_COMMAND",
+        "pattern": "SDNE1"
+      },
+      "SDNRAS": {
+        "netclass": "SDRAM_COMMAND",
+        "pattern": "SDNRAS"
+      },
+      "SDNWE": {
+        "netclass": "SDRAM_COMMAND",
+        "pattern": "SDNWE"
+      },
+      "SWCLK": {
+        "netclass": "SWD_CLOCK",
+        "pattern": "SWCLK"
+      },
+      "SWDIO": {
+        "netclass": "AUX",
+        "pattern": "SWDIO"
+      },
+      "SWO": {
+        "netclass": "AUX",
+        "pattern": "SWO"
+      },
+      "UART_RX": {
+        "netclass": "AUX",
+        "pattern": "UART_RX"
+      },
+      "UART_TX": {
+        "netclass": "AUX",
+        "pattern": "UART_TX"
+      },
+      "UDQM": {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "UDQM"
+      },
+      "VCAP1": {
+        "netclass": "AUX",
+        "pattern": "VCAP1"
+      },
+      "VCAP2": {
+        "netclass": "AUX",
+        "pattern": "VCAP2"
+      }
+    },
     "kct_router_netclasses": {
       "classes": [
         "AUX",
@@ -126,7 +348,7 @@
         "VCAP2"
       ]
     },
-    "kct_sidecar_sha256": "6c786fa8bf6184808acda14854eefe465e23ea0e7ac0e4f48fd8b6dbafd892c3"
+    "kct_sidecar_sha256": "123e089d819ef81e5216049052c1391683b0284a7701b307ceeb251c12ab0711"
   },
   "net_settings": {
     "classes": [
@@ -142,7 +364,7 @@
         "name": "Default",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.16,
+        "track_width": 0.18,
         "via_diameter": 0.5,
         "via_drill": 0.2,
         "wire_width": 6
@@ -159,7 +381,7 @@
         "name": "AUX",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.16,
+        "track_width": 0.18,
         "via_diameter": 0.5,
         "via_drill": 0.2,
         "wire_width": 6
@@ -176,7 +398,7 @@
         "name": "SDRAM_ADDRESS",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.16,
+        "track_width": 0.18,
         "via_diameter": 0.5,
         "via_drill": 0.2,
         "wire_width": 6
@@ -193,7 +415,7 @@
         "name": "SDRAM_BYTE0",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.16,
+        "track_width": 0.18,
         "via_diameter": 0.5,
         "via_drill": 0.2,
         "wire_width": 6
@@ -210,7 +432,7 @@
         "name": "SDRAM_BYTE1",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.16,
+        "track_width": 0.18,
         "via_diameter": 0.5,
         "via_drill": 0.2,
         "wire_width": 6
@@ -227,7 +449,7 @@
         "name": "SDRAM_COMMAND",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.16,
+        "track_width": 0.18,
         "via_diameter": 0.5,
         "via_drill": 0.2,
         "wire_width": 6
@@ -244,7 +466,7 @@
         "name": "SWD_CLOCK",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.16,
+        "track_width": 0.18,
         "via_diameter": 0.5,
         "via_drill": 0.2,
         "wire_width": 6
@@ -311,7 +533,228 @@
       "VCAP1": "AUX",
       "VCAP2": "AUX"
     },
-    "netclass_patterns": []
+    "netclass_patterns": [
+      {
+        "netclass": "AUX",
+        "pattern": "^\\x2B3V3\\z$"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "^\\x2B3V3_A\\z$"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "^\\x2B5V\\z$"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A0"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A1"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A10"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A11"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A2"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A3"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A4"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A5"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A6"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A7"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A8"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "A9"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "BA0"
+      },
+      {
+        "netclass": "SDRAM_ADDRESS",
+        "pattern": "BA1"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "BOOT0"
+      },
+      {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ0"
+      },
+      {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ1"
+      },
+      {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ10"
+      },
+      {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ11"
+      },
+      {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ12"
+      },
+      {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ13"
+      },
+      {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ14"
+      },
+      {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ15"
+      },
+      {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ2"
+      },
+      {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ3"
+      },
+      {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ4"
+      },
+      {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ5"
+      },
+      {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ6"
+      },
+      {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "DQ7"
+      },
+      {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ8"
+      },
+      {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "DQ9"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "GND"
+      },
+      {
+        "netclass": "SDRAM_BYTE0",
+        "pattern": "LDQM"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "LED_FAIL"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "LED_FAIL_A"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "LED_PASS"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "LED_PASS_A"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "NRST"
+      },
+      {
+        "netclass": "SDRAM_COMMAND",
+        "pattern": "SDCKE1"
+      },
+      {
+        "netclass": "SDRAM_COMMAND",
+        "pattern": "SDCLK"
+      },
+      {
+        "netclass": "SDRAM_COMMAND",
+        "pattern": "SDNCAS"
+      },
+      {
+        "netclass": "SDRAM_COMMAND",
+        "pattern": "SDNE1"
+      },
+      {
+        "netclass": "SDRAM_COMMAND",
+        "pattern": "SDNRAS"
+      },
+      {
+        "netclass": "SDRAM_COMMAND",
+        "pattern": "SDNWE"
+      },
+      {
+        "netclass": "SWD_CLOCK",
+        "pattern": "SWCLK"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "SWDIO"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "SWO"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "UART_RX"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "UART_TX"
+      },
+      {
+        "netclass": "SDRAM_BYTE1",
+        "pattern": "UDQM"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "VCAP1"
+      },
+      {
+        "netclass": "AUX",
+        "pattern": "VCAP2"
+      }
+    ]
   },
   "pcbnew": {
     "last_paths": {
