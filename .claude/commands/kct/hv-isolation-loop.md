@@ -27,7 +27,7 @@ uv run kct build-native --check
 
 ## Model selection
 
-`suggestedModel: sonnet`. Like `manufacturing-readiness`, this is a deterministic pipeline-orchestration task — author/collect the inputs, run each command in order, read exit codes and reports, and refuse to advance on any failure. It does not require frontier judgment (the frontier-judgment step, the EE decision, is delegated to `{{skill:ee-review}}`, which is opus). Model resolves through the harness's normal precedence chain (explicit dispatch param → harness role config → this doc's frontmatter `suggestedModel` → session default).
+Like `manufacturing-readiness`, this is a deterministic pipeline-orchestration task — author/collect the inputs, run each command in order, read exit codes and reports, and refuse to advance on any failure. It does not require frontier judgment (the frontier-judgment step, the EE decision, is delegated to `{{skill:ee-review}}`, which is opus). Codex CLI and opencode use the session's selected model. When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a model for this task. An explicit dispatch choice or role configuration takes precedence.
 
 ## Arguments
 
