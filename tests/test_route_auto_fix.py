@@ -696,6 +696,11 @@ def _patch_routing_engine_for_success(stack, router):
     stack.enter_context(patch("kicad_tools.router.show_routing_summary"))
     stack.enter_context(patch("kicad_tools.cli.route_cmd._write_routed_pcb"))
     stack.enter_context(patch("kicad_tools.cli.route_cmd._fill_zones_after_route"))
+    # Issue #10710: ``_write_routed_pcb`` is mocked, so no output board exists
+    # for the pour oracle to read; an unreadable board now reports UNVERIFIED
+    # (exit 10).  These tests cover the auto-fix exit codes, not the oracle
+    # (see tests/test_route_unverified_verdict_6273.py), so stub the stage.
+    stack.enter_context(patch("kicad_tools.cli.route_cmd._run_pour_oracle_stage", return_value=0))
     stack.enter_context(
         patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     )

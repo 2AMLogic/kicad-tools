@@ -693,14 +693,20 @@ def _resolve_end(
 ) -> tuple[Any, str | None]:
     """The :class:`LinkTerminal` for ``end``, or ``(None, why)``."""
     from kicad_tools.router.link_router import terminal_at_copper, terminal_for_pad
+    from kicad_tools.router.pad_geometry import routing_pad_chamfer
 
     if end.xy is None:
         assert end.ref is not None and end.pad is not None
         term = terminal_for_pad(pcb, end.ref, end.pad)
-        if term is None:
-            return None, f"pad {end.ref}.{end.pad} not found (or has no copper layer)"
         fp = pcb.get_footprint(end.ref)
-        pad = next((p for p in fp.pads if str(p.number) == str(end.pad)), None)
+        pad = next((p for p in fp.pads if str(p.number) == str(end.pad)), None) if fp else None
+        if term is None:
+            if pad is not None and routing_pad_chamfer(pad) is None:
+                return None, (
+                    f"pad {end.ref}.{end.pad} has an unsupported chamfer definition "
+                    "(expected named corners and a finite ratio from 0 to 0.5)"
+                )
+            return None, f"pad {end.ref}.{end.pad} not found (or has no copper layer)"
         if pad is not None and pad.net_number != net_number:
             return None, f"pad {end.ref}.{end.pad} is on net {pad.net_name!r}, not {net!r}"
     else:
