@@ -848,7 +848,7 @@ def output_table(
             bool(errors) or parity.error_count > 0 or hidden_errors > 0,
             bool(warnings) or parity.warning_count > 0 or hidden_warnings > 0,
             parity,
-            "No unwaived violations",
+            "No unwaived errors or warnings" if info_count > 0 else "No unwaived violations",
         )
         + (" (hidden by view filter)" if hidden else "")
     )

@@ -8157,6 +8157,7 @@ def _finish_post_stitch_drc(result, pcb_path: Path) -> dict:
     error_count = report.error_count
     warning_count = report.warning_count
     unconnected_count = report.unconnected_item_count
+    info_count = report.info_count
     passed = error_count == warning_count == unconnected_count == 0
 
     print(f"\n{'=' * 60}")
@@ -8164,11 +8165,28 @@ def _finish_post_stitch_drc(result, pcb_path: Path) -> dict:
     print(f"{'=' * 60}")
     print(f"  Errors:   {error_count}")
     print(f"  Warnings: {warning_count}")
+    if info_count:
+        print(f"  Infos:    {info_count}")
 
     print(f"  Unconnected items: {unconnected_count}")
 
+    # Info findings never gate (Issue #10650) but must not vanish from a
+    # passing run: the temp report is deleted, so this is their only record.
+    info_by_type: dict[str, int] = {}
+    for v in report.violations:
+        if v.is_info:
+            info_by_type[v.type_str] = info_by_type.get(v.type_str, 0) + 1
+
     if passed:
-        print("\nDRC PASSED - No violations found")
+        if info_count:
+            print(
+                f"\nDRC PASSED - No errors or warnings ({info_count} informational "
+                f"finding{'s' if info_count != 1 else ''} remain)"
+            )
+            for type_str, n in sorted(info_by_type.items(), key=lambda x: -x[1]):
+                print(f"  {type_str}: {n} info{'s' if n != 1 else ''}")
+        else:
+            print("\nDRC PASSED - No violations found")
     else:
         # Group by type
         by_type = report.violations_by_type()
@@ -8206,6 +8224,8 @@ def _finish_post_stitch_drc(result, pcb_path: Path) -> dict:
         "passed": passed,
         "error_count": error_count,
         "warning_count": warning_count,
+        "info_count": info_count,
+        "info_by_type": info_by_type,
         "unconnected_item_count": unconnected_count,
         "reason": None,
     }

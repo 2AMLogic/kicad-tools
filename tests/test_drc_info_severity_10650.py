@@ -452,3 +452,85 @@ def test_post_stitch_drc_passes_an_info_only_report(tmp_path, capsys):
     assert result["passed"] is True
     assert "Warnings: 0" in out
     assert "DRC PASSED" in out
+
+
+def test_post_stitch_drc_pass_reports_info_count_and_type(tmp_path, capsys):
+    """A passing post-stitch check must not hide its informational findings."""
+    result = _post_stitch_drc(tmp_path, [{**WARNING, "severity": "info"}])
+    out = capsys.readouterr().out
+    assert result["passed"] is True
+    assert result["info_count"] == 1
+    assert result["info_by_type"] == {"silk_over_copper": 1}
+    assert "Infos:    1" in out
+    assert "DRC PASSED - No errors or warnings (1 informational finding remain)" in out
+    assert "silk_over_copper: 1 info" in out
+    assert "No violations found" not in out
+
+
+def test_post_stitch_drc_clean_report_keeps_plain_pass_message(tmp_path, capsys):
+    result = _post_stitch_drc(tmp_path, [])
+    out = capsys.readouterr().out
+    assert result["info_count"] == 0
+    assert "DRC PASSED - No violations found" in out
+    assert "Infos:" not in out
+
+
+def test_table_info_only_pass_message_is_accurate(tmp_path, capsys):
+    report = parse_json_report(json.dumps(_kct_report([{**WARNING, "severity": "info"}])))
+    report.schematic_parity_ran = True
+    drc_cmd.output_table(list(report.violations), report)
+    out = capsys.readouterr().out
+    assert "Infos:      1" in out
+    assert "DRC PASSED - No unwaived errors or warnings" in out
+    assert "No unwaived violations" not in out
+
+
+# ---------------------------------------------------------------------------
+# Damaged / unrecognized severities never fail open (review of #10673)
+# ---------------------------------------------------------------------------
+
+BAD_SEVERITIES = ["warnng", "", "   ", None, 3]
+
+
+def _kct_with_severity(sev) -> dict:
+    return _kct_report([{**WARNING, "severity": sev}])
+
+
+def _kicad_with_severity(sev) -> dict:
+    data = _kicad_cli_report([{**WARNING, "severity": sev}])
+    return data
+
+
+@pytest.mark.parametrize("sev", BAD_SEVERITIES)
+@pytest.mark.parametrize("shape", [_kct_with_severity, _kicad_with_severity])
+def test_unrecognized_severity_is_a_warning_not_info(tmp_path, shape, sev):
+    report = parse_json_report(json.dumps(shape(sev)))
+    (v,) = report.violations
+    assert v.is_warning and not v.is_info
+    assert "unrecognized severity" in v.message
+
+
+@pytest.mark.parametrize("sev", BAD_SEVERITIES)
+@pytest.mark.parametrize("shape", [_kct_with_severity, _kicad_with_severity])
+def test_unrecognized_severity_fails_strict_cli(tmp_path, monkeypatch, capsys, shape, sev):
+    path = _write(tmp_path, shape(sev))
+    code = drc_cmd.main([str(path), "--strict", "--allow-incomplete", "--format", "json"])
+    assert code == 2
+
+
+@pytest.mark.parametrize("sev", BAD_SEVERITIES)
+@pytest.mark.parametrize("shape", [_kct_with_severity, _kicad_with_severity])
+def test_unrecognized_severity_cannot_yield_ok_preflight(tmp_path, shape, sev):
+    pcb = _minimal_pcb(tmp_path)
+    data = shape(sev)
+    data["pcb_sha256"] = hashlib.sha256(pcb.read_bytes()).hexdigest()
+    _write(tmp_path, data)
+    result = _preflight(pcb, None)
+    assert result.status == "WARN"
+
+
+@pytest.mark.parametrize("shape", [_kct_report, _kicad_cli_report])
+def test_explicit_info_stays_non_gating(tmp_path, shape):
+    report = parse_json_report(json.dumps(shape([{**WARNING, "severity": "info"}])))
+    (v,) = report.violations
+    assert v.is_info and "unrecognized" not in v.message
