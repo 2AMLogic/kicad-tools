@@ -1428,6 +1428,87 @@ def _weld_pad_openings(pcb_path: Path, only: frozenset[str]) -> dict[tuple[str, 
     return lands
 
 
+def _escape_polyline(route: Any, land: Any, layer: str) -> list[tuple[float, float]] | None:
+    """The vertex path of ``route`` read as one pad escape leaving ``land`` on ``layer``.
+
+    Issue #9424.  ``None`` unless every track of ``route`` is on ``layer``,
+    those legs chain into one simple path, the path leaves ``land`` at one
+    end, and -- when the route places a via, at most one -- it ends at that
+    via.  Board-relative coordinates, as the route's are.
+    """
+
+    def same(a: tuple[float, float], b: tuple[float, float]) -> bool:
+        return math.hypot(a[0] - b[0], a[1] - b[1]) <= 0.011  # the writer rounds to 0.01 mm
+
+    legs = [tuple(seg) for seg in route.segments]
+    if not legs or len(route.vias) > 1 or any(seg[4] != layer for seg in legs):
+        return None
+    ends = [((x1, y1), (x2, y2)) for x1, y1, x2, y2, _ in legs]
+
+    def chain(forward: bool) -> list[tuple[float, float]] | None:
+        """The legs as one path, the first leg read ``forward`` from its start."""
+        a, b = ends[0]
+        path = [a, b] if forward else [b, a]
+        rest = ends[1:]
+        while rest:
+            for i, (p, q) in enumerate(rest):
+                if same(p, path[-1]):
+                    path.append(q)
+                elif same(q, path[-1]):
+                    path.append(p)
+                else:
+                    continue
+                rest.pop(i)
+                break
+            else:
+                return None
+        return path
+
+    from shapely.geometry import Point
+
+    # The path leaves the land at one end and ends at the via, when there is one.
+    for forward in (True, False):
+        points = chain(forward)
+        if points is None:
+            continue
+        if land.covers(Point(points[-1])):
+            points.reverse()
+        if not land.covers(Point(points[0])):
+            continue
+        if route.vias and not same(points[-1], route.vias[0]):
+            continue
+        return points
+    return None
+
+
+def _foreign_masks(
+    rules: Any, net_name: str, items: list[Any], layer: str | None, radius: float
+) -> list[Any]:
+    """``route_link``'s leg / via test as geometry, for a pad-escape probe.
+
+    Issue #9424.  Other-net copper of ``items`` on ``layer`` (every layer when
+    ``None``), grouped by the clearance :meth:`LinkRouteRules.clearance_parts`
+    demands of the link net ``net_name`` and inflated by that clearance and
+    ``radius`` (the half width of the copper moving past it).
+    """
+    from shapely.ops import unary_union
+
+    groups: dict[float, list[Any]] = {}
+    for item in items:
+        for item_layer, geom in item.layers.items():
+            if layer is not None and item_layer != layer:
+                continue
+            moving = "Track" if layer is not None else "Via"
+            for part, clearance in rules.clearance_parts(
+                net_name, item.net, item_layer, geom, item, moving
+            ):
+                groups.setdefault(round(clearance, 6), []).append(part)
+    return [
+        unary_union(geoms).buffer(clearance + radius + 0.005)
+        for clearance, geoms in sorted(groups.items())
+    ]
+
+
 @dataclass
 class PourLinkCloser:
     """Close pour-net links: weld the named pads into their planes, route the rest.
@@ -1527,16 +1608,53 @@ class PourLinkCloser:
         The net class's numeric ``trace_width`` -- narrower than the board
         width included -- so a 0.50 mm ``Power`` class is not written at the
         0.20 mm board default.  A missing map, net or usable class width uses
-        ``trace_width``.  A declared ``neck_trace_width`` is deliberately not
-        consulted: the agreement audit only excuses short pad-escape legs, so
-        all new completion copper (weld stubs included) takes the full class
-        width.
+        ``trace_width``.  ``neck_trace_width`` does not narrow this: every
+        stub is sized for the class first, and only a stub no strategy can
+        place at that width falls back to :meth:`neck_width` (Issue #9424).
         """
         cls = (self.net_class_map or {}).get(net_name or "")
         value = getattr(cls, "trace_width", None) if cls is not None else None
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
             return float(value)
         return self.trace_width
+
+    def _declared_neck(self, net_name: str | None) -> float | None:
+        """The class's ``neck_trace_width`` when it narrows :meth:`pour_width`."""
+        cls = (self.net_class_map or {}).get(net_name or "")
+        value = getattr(cls, "neck_trace_width", None) if cls is not None else None
+        width = self.pour_width(net_name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < width:
+            return float(value)
+        return None
+
+    def neck_width(self, net_name: str | None) -> float | None:
+        """Pad-escape width for new pour-completion copper on ``net_name`` (Issue #9424).
+
+        The width :meth:`_weld_group` retries a stub at when no strategy can
+        place it at :meth:`pour_width`: a 0.50 mm stub cannot leave a 0.40 mm
+        pad on 0.65 mm pitch with 0.20 mm clearance (board 05's U2.16 and
+        U2.20), which #10627 turned from a weld into an open net.  It is the
+        class's declared ``neck_trace_width`` (:meth:`_declared_neck`) -- the
+        one width below class that the agreement audit
+        (:mod:`kicad_tools.validate.rules.netclass_agreement`) excuses for a
+        leg leaving a same-net pad -- and, for a class that declares none,
+        the board width every weld was written at before #10627 (never
+        thinner unless the class says so).  ``None`` when neither is narrower
+        than the class width: the pad keeps the routed-link path.
+        """
+        declared = self._declared_neck(net_name)
+        if declared is not None:
+            return declared
+        return self.trace_width if self.trace_width < self.pour_width(net_name) else None
+
+    def neck_label(self, net_name: str | None) -> str:
+        """How :meth:`neck_width` resolved ``net_name``'s pad escape, for the closer notes."""
+        neck = self.neck_width(net_name)
+        if neck is None:
+            return ""
+        if self._declared_neck(net_name) is not None:
+            return f"class pad-escape neck {neck:g} mm"
+        return f"board-width {neck:g} mm pad escape (the class declares no neck_trace_width)"
 
     def pair_clearance(self, pour_net: str, other_net: str | None) -> float:
         """``c(P, N)``: the clearance copper on ``pour_net`` keeps from ``other_net``."""
@@ -2016,9 +2134,10 @@ class PourLinkCloser:
     ) -> set[str]:
         """Weld one width group's named pads at ``trace_width`` (Issue #10627).
 
-        The initial attempt, forced retry and foreign-fill retry all stay
-        inside the group; its footprints, sites, vias, notes and exhausted
-        pads accumulate into ``attempt`` / ``exhausted``.
+        The initial attempt, forced retry, foreign-fill retry and the
+        pad-escape neck retry (Issue #9424) all stay inside the group; its
+        footprints, sites, vias, notes and exhausted pads accumulate into
+        ``attempt`` / ``exhausted``.
         """
         from kicad_tools.cli.stitch_cmd import run_stitch, trace_to_track_segments
 
@@ -2031,16 +2150,23 @@ class PourLinkCloser:
             else {}
         )
 
-        def stitch(pads: frozenset[str], force: frozenset[str], fills_yield: bool):
+        def stitch(
+            pads: frozenset[str],
+            force: frozenset[str],
+            fills_yield: bool,
+            width: float = trace_width,
+            neck_nets: list[str] | None = None,
+            pad_escape_class: tuple[float, float] | None = None,
+        ):
             return run_stitch(
                 pcb_path,
-                nets,
+                neck_nets if neck_nets is not None else nets,
                 via_size=self.via_size,
                 drill=self.via_drill,
                 clearance=clearance,
                 offset=self.weld_offset,
                 escape_distance=self.weld_escape_distance,
-                trace_width=trace_width,
+                trace_width=width,
                 entry_lands=lands,
                 mask_entry_clearance=self.mask_entry_clearance,
                 avoid_pad_overlap=self.avoid_via_in_pad,
@@ -2056,6 +2182,7 @@ class PourLinkCloser:
                 # stackup edge).
                 same_net_pad_gap_mm=self.same_net_pad_gap_mm,
                 same_net_trace_gap_mm=self.same_net_trace_gap_mm,
+                pad_escape_class=pad_escape_class,
             )
 
         force: frozenset[str] = frozenset()
@@ -2065,7 +2192,10 @@ class PourLinkCloser:
             # says they are not.  KiCad wins.
             force = only
             first = stitch(only, force, False)
-        passes = [first]
+        passes: list = [first]
+        #: Per pass, the closer-note label of the pad-escape neck it welded at;
+        #: ``None``: the class width.
+        necks: list[str | None] = [None]
         skipped = frozenset(f"{p.reference}.{p.pad_number}" for p, _ in first.pads_skipped)
         if skipped and self.refill is not None:
             # Pass 2: the pads every site of which sat inside a FOREIGN pour.
@@ -2073,8 +2203,48 @@ class PourLinkCloser:
             # stale fill is not an obstacle (4-layer boards whose GND pours
             # cover every layer have no other via site).
             passes.append(stitch(skipped, force & skipped, True))
+            necks.append(None)
+        if trace_width > self.trace_width:
+            # Issue #9424: a class-width stub no strategy could place is
+            # retried at the class's pad-escape neck (:meth:`neck_width`),
+            # and only as a leg the net-class agreement audit treats as a
+            # pad escape (``pad_escape_class``).  One pass per neck.
+            stranded = frozenset(
+                f"{p.reference}.{p.pad_number}" for p, _ in passes[-1].pads_skipped
+            )
+            by_neck: dict[tuple[float, float, bool], tuple[list[str], set[str]]] = {}
+            for net in nets:
+                neck = self.neck_width(net)
+                if neck is None:
+                    continue
+                pads = pads_by_net[net] & stranded
+                cls = (self.net_class_map or {}).get(net)
+                if pads and cls is not None:
+                    group = by_neck.setdefault(
+                        (
+                            round(neck, 6),
+                            round(float(getattr(cls, "clearance", None) or 0.0), 6),
+                            self._declared_neck(net) is not None,
+                        ),
+                        ([], set()),
+                    )
+                    group[0].append(net)
+                    group[1].update(pads)
+            for (neck, class_clearance, _declared), (neck_nets, neck_pads) in by_neck.items():
+                only_neck = frozenset(neck_pads)
+                passes.append(
+                    stitch(
+                        only_neck,
+                        force & only_neck,
+                        True,
+                        width=neck,
+                        neck_nets=neck_nets,
+                        pad_escape_class=(trace_width, class_clearance),
+                    )
+                )
+                necks.append(self.neck_label(neck_nets[0]))
 
-        for result in passes:
+        for result, escape in zip(passes, necks, strict=True):
             # Pair each stub with ITS via (pad identity + via position), not
             # just the pad: a pad that gets several vias must record every
             # stub, or ``withdraw_copper`` leaves the unrecorded ones behind
@@ -2083,6 +2253,12 @@ class PourLinkCloser:
             for placement in result.vias_added:
                 pad = placement.pad
                 key = f"pad:{pad.net_name}:{pad.reference}.{pad.pad_number}"
+                if escape is not None:
+                    # Never silent: this stub is below the class width.
+                    attempt.notes.append(
+                        f"{pad.net_name} {pad.reference}.{pad.pad_number}: welded at the "
+                        f"{escape} (no legal {trace_width:g} mm stub)"
+                    )
                 caps = attempt.footprints.setdefault(key, [])
                 attempt.sites.setdefault(key, []).append((placement.via_x, placement.via_y))
                 attempt.vias.append(
@@ -2107,7 +2283,10 @@ class PourLinkCloser:
                 f"{pad.reference}.{pad.pad_number}" for pad, _ in passes[-1].skip_details
             )
         for pad, reason in passes[-1].pads_skipped:
-            attempt.notes.append(f"{pad.net_name} {pad.reference}.{pad.pad_number}: {reason}")
+            note = f"{pad.net_name} {pad.reference}.{pad.pad_number}: {reason}"
+            if necks[-1] is not None:
+                note += f" ({necks[-1]}; no legal {trace_width:g} mm stub either)"
+            attempt.notes.append(note)
         return {
             f"{placement.pad.reference}.{placement.pad.pad_number}"
             for result in passes
@@ -2115,6 +2294,141 @@ class PourLinkCloser:
         }
 
     # -- routed links -----------------------------------------------------------
+
+    def _necked_escape(
+        self,
+        pcb: Any,
+        net_number: int,
+        net: str,
+        end: OracleEndpoint,
+        pad_terminal: Any,
+        target: Any,
+        rules: Any,
+        model: Any,
+    ) -> Any | None:
+        """A link that is ONE pad-escape leg from ``end``'s pad at the class neck.
+
+        Issue #9424.  :func:`~kicad_tools.router.link_router.route_link` at the
+        class width found nothing -- a 0.50 mm track cannot leave a 0.40 mm pad
+        on 0.65 mm pitch, nor cross the 0.5 mm from board 05's U2.20 to its
+        thermal pad.  The leg is searched the way a weld stub is seated: along
+        the eight 0/45/90-degree rays from the pad centre, nearest landing
+        first, to the class pad-escape reach
+        (:func:`~kicad_tools.validate.rules.netclass_agreement.pad_escape_reach`).
+        A landing is same-net copper of ``target`` on the pad's own layer, or
+        a via seat over ``target``'s copper on another layer.  Each candidate
+        leg is routed, and clearance-checked against the board's copper, by
+        ``route_link`` itself, and kept only when what it wrote chains from
+        inside the pad into that one leg (plus at most one via at its end) --
+        a path the net-class agreement audit judges a pad escape
+        (:func:`~kicad_tools.validate.rules.netclass_agreement.pad_escape_lands`).
+        Nothing is written below the class width beyond that reach.
+        """
+        from shapely.geometry import LineString, Point
+        from shapely.ops import unary_union
+
+        from kicad_tools.router.link_router import LinkTerminal, route_link
+        from kicad_tools.validate.rules.netclass_agreement import (
+            pad_escape_lands,
+            pad_escape_reach,
+        )
+
+        neck = self.neck_width(net)
+        size = _pad_size(pcb, end.ref or "", end.pad or "")
+        layers = dict(pad_terminal.layers) if pad_terminal is not None else {}
+        if neck is None or size is None or len(layers) != 1:
+            return None
+        pad_layer, land = next(iter(layers.items()))
+        cls = (self.net_class_map or {}).get(net)
+        reach = pad_escape_reach(
+            size, self.pour_width(net), float(getattr(cls, "clearance", None) or 0.0)
+        )
+        neck_rules = replace(rules, trace_width=neck, width_by_layer={}, pad_entry_gap=0.0)
+        g = neck_rules.grid
+        # ``route_link`` aligns its grid on the start at the writer's precision.
+        cx, cy = round(pad_terminal.point[0], 2), round(pad_terminal.point[1], 2)
+        centre = Point(cx, cy)
+        if not land.covers(centre):
+            return None
+        start = LinkTerminal(
+            pad_terminal.label, pad_terminal.point, {pad_layer: centre.buffer(0.01)}
+        )
+        targets = {
+            layer: geom
+            for layer, geom in target.layers.items()
+            if layer and geom is not None and not geom.is_empty
+        }
+        own = targets.get(pad_layer)
+        other = {layer: geom for layer, geom in targets.items() if layer != pad_layer}
+        if own is None and not other:
+            return None
+        # ``route_link``'s own leg and via tests, as geometry, to probe a ray
+        # once instead of routing every landing on it.
+        window = centre.buffer(reach + neck_rules.via_size + 1.0)
+        foreign = [
+            it
+            for it in model.items
+            if it.net != net_number and any(geom.intersects(window) for geom in it.layers.values())
+        ]
+        leg_masks = _foreign_masks(neck_rules, net, foreign, pad_layer, neck / 2)
+        via_masks = _foreign_masks(neck_rules, net, foreign, None, neck_rules.via_size / 2)
+        pads = [p for p in model.pad_geoms if p.intersects(window)]
+        if pads:
+            via_masks.append(unary_union(pads).buffer(neck_rules.via_size / 2 + 0.05))
+
+        def accepted(route: Any) -> Any:
+            if route is None:
+                return None
+            points = _escape_polyline(route, land, pad_layer)
+            if points is None or not pad_escape_lands(points, reach):
+                return None
+            return route
+
+        dead: set[int] = set()  # rays the neck-width leg can no longer leave along
+        for k in range(1, int(reach / g) + 2):
+            step = round(k * g, 2)
+            for r, (dx, dy) in enumerate(
+                ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
+            ):
+                if r in dead:
+                    continue
+                cand = (round(cx + dx * step, 2), round(cy + dy * step, 2))
+                if math.hypot(cand[0] - cx, cand[1] - cy) > reach:
+                    dead.add(r)
+                    continue
+                leg = LineString([(cx, cy), cand])
+                if any(mask.intersects(leg) for mask in leg_masks):
+                    dead.add(r)
+                    continue
+                point = Point(cand)
+                if own is not None and own.covers(point):
+                    landing = LinkTerminal("neck:land", cand, {pad_layer: point.buffer(0.01)})
+                    route = accepted(
+                        route_link(
+                            pcb,
+                            net_number,
+                            net,
+                            start,
+                            landing,
+                            neck_rules,
+                            model=model,
+                            allowed_layers=(pad_layer,),
+                        )
+                    )
+                    if route is not None:
+                        return route
+                if any(mask.covers(point) for mask in via_masks):
+                    continue
+                for layer, geom in other.items():
+                    if not geom.covers(point):
+                        continue
+                    landing = LinkTerminal("neck:via", cand, {layer: point.buffer(0.01)})
+                    route = accepted(
+                        route_link(pcb, net_number, net, start, landing, neck_rules, model=model)
+                    )
+                    if route is not None:
+                        return route
+        return None
 
     def _route_links(
         self,
@@ -2232,6 +2546,15 @@ class PourLinkCloser:
                     # main, 17 -> 17 with them).
                     continue
                 ta, tb = terminal(lk.a, net_number), terminal(lk.b, net_number)
+                # Issue #9424: the pad a necked pad-escape link would leave.
+                pad_end = next(
+                    (e for e in (lk.a, lk.b) if e.kind == "pad" and e.ref and e.pad), None
+                )
+                pad_terminal = (
+                    terminal_for_pad(pcb, pad_end.ref or "", pad_end.pad or "")
+                    if pad_end is not None
+                    else None
+                )
                 route = None
                 #: Variants skipped because their key is banned, and whether
                 #: any unbanned variant was actually tried (Issue #6412).
@@ -2309,6 +2632,28 @@ class PourLinkCloser:
                             route = route_link(
                                 pcb, net_number, lk.net, pair[0], pair[1], rules, model=model
                             )
+                            if (
+                                route is None
+                                and pad_end is not None
+                                and pad_terminal is not None
+                                and owning(comps, pad_terminal) == chosen
+                            ):
+                                route = self._necked_escape(
+                                    pcb,
+                                    net_number,
+                                    lk.net,
+                                    pad_end,
+                                    pad_terminal,
+                                    pair[1],
+                                    rules,
+                                    model,
+                                )
+                                if route is not None:
+                                    attempt.notes.append(
+                                        f"{lk.net} {pad_end.ref}.{pad_end.pad}: welded at the "
+                                        f"{self.neck_label(lk.net)} by the link router (no "
+                                        f"clearance-legal {self.pour_width(lk.net):g} mm route)"
+                                    )
                             if route is not None:
                                 route_key = key
                                 if to_plane and variant == ROUTE_VARIANT_ISLAND:

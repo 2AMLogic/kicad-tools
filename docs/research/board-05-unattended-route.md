@@ -625,3 +625,54 @@ The reviewer ran the unattended script with native router build 79 and pinned Ki
 | `8351670c5` (base) | macOS arm64 | 42 | `0de87784` | 454.9 | 120 | 0 / 79 | 14 / 83 / 258 |
 
 All rows completed 37/37 nets and 143/143 connections with clean native DRC, ERC and LVS. On macOS the same-host seed-42 comparison confirmed the four mask error removals. The strict nightly gate still failed on warnings. On the same Linux PCB, changing just the Differential width in the sibling project from 0.15 mm to the historical 0.20 mm raised netclass warnings from 3 to 11, accounting for the eight-warning difference from the historical Linux counts. Full PCB hashes and native verification details are in the [reviewer's measurement record](https://github.com/2AMLogic/kicad-tools/pull/10563#issuecomment-7214132170).
+
+## Pour completion at the class width opened +5V and GND, 2026-11-28 (issue #9424)
+
+Measured on Linux x86_64 (`loom-crew-2`, Intel Xeon Platinum 8488C, 16 vCPU
+shared with other work; 1-minute load 8 to 27) with C++ router build 79 and
+pinned kicad-cli 10.0.6 (`KCT_KICAD_DOCKER=1`).
+
+PR #10631 (#10627) made `PourLinkCloser` weld every pour pad at its class
+`trace_width`. The unattended route takes the router's default classes, which
+put `+5V` and `GND` in `Power` (0.50 mm, no `neck_trace_width`), and a 0.50 mm
+stub cannot leave a 0.40 mm pin on 0.65 mm pitch with 0.20 mm clearance. On
+`origin/main` @ `2d894a267` the weld for `+5V` U2.16 and `GND` U2.20 found no
+placement, the oracle stage stopped at 43 -> 2 unconnected pour links
+(`no_closer`), and the route exited 3. Seeds 7 and 1337 were not run on the
+base.
+
+| Revision | Seed | Route exit | Nets | Connections | Native DRC err / warn / open | ERC | Nightly errors / warnings | Copper and label LVS | Vias | Wall (s) |
+| --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | ---: |
+| `2d894a267` (base) | 42 | 3 | 44/46 | 141/143 | 0 / 0 / 2 | 0 | 0 / 12 | copper dirty | 120 | 397.6 |
+| this change | 42 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 14 | clean | 122 | 585.7 |
+| this change | 7 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 14 | clean | 122 | 586.1 |
+| this change | 1337 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 14 | clean | 122 | 586.1 |
+
+The three seeds of this change were routed in parallel on the same host,
+with a test run beside them, and saved byte-identical boards (SHA-256
+`34d639febe39d79e2ba856627b230f47807f627cd032da4e5dc73eaacb5fa967`). Each
+oracle stage converged in round 1 (43 -> 0). No route log carries a `per-net wall clock bound` or `stage
+deadline fired` line.
+
+A weld no strategy can place at the class width is now retried as a short pad
+escape at the class's pad-escape neck: its declared `neck_trace_width`, else
+the board width every weld was written at before #10627. The retry writes only
+a straight leg or one 45-degree dogleg landing inside the `netclass_agreement`
+rule's pad-escape reach. `run_stitch` seats it (`pad_escape_class`); where the
+stitcher's fixed via sites cannot reach -- `GND` U2.20, whose only exit is the
+0.5 mm gap to its own thermal pad U2.29 -- the link router searches the eight
+0/45/90-degree rays from the pad centre for the nearest same-net landing and
+writes that one leg.
+
+On the graded seed-42 board four of the 45 new pour segments are below the
+0.50 mm class width, each one 0.20 mm pad escape: `+5V` U2.16 to its via at
+(142.60, 103.58), `GND` U2.20 to U2.29, `GND` U3.4 to a via at (159.30, 77.17)
+and `+5V` U3.1 to a via at (158.10, 74.03). The other 41 are 0.50 mm. The nightly rule set reports those four
+as 2 `netclass_track_width_mismatch` warnings (`+5V`, `GND`) -- the two
+findings the board carried before #10627, back because the default `Power`
+class declares no `neck_trace_width` for the agreement rule to excuse. The
+reviewed map (`redesign/net_class_map.json`) declares 0.15 mm for both nets;
+the unattended route does not read it. The other 12 warnings are unchanged
+from the base (8 `redundant_copper_covered`, 4 `redundant_copper_detour`).
+`--skip mask_to_copper` stays, and the full-mask counts were not re-measured
+here.
