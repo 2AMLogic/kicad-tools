@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -71,12 +71,59 @@ def _number(value: Any) -> float | None:
     return float(value)
 
 
+Pt = tuple[float, float]
+
+
+def pad_escape_reach(pad_size: tuple[float, ...], class_width: float, clearance: float) -> float:
+    """Landing radius of a class pad-escape neck, measured from the pad attachment.
+
+    The radius :func:`_pad_necks` exempts a necked leg to. A writer that
+    emits a leg narrower than its class must land it inside this radius, or
+    the audit reports it (Issue #9424: the pour-completion weld).
+    """
+    from kicad_tools.router.lattice.geometry import DEFAULT_FINE_PITCH_MM, pad_stub_radius
+
+    return pad_stub_radius(DEFAULT_FINE_PITCH_MM, *pad_size) + class_width / 2 + clearance
+
+
+def _dogleg_lands(start: Pt, finish: Pt, path_length: float, reach: float) -> bool:
+    """Whether a two-leg neck from ``start`` to ``finish`` is one 45-degree pad dogleg.
+
+    Its landing is within ``reach`` of the attachment and its path length is
+    exactly that of a monotone 45-degree dogleg: ``max(dx, dy) + (sqrt(2) -
+    1) * min(dx, dy)``.  ``reach`` already carries ``DRC_TOLERANCE``.
+    """
+    dx, dy = abs(finish[0] - start[0]), abs(finish[1] - start[1])
+    dogleg = max(dx, dy) + (math.sqrt(2) - 1) * min(dx, dy)
+    return math.hypot(dx, dy) <= reach and abs(path_length - dogleg) <= DRC_TOLERANCE
+
+
+def pad_escape_lands(points: Sequence[Pt], reach: float) -> bool:
+    """Whether the equal-width stub ``points`` is one pad-escape neck.
+
+    ``points`` is a written stub polyline whose first point lies on its own
+    pad; ``reach`` is :func:`pad_escape_reach` for that pad.  True exactly
+    when :func:`_pad_necks` would exempt every leg against the class width:
+    a straight leg landing inside ``reach``, or one 45-degree dogleg
+    (:func:`_dogleg_lands`).  Anything longer, or that bends more than once,
+    is copper below class and is reported.
+    """
+    if len(points) not in (2, 3):
+        return False
+    limit = reach + DRC_TOLERANCE
+    first = math.dist(points[0], points[1])
+    if first > limit:
+        return False
+    if len(points) == 2:
+        return True
+    return _dogleg_lands(points[0], points[2], first + math.dist(points[1], points[2]), limit)
+
+
 def _pad_necks(pcb: PCB, tracks: list[Segment], class_width: float, clearance: float) -> set[int]:
     """Identify a pad entry and its optional second leg in saved copper."""
     from shapely import Point, STRtree  # type: ignore[import-untyped]
 
     from kicad_tools.core.layers import via_spans_layer
-    from kicad_tools.router.lattice.geometry import DEFAULT_FINE_PITCH_MM, pad_stub_radius
     from kicad_tools.schema.pcb import Arc, iter_copper_pads
 
     from .clearance import _pad_on_layer, _pad_polygon
@@ -109,7 +156,7 @@ def _pad_necks(pcb: PCB, tracks: list[Segment], class_width: float, clearance: f
         # kct route refines at or below its fine pitch, and subtracts the
         # base agent radius from the class's width/clearance expansion.
         # The saved board lacks that lattice. Use its conservative reach.
-        reach = pad_stub_radius(DEFAULT_FINE_PITCH_MM, *pad.size) + class_width / 2 + clearance
+        reach = pad_escape_reach(tuple(pad.size), class_width, clearance)
         for k in index.query(copper, predicate="covers"):
             node = nodes[k]
             if _pad_on_layer(pad, node[0]):
@@ -142,14 +189,8 @@ def _pad_necks(pcb: PCB, tracks: list[Segment], class_width: float, clearance: f
             if other not in lengths or abs(next_track.width - track.width) > DRC_TOLERANCE:
                 continue
             finish = next_track.end if next_track.start == tip else next_track.start
-            # A 45-degree pad dogleg moves monotonically towards the landing:
-            # its path length is max(dx,dy) + (sqrt(2) - 1) * min(dx,dy).
-            dx, dy = abs(finish[0] - start[0]), abs(finish[1] - start[1])
-            dogleg = max(dx, dy) + (math.sqrt(2) - 1) * min(dx, dy)
-            if (
-                math.hypot(dx, dy) <= reach
-                and abs(lengths[i] + lengths[other] - dogleg) <= DRC_TOLERANCE
-            ):
+            # A 45-degree pad dogleg moves monotonically towards the landing.
+            if _dogleg_lands(start, finish, lengths[i] + lengths[other], reach):
                 necks.add(other)
     return necks
 
