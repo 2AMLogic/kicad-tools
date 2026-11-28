@@ -21,12 +21,16 @@ measured in full: the recipe's strict manufacturing check
 independently refilled copy, KiCad's physical pad groups, copper and label
 LVS, and the recipe's USB bounds (``routing_plan.usb_geometry``).
 
+The published routed PCB is the public stand-in for the coordinated reissue
+input, which is not on ``main``; the rendered note says so.
+
 Usage (the scratch copy keeps the project sidecars next to the board)::
 
     KCT_KICAD_DOCKER=1 uv run python \\
         boards/03-usb-joystick/engineering/acute_branch_10732.py \\
         --input boards/03-usb-joystick/output --work /tmp/board03-acute-10732 \\
-        --record boards/03-usb-joystick/engineering/acute-branch-10732.json
+        --record boards/03-usb-joystick/engineering/acute-branch-10732.json \\
+        --note boards/03-usb-joystick/engineering/acute-branch-10732.md
 """
 
 from __future__ import annotations
@@ -300,11 +304,173 @@ def run(input_dir: Path, work: Path) -> dict:
     return record
 
 
+def render_note(record: dict) -> str:
+    """The record as the committed markdown note; every value is read from ``record``."""
+    stages = record["stages"]
+    first, middle, last = (
+        stages["input"],
+        stages["redundant-copper"],
+        stages["acute-branch"],
+    )
+    tool = record["toolchain"]
+
+    def native(stage: dict, key: str) -> str:
+        result = stage[key]
+        if not result.get("ran"):
+            return f"not run: {result.get('note')}"
+        return f"{result['violations']} violations / {result['opens']} opens"
+
+    def lvs(stage: dict) -> str:
+        result = stage["lvs"]
+        return (
+            f"label {'clean' if result['label_clean'] else 'DIRTY'}, "
+            f"copper {'clean' if result['copper_clean'] else 'DIRTY'}, "
+            f"{result['copper_bound_pad_count']} bound pads"
+        )
+
+    def rule(stage: dict, name: str) -> int:
+        return stage["kct_check"]["by_rule"].get(name, 0)
+
+    def strict(stage: dict, key: str) -> int:
+        return stage["strict_manufacturing_check"]["summary"][key]
+
+    def erc(stage: dict) -> str:
+        leg = stage["strict_manufacturing_check"]["meta_checks"].get("erc", {})
+        detail = str(leg.get("detail") or "").split(" -- ")[0]
+        return f"`{leg.get('status', '?')}` ({detail})" if detail else f"`{leg.get('status', '?')}`"
+
+    names = sorted(
+        set(first["kct_check"]["by_rule"])
+        | set(middle["kct_check"]["by_rule"])
+        | set(last["kct_check"]["by_rule"])
+    )
+    moved = [
+        f"`{name}` {rule(middle, name)} -> {rule(last, name)}"
+        for name in names
+        if rule(middle, name) != rule(last, name)
+    ]
+    reasons = {item["net"]: item["reason"] for item in last["unrepaired"]}
+    producer = record["producer"]
+    lines = [
+        "# Board 03 acute-branch measurement (Issue #10732)",
+        "",
+        f"Produced by `engineering/acute_branch_10732.py` (SHA-256 "
+        f"`{producer['script_sha256']}`) on {record['measured_at']} in {record['elapsed_s']} s, "
+        f"on KiCad {tool['kicad_version']} (`{tool['image']}`), from the published routed PCB "
+        f"`output/usb_joystick_routed.kicad_pcb` (SHA-256 `{record['input']['sha256']}`) at "
+        f"`{producer['head']}`"
+        + (" with uncommitted changes" if producer["dirty"] else "")
+        + ". The machine-readable record is `acute-branch-10732.json` next to this note.",
+        "",
+        "This is the public stand-in, not the coordinated reissue input: the tool-generated "
+        "rebuild #8900 measures from is not on `main`. The run is the readiness copper cleanup's "
+        "order on a scratch copy -- `dedupe`, `kct fix-drc --only redundant-copper` (#10667), "
+        "then `kct fix-drc --only acute-branch` (this issue) -- with each stage measured on its "
+        "saved bytes.",
+        "",
+        "## Stages",
+        "",
+        "| Stage | `sharp_trace_corner` sites | PCB SHA-256 | `kct check` errors / warnings |",
+        "| --- | ---: | --- | --- |",
+    ]
+    for name, stage in stages.items():
+        census = stage.get("kct_check")
+        count = f"{census['errors']} / {census['warnings']}" if census else "not measured"
+        lines.append(
+            f"| `{name}` | {len(stage['sharp_trace_corner'])} | `{stage['sha256'][:16]}` | {count} |"
+        )
+    lines += [
+        "",
+        "## Acute-branch pass",
+        "",
+        f"`kct fix-drc --only acute-branch --mfr {MANUFACTURER}` planned {last['findings']} tap "
+        f"findings and kept {last['repaired']} edits, each re-checked on the saved, refilled board "
+        f"with `kct check`'s rule set and native DRC (exit {last['exit']}: the residuals below).",
+        "",
+        "| Residual site | Reason |",
+        "| --- | --- |",
+    ]
+    for site in last["sharp_trace_corner"]:
+        lines.append(
+            f"| `{site['net']}` {site['layer']} ({site['x']:.3f}, {site['y']:.3f}), "
+            f"{site['angle_deg']:.0f} deg | `{reasons[site['net']]}` |"
+        )
+    lines += [
+        "",
+        "Each residual is a tap whose every right-angle entry turns its own feeding tracks, or "
+        "the carrier it lands on, into a chain the `redundant_copper` rule then reports as a "
+        "staircase; the repair refuses that trade rather than swapping one warning for another.",
+        "",
+        "## Saved and refilled copper",
+        "",
+        "| Measurement | Input | After the cleanup |",
+        "| --- | --- | --- |",
+        f"| Native DRC, saved copper (pinned KiCad {tool['kicad_version']}) | "
+        f"{native(first, 'native_saved')} | {native(last, 'native_saved')} |",
+        "| Native DRC, independently refilled copy | "
+        f"{native(first, 'native_refilled')} | {native(last, 'native_refilled')} |",
+        f"| KiCad physical pad groups | {first['pad_groups']['groups']} groups / "
+        f"{first['pad_groups']['pads']} pads | {last['pad_groups']['groups']} groups / "
+        f"{last['pad_groups']['pads']} pads |",
+        f"| Copper and label LVS | {lvs(first)} | {lvs(last)} |",
+        f"| USB D+ / D- copper length (mm) | "
+        f"{first['usb_geometry']['lengths_mm']['USB_D+']:.6f} / "
+        f"{first['usb_geometry']['lengths_mm']['USB_D-']:.6f} | "
+        f"{last['usb_geometry']['lengths_mm']['USB_D+']:.6f} / "
+        f"{last['usb_geometry']['lengths_mm']['USB_D-']:.6f} |",
+        f"| USB common coupled run (mm) | {first['usb_geometry']['common_coupled_mm']:.6f} | "
+        f"{last['usb_geometry']['common_coupled_mm']:.6f} |",
+        f"| USB D+ / D- skew (mm) | {first['usb_geometry']['branch_skew_mm']:.6f} | "
+        f"{last['usb_geometry']['branch_skew_mm']:.6f} |",
+        f"| `kct check` ({MANUFACTURER}) errors / warnings | "
+        f"{first['kct_check']['errors']} / {first['kct_check']['warnings']} | "
+        f"{last['kct_check']['errors']} / {last['kct_check']['warnings']} |",
+        f"| Mask assessment | "
+        f"{', '.join(first['kct_check']['mask_assessment_coverage'])}, "
+        f"{first['kct_check']['mask_findings']} `mask_to_copper*` findings | "
+        f"{', '.join(last['kct_check']['mask_assessment_coverage'])}, "
+        f"{last['kct_check']['mask_findings']} `mask_to_copper*` findings |",
+        f"| Strict manufacturing check (`check_manufacturing.py`) | "
+        f"{strict(first, 'errors')} errors / {strict(first, 'warnings')} warnings | "
+        f"{strict(last, 'errors')} errors / {strict(last, 'warnings')} warnings |",
+        "",
+        f"`routing_plan.usb_geometry` accepted both boards (at most "
+        f"{_usb_skew_limit():g} mm of D+ / D- skew). The strict check's ERC leg reads "
+        f"{erc(first)} on the input and {erc(last)} on the result; the record keeps its detail "
+        "(a warning about the host's KiCad library tables, not a schematic defect). Its manifest "
+        "leg is `NOT RUN` because the scratch copy carries no manufacturing bundle: the package "
+        "and release stay with #8900.",
+        "",
+        "## Rule-set census",
+        "",
+        "| Rule | Input | After redundant-copper | After acute-branch |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    lines += [
+        f"| `{name}` | {rule(first, name)} | {rule(middle, name)} | {rule(last, name)} |"
+        for name in names
+    ]
+    lines += [
+        "",
+        "The acute-branch pass moved " + ", ".join(moved) + "; every other count is the "
+        "redundant-copper stage's.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _usb_skew_limit() -> float:
+    from routing_plan import USB_FS_MAX_SKEW_MM
+
+    return float(USB_FS_MAX_SKEW_MM)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--input", required=True, type=Path, help="the routed board's directory")
     parser.add_argument("--work", required=True, type=Path, help="scratch directory")
     parser.add_argument("--record", type=Path, help="write the measurement here (JSON)")
+    parser.add_argument("--note", type=Path, help="write the markdown note rendered from it here")
     args = parser.parse_args(argv)
     from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError
 
@@ -313,9 +479,10 @@ def main(argv: list[str] | None = None) -> int:
     except KiCadEnvironmentError as error:
         print(f"REFUSED (KiCad environment, Issue #6962): {error}", file=sys.stderr)
         return 2
-    text = json.dumps(record, indent=2) + "\n"
     if args.record:
-        args.record.write_text(text)
+        args.record.write_text(json.dumps(record, indent=2) + "\n")
+    if args.note:
+        args.note.write_text(render_note(record))
     sites = {name: len(stage["sharp_trace_corner"]) for name, stage in record["stages"].items()}
     print(f"sharp_trace_corner sites per stage: {sites}")
     print(f"elapsed: {record['elapsed_s']} s")
