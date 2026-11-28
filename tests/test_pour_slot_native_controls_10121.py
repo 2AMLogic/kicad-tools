@@ -200,6 +200,57 @@ def test_unparameterized_checker_matches_public_check(
     assert _pour_slot_count(checker.check_pour_slot()) == warnings
 
 
+@pytest.mark.parametrize("use_symlink", [False, True], ids=["file", "symlink"])
+def test_relative_load_keeps_the_selected_project_after_chdir(tmp_path, monkeypatch, use_symlink):
+    from kicad_tools.validate import DRCChecker
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    name = Path("control_p.kicad_pcb")
+    _control_p(second, gap=0.95)
+    if use_symlink:
+        (first / name).symlink_to(second / name)
+    else:
+        (first / name).write_bytes((second / name).read_bytes())
+    _write_project(first / name, 0.4, 0.4)
+    _write_project(second / name, 0.2, 0.2)
+
+    monkeypatch.chdir(first)
+    pcb = PCB.load(name)
+    monkeypatch.chdir(second)
+    checker = DRCChecker(pcb, manufacturer="jlcpcb")
+    assert pcb.path == name
+    assert _pour_slot_count(checker.check_pour_slot()) == 1
+    assert _pour_slot_count(checker.check_all()) == 1
+    assert _pour_slot_count(checker.check_pour_slot({"": 0.2})) == 0
+
+
+def test_relative_save_as_binds_later_checks_and_saves_to_the_new_project(tmp_path, monkeypatch):
+    from kicad_tools.validate import DRCChecker
+
+    pcb = _control_p(tmp_path, gap=0.95)
+    _write_project(tmp_path / "control_p.kicad_pcb", 0.4, 0.4)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    monkeypatch.chdir(destination)
+    name = Path("copy.kicad_pcb")
+    pcb.save(name)
+    _write_project(destination / name, 0.2, 0.2)
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(OSError):
+        pcb.save(Path("control_p.kicad_pcb") / "invalid.kicad_pcb")
+    assert pcb.path == name
+    checker = DRCChecker(pcb, manufacturer="jlcpcb")
+    assert _pour_slot_count(checker.check_pour_slot()) == 0
+    assert _pour_slot_count(checker.check_all()) == 0
+    pcb.save()
+    assert not (tmp_path / name).exists()
+    assert (destination / name).is_file()
+
+
 @pytest.mark.parametrize(("gap", "default", "wide", "warnings"), PROJECT_MATRIX)
 def test_mfr_validate_matches_public_check(tmp_path, capsys, gap, default, wide, warnings):
     """``kct mfr validate`` counts ``pour_slot`` the way ``kct check`` does,

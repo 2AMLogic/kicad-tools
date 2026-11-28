@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.manufacturers import DesignRules, get_profile
@@ -42,7 +43,6 @@ if TYPE_CHECKING:
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
-    from pathlib import Path
 
     from kicad_tools.router.current_paths import CurrentPathSpec, OperatingCase
     from kicad_tools.router.rules import NetClassRouting
@@ -818,6 +818,13 @@ class DRCChecker:
                 return prefix_category
         return cls.CATEGORY_MANUFACTURING
 
+    def _source_path(self) -> Path | None:
+        """Use the project selected when this board was loaded or last saved."""
+        path = getattr(self.pcb, "source_path", None)
+        if not isinstance(path, (str, Path)):
+            path = getattr(self.pcb, "path", None)
+        return Path(path) if isinstance(path, (str, Path)) else None
+
     def _absolutize(self, results: DRCResults) -> DRCResults:
         """Rewrite violation locations from board-relative to sheet-absolute.
 
@@ -1166,19 +1173,18 @@ class DRCChecker:
         Own CLI category (``pour_slot``) so ``--skip pour_slot`` works.
         Accepts board clearance rules or a mapping of per-net clearances.
 
-        With no argument the clearances come from the ``.kicad_pro`` /
-        ``.kicad_dru`` beside ``self.pcb.path`` -- the reading ``kct check``
-        applies -- so every ``check_all()`` caller grades the rule the same
-        way (Issue #10683).  A PCB with no file path (in-memory, or a test
+        With no argument the clearances come from the ``.kicad_pro`` and
+        ``.kicad_dru`` beside the file the PCB was loaded from or last saved
+        to. Every ``check_all()`` caller uses the same project as ``kct check``,
+        even after a working-directory change (Issue #10683).
+        A PCB with no file path (in-memory, or a test
         double whose ``path`` is not a ``str`` / ``Path``) falls back to the
         zone clearance combined with KiCad's default net-class clearance.
         An explicit argument always takes precedence over the project files.
         """
         if netclass_clearances is None:
-            from pathlib import Path
-
-            pcb_path = getattr(self.pcb, "path", None)
-            if isinstance(pcb_path, (str, Path)):
+            pcb_path = self._source_path()
+            if pcb_path is not None:
                 from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 
                 netclass_clearances = BoardClearanceRules.from_board(pcb_path)
@@ -1928,24 +1934,25 @@ class DRCChecker:
         )
 
         request = self.mask_copper_request or MaskCopperRequest()
+        pcb_path = self._source_path()
         try:
-            if self.pcb.path is None:
+            if pcb_path is None:
                 assessment = MaskCopperAssessment(
                     reasons=["Mask geometry requires a saved source PCB"]
                 )
             else:
-                raw = self.pcb.path.read_bytes()
+                raw = pcb_path.read_bytes()
                 # Both sides go through PCB's own load-time normalization, so a
                 # freshly loaded name-only-net board is not mistaken for an
                 # edited one (issue #5814); see canonical_source_text().
-                if self.pcb._sexp.to_string() != canonical_source_text(raw, self.pcb.path):
+                if self.pcb._sexp.to_string() != canonical_source_text(raw, pcb_path):
                     assessment = MaskCopperAssessment(
                         coverage="incomplete",
                         reasons=["PCB object differs from current source bytes"],
                     )
                 else:
                     assessment = check_mask_to_copper(
-                        self.pcb.path, request.policy, request.intents, **request.native_options
+                        pcb_path, request.policy, request.intents, **request.native_options
                     )
                     if (
                         assessment.binding
@@ -2000,7 +2007,7 @@ class DRCChecker:
             return cached
         from .mask_geometry import inspect_mask_geometry
 
-        path = getattr(self.pcb, "path", None)
+        path = self._source_path()
         try:
             if path is None:
                 result: tuple[Any, str | None] = (None, "no_saved_source_pcb")
@@ -2360,14 +2367,15 @@ class DRCChecker:
         # The preflight needs the PCB file path -- it re-parses the file
         # using load_pads_for_analysis() to get absolute pad coordinates
         # with footprint rotation handled correctly.
-        if self.pcb.path is None:
+        pcb_path = self._source_path()
+        if pcb_path is None:
             # Cannot run without a backing file (in-memory PCBs can't be
             # checked because the underlying parser operates on text).
             results.rules_checked += 1
             return results
 
         report = check_pad_grid_alignment(
-            self.pcb.path,
+            pcb_path,
             grid_resolution=grid_resolution,
             threshold=threshold,
             clearance=self.design_rules.min_clearance_mm,
