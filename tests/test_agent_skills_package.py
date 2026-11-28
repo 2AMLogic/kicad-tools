@@ -131,9 +131,11 @@ def test_built_wheel_contains_skills_and_installs_from_it(tmp_path: Path) -> Non
     )
     env = {**os.environ, "PYTHONPATH": str(tmp_path / "site")}
     model_hints = {
+        "board-recipe-scaffold": "sonnet",
         "ee-review": "opus",
         "help": "sonnet",
         "hv-isolation-loop": "sonnet",
+        "layout-journal": "sonnet",
         "manufacturing-readiness": "sonnet",
         "tapeout": "sonnet",
     }
