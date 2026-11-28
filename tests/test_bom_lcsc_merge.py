@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
@@ -466,6 +467,25 @@ def test_board06_repeat_export_keeps_reviewed_spec_lcsc(tmp_path, auto_lcsc):
             row = next(r for r in got if ref in r["Designator"].split(","))
             assert row["LCSC Part #"] == lcsc, ref
     assert before == _snapshot_dir(BOARD06)
+
+
+@pytest.mark.parametrize(
+    ("board", "part", "references"),
+    [
+        ("01-voltage-divider", "C7501260", ["J1", "J2"]),
+        ("05-bldc-motor-controller", "C7501260", ["J1", "J5"]),
+        ("06-diffpair-test", "C492407", ["J2", "J3"]),
+    ],
+)
+def test_published_bom_groups_matching_headers(board, part, references):
+    output = Path(__file__).resolve().parents[1] / "boards" / board / "output"
+    with ZipFile(output / "manufacturing.zip") as archive:
+        (member,) = [name for name in archive.namelist() if Path(name).name == "bom_jlcpcb.csv"]
+        bom = archive.read(member)
+    assert bom == (output / "manufacturing" / "bom_jlcpcb.csv").read_bytes()
+    rows = csv.DictReader(bom.decode("utf-8-sig").splitlines())
+    groups = [sorted(row["Designator"].split(",")) for row in rows if row["LCSC Part #"] == part]
+    assert groups == [references]
 
 
 def test_snapshot_dir_ignores_transient_kicad_lock(tmp_path):
