@@ -90,15 +90,13 @@ def test_long_blockers_are_shortened_and_empty_ones_still_block(tmp_path, capsys
     assert not any(b["ship_ready"] for b in by_name.values())
 
 
-def test_real_board_04_is_not_ship_ready(capsys):
-    """The committed Board 04 receipt says blocked, so the fleet survey says so."""
+def test_real_board_04_is_ship_ready_with_its_disclosed_exception(capsys):
+    """The committed Board 04 receipt says ready (#10664 cleared its mask findings)."""
     code = main(["status", "--boards-dir", str(BOARD_04), "--format", "json"])
     (board,) = json.loads(capsys.readouterr().out)["boards"]
 
-    assert code == 2
-    assert board["ship_ready"] is False
+    assert code == 0
+    assert board["ship_ready"] is True and board["blockers"] == []
+    assert [entry["issue"] for entry in board["known_issues"]] == [6269]
     receipt = json.loads((BOARD_04 / "output" / "readiness.json").read_text())
-    first = receipt["blockers"][0][: _BLOCKED_RECEIPT_WIDTH - 3].rstrip() + "..."
-    assert board["blockers"][0] == f"readiness blocked: {first}"
-    assert len(board["blockers"]) == 2
-    assert board["blockers"][1].startswith("known defect #")
+    assert receipt["status"] == "ready" and receipt["blockers"] == []

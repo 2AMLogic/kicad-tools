@@ -41,6 +41,7 @@ from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.pcb.center_sheet import centered_origin
 from kicad_tools.pcb.models3d import ensure_models
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
+from kicad_tools.recipes.mask_repair import repair_mask_copper
 from kicad_tools.recipes.precondition import require_spec
 from kicad_tools.schematic.blocks import (
     DebugHeader,
@@ -3477,6 +3478,21 @@ def main() -> int:
         # Keep the rerouted GND, USER_LED and oscillator copper clear of the
         # front mask openings introduced or affected by the bypass move (#10194).
         process["repair_bypass_mask_escapes"](routed_path)
+        # Issue #10664: clear the same-net ``mask_to_copper`` errors the public
+        # check reports on this board (ten on the committed artifact: three
+        # own-pad exits, a redundant NRST edge fragment, the SWCLK via beside
+        # J1/3 and three own-pour overlaps) with the verified repair, so a
+        # fresh regen converges without a hand-edited artifact.  The repairer
+        # compares the saved board before and after each move, so it runs on
+        # the filled board; it refills the zones itself after saving.
+        if not fill_zones(routed_path):
+            raise RuntimeError("Could not refill the planes before the mask repair")
+        mask_outcome = repair_mask_copper(routed_path, log=print)
+        if mask_outcome.remaining:
+            print(
+                f"   WARNING: {mask_outcome.remaining} mask_to_copper error(s) remain that the "
+                "repair declines to move; the public readiness check will report them"
+            )
         if not finalize_silkscreen(routed_path):
             raise RuntimeError("Could not finalize Board 04 silkscreen")
         if not check_silk_clear_of_holes(routed_path):

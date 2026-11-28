@@ -744,7 +744,11 @@ class MaskCopperRepairer(CopperGapRepairer):
         raise MaskTraceAngleError(f"neither elbow preserves contact and clearance for track {uid}")
 
     def disconnected_copper_nets(
-        self, before: MaskCopperRepairer, names: set[str], *, removed: set[str] = frozenset()
+        self,
+        before: MaskCopperRepairer,
+        names: set[str],
+        *,
+        removed: set[str] | frozenset[str] = frozenset(),
     ) -> set[str]:
         """Check all physical copper groups, including taps without a pad on either side.
 
@@ -1908,7 +1912,7 @@ class MaskCopperRepairer(CopperGapRepairer):
                 return zone
         return None
 
-    def _pad_node(self, pad_uuid: str) -> tuple[SExp, SExp | None] | None:
+    def _pad_node(self, pad_uuid: str) -> tuple[SExp | None, SExp | None] | None:
         """``(pad node, footprint node)`` for one opening uuid."""
         from kicad_tools.schema.pcb import PCB
 
@@ -2005,9 +2009,10 @@ class MaskCopperRepairer(CopperGapRepairer):
         if not any(layer in pad_layers for layer in zone_layers) and "*.Cu" not in pad_layers:
             return "pour_not_on_pad_layer"
         found = self._pad_node(openings[0])
-        if found is None or found[0] is None:
+        pad_node = None if found is None else found[0]
+        if pad_node is None:
             return "pad_node_unavailable"
-        pad_node, footprint_node = found
+        footprint_node = None if found is None else found[1]
         thru_hole = pad_node.get_string(1) == "thru_hole"
         if not self._declared_thermal_connection(pad_node, footprint_node, zone, thru_hole):
             return "pour_relief_not_thermal"
@@ -2052,9 +2057,9 @@ class MaskCopperRepairer(CopperGapRepairer):
 
     def _undo_pour_relief(self, action: MaskPourReliefAction) -> bool:
         found = self._pad_node(action.pad_uuid)
-        if found is None or found[0] is None:
+        pad_node = None if found is None else found[0]
+        if pad_node is None:
             return False
-        pad_node = found[0]
         own = pad_node.find_child("thermal_gap")
         if action.old_gap_mm is None:
             if own is None or not pad_node.remove(own):
@@ -6904,9 +6909,9 @@ class MaskCopperRepairer(CopperGapRepairer):
                 return None
             from kicad_tools.sexp import parse_string
 
-            node = parse_string(action.node_text)
-            start, end = self._xy(node.find("start")), self._xy(node.find("end"))
-            width_node = node.find("width")
+            fragment = parse_string(action.node_text)
+            start, end = self._xy(fragment.find("start")), self._xy(fragment.find("end"))
+            width_node = fragment.find("width")
             if start is None or end is None or width_node is None:
                 return None
             return LineString([start, end]).buffer(_num(width_node) / 2, quad_segs=16)

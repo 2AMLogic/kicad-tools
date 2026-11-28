@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.29.0",
-  "generated_at": "2026-11-27T01:36:26+00:00",
+  "generated_at": "2026-11-28T01:45:51+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -13,20 +13,20 @@
       "size": 1057
     },
     "assembly-back.pdf": {
-      "sha256": "bdfba533556ec8349f4ebfabc3d8859e0b3bbb231c7caa0af56c21c03b200116",
-      "size": 22651
+      "sha256": "321b1e880cf0930ad7f50f205188f896befa5fe40befcb07a727d2eefb611593",
+      "size": 22631
     },
     "assembly-front.pdf": {
-      "sha256": "e55d5eef9b27d90d4028c2fd70919841bcca292615217755f48c308d76bc40f4",
-      "size": 67113
+      "sha256": "1a136917ee589ac3c06f6344fcf6c1c698740a51197bbf26a68a18d758536fb1",
+      "size": 67573
     },
     "bom_jlcpcb.csv": {
       "sha256": "22f4f6e0ae921146268a6a0c94e0267283a7a8d64f24d90be807bb449873b27f",
       "size": 640
     },
     "check-report.json": {
-      "sha256": "599c1b104fff9c76f13a213c681673939f83aedbf485d2141cb24903d6911c2f",
-      "size": 17242
+      "sha256": "33956dbe237f6f8a74cef25bcc17f87e248d30cc7730d2af5df30c55b6252cd6",
+      "size": 17157
     },
     "cpl_jlcpcb.csv": {
       "sha256": "5eaab518a18c6cfa01acf43562ca01b76b1649f2d60ec3db735d6aecebd529b2",
@@ -45,8 +45,8 @@
       "size": 3393
     },
     "design-source/generate_design.py": {
-      "sha256": "8ff6bed8c9c09c4a0a5d0414fd5a9396b3867365c2b2db071b28c17e533486f5",
-      "size": 172746
+      "sha256": "b7310eed85b7337fe28c671afcf49b378502136a5570e42205bff11c07f4634a",
+      "size": 173786
     },
     "design-source/manufacturing_process.py": {
       "sha256": "ef4f0c259a93cd234afab7ec0e8d7ff3d530bc5f52a9989f1612adbbbbded2ef",
@@ -61,40 +61,40 @@
       "size": 33
     },
     "gerbers/gerbers.zip": {
-      "sha256": "4b63be87bd440764a330b0c5d0e22c19d36eca84c755a46ab8afabe81760939e",
-      "size": 56473
+      "sha256": "60528e497acf4c5f3c34415cd9df789fd470c6a987795c2e80422895b7260d05",
+      "size": 56844
     },
     "images/assembly.png": {
-      "sha256": "b745a452747f74c91b83ef93e4bb89780498b7b3455047f73f9b5038b8c6286f",
-      "size": 212008
+      "sha256": "138bc10754d2d18396381e4c39a18be05705c4db798293d8a92d5000dd055aff",
+      "size": 213909
     },
     "images/layer_B_Cu.png": {
-      "sha256": "79d53395602cff88d5ba27b37e1283b0edc2699a81e26c6931fdb9cc7b37a293",
-      "size": 101560
+      "sha256": "cb73e8ff79e91984377a0eead409aacc03dc405e781eb53c4028e465e3189d91",
+      "size": 101833
     },
     "images/layer_F_Cu.png": {
-      "sha256": "36e00cd538b4c5d049b2297739cc538219895d173a8e474df59027c61eedde7b",
-      "size": 177022
+      "sha256": "1d0e269dca00cb5286e514f939408863aeb8ed4ff6015b8d74593fe61e97880e",
+      "size": 177415
     },
     "images/pcb_back.png": {
-      "sha256": "9f30852a8cb32aead4e0c9e80de3e07383662385fcca638dd06d8727212bd983",
-      "size": 103635
+      "sha256": "562b85ac5b483b2d36934531ca2e402b63960c194daeb6b28c96b22f9d107f85",
+      "size": 103940
     },
     "images/pcb_copper.png": {
-      "sha256": "7c1ef16d948b7871905982ce99b1ca6bb5b02d86c799b66366e0944d82475e43",
-      "size": 120637
+      "sha256": "c865840dc07dfcf5a9e9688f9a0508fcb212fe9e9cc55e9b7272866b0f93fcd6",
+      "size": 122615
     },
     "images/pcb_front.png": {
-      "sha256": "0c7423d9440fc32bbaa9ecdfcfd571311168795f06501f413c7719d426203aa8",
-      "size": 282352
+      "sha256": "a8f99d06e1b882411050717a678825484e80b39cfea9a545dcb0282b4a9882d8",
+      "size": 282606
     },
     "images/schematic_stm32_devboard.png": {
       "sha256": "e0d58863c7071f9ef5fb2ba4940807a5fbb2a8df6f5321a377cd2f1f2c2f87ba",
       "size": 279454
     },
     "kicad_project.zip": {
-      "sha256": "7d4627241aed85ade87e8642e556e6fd1a47c6e12f31d4f967a9a1545fca1a20",
-      "size": 74166
+      "sha256": "db5ece95c62158ee928e2adab745a4e31f3d85b82419762c5810c0c48d924768",
+      "size": 74616
     },
     "manufacturing-requirements.json": {
       "sha256": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
@@ -117,12 +117,12 @@
       "size": 3329
     },
     "report.md": {
-      "sha256": "f2ffdd5ee89cd1822cbc575da50b7573d19f8eb20f7f9909e573a62916d66de6",
-      "size": 3490
+      "sha256": "a70d3584bc45299aa5c6b5fe7c2ddf8008e4be5ca3a5e71538f7bd25dc96edb4",
+      "size": 3353
     },
     "report.pdf": {
-      "sha256": "63d2c1b63788e1762aa70f964437076de3a6014b6ed8276b24ddc9ad4ec59d29",
-      "size": 1381049
+      "sha256": "602ef5e8ee5a614efa9ec519b902f4cecd5d4e4529f6072f31673886c0c88650",
+      "size": 1385651
     }
   },
   "board": {
@@ -169,7 +169,7 @@
     {
       "name": "assembly_lead_fit",
       "status": "WARN",
-      "message": "Through-hole lead fit unverified: 8 pad(s) unassessed (no verified lead dimensions or unsupported geometry); no failures",
+      "message": "Through-hole lead fit unverified: 8 pad(s) unassessed (no verified lead or prepared wire dimensions, or unsupported geometry); no failures",
       "details": "J1 pad 1 [2.54-1x6P]: unassessed: no verified lead dimensions declared for pad 1 of 2.54-1x6P\nJ1 pad 2 [2.54-1x6P]: unassessed: no verified lead dimensions declared for pad 2 of 2.54-1x6P\nJ1 pad 3 [2.54-1x6P]: unassessed: no verified lead dimensions declared for pad 3 of 2.54-1x6P\nJ1 pad 4 [2.54-1x6P]: unassessed: no verified lead dimensions declared for pad 4 of 2.54-1x6P\nJ1 pad 5 [2.54-1x6P]: unassessed: no verified lead dimensions declared for pad 5 of 2.54-1x6P\nJ1 pad 6 [2.54-1x6P]: unassessed: no verified lead dimensions declared for pad 6 of 2.54-1x6P\nY1 pad 1 [X49SD8MSB2SC]: unassessed: no verified lead dimensions declared for pad 1 of X49SD8MSB2SC\nY1 pad 2 [X49SD8MSB2SC]: unassessed: no verified lead dimensions declared for pad 2 of X49SD8MSB2SC\nAssessment covers centred geometric fit only (not lead pitch or placement tolerances).",
       "data": {
         "pads": [
@@ -182,6 +182,7 @@
               "diameter_mm": 1.0
             },
             "lead": null,
+            "wire": null,
             "status": "unassessed",
             "reason": "no verified lead dimensions declared for pad 1 of 2.54-1x6P"
           },
@@ -194,6 +195,7 @@
               "diameter_mm": 1.0
             },
             "lead": null,
+            "wire": null,
             "status": "unassessed",
             "reason": "no verified lead dimensions declared for pad 2 of 2.54-1x6P"
           },
@@ -206,6 +208,7 @@
               "diameter_mm": 1.0
             },
             "lead": null,
+            "wire": null,
             "status": "unassessed",
             "reason": "no verified lead dimensions declared for pad 3 of 2.54-1x6P"
           },
@@ -218,6 +221,7 @@
               "diameter_mm": 1.0
             },
             "lead": null,
+            "wire": null,
             "status": "unassessed",
             "reason": "no verified lead dimensions declared for pad 4 of 2.54-1x6P"
           },
@@ -230,6 +234,7 @@
               "diameter_mm": 1.0
             },
             "lead": null,
+            "wire": null,
             "status": "unassessed",
             "reason": "no verified lead dimensions declared for pad 5 of 2.54-1x6P"
           },
@@ -242,6 +247,7 @@
               "diameter_mm": 1.0
             },
             "lead": null,
+            "wire": null,
             "status": "unassessed",
             "reason": "no verified lead dimensions declared for pad 6 of 2.54-1x6P"
           },
@@ -254,6 +260,7 @@
               "diameter_mm": 0.8
             },
             "lead": null,
+            "wire": null,
             "status": "unassessed",
             "reason": "no verified lead dimensions declared for pad 1 of X49SD8MSB2SC"
           },
@@ -266,10 +273,12 @@
               "diameter_mm": 0.8
             },
             "lead": null,
+            "wire": null,
             "status": "unassessed",
             "reason": "no verified lead dimensions declared for pad 2 of X49SD8MSB2SC"
           }
         ],
+        "wire_terminations_not_applied": [],
         "summary": {
           "pads": 8,
           "failed": 0,
@@ -278,6 +287,408 @@
           "finished_hole_tolerance_mm": null,
           "finished_hole_tolerance_source": null
         }
+      }
+    },
+    {
+      "name": "assembly_smd_land_pattern",
+      "status": "WARN",
+      "message": "SMD land pattern unverified: 13 two-terminal SMD component(s) unassessed (missing MPN, source, or usable geometry); no failures",
+      "details": "C1 [CL21A106KAYNNNE]: unassessed: no verified SMD land pattern declared for MPN CL21A106KAYNNNE (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nC2 [CL21A106KAYNNNE]: unassessed: no verified SMD land pattern declared for MPN CL21A106KAYNNNE (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nC3 [CC0805KRX7R9BB104]: unassessed: no verified SMD land pattern declared for MPN CC0805KRX7R9BB104 (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nC10 [CL21C200JBANNNC]: unassessed: no verified SMD land pattern declared for MPN CL21C200JBANNNC (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nC11 [CL21C200JBANNNC]: unassessed: no verified SMD land pattern declared for MPN CL21C200JBANNNC (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nC12 [CC0805KRX7R9BB104]: unassessed: no verified SMD land pattern declared for MPN CC0805KRX7R9BB104 (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nC13 [CC0805KRX7R9BB104]: unassessed: no verified SMD land pattern declared for MPN CC0805KRX7R9BB104 (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nC14 [CC0805KRX7R9BB104]: unassessed: no verified SMD land pattern declared for MPN CC0805KRX7R9BB104 (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nC15 [CC0805KRX7R9BB104]: unassessed: no verified SMD land pattern declared for MPN CC0805KRX7R9BB104 (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nC16 [CL21A475KAQNNNE]: unassessed: no verified SMD land pattern declared for MPN CL21A475KAQNNNE (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nD1 [17-21SURC/S530-A2/TR8]: unassessed: no verified SMD land pattern declared for MPN 17-21SURC/S530-A2/TR8 (measured: pad 1 roundrect 1.000 x 1.200 mm, pad 2 roundrect 1.000 x 1.200 mm, pitch 2.100 mm, outer span 3.100 mm)\nR1 [0805W8F3300T5E]: unassessed: no verified SMD land pattern declared for MPN 0805W8F3300T5E (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nR2 [0805W8F1002T5E]: unassessed: no verified SMD land pattern declared for MPN 0805W8F1002T5E (measured: pad 1 roundrect 1.000 x 1.300 mm, pad 2 roundrect 1.000 x 1.300 mm, pitch 2.000 mm, outer span 3.000 mm)\nDimensional comparison tolerance: +/-0.001 mm (two-terminal SMD copper pads; placement rotation and mirroring undone).",
+      "data": {
+        "components": [
+          {
+            "reference": "C14",
+            "mpn": "CC0805KRX7R9BB104",
+            "footprint": "Capacitor_SMD:C_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0,
+              "outer_span_mm": 3.0
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN CC0805KRX7R9BB104"
+          },
+          {
+            "reference": "R2",
+            "mpn": "0805W8F1002T5E",
+            "footprint": "Resistor_SMD:R_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0,
+              "outer_span_mm": 3.0
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN 0805W8F1002T5E"
+          },
+          {
+            "reference": "C13",
+            "mpn": "CC0805KRX7R9BB104",
+            "footprint": "Capacitor_SMD:C_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0,
+              "outer_span_mm": 3.0
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN CC0805KRX7R9BB104"
+          },
+          {
+            "reference": "C3",
+            "mpn": "CC0805KRX7R9BB104",
+            "footprint": "Capacitor_SMD:C_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0,
+              "outer_span_mm": 3.0
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN CC0805KRX7R9BB104"
+          },
+          {
+            "reference": "C16",
+            "mpn": "CL21A475KAQNNNE",
+            "footprint": "Capacitor_SMD:C_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0,
+              "outer_span_mm": 3.0
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN CL21A475KAQNNNE"
+          },
+          {
+            "reference": "C11",
+            "mpn": "CL21C200JBANNNC",
+            "footprint": "Capacitor_SMD:C_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0,
+              "outer_span_mm": 3.0
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN CL21C200JBANNNC"
+          },
+          {
+            "reference": "R1",
+            "mpn": "0805W8F3300T5E",
+            "footprint": "Resistor_SMD:R_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0,
+              "outer_span_mm": 3.0
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN 0805W8F3300T5E"
+          },
+          {
+            "reference": "C1",
+            "mpn": "CL21A106KAYNNNE",
+            "footprint": "Capacitor_SMD:C_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0,
+              "outer_span_mm": 3.0
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN CL21A106KAYNNNE"
+          },
+          {
+            "reference": "D1",
+            "mpn": "17-21SURC/S530-A2/TR8",
+            "footprint": "LED_SMD:LED_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.2
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.2
+                }
+              ],
+              "pitch_mm": 2.1,
+              "outer_span_mm": 3.1
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN 17-21SURC/S530-A2/TR8"
+          },
+          {
+            "reference": "C2",
+            "mpn": "CL21A106KAYNNNE",
+            "footprint": "Capacitor_SMD:C_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0,
+              "outer_span_mm": 3.0
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN CL21A106KAYNNNE"
+          },
+          {
+            "reference": "C15",
+            "mpn": "CC0805KRX7R9BB104",
+            "footprint": "Capacitor_SMD:C_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0,
+              "outer_span_mm": 3.0
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN CC0805KRX7R9BB104"
+          },
+          {
+            "reference": "C12",
+            "mpn": "CC0805KRX7R9BB104",
+            "footprint": "Capacitor_SMD:C_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0,
+              "outer_span_mm": 3.0
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN CC0805KRX7R9BB104"
+          },
+          {
+            "reference": "C10",
+            "mpn": "CL21C200JBANNNC",
+            "footprint": "Capacitor_SMD:C_0805_2012Metric",
+            "source": null,
+            "expected": null,
+            "measured": {
+              "pads": [
+                {
+                  "pad": "1",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                },
+                {
+                  "pad": "2",
+                  "shape": "roundrect",
+                  "depth_mm": 1.0,
+                  "width_mm": 1.3
+                }
+              ],
+              "pitch_mm": 2.0,
+              "outer_span_mm": 3.0
+            },
+            "mismatched_fields": [],
+            "status": "unassessed",
+            "reason": "no verified SMD land pattern declared for MPN CL21C200JBANNNC"
+          }
+        ],
+        "tolerance_mm": 0.001,
+        "summary": {
+          "components": 13,
+          "passed": 0,
+          "failed": 0,
+          "unassessed": 13
+        }
+      }
+    },
+    {
+      "name": "assembly_mounting_hole_fit",
+      "status": "OK",
+      "message": "No placed references with a mounting-hole declaration; mounting-hole fit not applicable",
+      "data": {
+        "diameters": [],
+        "pitch": [],
+        "summary": {
+          "holes": 0,
+          "pitch_pairs": 0,
+          "failed": 0,
+          "unassessed": 0,
+          "order_unassessed": 0,
+          "invalid_declarations": 0,
+          "finished_hole_tolerance_mm": null,
+          "finished_hole_tolerance_upper_mm": null,
+          "finished_hole_tolerance_source": null
+        },
+        "invalid_declarations": []
       }
     },
     {
@@ -311,7 +722,7 @@
     {
       "name": "bom_lcsc_values",
       "status": "OK",
-      "message": "17 of 17 assigned item(s) verified against offline catalog; no LCSC value/package mismatches"
+      "message": "17 of 17 assigned item(s) verified against offline catalog and parts cache; no LCSC value/package mismatches"
     },
     {
       "name": "bom_lcsc_stock",
@@ -329,10 +740,10 @@
               "Y1"
             ],
             "per_board": 1,
-            "stock": 7181,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
+            "stock": 9102,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
           },
           {
             "lcsc": "C131244",
@@ -363,10 +774,10 @@
               "C2"
             ],
             "per_board": 2,
-            "stock": 3710191,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
+            "stock": 9295232,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
           },
           {
             "lcsc": "C17414",
@@ -374,10 +785,10 @@
               "R2"
             ],
             "per_board": 1,
-            "stock": 56926084,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
+            "stock": 43176854,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
           },
           {
             "lcsc": "C17630",
@@ -396,10 +807,10 @@
               "C16"
             ],
             "per_board": 1,
-            "stock": 2469579,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
+            "stock": 2516032,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
           },
           {
             "lcsc": "C1798",
@@ -408,10 +819,10 @@
               "C11"
             ],
             "per_board": 2,
-            "stock": 165621,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
+            "stock": 76240,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
           },
           {
             "lcsc": "C37208",
@@ -434,10 +845,10 @@
               "C3"
             ],
             "per_board": 5,
-            "stock": 21550379,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
+            "stock": 19536753,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
           },
           {
             "lcsc": "C8734",
@@ -445,15 +856,15 @@
               "U2"
             ],
             "per_board": 1,
-            "stock": 238965,
-            "verified": false,
-            "source": "offline_catalog",
-            "age_days": null
+            "stock": 200705,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
           }
         ],
         "unresolved": [],
         "sources": {
-          "parts_cache": "miss",
+          "parts_cache": "hit",
           "offline_catalog": "hit"
         }
       }
@@ -471,7 +882,7 @@
     {
       "name": "drc",
       "status": "WARN",
-      "message": "DRC passed with 11 warning(s)"
+      "message": "DRC passed with 10 warning(s)"
     },
     {
       "name": "erc",

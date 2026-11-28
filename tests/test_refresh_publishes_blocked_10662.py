@@ -334,26 +334,24 @@ def test_only_board_04_publishes_its_verdict(mod) -> None:
     assert mod.BOARDS["04-stm32-devboard"].tier_check == "output/readiness/tier-check.json"
 
 
-def test_real_board_04_receipt_is_blocked_by_the_mask_findings() -> None:
-    """The committed receipt carries the public verdict, and validates as blocked."""
+def test_real_board_04_receipt_carries_the_public_verdict() -> None:
+    """The committed receipt carries the public verdict, and validates as ready.
+
+    #10662 found this receipt ``blocked`` by ten ``mask_to_copper`` errors the
+    paid-drill checker never saw; #10664 repaired that copper and re-issued the
+    board through this producer, so the tier gate now passes on an exact
+    exception match and no defect is recorded.
+    """
     from kicad_tools.cli.board_readiness import read_readiness
 
     receipt = json.loads((BOARD_04 / "output" / "readiness.json").read_text())
-    assert receipt["status"] == "blocked"
-    unaccepted = [b for b in receipt["blockers"] if b.startswith("kct check reports")]
-    assert len(unaccepted) == 1
-    assert "not recorded)" in unaccepted[0]
-    assert "no longer fires)" not in unaccepted[0]
-    assert set(_rules(unaccepted[0])) == {"mask_to_copper"}
+    assert receipt["status"] == "ready" and receipt["blockers"] == []
     kinds = {entry["issue"]: entry["kind"] for entry in receipt["known_issues"]}
-    assert kinds[6269] == "exception"
-    assert "defect" in kinds.values()
-    assert _check(receipt, "tier_check")["status"] == "failed"
+    assert kinds == {6269: "exception"}
+    tier = _check(receipt, "tier_check")
+    assert (
+        tier["status"] == "passed"
+        and "accepted exactly by the recorded exception" in tier["detail"]
+    )
     verdict = read_readiness(BOARD_04)
-    assert verdict["status"] == "blocked", verdict["blockers"]
-
-
-def _rules(blocker: str) -> list[str]:
-    import re
-
-    return re.findall(r"([a-z_]+) at -?\d+(?:\.\d+)?/-?\d+(?:\.\d+)? \(not recorded\)", blocker)
+    assert verdict["status"] == "ready", verdict["blockers"]
