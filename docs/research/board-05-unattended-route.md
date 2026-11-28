@@ -780,3 +780,79 @@ the gate (operator ruling, 2026-11-23).
 `--grade-only` on the graded seed-42 board exits 1 with that one failure,
 `kct check --mfr jlcpcb warnings: 13`; every native gate passes and the mask
 coverage is complete.
+
+## Same-net legs kept once, 2026-11-28 (issue #9424)
+
+Measured on Linux x86_64 (`loom-crew-1`, 16 vCPU shared with other work;
+1-minute load 15 to 66 while the three routes ran, with a board 03 baseline
+test beside them) with C++ router build 79 and pinned kicad-cli 10.0.6
+(`KCT_KICAD_DOCKER=1`).
+
+On `origin/main` @ `c9ef1c3ed` the nightly rule set reports 0 errors and 9
+warnings on the seed-42 board of `94b50a71e` (routed in 535.0 s at
+`32d2fd4d0`, SHA-256 `d3ea9cfffa955ea5fd7504e821a084209506eff265ea7ca212022383e1862721`,
+then regraded at `c9ef1c3ed`, whose #10698 checker no longer reports the
+four detours): 8 `redundant_copper_covered` (RESET 3, VM 3, GND_SENSE 1,
+DRIVER_SLEEP 1) and 1 `sharp_trace_corner` (RESET, a 45-degree 3-way
+junction at (160.10, 95.06)). The commit journal places the alignment in the
+optimizer's post-route pass (records 717 to 783), over copper that several
+connections of one net share: each route draws the escape leg its pad needs,
+and the passes move the copies onto one line. RESET's three connections
+leave U1.29 together; pad-entry straightening lays their copies on the
+pad's axis, `x = 160.10`, so two lie under the third, and the branch to its
+via at (160.87, 94.285) turns 45 degrees off that line 0.045 mm beyond the
+pad's copper. VM's connections leave C1.1 the same way, as D1.1's, R4.1's
+and U2.17's. On B.Cu at (170.49, 75.305) via minimisation ran one RESET leg
+on through a via to a sibling leg's free end, covering it.
+
+`kct route` now reconciles a net's routes after the optimize pass
+(`reconcile_same_net_routes`, applied through the same grid transaction):
+
+* a leg that lies wholly on a longer, no-narrower same-net leg of the same
+  layer is dropped -- the copper union is unchanged, and whatever touched
+  the dropped leg touches the longer one there;
+* an acute branch that ends in its own via enters it perpendicular to the
+  trunk instead, when the foreign-copper check and the fabrication gap gates
+  accept the new leg;
+* a dead tip a drop exposes is cut back to the via it passes.
+
+| Revision | Seed | Route exit | Nets | Connections | Native DRC err / warn / open | ERC | Nightly errors / warnings | Copper and label LVS | Vias | Wall (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: |
+| `94b50a71e` (base, regraded at `c9ef1c3ed`) | 42 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 9 | clean | 122 | 535.0 |
+| `2852f1a05` | 42 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | **0 / 0** | clean | 122 | 754.6 |
+| `2852f1a05` | 7 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | **0 / 0** | clean | 122 | 754.6 |
+| `2852f1a05` | 1337 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | **0 / 0** | clean | 122 | 754.6 |
+
+Seeds 7 and 1337 were not run on the base. The three saved boards are
+byte-identical (SHA-256
+`f0f55e7c6c3fb37892f308994723b6068675956ded76b52e38f8eea9beb1e174`). An
+earlier run of the three seeds and one run of seed 42 alone saved the same
+bytes (walls 613.3 / 618.7 / 618.6 s and 535.9 s at load 12 to 68). Each
+oracle stage converged in round 1 (43 -> 0), and no route log carries a
+`per-net wall clock bound` or `stage deadline fired` line.
+
+Against the base board ten segments go and two arrive, the vias are
+unchanged (122) and segments go 367 -> 359. The eight covered legs go
+(DRIVER_SLEEP 1, GND_SENSE 1, RESET 3, VM 3). The 9.360 mm RESET leg on
+B.Cu at (170.49, 75.305) stops at its via at 7.995 mm. RESET's 1.089 mm
+diagonal to the via at (160.87, 94.285) becomes a 0.770 mm entry
+perpendicular to the trunk at (160.10, 94.285). Every other segment is
+identical.
+
+The full JLCPCB check on the graded seed-42 board (91 rules, zero waivers)
+reports 11 errors, 3 warnings and 258 infos; the base board reports 12, 12
+and 265. The nine warnings above are gone and no finding is new. The mask
+face loses one error, the RESET overlap at U1/29 (exposed area 0.0071 mm^2)
+the covered escape legs made: 8 `mask_to_copper` overlaps and 3 disjoint
+openings remain as errors, with the same 3 disjoint warnings.
+
+`--grade-only` exits 0 on the graded seed-42 board and leaves its bytes
+unchanged; on the base board it exits 1 with `kct check --mfr jlcpcb
+warnings: 9`. The nightly rule set is at 0 errors and 0 warnings on all
+three seeds. `--skip mask_to_copper` stays in the gate (operator ruling,
+2026-11-23) until the 11 mask errors are repaired at their source. On this
+branch merged with `origin/main` @ `762306338` (`70d262df2`, the #10729
+sharp-corner window guard), seed 42 saves the same bytes in 535.3 s and
+passes. `kct check --mfr jlcpcb` takes 19.7 s with the mask pass skipped and
+69.7 s with it (load 12 to 26): the pass costs 49.9 s, the number for when
+the skip goes.

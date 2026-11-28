@@ -779,6 +779,23 @@ class TraceOptimizer:
             original, candidate, kept
         )
 
+    def leg_rewrite_is_clear(
+        self, original: list[Segment], candidate: list[Segment], kept: list[Segment]
+    ) -> bool:
+        """Whether the clearance gates accept replacing *original* with *candidate*.
+
+        The foreign-copper check and the fabrication gates every chain
+        rewrite passes through :meth:`_accepts_chain_rewrite` -- the pad gap,
+        mask openings, a pad's clean escape -- for a caller that rewrites one
+        leg of a chain against the same-net copper it names in *kept*, without
+        the whole-chain anchor and own-copper tests.
+        """
+        if not all(self._path_is_clear(seg) for seg in candidate):
+            return False
+        return self._replacement_is_clear(original, candidate, kept) and self._keeps_pad_escapes(
+            original, candidate
+        )
+
     def _lays_copper_twice(self, old: list[Segment], new: list[Segment]) -> bool:
         """True if a leg *new* adds lies on the net's own copper (Issue #8603).
 

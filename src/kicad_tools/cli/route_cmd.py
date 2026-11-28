@@ -2055,6 +2055,7 @@ def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: b
         TraceOptimizer,
         make_collision_checker,
         optimize_routes_grid_synced,
+        reconcile_same_net_routes,
     )
 
     if not quiet:
@@ -2106,6 +2107,10 @@ def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: b
         optimize_routes_grid_synced(
             router, optimizer, skip_nets=_committed_coupled_skip_nets(router)
         )
+        # Issue #9424: the connections of one net that leave a pad together
+        # each draw the escape leg, and the passes above align the copies on
+        # one line.  Keep the leg once, through the same grid transaction.
+        reconcile_same_net_routes(router, optimizer, skip_nets=_committed_coupled_skip_nets(router))
 
     _enforce_connectivity_invariant_or_exit(
         router,

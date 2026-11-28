@@ -51,6 +51,7 @@ from .serpentine import (
     add_serpentine,
     tune_match_group,
 )
+from .sibling import SameNetPlan, plan_same_net_reconcile, reconcile_same_net_routes
 from .trace import (
     PairwiseRouteGate,
     TraceOptimizer,
@@ -80,6 +81,7 @@ __all__ = [
     "SerpentineGenerator",
     "SerpentineResult",
     "SerpentineStyle",
+    "SameNetPlan",
     "TraceOptimizer",
     "ViaOptimizationConfig",
     "ViaOptimizationStats",
@@ -92,5 +94,7 @@ __all__ = [
     "optimize_route_vias",
     "optimize_routes_grid_synced",
     "pairwise_route_gate",
+    "plan_same_net_reconcile",
+    "reconcile_same_net_routes",
     "tune_match_group",
 ]
