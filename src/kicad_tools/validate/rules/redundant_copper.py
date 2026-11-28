@@ -274,6 +274,8 @@ class RedundantCopperRule(DRCRule):
         self._gap_mm = physical_copper_gap_mm
         self._gap_policy = fab_view_gap_policy
         self._gap_oracle: Any | None = None
+        # The Board 04 repair also reads foreign copper on a fresh rule instance.
+        self._static_foreign_cache: dict[str, list[tuple[Any, float, float, float, float]]] = {}
 
     def bind(self, pcb: PCB, design_rules: DesignRules | None) -> None:
         """Set the per-board state the chain gates read, without reporting.
@@ -291,7 +293,7 @@ class RedundantCopperRule(DRCRule):
         self._requirement = self._pair_requirement(pcb)
         self._req_cache: dict[tuple[int, int], float] = {}
         self._foreign_cache: dict[str, list[tuple[Any, float, float, float, float]]] = {}
-        self._static_foreign_cache: dict[str, list[tuple[Any, float, float, float, float]]] = {}
+        self._static_foreign_cache.clear()
         self._mask_cache: dict[str, list[_MaskZone]] = {}
         self._copper_discs_cache: list[Any] | None = None
         self._gap_oracle = None  # Rebuild lazily for this PCB.
@@ -878,7 +880,13 @@ class RedundantCopperRule(DRCRule):
         self._static_foreign_cache[layer] = elems
         return elems
 
-    def _foreign_elements(self, layer: str) -> list[tuple[Any, float, float, float, float]]:
+    def _foreign_elements(self, layer: str) -> list[Any]:
+        """Return copper elements for the existing Board 04 clearance check."""
+        return [row[0] for row in self._foreign_elements_with_bounds(layer)]
+
+    def _foreign_elements_with_bounds(
+        self, layer: str
+    ) -> list[tuple[Any, float, float, float, float]]:
         """Segment/via/pad copper on ``layer``, as ``(CopperElement, minx, miny, maxx, maxy)``."""
         from .clearance import CopperElement
 
@@ -914,7 +922,7 @@ class RedundantCopperRule(DRCRule):
         )
 
         hw = width / 2.0
-        foreign = self._foreign_elements(layer)
+        foreign = self._foreign_elements_with_bounds(layer)
         for a, b in path:
             c_minx = min(a[0], b[0]) - hw
             c_miny = min(a[1], b[1]) - hw
