@@ -124,21 +124,39 @@ def test_control_p_genuine_slot_still_warns(tmp_path: Path) -> None:
     assert gap - 2 * CLEARANCE_MM < MIN_THICKNESS_MM
 
 
-def test_public_check_uses_the_sibling_project_on_both_sides(tmp_path, capsys):
+@pytest.mark.parametrize(
+    ("gap", "default", "wide", "warnings"),
+    [
+        (0.55, 0.2, 0.2, 1),
+        (0.55, 0.2, 0.4, 0),
+        (0.65, 0.2, 0.4, 1),
+        (0.95, 0.2, 0.4, 0),
+        (0.95, 0.4, 0.4, 1),
+    ],
+)
+def test_check_and_audit_use_the_sibling_project_on_both_sides(
+    tmp_path, capsys, monkeypatch, gap, default, wide, warnings
+):
+    from kicad_tools.audit.auditor import ManufacturingAudit
+
+    pcb = _control_p(tmp_path, gap=gap)
     board = tmp_path / "control_p.kicad_pcb"
     settings = {
         "meta": {"version": 5},
         "classes": [
-            {"name": "Default", "clearance": 0.2},
-            {"name": "Wide", "clearance": 0.4},
+            {"name": "Default", "clearance": default},
+            {"name": "Wide", "clearance": wide},
         ],
         "netclass_patterns": [{"netclass": "Wide", "pattern": "NET1"}],
     }
-    for gap, default, warnings in ((0.65, 0.2, 1), (0.95, 0.2, 0), (0.95, 0.4, 1)):
-        _control_p(tmp_path, gap=gap)
-        settings["classes"][0]["clearance"] = default
-        board.with_suffix(".kicad_pro").write_text(json.dumps({"net_settings": settings}))
-        assert _public_pour_slot_count(board, capsys) == warnings
+    board.with_suffix(".kicad_pro").write_text(json.dumps({"net_settings": settings}))
+    assert _public_pour_slot_count(board, capsys) == warnings
+    audit = ManufacturingAudit(board, manufacturer="jlcpcb")
+    # The manufacturing checker owns pour_slot. Native geometry has a separate tally.
+    monkeypatch.setattr(audit, "_merge_geometric_drc", lambda status: None)
+    drc = audit._check_drc(pcb)
+    assert drc.violations_by_type
+    assert drc.violations_by_type.get("pour_slot", 0) == warnings
 
 
 def _public_pour_slot_count(board: Path, capsys) -> int:

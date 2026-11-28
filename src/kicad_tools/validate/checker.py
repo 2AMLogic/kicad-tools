@@ -874,6 +874,8 @@ class DRCChecker:
         self,
         filters: list[ViolationFilter] | None = None,
         pad_grid_auto_derive: bool = False,
+        *,
+        pour_slot_clearances: PourSlotClearances | None = None,
     ) -> DRCResults:
         """Run all DRC checks.
 
@@ -889,6 +891,9 @@ class DRCChecker:
                 Python-API behaviour; gating consumers that must agree
                 with ``kct check`` (e.g. ``ManufacturingAudit``) opt in
                 so report and CLI verdicts cannot drift (issue #3497).
+            pour_slot_clearances: Project and custom clearance rules for
+                track-to-zone gaps. When omitted the rule combines the
+                zone clearance with KiCad's default net-class clearance.
 
         Returns:
             DRCResults containing all violations found (after filtering,
@@ -905,6 +910,8 @@ class DRCChecker:
             method = getattr(self, method_name)
             if method_name == "check_pad_grid_alignment":
                 results.merge(method(auto_derive_threshold=pad_grid_auto_derive))
+            elif method_name == "check_pour_slot" and pour_slot_clearances is not None:
+                results.merge(method(pour_slot_clearances))
             else:
                 results.merge(method())
 
