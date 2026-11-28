@@ -81,6 +81,10 @@ to the ``checked_at`` its committed ``readiness.json`` already carries (so
 ``--checked-at`` is optional) and exits 1 when any bundle would publish a
 file: a committed bundle can be self-consistent and still disagree with what
 the current rules emit, and only a fresh run on the pinned toolchain shows it.
+Its verdict names, per drifted board, the invocation that repairs it: the
+plain refresh, or ``--force-replot`` when only committed check reports
+disagree, because a current archive never re-runs the checker and a plain
+refresh publishes nothing for that case (Issue #10727).
 """
 
 from __future__ import annotations
@@ -90,6 +94,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -112,6 +117,10 @@ log = rr.log
 sha256 = rr.sha256
 
 REPO_ROOT = rr.REPO_ROOT
+
+#: This driver as the ``--check`` remediation names it (Issue #10727): the interpreter
+#: invocation the nightly workflow uses, since the script is not executable (mode 100644).
+DRIVER = "uv run python " + Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
 
 
 #: ``gerbers.zip`` members plotted from the saved copper fills / the front silk.
@@ -1120,6 +1129,7 @@ def refresh_bundle(
     resolve_known_issue: list[str] | None = None,
     on_verdict: Callable[[str], None] | None = None,
     compare_checks: bool = False,
+    on_check_drift: Callable[[list[str]], None] | None = None,
 ) -> list[str]:
     cfg = rr.BOARDS[board.name]
     bundle = BUNDLES[board.name]
@@ -1213,10 +1223,16 @@ def refresh_bundle(
         )
         if compare_checks and not stale:
             # Issue #10692: a current archive skips the checker above, so compare
-            # the committed per-rule counts to a fresh run here.
-            for target in stale_check_reports(board, staged, cfg, bundle):
-                if target not in would_publish:
-                    would_publish.append(target)
+            # the committed per-rule counts to a fresh run here.  A plain refresh
+            # republishes none of them (Issue #10727), so they are reported apart.
+            check_drift = [
+                target
+                for target in stale_check_reports(board, staged, cfg, bundle)
+                if target not in would_publish
+            ]
+            would_publish.extend(check_drift)
+            if on_check_drift is not None:
+                on_check_drift(check_drift)
         return would_publish
 
 
@@ -1231,10 +1247,35 @@ def _source_date_epoch(checked_at: str) -> str:
     return str(int(datetime.fromisoformat(checked_at.replace("Z", "+00:00")).timestamp()))
 
 
+def repair_command(board: Path, checked_at: str, *, force_replot: bool) -> str:
+    """This driver's invocation, without ``--check``, that republishes ``board`` (Issue #10727).
+
+    A plain run needs ``--checked-at`` (``--check`` reads the committed value for
+    itself), and only a re-plot re-runs the checker on a current archive, so that
+    repair adds ``--force-replot``.
+    """
+    inside = board.is_relative_to(REPO_ROOT)
+    where = shlex.quote(board.relative_to(REPO_ROOT).as_posix() if inside else str(board))
+    # Quote the whole argument list: a ``--checked-at`` the parser accepts may hold a space.
+    return " ".join(
+        [
+            DRIVER,
+            where,
+            *(["--force-replot"] if force_replot else []),
+            "--checked-at",
+            shlex.quote(checked_at),
+        ]
+    )
+
+
 def drift_exit_status(
     drift: dict[str, list[str]],
     refused: list[str] | None = None,
     blocked: list[str] | None = None,
+    *,
+    check_only: dict[str, list[str]] | None = None,
+    boards: dict[str, Path] | None = None,
+    anchors: dict[str, str] | None = None,
 ) -> int:
     """The ``--check`` verdict (Issue #10692).
 
@@ -1242,20 +1283,56 @@ def drift_exit_status(
     ready (a ``blocked`` receipt, Issue #10662 -- the nightly stays red for
     such a board until its defect is fixed); else 0.  The "clean" line is only
     printed when none of those happened, so a red run never reads as clean.
+
+    Each drifted board is followed by the invocation that repairs it
+    (Issue #10727), in one of two classes.  Files a plain refresh would publish
+    are repaired by that refresh.  ``check_only[name]`` are the committed check
+    reports the ``--check`` comparison added: the archive is current, so a
+    plain refresh never re-runs the checker and leaves them stale.  Only a
+    re-plot does, and it regenerates the whole bundle -- measured on Board 04,
+    ``--force-replot`` would have republished five files including both ZIPs
+    while both check reports already agreed.  ``boards`` and ``anchors`` carry
+    each board's path and the ``checked_at`` it was checked at.  ``drift``,
+    ``check_only``, ``boards`` and ``anchors`` are keyed by the board's resolved
+    path, not its basename: two inputs may share a basename (Issue #10727), and
+    the printed repair must name the directory that drifted.  Only the header
+    label shows the basename.
     """
     refused, blocked = refused or [], blocked or []
+    check_only, boards, anchors = check_only or {}, boards or {}, anchors or {}
     if not (drift or refused or blocked):
         log("== --check: every bundle reproduces on the pinned toolchain; nothing to publish")
         return 0
-    for name, files in drift.items():
+    for key, files in drift.items():
+        name = Path(key).name
         log(f"== --check DRIFT {name}: a fresh run would publish {len(files)} file(s)")
         for path in files:
             log(f"    {path}")
-    if drift:
-        log(
-            "  --check: the committed bundle disagrees with a fresh run. Refresh it with this "
-            "driver (without --check) on the pinned toolchain and commit the result."
-        )
+        repair = None
+        if key in boards and key in anchors:
+            repair = repair_command(
+                boards[key], anchors[key], force_replot=bool(check_only.get(key))
+            )
+        if check_only.get(key):
+            log(
+                "  --check: committed check report(s) disagree with a fresh checker run while "
+                "the archive is current. A plain refresh does not re-run the checker, so it "
+                "leaves them stale; re-run with --force-replot, which does, on the pinned "
+                "toolchain and commit the result:"
+            )
+            if repair:
+                log(f"    {repair}")
+            log(
+                "  A forced re-plot regenerates the whole bundle: that commit also carries the "
+                "re-plotted archives, not only the check report."
+            )
+        else:
+            log(
+                "  --check: the committed bundle disagrees with a fresh run. Refresh it with "
+                "this driver (without --check) on the pinned toolchain and commit the result:"
+            )
+            if repair:
+                log(f"    {repair}")
     for name in refused:
         log(f"== --check REFUSED {name}: a gate refused the fresh run; drift is unknown")
     for name in blocked:
@@ -1313,6 +1390,9 @@ def main(argv: list[str] | None = None) -> int:
     ambient_epoch = os.environ.get("SOURCE_DATE_EPOCH")
     status = 0
     drift: dict[str, list[str]] = {}
+    check_only: dict[str, list[str]] = {}
+    boards: dict[str, Path] = {}
+    anchors: dict[str, str] = {}
     refused: list[str] = []
     blocked: list[str] = []
     for board in args.boards:
@@ -1333,6 +1413,10 @@ def main(argv: list[str] | None = None) -> int:
             anchored = _source_date_epoch(checked_at)
         except ValueError:
             parser.error(f"{origin} is not an ISO timestamp: {checked_at}")
+        key = str(board)
+        boards[key] = board
+        anchors[key] = checked_at
+        added: list[str] = []
         if ambient_epoch is None:
             os.environ["SOURCE_DATE_EPOCH"] = anchored
         try:
@@ -1348,11 +1432,21 @@ def main(argv: list[str] | None = None) -> int:
                 known_issue=args.known_issue,
                 resolve_known_issue=args.resolve_known_issue,
                 on_verdict=verdict.publish,
+                on_check_drift=added.extend,
             )
             for name in would_publish:
-                log(f"    {name}")
+                if name not in added:
+                    log(f"    {name}")
+            if added:
+                check_only[key] = added
+                log(
+                    f"  --check: {len(added)} committed check report(s) whose per-rule counts "
+                    "differ from a fresh run (not counted above):"
+                )
+                for name in added:
+                    log(f"    {name}")
             if would_publish:
-                drift[board.name] = would_publish
+                drift[key] = would_publish
         except GateFailure as exc:
             log(f"  REFUSED: {exc} -- nothing published for {board.name}")
             status = 1
@@ -1363,7 +1457,17 @@ def main(argv: list[str] | None = None) -> int:
             status = 1
             blocked.append(board.name)
     if args.check:
-        status = drift_exit_status(drift, refused=refused, blocked=blocked) or status
+        status = (
+            drift_exit_status(
+                drift,
+                refused=refused,
+                blocked=blocked,
+                check_only=check_only,
+                boards=boards,
+                anchors=anchors,
+            )
+            or status
+        )
     return status
 
 
