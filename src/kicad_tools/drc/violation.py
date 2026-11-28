@@ -797,6 +797,19 @@ class DRCViolation:
         return self.severity == Severity.ERROR and not self.waived
 
     @property
+    def is_warning(self) -> bool:
+        """Check if this is a non-blocking warning (vs error, info, or a waived finding).
+
+        The one definition behind every warning count (Issue #10650).
+        """
+        return self.severity == Severity.WARNING and not self.waived
+
+    @property
+    def is_info(self) -> bool:
+        """Check if this is an informational finding (never a gate input)."""
+        return self.severity == Severity.INFO and not self.waived
+
+    @property
     def is_waived(self) -> bool:
         """Check if a ``.kct_waivers.json`` entry matched this finding."""
         return self.waived

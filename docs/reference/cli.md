@@ -719,6 +719,17 @@ RUN parity is `verdict: "incomplete"` with `exit_code: 0`. It also adds a
 `parity_errors`/`parity_warnings` in `summary`. Waiver entries match parity
 findings the same way they match DRC findings.
 
+**Informational findings (#10650)**
+
+An `info`-severity finding counts as neither an error nor a warning, so it
+never changes the exit code: an info-only report exits 0 under `--strict` when
+its other gates pass. It stays listed for inspection — an `INFO
+(informational, non-gating)` section and an `Infos:` count in the table, an
+`Infos` column in `--format summary`, and `summary.infos` in `--format json`
+(present only when the count is nonzero, like `waived`). In `--mfr` output an
+unchecked info finding adds `, N info` to the `NOT CHECKED` line and
+`not_checked_infos` to the JSON summary.
+
 **Manufacturer check (`--mfr`, #7170)**
 
 `--mfr <fab>` gives every kicad-cli violation exactly one verdict:
@@ -743,7 +754,8 @@ under `--strict`, or when schematic parity did NOT RUN without
 `--allow-incomplete`, like plain `kct drc report.json`); else 0.
 `--mfr --format json` prints `{manufacturer, layers, source, summary: {total,
 checked, compatible, incompatible, not_checked, not_checked_errors,
-not_checked_warnings, not_checked_by_type, parity_errors, parity_warnings},
+not_checked_warnings, not_checked_infos (nonzero only, #10650),
+not_checked_by_type, parity_errors, parity_warnings},
 checks: [{type_str, severity, result, rule_name, message, violation_message,
 manufacturer_limit, actual_value}], schematic_parity, schematic_parity_checked,
 verdict, exit_code}`; `checked + not_checked == total`. Other `--format` values print
