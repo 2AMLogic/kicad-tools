@@ -457,6 +457,89 @@ def test_orphan_track_counts_as_open(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# A chamfered corner is not copper (Issue #10669)
+# ---------------------------------------------------------------------------
+#
+# P3's 0.20 mm track ends 0.042 mm inside the bottom-right corner of P2's
+# 2 x 2 mm copper, which a drill offset keeps centred at (11.7, 13.7).  A cut
+# on that corner takes the copper away from the track end; the same cut
+# anywhere else leaves it.  ``opens`` is kicad-cli's ``unconnected_items``.
+
+# Drill offset (pad-local) that holds the copper at (11.7, 13.7) per footprint angle.
+_OFFSET_FOR_ANGLE = {0: "-0.3 -0.3", 90: "0.3 -0.3", -90: "-0.3 0.3"}
+_SQUARE_CORNERS = "(roundrect_rratio 0) "
+
+# name -> (pad tokens, footprint angle, track end, opens)
+_CUT_CORNER_CASES: dict[str, tuple[str, int, str, int]] = {
+    "cut_under_track": (
+        f"{_SQUARE_CORNERS}(chamfer_ratio 0.14) (chamfer bottom_right)",
+        0,
+        "12.67 14.67",
+        1,
+    ),
+    "cut_away_from_track": (
+        f"{_SQUARE_CORNERS}(chamfer_ratio 0.14) (chamfer top_left)",
+        0,
+        "12.67 14.67",
+        0,
+    ),
+    "plain_square": ("(roundrect_rratio 0)", 0, "12.67 14.67", 0),
+    # The pad's own top-right corner sits at the board's bottom right at -90.
+    "rotated_cut": (
+        f"{_SQUARE_CORNERS}(chamfer_ratio 0.14) (chamfer top_right)",
+        -90,
+        "12.67 14.67",
+        1,
+    ),
+    # At 90 the cut (bottom-left in pad axes) is away from this track end.
+    "rotated_uncut_corner": (
+        f"{_SQUARE_CORNERS}(chamfer_ratio 0.14) (chamfer bottom_left)",
+        90,
+        "10.90 12.90",
+        0,
+    ),
+    # A 0.5 radius rounds the far corners; a 0.05 cut squares the near one,
+    # whose copper then reaches the track end.
+    "cut_replaces_round": (
+        "(roundrect_rratio 0.5) (chamfer_ratio 0.05) (chamfer bottom_right)",
+        0,
+        "12.60 14.60",
+        0,
+    ),
+    # Same track end, cut elsewhere: the near corner's radius keeps it off.
+    "uncut_corner_keeps_round": (
+        "(roundrect_rratio 0.5) (chamfer_ratio 0.05) (chamfer top_left)",
+        0,
+        "12.60 14.60",
+        1,
+    ),
+}
+
+
+def _cut_corner_board(tmp_path: Path, name: str) -> Path:
+    """P3 at (17, 18) joined to the offset roundrect P2 by one 0.20 mm track."""
+    tokens, angle, end, _opens = _CUT_CORNER_CASES[name]
+    body = f"""  (footprint "T:P" (layer "F.Cu") (uuid "p3") (at 17 18)
+    (property "Reference" "P3" (at 0 -3 0) (layer "F.SilkS") (uuid "r3"))
+    (pad "1" thru_hole rect (at 0 0) (size 2 2) (drill 0.4) (layers "*.Cu") (net 1 "GND")))
+  (footprint "T:P" (layer "F.Cu") (uuid "p2") (at 12 14 {angle})
+    (property "Reference" "P2" (at 0 -3 0) (layer "F.SilkS") (uuid "r2"))
+    (pad "1" thru_hole roundrect (at 0 0 {angle}) (size 2 2) {tokens}
+      (drill 0.4 (offset {_OFFSET_FOR_ANGLE[angle]})) (layers "*.Cu") (net 1 "GND")))
+  (segment (start 17 18) (end {end}) (width 0.20) (layer "F.Cu") (net 1) (uuid "s1"))
+"""
+    return _write(tmp_path, f"cut_corner_{name}", body)
+
+
+@pytest.mark.parametrize("name", sorted(_CUT_CORNER_CASES))
+def test_cut_corner_is_not_copper(tmp_path: Path, name: str):
+    path = _cut_corner_board(tmp_path, name)
+    expected = _CUT_CORNER_CASES[name][3]
+    assert _three_models(path, "GND") == (expected,) * 3
+    _check_kicad(path, tmp_path, "GND", expected)
+
+
+# ---------------------------------------------------------------------------
 # Pad-less components: what kicad-cli counts and what it does not
 # ---------------------------------------------------------------------------
 #

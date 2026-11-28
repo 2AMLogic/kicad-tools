@@ -42,10 +42,13 @@ from __future__ import annotations
 import math
 import re
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools._shapely import has_shapely as _has_shapely
-from kicad_tools.core.geometry import point_to_segment_distance
+from kicad_tools.core.geometry import point_to_segment_distance, rotate_pad_offset
+
+if TYPE_CHECKING:
+    from kicad_tools.sexp import SExp
 
 if _has_shapely():  # pragma: no cover - import guard exercised by environment
     from shapely.geometry import LineString as _ShapelyLineString  # type: ignore[import-untyped]
@@ -63,7 +66,7 @@ if _has_shapely():  # pragma: no cover - import guard exercised by environment
 CONTACT_AREA_EPSILON: float = 1e-6
 
 # Inward erosion (mm) for pad shapes this module does NOT model exactly
-# (``trapezoid``, chamfered ``roundrect``, ``custom`` primitives).  Their
+# (``trapezoid``, ``custom`` primitives).  Their
 # size box over-reaches the real copper at the corners, so the box is shrunk
 # by this margin to stay a conservative under-approximation: such a pad can
 # only bond *less* readily than its real copper, never across a clearance
@@ -76,30 +79,69 @@ PAD_FALLBACK_ERODE: float = 0.1
 EXACT_PAD_SHAPES: frozenset[str] = frozenset({"rect", "roundrect", "circle", "oval", "obround"})
 
 
-def _pad_has_chamfer(pad: Any) -> bool:
-    """True when a ``roundrect`` pad carries a non-zero chamfer.
+def pad_chamfered_outline(
+    source: SExp | None, default_ratio: float
+) -> tuple[tuple[float, float], ...]:
+    """Boundary of a mixed chamfered/rounded pad, relative to its centre in board axes.
 
-    The schema does not model chamfers, so look at the raw ``(pad ...)``
-    S-expression when it is linked: ``(chamfer_ratio R)`` with ``R > 0`` and a
-    ``(chamfer ...)`` corner list means some corners are cut, not rounded.
+    ``source`` is the pad's raw ``(pad ...)`` node.  A corner listed in
+    ``(chamfer ...)`` is a straight cut of ``chamfer_ratio * min(w, h)`` along
+    each edge; every other corner keeps its ``(roundrect_rratio ...)`` radius,
+    or ``default_ratio * min(w, h)`` when that token is absent.  The vertices
+    are already turned by the pad's absolute ``(at x y ANGLE)``, so a caller
+    adds only the copper centre.
+
+    Returns ``()`` when no corner is cut -- no ``(chamfer ...)`` list, no
+    ``(chamfer_ratio ...)``, or a zero ratio -- and the ordinary ``roundrect``
+    construction stands.  One construction shared by the router loaders
+    (:func:`kicad_tools.router.io._chamfered_outlines`) and
+    :func:`pad_copper_outline` (Issue #10669).
     """
-    node = getattr(pad, "_sexp_node", None)
-    if node is None:
-        return False
-    ratio = node.find("chamfer_ratio")
-    corners = node.find("chamfer")
-    if ratio is None or corners is None:
-        return False
-    value = ratio.get_float(0)
-    return bool(value) and value > 0 and len(getattr(corners, "children", []) or []) > 1
+    if source is None or (corners := source.find_child("chamfer")) is None:
+        return ()
+    ratio = source.find_child("chamfer_ratio")
+    size = source.find_child("size")
+    if ratio is None or size is None:
+        return ()
+    width, height = size.get_float(0) or 0.0, size.get_float(1) or 0.0
+    short = min(width, height)
+    cut = min(0.5, ratio.get_float(0) or 0.0) * short
+    if cut <= 0:
+        return ()
+    rounding = source.find_child("roundrect_rratio")
+    rratio = rounding.get_float(0) if rounding is not None else None
+    rounded = (default_ratio if rratio is None else max(0.0, min(0.5, rratio))) * short
+    at = source.find_child("at")
+    rotation = (at.get_float(2) or 0.0) if at is not None else 0.0
+    selected = {item.value for item in corners.children}
+    vertices: list[tuple[float, float]] = []
+    for name, sx, sy, angle in (
+        ("top_left", -1, -1, 180),
+        ("top_right", 1, -1, 270),
+        ("bottom_right", 1, 1, 0),
+        ("bottom_left", -1, 1, 90),
+    ):
+        # A chamfer replaces the round on that corner. Its two tangent
+        # points describe one straight cut. Uncut corners retain the same
+        # inscribed arc resolution as pad_gate_polygon.
+        chamfered = name in selected
+        radius = cut if chamfered else rounded
+        steps = 1 if chamfered or radius == 0 else 32
+        cx, cy = sx * (width / 2 - radius), sy * (height / 2 - radius)
+        for i in range(steps + 1):
+            theta = math.radians(angle + 90 * i / steps)
+            x, y = cx + radius * math.cos(theta), cy + radius * math.sin(theta)
+            vertices.append(rotate_pad_offset(x, y, rotation))
+    return tuple(vertices)
 
 
 def pad_outline_is_exact(pad: Any) -> bool:
-    """Whether :func:`pad_copper_outline` models ``pad``'s copper exactly."""
+    """Whether :func:`pad_copper_outline` models ``pad``'s copper exactly.
+
+    A ``roundrect`` is exact whether or not corners are chamfered (Issue #10669).
+    """
     shape = (getattr(pad, "shape", "") or "").lower()
-    if shape not in EXACT_PAD_SHAPES:
-        return False
-    return not (shape == "roundrect" and _pad_has_chamfer(pad))
+    return shape in EXACT_PAD_SHAPES
 
 
 # The refusal half of ``custom_pad_outline_detail``: the router's ValueError
@@ -256,7 +298,9 @@ def pad_copper_outline(
 
     * ``rect`` -> the exact rectangle;
     * ``roundrect`` -> rectangle with corner radius
-      ``roundrect_rratio * min(w, h)`` (KiCad's default ratio 0.25);
+      ``roundrect_rratio * min(w, h)`` (KiCad's default ratio 0.25); a corner
+      named in ``(chamfer ...)`` is a straight cut instead
+      (:func:`pad_chamfered_outline`, Issue #10669);
     * ``circle`` -> disk of diameter ``min(w, h)``;
     * ``oval`` / ``obround`` -> stadium (a circle when ``w == h``).
 
@@ -272,8 +316,8 @@ def pad_copper_outline(
 
     A ``custom`` pad uses its real anchor-plus-filled-polygon copper (Issue
     #9468, :func:`custom_pad_board_outline`).  Shapes not modelled exactly
-    (``trapezoid``, chamfered ``roundrect``, and a ``custom`` pad whose copper
-    that helper refuses) fall back to the size box eroded by
+    (``trapezoid``, and a ``custom`` pad whose copper that helper refuses)
+    fall back to the size box eroded by
     :data:`PAD_FALLBACK_ERODE` (un-eroded if the erosion empties it), which
     can only under-report contact.  A pad with a non-positive size is its
     bare anchor point.  Returns ``None`` when shapely is unavailable.
@@ -298,6 +342,20 @@ def pad_copper_outline(
 
     shape = (getattr(pad, "shape", "") or "").lower()
     exact = pad_outline_is_exact(pad)
+    if exact and shape == "roundrect":
+        # A chamfered corner is copper the size box does not have (Issue
+        # #10669).  The vertices arrive already turned by the pad's absolute
+        # angle, so only the copper centre is added; a repeated vertex marks
+        # an unrounded corner.
+        vertices = pad_chamfered_outline(getattr(pad, "_sexp_node", None), 0.25)
+        if vertices:
+            ccx, ccy = _to_board(0.0, 0.0)
+            ring: list[tuple[float, float]] = []
+            for x, y in vertices:
+                point = (ccx + x, ccy + y)
+                if not ring or point != ring[-1]:
+                    ring.append(point)
+            return _ShapelyPolygon(ring)
     radius = 0.0
     if exact and shape in ("circle", "oval", "obround"):
         radius = min(w, h) / 2.0
