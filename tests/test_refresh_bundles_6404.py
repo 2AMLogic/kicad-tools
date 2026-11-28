@@ -1316,7 +1316,7 @@ def test_drift_exit_status_never_prints_clean_on_refused_or_blocked(mod, capsys)
 
 
 # --------------------------------------------------------------------------- --check remediation (#10727)
-DRIVER = SCRIPT.relative_to(REPO).as_posix()
+DRIVER = "uv run python " + SCRIPT.relative_to(REPO).as_posix()
 CHECK_REPORT = "output/manufacturing/check-report.json"
 ANCHOR = "2026-10-18T00:00:00+00:00"
 
@@ -1343,7 +1343,7 @@ def _stale_count_drift(mod, tmp_path, monkeypatch, unanchored_clock, capsys) -> 
 def _printed_remediation(out: str) -> list[str]:
     """The driver arguments of the remediation line ``--check`` printed."""
     (line,) = [line.strip() for line in out.splitlines() if line.strip().startswith(DRIVER + " ")]
-    return shlex.split(line)[1:]
+    return shlex.split(line)[len(DRIVER.split()) :]
 
 
 def _count_and_list(out: str, claimed: str) -> tuple[int, list[str]]:

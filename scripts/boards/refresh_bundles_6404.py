@@ -117,8 +117,9 @@ sha256 = rr.sha256
 
 REPO_ROOT = rr.REPO_ROOT
 
-#: This driver, repository-relative, as the ``--check`` remediation names it (Issue #10727).
-DRIVER = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
+#: This driver as the ``--check`` remediation names it (Issue #10727): the interpreter
+#: invocation the nightly workflow uses, since the script is not executable (mode 100644).
+DRIVER = "uv run python " + Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
 
 
 #: ``gerbers.zip`` members plotted from the saved copper fills / the front silk.
@@ -1284,8 +1285,8 @@ def drift_exit_status(
             log(
                 "  --check: committed check report(s) disagree with a fresh checker run while "
                 "the archive is current. A plain refresh does not re-run the checker, so it "
-                "leaves them stale; re-run with --force-replot, which does, and commit the "
-                "result:"
+                "leaves them stale; re-run with --force-replot, which does, on the pinned "
+                "toolchain and commit the result:"
             )
             if repair:
                 log(f"    {repair}")
