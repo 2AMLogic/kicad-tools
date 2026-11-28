@@ -11,7 +11,8 @@ everything already on the board.
 self-contained, because a link is short and the board is otherwise finished:
 
 * a uniform multi-layer grid over the link's bounding box plus a margin,
-  aligned on the link's first endpoint so a pad's own axis is a grid line;
+  aligned on the first endpoint, or on a narrow destination pad when the
+  initial grid misses its copper;
 * every other net's copper (pads, tracks, vias, arcs and unnetted copper
   pads), inflated by ``clearance + trace_width / 2``, blocks a cell; the
   board outline (inset by the edge clearance) bounds the grid;
@@ -648,8 +649,104 @@ def _uniform_pad_lands(fp: Any, pad: Any, layers: Collection[str]) -> dict[str, 
     return dict.fromkeys(layers, outline) if outline is not None else {}
 
 
+def _pad_has_cut_corner(pad: Any) -> bool:
+    """True when a ``roundrect`` pad cuts at least one corner (``chamfer`` list).
+
+    Unlike ``copper._pad_has_chamfer`` (which keeps a single selected corner on
+    the shared exact outline), this admits a one-corner list, so the named-pad
+    terminal lands on the cut copper too (Issue #10604).
+    """
+    node = getattr(pad, "_sexp_node", None)
+    if node is None or (getattr(pad, "shape", "") or "").lower() != "roundrect":
+        return False
+    corners = node.find("chamfer")
+    if corners is None or not getattr(corners, "children", None):
+        return False
+    return _chamfer_ratio(node) > 0
+
+
+def _chamfer_ratio(node: Any) -> float:
+    """The pad's ``chamfer_ratio``; an omitted one is KiCad's default 0.2."""
+    ratio = node.find("chamfer_ratio")
+    if ratio is None:
+        return 0.2
+    return ratio.get_float(0) or 0.0
+
+
+def _approximated_pad_box(fp: Any, pad: Any, geom: Any) -> Any:
+    """Offset-aware conservative land for a pad the outline models only roughly.
+
+    ``pad_copper_outline`` erodes the box of chamfered ``roundrect`` and
+    ``trapezoid`` pads by ``PAD_FALLBACK_ERODE`` per side; on top of the
+    terminal inset that empties 0.26-0.28 mm wide pads on a 0.05 mm grid.  The
+    un-eroded circumscribing box over-claims instead: a goal cell in a chamfered
+    corner is off the real copper.  So the land is an *inscribed* region at the
+    pad's ``(offset)`` centre: a chamfered ``roundrect`` is its box with each
+    corner cut (an uncut rounded corner is cut by its radius, a chord that
+    lies inside the arc), and a ``trapezoid`` is the rectangle inside it for
+    either sign of ``rect_delta``.  Anything else keeps ``geom``.
+    ``exact_pad_lands`` still marks the pad unmodelled.
+    """
+    from shapely.geometry import Polygon
+
+    from kicad_tools.geometry.copper import custom_pad_board_outline, pad_board_center
+
+    center = pad_board_center(pad, fp.position, fp.rotation)
+    w, h = pad.size
+    if custom_pad_board_outline(pad, center) is not None or w <= 0 or h <= 0:
+        return geom
+    node = getattr(pad, "_sexp_node", None)
+    shape = (getattr(pad, "shape", "") or "").lower()
+    local: list[tuple[float, float]]
+    if node is not None and shape == "roundrect" and _pad_has_cut_corner(pad):
+        short = min(w, h)
+        ratio = _chamfer_ratio(node)
+        cut = max(0.0, min(0.5, ratio)) * short
+        selected = {c.value for c in node.find("chamfer").children}
+        round_ratio = getattr(pad, "roundrect_rratio", None)
+        rounded = max(0.0, min(0.5, 0.25 if round_ratio is None else round_ratio)) * short
+        local = []
+        # KiCad pad-local y grows downward, so "top" is -y.
+        for name, sx, sy in (
+            ("top_left", -1, -1),
+            ("top_right", 1, -1),
+            ("bottom_right", 1, 1),
+            ("bottom_left", -1, 1),
+        ):
+            r = cut if name in selected else rounded
+            cx, cy = sx * w / 2, sy * h / 2
+            if r <= 0:
+                local.append((cx, cy))
+            else:
+                local += [(cx - sx * r, cy), (cx, cy - sy * r)][:: -1 if sx * sy > 0 else 1]
+    elif shape == "trapezoid" and node is not None:
+        delta = node.find("rect_delta")
+        dx = (delta.get_float(0) if delta is not None else 0.0) or 0.0
+        dy = (delta.get_float(1) if delta is not None else 0.0) or 0.0
+        hw, hh = w / 2 - abs(dy) / 2, h / 2 - abs(dx) / 2
+        if not (math.isfinite(hw) and math.isfinite(hh)) or hw <= 0 or hh <= 0:
+            return geom
+        local = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+    else:
+        local = [(-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)]
+    ox, oy = getattr(pad, "drill_offset", (0.0, 0.0)) or (0.0, 0.0)
+    ang = math.radians(-(getattr(pad, "rotation", 0.0) or 0.0))
+    ca, sa = math.cos(ang), math.sin(ang)
+    return Polygon(
+        [
+            (
+                center[0] + (lx + ox) * ca - (ly + oy) * sa,
+                center[1] + (lx + ox) * sa + (ly + oy) * ca,
+            )
+            for lx, ly in local
+        ]
+    )
+
+
 def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None:
     """The copper of footprint pad ``ref.pad_number`` as a :class:`LinkTerminal`."""
+    from kicad_tools.geometry.copper import pad_copper_outline, pad_outline_is_exact
+
     copper = _copper_layer_names(pcb)
     fp = pcb.get_footprint(ref)
     if fp is None:
@@ -659,7 +756,11 @@ def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None
             layers = _pad_layers(list(getattr(pad, "layers", []) or []), copper)
             if not layers:
                 return None
-            geom = _pad_geometry(fp, pad)
+            geom = pad_copper_outline(pad, fp.position, fp.rotation)
+            if geom is None:
+                return None
+            if not pad_outline_is_exact(pad) or _pad_has_cut_corner(pad):
+                geom = _approximated_pad_box(fp, pad, geom)
             c = geom.centroid
             stack = _padstack_lands(fp, pad, layers)
             # The ordinary named-pad route retains its existing approximation
@@ -927,20 +1028,52 @@ def route_link(
     if model.outline is not None:
         ob = model.outline.bounds
         x0, y0, x1, y1 = max(x0, ob[0]), max(y0, ob[1]), min(x1, ob[2]), min(y1, ob[3])
-    # Align the grid on the anchor at the precision its route writer uses.
-    anchor_x, anchor_y = grid_anchor or a.point
-    gx0, gy0 = round(anchor_x, grid_digits), round(anchor_y, grid_digits)
-    ix0 = math.floor((x0 - gx0) / g)
-    iy0 = math.floor((y0 - gy0) / g)
-    nx = int(math.ceil((x1 - gx0) / g)) - ix0 + 1
-    ny = int(math.ceil((y1 - gy0) / g)) - iy0 + 1
     nl = len(copper)
-    if nx <= 1 or ny <= 1 or nx * ny * nl > rules.max_cells:
+
+    def mask_of(geom: Any) -> Any:
+        if geom is None or geom.is_empty:
+            return np.zeros((nx, ny), dtype=bool)
+        shapely.prepare(geom)
+        return shapely.intersects_xy(geom, flat_x, flat_y).reshape(nx, ny)
+
+    def terminal_mask(terminal: LinkTerminal) -> Any:
+        cells = np.zeros((nl, nx, ny), dtype=bool)
+        for li, layer in enumerate(copper):
+            if layer in terminal.layers and (allowed_layers is None or layer in allowed_layers):
+                land = terminal.layers[layer]
+                # KiCad connects the track when its endpoint lies inside the pad.
+                inset = land.buffer(-_TERMINAL_INSET)
+                cells[li] = mask_of(land if inset.is_empty else inset)
+        return cells
+
+    # Preserve explicit anchors and prefer the ordinary source-aligned grid.
+    # A narrow, conservatively modelled destination may fall between columns.
+    # Try its own alignment before building obstacles or starting a search.
+    anchors = [grid_anchor or a.point]
+    if (
+        grid_anchor is None
+        and b.exact_pad_lands is not None
+        and b.layers.keys() - b.exact_pad_lands.keys()
+    ):
+        anchors.append(b.point)
+    for anchor_x, anchor_y in anchors:
+        gx0, gy0 = round(anchor_x, grid_digits), round(anchor_y, grid_digits)
+        ix0 = math.floor((x0 - gx0) / g)
+        iy0 = math.floor((y0 - gy0) / g)
+        nx = int(math.ceil((x1 - gx0) / g)) - ix0 + 1
+        ny = int(math.ceil((y1 - gy0) / g)) - iy0 + 1
+        if nx <= 1 or ny <= 1 or nx * ny * nl > rules.max_cells:
+            return None
+        xs = np.round(gx0 + (ix0 + np.arange(nx)) * g, grid_digits)
+        ys = np.round(gy0 + (iy0 + np.arange(ny)) * g, grid_digits)
+        gx, gy = np.meshgrid(xs, ys, indexing="ij")
+        flat_x, flat_y = gx.ravel(), gy.ravel()
+        start, goal = terminal_mask(a), terminal_mask(b)
+        if start.any() and goal.any():
+            break
+    else:
         return None
-    xs = np.round(gx0 + (ix0 + np.arange(nx)) * g, grid_digits)
-    ys = np.round(gy0 + (iy0 + np.arange(ny)) * g, grid_digits)
-    gx, gy = np.meshgrid(xs, ys, indexing="ij")
-    flat_x, flat_y = gx.ravel(), gy.ravel()
+
     reach = 1.0
     if rules.width_by_layer:
         radius = max(max(rules.width_by_layer.values()), rules.via_size) / 2
@@ -951,12 +1084,6 @@ def route_link(
     # matters however far its raw shape lies from it (project rules can demand
     # several mm), so foreign copper is selected by the search area itself.
     search_box = box(xs[0], ys[0], xs[-1], ys[-1])
-
-    def mask_of(geom: Any) -> Any:
-        if geom is None or geom.is_empty:
-            return np.zeros((nx, ny), dtype=bool)
-        shapely.prepare(geom)
-        return shapely.intersects_xy(geom, flat_x, flat_y).reshape(nx, ny)
 
     # Foreign copper per layer, grouped by the clearance it demands (Issue
     # #6374: ``rules.clearance_for(net)``).  Without a per-net map there is
@@ -1076,19 +1203,6 @@ def route_link(
                 ) & ~mask_of(pads.buffer(-_TERMINAL_INSET))
                 via_bad |= mask_of(pads.buffer(rules.via_size / 2 + gap))
 
-    def terminal_mask(t: LinkTerminal) -> Any:
-        m = np.zeros((nl, nx, ny), dtype=bool)
-        for li, layer in enumerate(copper):
-            if layer in t.layers:
-                geom = t.layers[layer]
-                # Keep endpoints strictly inside the copper they bond to (KiCad
-                # joins a track to a pad by its END POINT, not by overlap).
-                inset = geom.buffer(-_TERMINAL_INSET)
-                m[li] = mask_of(geom if inset.is_empty else inset) & ~blocked[li]
-                if li in endpoint_keepouts:
-                    m[li] &= ~endpoint_keepouts[li]
-        return m
-
     # Plane layers accept vias by default. Only lateral moves on the
     # explicitly authorized layer use the inset rectangle.
     corridor_li = -1
@@ -1103,8 +1217,11 @@ def route_link(
         for li, layer in enumerate(copper)
     ]
 
-    start = terminal_mask(a)
-    goal = terminal_mask(b)
+    start &= ~blocked
+    goal &= ~blocked
+    for li, keepout in endpoint_keepouts.items():
+        start[li] &= ~keepout
+        goal[li] &= ~keepout
     if not start.any() or not goal.any():
         return None
 
