@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("shapely")
+from shapely.geometry import Point, box  # noqa: E402
 
 from kicad_tools.cli import main  # noqa: E402
 from kicad_tools.cli.route_link_cmd import LinkSpecError, parse_link_spec  # noqa: E402
@@ -36,6 +37,28 @@ BOARD = """(kicad_pcb
     (fp_text reference "R2" (at 0 -1.5) (layer "F.SilkS"))
     (pad "1" smd rect (at 0 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "SIG")))
   (segment (start 115 100.6) (end 115 119.4) (width 0.2) (layer "F.Cu") (net 2) (uuid "00000000-0000-0000-0000-000000000010"))
+)
+"""
+OFFSET_PAD_BOARD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SENSE")
+  (gr_rect (start 1 1) (end 21 19) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+  (footprint "P" (layer "F.Cu") (uuid "00000000-0000-0000-0000-000000000001") (at 6 8)
+    (fp_text reference "P1" (at 0 -1.5) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "SENSE")))
+  (footprint "P" (layer "F.Cu") (uuid "00000000-0000-0000-0000-000000000002") (at 12 14)
+    (fp_text reference "P2" (at 0 -1.5) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "SENSE")))
+  (footprint "P" (layer "F.Cu") (uuid "00000000-0000-0000-0000-000000000003") (at 12 9 {angle})
+    (fp_text reference "P3" (at 0 -1.5) (layer "F.SilkS"))
+    (pad "1" thru_hole {shape} (at 0 0 {angle}) (size 2 2) (drill 0.4 (offset 0.6 0)) {rounding} (layers "*.Cu" "*.Mask") (net 1 "SENSE")))
+  (segment (start 6 8) (end 12 14) (width 0.25) (layer "F.Cu") (net 1) (uuid "00000000-0000-0000-0000-000000000010"))
 )
 """
 LINK = "SIG R1.1 R2.1"
@@ -362,7 +385,14 @@ class TestCommit:
         saved = _joined(capsys, board, "--join-track", "--link-layers", "F.Cu", "-o", str(out))
         assert saved["status"] == "committed"
         assert saved["length_mm"] == probe["length_mm"]
-        assert saved["junction"] == probe["junction"] == {"x": 9.5, "y": 11.5, "layer": "F.Cu"}
+        centre_x = 12.6 if offset else 12.0
+        # Perpendicular foot on the host line y = x + 2 from the plotted land centre.
+        junction_x = (centre_x + 9.0 - 2.0) / 2
+        assert (
+            saved["junction"]
+            == probe["junction"]
+            == {"x": junction_x, "y": junction_x + 2.0, "layer": "F.Cu"}
+        )
         assert any(land.contains(Point(start)) for start, *_ in _file_segments(out))
 
     def test_join_track_splits_the_host_and_adds_the_branch(self, tee, capsys):
@@ -468,6 +498,195 @@ class TestCommit:
             ]
         )
         assert len({p[4] for p in pieces}) == 5
+
+    @pytest.mark.parametrize(
+        ("angle", "shape", "source_flash"),
+        [
+            (90, "rect", box(11, 7.4, 13, 9.4)),
+            (0, "rect", box(11.6, 8, 13.6, 10)),
+            (-90, "rect", box(11, 8.6, 13, 10.6)),
+            (90, "circle", Point(12, 8.4).buffer(1)),
+            (90, "roundrect", box(11.5, 7.9, 12.5, 8.9).buffer(0.5)),
+        ],
+    )
+    def test_offset_pad_link_lands_on_both_named_pads(
+        self, tmp_path, capsys, angle, shape, source_flash
+    ):
+        board = tmp_path / "offset.kicad_pcb"
+        out = tmp_path / "saved.kicad_pcb"
+        board.write_text(
+            OFFSET_PAD_BOARD.format(
+                angle=angle,
+                shape=shape,
+                rounding="(roundrect_rratio 0.25)" if shape == "roundrect" else "",
+            )
+        )
+        before = board.read_bytes()
+        args = (
+            str(board),
+            "--link",
+            "SENSE P3.1 P2.1",
+            "--link-layers",
+            "F.Cu",
+            "--trace-width",
+            ".25",
+            "--clearance",
+            ".2",
+        )
+        rc, doc = _run(capsys, *args, "--probe")
+        assert rc == 0 and doc["links"][0]["routable"]
+        assert board.read_bytes() == before
+        probe_length = doc["links"][0]["length_mm"]
+        rc, doc = _run(capsys, *args, "-o", str(out))
+        assert rc == 0 and doc["links"][0]["status"] == "committed"
+        assert doc["links"][0]["length_mm"] == probe_length
+        assert board.read_bytes() == before
+
+        pcb = PCB.load(str(out))
+        ox, oy = pcb.board_origin
+        original = PCB.load(str(board)).segments[0]
+        added = [s for s in pcb.segments if s.uuid != original.uuid]
+        assert added and all(s.layer == "F.Cu" and s.net_number == 1 for s in added)
+        assert not pcb.vias
+        # Board-file coordinates of the source flash and P2.1. A connection
+        # ending on the existing diagonal alone would also clear the open.
+        ends = [Point(x + ox, y + oy) for s in added for x, y in (s.start, s.end)]
+        assert any(source_flash.covers(p) for p in ends)
+        destination_flash = box(11.5, 13.5, 12.5, 14.5)
+        assert any(destination_flash.covers(p) for p in ends)
+
+    _DIAGONAL_PADS = {
+        "chamfered": (
+            '(pad "1" thru_hole roundrect (at 0 0) (size 2 2) (roundrect_rratio 0) '
+            "(chamfer_ratio 0.14) (chamfer top_left top_right bottom_left bottom_right) "
+            '(drill 0.4 (offset -0.3 -0.3)) (layers "*.Cu" "*.Mask") (net 1 "SENSE"))'
+        ),
+        "omitted": (
+            '(pad "1" thru_hole roundrect (at 0 0) (size 2 2) (roundrect_rratio 0) '
+            "(chamfer top_left) "
+            '(drill 0.4 (offset -0.3 -0.3)) (layers "*.Cu" "*.Mask") (net 1 "SENSE"))'
+        ),
+        "trapezoid": (
+            '(pad "1" thru_hole trapezoid (at 0 0) (size 2 2) (rect_delta 0 0.6) '
+            '(drill 0.4 (offset -0.3 -0.3)) (layers "*.Cu" "*.Mask") (net 1 "SENSE"))'
+        ),
+    }
+
+    def _diagonal_board(self, tmp_path, kind):
+        old = '(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "SENSE"))'
+        text = OFFSET_PAD_BOARD.format(angle=0, shape="rect", rounding="")
+        head, _, tail = text.partition(old)
+        # First (P1) pad stays as is; swap P2's pad for the approximated shape.
+        p2, _, rest = tail.partition(old)
+        board = tmp_path / "diagonal.kicad_pcb"
+        board.write_text(head + old + p2 + self._DIAGONAL_PADS[kind] + rest)
+        return board
+
+    def test_chamfered_pad_terminal_excludes_the_cut_corners(self, tmp_path):
+        from kicad_tools.router.link_router import terminal_for_pad
+
+        pcb = PCB.load(str(self._diagonal_board(tmp_path, "chamfered")))
+        land = terminal_for_pad(pcb, "P2", "1").layers["F.Cu"]
+        # 2 x 2 mm octagon, 0.14 * 2 = 0.28 mm cuts: 4 - 4 * 0.28**2 / 2.
+        assert land.area == pytest.approx(4 - 4 * 0.28**2 / 2, abs=1e-6)
+
+    def test_single_corner_chamfer_terminal_excludes_the_cut_corner(self, tmp_path):
+        from kicad_tools.router.link_router import terminal_for_pad
+
+        pads = dict(self._DIAGONAL_PADS)
+        pads["single"] = pads["chamfered"].replace(
+            "(chamfer top_left top_right bottom_left bottom_right)", "(chamfer top_left)"
+        )
+        old_pads, type(self)._DIAGONAL_PADS = type(self)._DIAGONAL_PADS, pads
+        try:
+            pcb = PCB.load(str(self._diagonal_board(tmp_path, "single")))
+        finally:
+            type(self)._DIAGONAL_PADS = old_pads
+        land = terminal_for_pad(pcb, "P2", "1").layers["F.Cu"]
+        # One 0.28 mm cut removes a single 0.28**2 / 2 triangle from the 2 x 2 box.
+        assert land.area == pytest.approx(4 - 0.28**2 / 2, abs=1e-6)
+
+    def test_omitted_chamfer_ratio_defaults_to_kicad_0_2(self, tmp_path):
+        from kicad_tools.router.link_router import terminal_for_pad
+
+        pcb = PCB.load(str(self._diagonal_board(tmp_path, "omitted")))
+        land = terminal_for_pad(pcb, "P2", "1").layers["F.Cu"]
+        # No (chamfer_ratio): KiCad's 0.2 -> one 0.4 mm cut, 4 - 0.4**2 / 2.
+        assert land.area == pytest.approx(4 - 0.4**2 / 2, abs=1e-6)
+
+    @pytest.mark.parametrize("order", ["P3.1 P2.1", "P2.1 P3.1"])
+    @pytest.mark.parametrize("kind", ["chamfered", "omitted", "trapezoid"])
+    def test_offset_approximated_pad_on_a_diagonal_link(self, tmp_path, capsys, kind, order):
+        board = self._diagonal_board(tmp_path, kind)
+        out = tmp_path / "saved.kicad_pcb"
+        args = (
+            str(board),
+            "--link",
+            f"SENSE {order}",
+            "--link-layers",
+            "F.Cu",
+            "--trace-width",
+            ".2",
+            "--clearance",
+            ".2",
+        )
+        rc, probe = _run(capsys, *args, "--probe")
+        assert rc == 0
+        rc, doc = _run(capsys, *args, "-o", str(out))
+        # A probe that claims a route must be one the write keeps.
+        assert probe["links"][0]["routable"] and doc["links"][0]["status"] == "committed"
+
+    @pytest.mark.parametrize("width", [0.28, 0.265, 0.22])
+    @pytest.mark.parametrize(
+        "pad",
+        [
+            "smd roundrect (at 0 0) (size {width} 1) (roundrect_rratio 0) "
+            "(chamfer_ratio 0.2) (chamfer top_left top_right)",
+            "smd trapezoid (at 0 0) (size {width} 1) (rect_delta 0.08 0)",
+        ],
+        ids=["chamfered", "trapezoid"],
+    )
+    def test_narrow_destination_between_grid_columns(self, tmp_path, capsys, pad, width):
+        # Remove the foreign wall and place R2 half a grid step east of R1.
+        board = tmp_path / "off_grid.kicad_pcb"
+        two_pads = BOARD.partition("  (segment ")[0] + ")\n"
+        before, r2 = two_pads.split("(at 120 110)")
+        r2 = r2.replace("smd rect (at 0 0) (size 0.8 0.8)", pad.format(width=width))
+        board.write_text(before + "(at 110.025 115)" + r2)
+        args = (str(board), "--link", LINK, "--link-layers", "F.Cu", "--trace-width", ".2")
+        rc, probe = _run(capsys, *args, "--probe")
+        assert rc == 0 and probe["links"][0]["routable"]
+        out = tmp_path / "routed.kicad_pcb"
+        rc, written = _run(capsys, *args, "-o", str(out))
+        assert rc == 0 and written["links"][0]["status"] == "committed"
+
+        ends = [Point(point) for start, end, *_ in _file_segments(out) for point in (start, end)]
+        # This central rectangle lies inside both the chamfer and the trapezoid.
+        assert any(box(109.935, 114.55, 110.115, 115.45).covers(p) for p in ends)
+
+    @pytest.mark.parametrize("order", ["R1.1 R2.1", "R2.1 R1.1"])
+    @pytest.mark.parametrize("width", [0.28, 0.265])
+    @pytest.mark.parametrize(
+        "pad",
+        [
+            "smd roundrect (at 0 0) (size {width} 1) (roundrect_rratio 0) "
+            "(chamfer_ratio 0.2) (chamfer top_left top_right)",
+            "smd trapezoid (at 0 0) (size {width} 1) (rect_delta 0.08 0)",
+        ],
+        ids=["chamfered", "trapezoid"],
+    )
+    def test_two_narrow_approximated_pads_half_a_step_apart(
+        self, tmp_path, capsys, pad, width, order
+    ):
+        board = tmp_path / "two_narrow.kicad_pcb"
+        two_pads = BOARD.partition("  (segment ")[0] + ")\n"
+        before, r2 = two_pads.split("(at 120 110)")
+        r2 = r2.replace("smd rect (at 0 0) (size 0.8 0.8)", pad.format(width=width))
+        before = before.replace("smd rect (at 0 0) (size 0.8 0.8)", pad.format(width=width))
+        board.write_text(before + "(at 110.025 115)" + r2)
+        args = (str(board), "--link", f"SIG {order}", "--link-layers", "F.Cu")
+        rc, probe = _run(capsys, *args, "--trace-width", ".2", "--probe")
+        assert rc == 0 and probe["links"][0]["routable"]
 
     def test_output_file_leaves_input_alone(self, board, tmp_path, capsys):
         out = tmp_path / "out.kicad_pcb"
