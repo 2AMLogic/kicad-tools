@@ -733,19 +733,23 @@ other net. A missing or unusable neck refuses the route. The rest of the
 reviewed account is not adopted.
 
 | Revision | Seed | Route exit | Nets | Connections | Native DRC err / warn / open | ERC | Nightly errors / warnings | Width mismatches | Copper and label LVS | Vias | Wall (s) |
-| --- | ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: |
+| --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | --- | --- | ---: |
 | `2c088ca39` (base) | 42 | 3 | 44/46 | 141/143 | 0 / 0 / 2 | 0 | 0 / 13 | 0 | copper dirty | 120 | 480.5 |
-| `cd67091bf` | 42 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 13 | 0 | clean | 122 | 421.0 |
-| `cd67091bf` | 7 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 13 | 0 | clean | 122 | 483.1 |
-| `cd67091bf` | 1337 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 13 | 0 | clean | 122 | 483.4 |
+| `94b50a71e` | 42 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 13 | 0 | clean | 122 | 536.4 |
+| `94b50a71e` | 7 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 13 | 0 | clean | 122 | 536.5 |
+| `94b50a71e` | 1337 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 13 | 0 | clean | 122 | 536.6 |
 
-Seeds 7 and 1337 were not run on the base. On the base the oracle stage
-stopped at 43 -> 2 (`no_closer`): `+5V` U2.16 and `GND` U2.20 to its thermal
-pad U2.29. Seeds 7 and 1337 of the change ran in parallel. The three saved
-boards are byte-identical (SHA-256
+`94b50a71e` is the base with the gate change, merged with `origin/main` @
+`16b1e324f` (#10713, which only changes how the oracle stage reports an
+internal failure). Seeds 7 and 1337 were not run on the base. On the base the
+oracle stage stopped at 43 -> 2 (`no_closer`): `+5V` U2.16 and `GND` U2.20 to
+its thermal pad U2.29. The three seeds of the change ran in parallel. The
+three saved boards are byte-identical (SHA-256
 `d3ea9cfffa955ea5fd7504e821a084209506eff265ea7ca212022383e1862721`), each
 oracle stage converged in round 1 (43 -> 0), and no route log carries a
-`per-net wall clock bound` or `stage deadline fired` line.
+`per-net wall clock bound` or `stage deadline fired` line. Seed 42 alone on
+`cd67091bf` (the gate change on the base, before that merge) saved the same
+bytes in 421.0 s.
 
 Against the base's seed-42 board the signal copper is unchanged. Four new
 0.15 mm F.Cu pad escapes carry the two pour nets: `+5V` U2.16 east 1.24 mm to
