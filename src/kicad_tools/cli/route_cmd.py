@@ -11403,12 +11403,14 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     --refill-zones`` which pads are still stranded on a pour and closes
     exactly those links (see :mod:`kicad_tools.router.oracle_completion`).
     Stashes the stranded-link count on ``args._stranded_pour_links`` (read by
-    the exit-code gate) and returns it.  Never raises: a missing kicad-cli, a
-    placement-preserving run or any internal failure leaves the board
-    untouched and the count at 0 (the strict-DRC machinery already reports a
-    kicad-cli that did not run).  Issue #6273: a check the ``--timeout``
-    stopped before its first DRC sets ``args._stranded_pour_unknown`` instead,
-    so the run exits :data:`EXIT_UNVERIFIED` rather than passing the gate.
+    the exit-code gate) and returns it.  Never raises: a missing kicad-cli or
+    a placement-preserving run leaves the board untouched and the count at 0
+    (the strict-DRC machinery already reports a kicad-cli that did not run).
+    Issue #6273: a check the ``--timeout`` stopped before its first DRC sets
+    ``args._stranded_pour_unknown`` instead, so the run exits
+    :data:`EXIT_UNVERIFIED` rather than passing the gate.  Issue #10710: an
+    internal failure of the loop sets it too -- that count was never measured
+    either.
     """
     from kicad_tools.router.completion_verdict import allow_stranded_pour_pads, oracle_rounds
     from kicad_tools.router.oracle_completion import (
@@ -11526,6 +11528,14 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
         args._oracle_changed_copper = any(round_.kept for round_ in result.rounds)
     except Exception as exc:  # advisory machinery must never fail a route
         logger.warning("Oracle completion skipped: %s", exc)
+        # Issue #10710: the completion loop raised, so the stranded-pad count
+        # was never measured.  Reporting 0 would pass the #5785 gate vacuously;
+        # the run is reported unverified instead, exactly as for the STOP_*
+        # cases below.
+        args._stranded_pour_unknown = True
+        args._stranded_pour_failure = f"{type(exc).__name__}: {exc}"
+        if not quiet:
+            print("  stranded-pour status UNKNOWN -- the run is reported unverified")
         return 0
     try:
         if router is not None and getattr(args, "_pairwise_required", None) is not None:
