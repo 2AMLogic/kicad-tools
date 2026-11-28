@@ -1386,6 +1386,7 @@ class ManufacturingAudit:
         try:
             import json as _json
 
+            from kicad_tools.router.board_clearance_rules import BoardClearanceRules
             from kicad_tools.router.rules import net_class_map_from_path
             from kicad_tools.validate import DRCChecker
 
@@ -1438,12 +1439,11 @@ class ManufacturingAudit:
                 # tier's.
                 checker.design_rules = self.design_rules_override
 
-            # Match the ``kct check`` CLI's pad_grid tolerance policy
-            # (auto-derive per-board, issue #3061) so the audit -- and the
-            # manufacturing report's DRC section built from it -- cannot
-            # disagree with the documented ``kct check --mfr <profile>``
-            # gate (issue #3497).
-            results = checker.check_all(pad_grid_auto_derive=True)
+            # Use the same pad-grid tolerance and track-to-zone clearances as kct check.
+            results = checker.check_all(
+                pad_grid_auto_derive=True,
+                pour_slot_clearances=BoardClearanceRules.from_board(self.pcb_path),
+            )
 
             # Issue #8130: honour the waivers sidecar exactly as ``kct check``
             # does, so a waived finding cannot read as blocking here while

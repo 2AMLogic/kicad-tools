@@ -1,5 +1,7 @@
 """Tests for the ``sharp_trace_corner`` rule (#8840)."""
 
+from itertools import pairwise
+
 import pytest
 
 from kicad_tools.schema.pcb import PCB
@@ -194,6 +196,68 @@ def test_open_air_junction_reported_with_junction_sub_type(tmp_path):
     assert v[0].corner_class == "junction"
     assert v[0].actual_value < 90
     assert "3-segment junction" in v[0].message
+
+
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("shape", ["acute", "orthogonal", "buried"])
+def test_branch_at_track_interior_matches_explicit_split(tmp_path, split, shape):
+    carrier = [_seg((5, 0), (10, 0)), _seg((10, 0), (15, 0))] if split else [_seg((5, 0), (15, 0))]
+    branch = _seg((10, 0), (10, 4) if shape == "orthogonal" else (14, 4))
+    pads = [_long_pad()] if shape == "buried" else []
+    hits = _check(tmp_path, *carrier, branch, *pads)
+    if shape != "acute":
+        assert hits == []
+        return
+    assert len(hits) == 1
+    hit = hits[0]
+    assert (hit.nets, hit.layer, hit.location) == (("SIG",), "F.Cu", (10, 0))
+    assert hit.actual_value == pytest.approx(45)
+    assert hit.corner_class == "junction" and "3-segment junction" in hit.message
+
+
+def test_multiple_taps_on_reversed_and_stacked_carrier(tmp_path):
+    taps = [_seg((5, 0), (3, 2)), _seg((15, 0), (17, 2))]
+    hits = _check(tmp_path, _seg((20, 0), (0, 0)), *taps, _seg((0, 0), (20, 0)))
+    assert sorted(hit.location for hit in hits) == [(5, 0), (15, 0)]
+    assert all(
+        hit.corner_class == "junction" and hit.actual_value == pytest.approx(45) for hit in hits
+    )
+    assert all("3-segment junction" in hit.message for hit in hits)
+
+
+@pytest.mark.parametrize("stops", [[-5, 5], [-5, 0, 5], [-5, -0.4, 0, 5]])
+def test_nearby_tap_does_not_shorten_an_open_wedge(tmp_path, stops):
+    # Board 03 VBUS: the 0.4 mm between taps is shorter than the distance
+    # needed for the facing edges of these 0.5 mm legs to separate.
+    carrier = [_wseg((a, 0), (b, 0), 0.5) for a, b in pairwise(stops)]
+    hits = _check(
+        tmp_path, *carrier, _wseg((0, 0), (-4, 4), 0.5), _wseg((-0.4, 0), (-0.4, -2), 0.5)
+    )
+    assert [(hit.location, hit.corner_class) for hit in hits] == [((0, 0), "junction")]
+    assert hits[0].actual_value == pytest.approx(45)
+
+
+def test_disconnected_collinear_track_does_not_extend_a_width_filled_wedge(tmp_path):
+    hits = _check(
+        tmp_path,
+        _wseg((-5, 0), (-1.4, 0), 0.5),
+        _wseg((-0.4, 0), (5, 0), 0.5),
+        _wseg((0, 0), (-4, 4), 0.5),
+    )
+    assert hits == []
+
+
+@pytest.mark.parametrize(
+    ("offset", "net", "layer", "expected"),
+    [(0.005, 1, "F.Cu", 1), (0.020, 1, "F.Cu", 0), (0, 2, "F.Cu", 0), (0, 1, "B.Cu", 0)],
+)
+def test_interior_contact_tolerance_and_net_layer_scope(tmp_path, offset, net, layer, expected):
+    hits = _check(
+        tmp_path, _seg((0, 0), (20, 0)), _seg((10, offset), (14, 4 + offset), net=net, layer=layer)
+    )
+    assert len(hits) == expected
+    if hits:
+        assert hits[0].corner_class == "junction"
 
 
 def test_inner_layer_junction_still_reported(tmp_path):

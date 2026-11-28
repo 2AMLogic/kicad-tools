@@ -1,9 +1,12 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-11-28T02:00:00+00:00",
+  "checked_at": "2026-11-27T23:57:18Z",
   "mode": "assembly",
-  "status": "ready",
-  "blockers": [],
+  "status": "blocked",
+  "blockers": [
+    "kct check reports 79 error(s); unaccepted error(s): mask_to_copper at 144.60/89.80 (not recorded); mask_to_copper at 144.65/89.79 (not recorded); mask_to_copper at 144.65/89.80 (not recorded); mask_to_copper at 148.75/84.62 (not recorded); mask_to_copper at 173.50/82.41 (not recorded); mask_to_copper at 172.87/87.65 (not recorded); mask_to_copper at 123.35/75.20 (not recorded); mask_to_copper at 136.35/84.10 (not recorded); mask_to_copper at 172.87/87.65 (not recorded); mask_to_copper at 173.50/95.19 (not recorded). [invocation: kct check <pcb> --mfr jlcpcb-tier1 --schematic output/stm32_devboard.kicad_sch]",
+    "known defect #10664: Ten same-net mask_to_copper errors block the board under the public readiness check; the copper repair is tracked here"
+  ],
   "checks": [
     {
       "name": "kct_check",
@@ -29,6 +32,11 @@
       "name": "via_process",
       "status": "passed",
       "detail": "Two layers, paid 0.15mm mechanical drill option, .30mm minimum via diameter, .075mm ring, tented through vias; eight SMT-pad drill overlaps repaired."
+    },
+    {
+      "name": "tier_check",
+      "status": "failed",
+      "detail": "79 electrical/manufacturing error(s) do not match the recorded exception identities: mask_to_copper at 144.60/89.80 (not recorded); mask_to_copper at 144.65/89.79 (not recorded); mask_to_copper at 144.65/89.80 (not recorded); mask_to_copper at 148.75/84.62 (not recorded); mask_to_copper at 173.50/82.41 (not recorded); mask_to_copper at 172.87/87.65 (not recorded); mask_to_copper at 123.35/75.20 (not recorded); mask_to_copper at 136.35/84.10 (not recorded); mask_to_copper at 172.87/87.65 (not recorded); mask_to_copper at 173.50/95.19 (not recorded); warning counts: mask_to_copper=35, netclass_sidecar_mismatch=2, netclass_track_width_mismatch=3, pour_slot=4. [invocation: kct check <pcb> --mfr jlcpcb-tier1 --schematic output/stm32_devboard.kicad_sch]"
     }
   ],
   "metrics": {
@@ -68,7 +76,7 @@
     "output/manufacturing/images/pcb_front.png": "0c7423d9440fc32bbaa9ecdfcfd571311168795f06501f413c7719d426203aa8",
     "output/manufacturing/images/schematic_stm32_devboard.png": "e0d58863c7071f9ef5fb2ba4940807a5fbb2a8df6f5321a377cd2f1f2c2f87ba",
     "output/manufacturing/kicad_project.zip": "7d4627241aed85ade87e8642e556e6fd1a47c6e12f31d4f967a9a1545fca1a20",
-    "output/manufacturing/manifest.json": "436aeda6e333628bd0c922d1f8c15543cc39505c58272c9f107def582a9a6f31",
+    "output/manufacturing/manifest.json": "8f7e771d1fa98ee1753dc00a031bb2c4707c143b750f3d09fa7382c58c5e54d6",
     "output/manufacturing/manufacturing-requirements.json": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
     "output/manufacturing/native-drc.json": "98b3e1eea2d868b39295d98fe7d9cc52e971a4e399010b203ca3380e6dc71bf4",
     "output/manufacturing/native-erc.json": "a63705556bc9c62121b86b9ba175962761eddaf7107211dc068c4acba96251ff",
@@ -76,7 +84,7 @@
     "output/manufacturing/report.md": "f2ffdd5ee89cd1822cbc575da50b7573d19f8eb20f7f9909e573a62916d66de6",
     "output/manufacturing/report.pdf": "63d2c1b63788e1762aa70f964437076de3a6014b6ed8276b24ddc9ad4ec59d29",
     "output/manufacturing-requirements.json": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
-    "output/manufacturing.zip": "69ad141e2cdb14c522a513f4e94211c61584c034e45cf4ad82c63b7d0fe2f71c",
+    "output/manufacturing.zip": "c76a6412f55d32ac5737436e79cb724cf8642c3f18b279073287b153d611f7c4",
     "output/readiness/fill-consistency.json": "3369e42a5c0ea40c718cdf6016b83fa85b04260ad66cf757b282ea30ef9561b6",
     "output/readiness/kct-check.json": "599c1b104fff9c76f13a213c681673939f83aedbf485d2141cb24903d6911c2f",
     "output/readiness/native-drc.json": "98b3e1eea2d868b39295d98fe7d9cc52e971a4e399010b203ca3380e6dc71bf4",
@@ -92,21 +100,23 @@
     "output/board04_symbols.kicad_sym": "551e09f27d91f87826b728b9436e23f38228bd17430c48a83deaa55cd419c396",
     "output/readiness/native-erc-linux.json": "9dd3742f1e9ebf0f5e44a107badabd035a933bf06552201fb0bb6a2f7eea22d8",
     "output/manufacturing/native-erc-linux.json": "9dd3742f1e9ebf0f5e44a107badabd035a933bf06552201fb0bb6a2f7eea22d8",
-    "output/readiness/known-issues.json": "7164a6fe31ab03b9c2479986b7d8c5aa6d0c4570a83c691ecb65244e411198b1",
-    "output/net_class_map.json": "68d7dc586f39f5a0fc360a7ba9017fb0c380b5fa1021003d5761087f86129b40"
+    "output/readiness/known-issues.json": "651a469e05b2328371ab8a41c5cac223ad5056bc964aadd13fba3bbdccd8afd4",
+    "output/net_class_map.json": "68d7dc586f39f5a0fc360a7ba9017fb0c380b5fa1021003d5761087f86129b40",
+    "output/readiness/tier-check.json": "bbd07ae9d6618d0b131dfbe73261d181be9abe90dc3e276e2e33c935125627c6"
   },
   "evidence": {
     "kct_check": "output/readiness/kct-check.json",
     "native_drc": "output/readiness/native-drc.json",
     "native_erc_linux": "output/readiness/native-erc-linux.json",
-    "native_erc": "output/readiness/native-erc.json"
+    "native_erc": "output/readiness/native-erc.json",
+    "tier_check": "output/readiness/tier-check.json"
   },
   "known_issues": [
     {
       "issue": 6269,
       "kind": "exception",
       "summary": "Paid 0.15 mm mechanical-drill via process (ruling #7147); the generic jlcpcb-tier1 kct check reports the reviewed vias as errors, the board's own check_manufacturing.py models the process",
-      "recorded": "2026-11-19",
+      "recorded": "2026-11-27",
       "errors": [
         {
           "rule": "dimension_annular_ring",
@@ -146,22 +156,29 @@
         {
           "rule": "dimension_annular_ring",
           "at": [
-            137.78,
-            83.08
-          ]
-        },
-        {
-          "rule": "dimension_annular_ring",
-          "at": [
-            145.0,
+            139.0,
             84.65
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            146.0,
-            104.65
+            141.0,
+            85.45
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            141.8,
+            85.65
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            145.65,
+            83.1
           ]
         },
         {
@@ -183,13 +200,6 @@
           "at": [
             147.75,
             86.58
-          ]
-        },
-        {
-          "rule": "dimension_annular_ring",
-          "at": [
-            151.0,
-            104.65
           ]
         },
         {
@@ -272,22 +282,29 @@
         {
           "rule": "dimension_via_diameter",
           "at": [
-            137.78,
-            83.08
-          ]
-        },
-        {
-          "rule": "dimension_via_diameter",
-          "at": [
-            145.0,
+            139.0,
             84.65
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            146.0,
-            104.65
+            141.0,
+            85.45
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            141.8,
+            85.65
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            145.65,
+            83.1
           ]
         },
         {
@@ -309,13 +326,6 @@
           "at": [
             147.75,
             86.58
-          ]
-        },
-        {
-          "rule": "dimension_via_diameter",
-          "at": [
-            151.0,
-            104.65
           ]
         },
         {
@@ -398,29 +408,29 @@
         {
           "rule": "dimension_via_drill",
           "at": [
-            137.25,
-            83.75
+            139.0,
+            84.65
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            137.78,
-            83.08
+            141.0,
+            85.45
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            143.1,
-            87.4
+            141.53,
+            83.2
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            143.35,
-            89.1
+            141.8,
+            85.65
           ]
         },
         {
@@ -433,15 +443,8 @@
         {
           "rule": "dimension_via_drill",
           "at": [
-            145.0,
-            84.65
-          ]
-        },
-        {
-          "rule": "dimension_via_drill",
-          "at": [
-            146.0,
-            104.65
+            145.65,
+            83.1
           ]
         },
         {
@@ -463,13 +466,6 @@
           "at": [
             147.75,
             86.58
-          ]
-        },
-        {
-          "rule": "dimension_via_drill",
-          "at": [
-            151.0,
-            104.65
           ]
         },
         {
@@ -597,6 +593,12 @@
           "item": "netclass:Default"
         }
       ]
+    },
+    {
+      "issue": 10664,
+      "kind": "defect",
+      "summary": "Ten same-net mask_to_copper errors block the board under the public readiness check; the copper repair is tracked here",
+      "recorded": "2026-11-27"
     }
   ],
   "manufacturer": "jlcpcb-tier1",

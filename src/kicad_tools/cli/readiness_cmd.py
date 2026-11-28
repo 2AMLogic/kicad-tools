@@ -2062,8 +2062,22 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
             changed = True
     if changed:
         report_path.write_text(json.dumps(report, indent=2) + "\n")
+    return judge_kct_check_report(report, options.known_issues, evidence_rel=evidence_rel), report
+
+
+def judge_kct_check_report(
+    report: dict, known_issues: Sequence[dict[str, Any]] = (), *, evidence_rel: str | None = None
+) -> CheckOutcome:
+    """The ``kct_check`` gate's verdict on one ``kct check`` JSON report (Issue #10662).
+
+    Pure: every input of the verdict is in *report* and *known_issues*, so a
+    committed board's producer (``scripts/boards/refresh_readiness.py``) judges
+    the generic-tier report exactly as ``kct readiness --verify`` does here --
+    same allowance, same wording -- and the two cannot disagree on one board.
+    """
     summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
     errors = int(summary.get("errors", 0) or 0)
+    meta = report.get("meta_checks", {}) if isinstance(report.get("meta_checks"), dict) else {}
     counts = _warning_counts(report)
     table = _format_warning_table(counts)
 
@@ -2071,10 +2085,10 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
     # belong to *this* runner rather than to ``kct check``:
     #
     # * ``manifest`` is NOT RUN on a first sign-off because the bundle this
-    #   command is about to produce does not exist yet.  Deferring it is safe
-    #   only because the ``artifacts`` gate below re-verifies the manifest
-    #   *and* the archived source provenance — strictly more than the
-    #   sub-check would have.
+    #    command is about to produce does not exist yet.  Deferring it is safe
+    #    only because the ``artifacts`` gate below re-verifies the manifest
+    #    *and* the archived source provenance — strictly more than the
+    #    sub-check would have.
     # * ``lvs`` has its own dedicated gate, which additionally rejects a
     #   vacuous comparison (#4006) that the sub-check reports as PASSED.
     gating = {
@@ -2089,7 +2103,7 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
     # Issue #7355: an ``exception`` known issue may account for an exact set of
     # errors (an approved deviation the generic tier cannot model).  Only an
     # exact match waives them -- and the FAILED drc/erc roll-up they cause.
-    allowance = known_error_allowance(options.known_issues)
+    allowance = known_error_allowance(known_issues)
     mismatch = _unaccepted_errors(report, allowance)
     waived_errors = 0
     if errors and mismatch == [] and not not_run:
@@ -2100,48 +2114,37 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
         failed = [name for name in failed if name != "drc"]
     elif mismatch:  # also a stale allowance naming a rule that no longer fires
         table_err = "; ".join(mismatch)
-        return (
-            CheckOutcome(
-                name="kct_check",
-                status=FAILED,
-                detail=(
-                    f"{errors} electrical/manufacturing error(s) do not match the recorded "
-                    f"exception identities: {table_err}; warning counts: {table}."
-                ),
-                evidence=evidence_rel,
-                blockers=[
-                    f"kct check reports {errors} error(s); unaccepted error(s): {table_err}."
-                ],
+        return CheckOutcome(
+            name="kct_check",
+            status=FAILED,
+            detail=(
+                f"{errors} electrical/manufacturing error(s) do not match the recorded "
+                f"exception identities: {table_err}; warning counts: {table}."
             ),
-            report,
+            evidence=evidence_rel,
+            blockers=[f"kct check reports {errors} error(s); unaccepted error(s): {table_err}."],
         )
 
     if errors or failed:
         named = ", ".join(failed) or "none"
-        return (
-            CheckOutcome(
-                name="kct_check",
-                status=FAILED,
-                detail=(
-                    f"{errors} electrical/manufacturing error(s); failed sub-checks: "
-                    f"{named}; warning counts: {table}."
-                ),
-                evidence=evidence_rel,
-                blockers=[f"kct check reports {errors} error(s); failed sub-checks: {named}."],
+        return CheckOutcome(
+            name="kct_check",
+            status=FAILED,
+            detail=(
+                f"{errors} electrical/manufacturing error(s); failed sub-checks: "
+                f"{named}; warning counts: {table}."
             ),
-            report,
+            evidence=evidence_rel,
+            blockers=[f"kct check reports {errors} error(s); failed sub-checks: {named}."],
         )
     if not_run:
         named = ", ".join(not_run)
-        return (
-            CheckOutcome(
-                name="kct_check",
-                status=NOT_RUN,
-                detail=f"Sub-checks did not run: {named}; warning counts: {table}.",
-                evidence=evidence_rel,
-                blockers=[f"kct check sub-check(s) did not run: {named}."],
-            ),
-            report,
+        return CheckOutcome(
+            name="kct_check",
+            status=NOT_RUN,
+            detail=f"Sub-checks did not run: {named}; warning counts: {table}.",
+            evidence=evidence_rel,
+            blockers=[f"kct check sub-check(s) did not run: {named}."],
         )
     # Issue #5946: "unknown is not pass".  A blocking check category that
     # could not evaluate this board (missing input, absent zone fills, an
@@ -2153,57 +2156,48 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
     # carried into a sign-off as accepted risk.
     stale = int(summary.get("stale_waivers", 0) or 0)
     if stale:
-        return (
-            CheckOutcome(
-                name="kct_check",
-                status=FAILED,
-                detail=(
-                    f"{stale} stale evidence-bound waiver(s): the evidence under a "
-                    f"reviewed finding changed; warning counts: {table}."
-                ),
-                evidence=evidence_rel,
-                blockers=[
-                    f"kct check reports {stale} stale waiver(s); re-review the "
-                    "findings and re-waive them (kct check --waive) only if still intentional."
-                ],
+        return CheckOutcome(
+            name="kct_check",
+            status=FAILED,
+            detail=(
+                f"{stale} stale evidence-bound waiver(s): the evidence under a "
+                f"reviewed finding changed; warning counts: {table}."
             ),
-            report,
+            evidence=evidence_rel,
+            blockers=[
+                f"kct check reports {stale} stale waiver(s); re-review the "
+                "findings and re-waive them (kct check --waive) only if still intentional."
+            ],
         )
     unknown = _blocking_unknown_coverage(report)
     if unknown:
         named = "; ".join(unknown)
-        return (
-            CheckOutcome(
-                name="kct_check",
-                status=NOT_RUN,
-                detail=(
-                    f"0 errors, but blocking check(s) could not evaluate the board: "
-                    f"{named}; warning counts: {table}."
-                ),
-                evidence=evidence_rel,
-                blockers=[
-                    "kct check coverage is unknown for blocking check(s) "
-                    f"({named}); unknown is not pass -- supply the missing input."
-                ],
-            ),
-            report,
-        )
-    return (
-        CheckOutcome(
+        return CheckOutcome(
             name="kct_check",
-            status=PASSED,
+            status=NOT_RUN,
             detail=(
-                (
-                    "0 electrical/manufacturing errors; DRC and ERC sub-checks passed; "
-                    if not waived_errors
-                    else f"{waived_errors} error(s) accepted exactly by the recorded exception "
-                    "allowance; no other errors; "
-                )
-                + f"warning counts: {table}.{deferred}"
+                f"0 errors, but blocking check(s) could not evaluate the board: "
+                f"{named}; warning counts: {table}."
             ),
             evidence=evidence_rel,
+            blockers=[
+                "kct check coverage is unknown for blocking check(s) "
+                f"({named}); unknown is not pass -- supply the missing input."
+            ],
+        )
+    return CheckOutcome(
+        name="kct_check",
+        status=PASSED,
+        detail=(
+            (
+                "0 electrical/manufacturing errors; DRC and ERC sub-checks passed; "
+                if not waived_errors
+                else f"{waived_errors} error(s) accepted exactly by the recorded exception "
+                "allowance; no other errors; "
+            )
+            + f"warning counts: {table}.{deferred}"
         ),
-        report,
+        evidence=evidence_rel,
     )
 
 

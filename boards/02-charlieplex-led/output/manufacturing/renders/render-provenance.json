@@ -1,0 +1,11 @@
+{
+  "generator": "kct render",
+  "outputs": {
+    "3d-back.png": "1635bf5a5bf5710dade86dec68bea58b471a95351a1a1ed933d7e876cabe093c",
+    "3d-front.png": "3029f51c726ee3ac263fc2764122340a1b0dbcabb37caae23f3b3f78c5a104ae",
+    "pcb-back.svg": "e9500018f103a3831165935c4063cc74e1f5b50e0234f45122f773113cce2113",
+    "pcb-front.svg": "c11f4366b230f80b7b2a66c53dc885692e48fe6f8b48eda1f1e14a5ae0dcfba6"
+  },
+  "pcb": "charlieplex_3x3_routed.kicad_pcb",
+  "pcb_sha256": "3717d1ac6504f0098646bc4eac56e1cf1b938595a8aebd0d7ac4a3d78be349ab"
+}

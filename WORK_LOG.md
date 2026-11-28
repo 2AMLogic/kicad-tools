@@ -14,8 +14,25 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-28
+
+- **PR #10695**: docs: clarify model selection in the scaffold and journal skills
+- **PR #10672**: fix(boards): author board 02's reviewed net classes so release cleanup keeps its track widths
+- **PR #10666**: fix(report): apply project clearance rules to pour-slot warnings
+- **PR #10657**: fix(router): validate declared current paths on offset pad copper
+- **PR #10631**: fix: write pour-completion copper at the net-class width
+- **Issue #10688** (closed): board-recipe-scaffold and layout-journal still open Model selection with a bare suggestedModel assertion
+- **Issue #10663** (closed): Board 02 release cleanup narrows all 12 routed nets to 0.127 mm
+- **Issue #10656** (closed): Current-path check accepts a disconnected offset pad and rejects a bonded one
+- **Issue #10649** (closed): Design reports ignore project clearance rules when counting pour slots
+- **PR #10660**: fix: refuse readiness evidence produced without the parts catalog
+- **PR #10658**: feat: pin the jlcparts catalog location with KCT_JLCPARTS_CATALOG
+- **Issue #10655** (closed): get_catalog_path() resolves under XDG_CACHE_HOME, hiding the worker's jlcparts catalog from redirected sessions
+- **Issue #10646** (closed): Board 01's committed stock/BOM evidence regressed OK -> WARN because the generating host had no offline parts catalog
+
 ### 2026-11-27
 
+- **PR #9112**: fix: distinguish silk over vias and component drill holes under JLCPCB profiles
 - **PR #10652**: fix(report): pass Pandoc cover scalars as literal metadata
 - **PR #10651**: chore(boards): include the selected net-class map in the Board 04 editable project
 - **PR #10638**: chore(boards): deliver Board 06's selected net-class map in its legacy project ZIP

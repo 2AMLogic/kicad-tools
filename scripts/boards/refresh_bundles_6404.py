@@ -62,7 +62,10 @@ gate passes.  Stages, in order:
    rebuilds, manifest re-hash (only ``files`` may change), its gates
    (refilled native DRC, ``kct check``, ``net-status``, ``validate --sync``),
    metric comparison, and the ``readiness.json`` re-pin validated by
-   ``read_readiness()``.
+   ``read_readiness()``.  A board registered with ``tier_check`` is also
+   judged by the public verifier's generic check, and what it measures is the
+   receipt published: ``blocked`` names the unaccepted findings and exits 1
+   (Issue #10662).
 
 Usage (repository root, KiCad 10 ``kicad-cli`` on PATH or ``KICAD_CLI_DIR``)::
 
@@ -1042,6 +1045,7 @@ def refresh_bundle(
     dry_run: bool = False,
     known_issue: list[str] | None = None,
     resolve_known_issue: list[str] | None = None,
+    on_verdict: Callable[[str], None] | None = None,
 ) -> list[str]:
     cfg = rr.BOARDS[board.name]
     bundle = BUNDLES[board.name]
@@ -1131,6 +1135,7 @@ def refresh_bundle(
             known_issue=known_issue,
             resolve_known_issue=resolve_known_issue,
             after_manifest=after_manifest if stale else None,
+            on_verdict=on_verdict,
         )
 
 
@@ -1183,6 +1188,7 @@ def main(argv: list[str] | None = None) -> int:
         if board.name not in BUNDLES:
             parser.error(f"{board.name}: no bundle configuration (known: {sorted(BUNDLES)})")
         log(f"== {board.name}")
+        verdict = rr.Verdict()
         try:
             for name in refresh_bundle(
                 board,
@@ -1194,10 +1200,15 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run,
                 known_issue=args.known_issue,
                 resolve_known_issue=args.resolve_known_issue,
+                on_verdict=verdict.publish,
             ):
                 log(f"    {name}")
         except GateFailure as exc:
             log(f"  REFUSED: {exc} -- nothing published for {board.name}")
+            status = 1
+            continue
+        if verdict.status != "ready":
+            log(f"  BLOCKED: {board.name} does not verify ready (exit 1)")
             status = 1
     return status
 

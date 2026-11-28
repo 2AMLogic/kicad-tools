@@ -436,12 +436,20 @@ def _escapes():
         [(0, 0), (0, -0.09), (-0.495, -0.585), (-0.495, -0.6607)],
     )
     for pin, net, y in (("E1", "TMDS_D2_P", 0.235), ("F1", "TMDS_D2_N", -0.235)):
+        # The F1 exit also passes a +1V8 via. Start the diagonal 25 µm
+        # earlier and finish on the original axis to retain the pair length
+        # while clearing the Power class's 0.20 mm floor.
+        revised = (
+            [(0, 0), (-0.44, 0), (-0.675, y), (-0.7, y)]
+            if pin == "F1"
+            else [(0, 0), (-0.465, 0), (-0.7, y)]
+        )
         yield (
             f"U4/{pin}",
             net,
             "F.Cu",
             [(0, 0), (-0.235, y), (-0.7, y)],
-            [(0, 0), (-0.465, 0), (-0.7, y)],
+            revised,
         )
 
 

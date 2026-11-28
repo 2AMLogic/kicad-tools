@@ -143,6 +143,9 @@ class LinkRouteRules:
 
     width_by_layer: Mapping[str, float] = field(default_factory=dict)
 
+    # Clearance from a wide link endpoint or via to neighbouring surface-pad lands.
+    pad_entry_gap: float = 0.0
+
     def width_for(self, layer: str) -> float:
         return self.width_by_layer.get(layer, self.trace_width)
 
@@ -1049,6 +1052,30 @@ def route_link(
     if model.outline is not None:
         via_bad |= ~mask_of(model.outline.buffer(-(rules.edge_clearance + rules.via_size / 2)))
 
+    # Island terminals can contain both pads and tracks. A track endpoint
+    # beside a same-net pad tip can expose copper through its mask opening.
+    # Either land the endpoint inside the pad or keep the whole cap clear.
+    endpoint_keepouts = {}
+    if rules.pad_entry_gap:
+        gap = max(rules.pad_entry_gap + COORD_WRITE_GUARD_MM, band_edge_mm)
+        for li, layer in enumerate(copper):
+            if layer not in ("F.Cu", "B.Cu"):
+                continue
+            lands = [
+                it.layers[layer]
+                for it in model.items
+                if it.is_pad
+                and it.net == net_number
+                and layer in it.layers
+                and it.layers[layer].intersects(window)
+            ]
+            if lands:
+                pads = unary_union(lands)
+                endpoint_keepouts[li] = mask_of(
+                    pads.buffer(rules.width_for(layer) / 2 + gap)
+                ) & ~mask_of(pads.buffer(-_TERMINAL_INSET))
+                via_bad |= mask_of(pads.buffer(rules.via_size / 2 + gap))
+
     def terminal_mask(t: LinkTerminal) -> Any:
         m = np.zeros((nl, nx, ny), dtype=bool)
         for li, layer in enumerate(copper):
@@ -1058,6 +1085,8 @@ def route_link(
                 # joins a track to a pad by its END POINT, not by overlap).
                 inset = geom.buffer(-_TERMINAL_INSET)
                 m[li] = mask_of(geom if inset.is_empty else inset) & ~blocked[li]
+                if li in endpoint_keepouts:
+                    m[li] &= ~endpoint_keepouts[li]
         return m
 
     # Plane layers accept vias by default. Only lateral moves on the
