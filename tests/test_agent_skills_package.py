@@ -48,6 +48,22 @@ def _repo_skill_names() -> set[str]:
     return {p.name for p in REPO_COPY_DIR.glob("*.md")}
 
 
+def _model_hints() -> dict[str, str]:
+    """``{skill: suggestedModel}`` for every source skill with a ``## Model selection`` section.
+
+    Derived from the sources rather than listed, so a skill that gains the
+    section is covered without a hand edit (issue #10717).
+    """
+    hints: dict[str, str] = {}
+    for path in sorted(REPO_COPY_DIR.glob("*.md")):
+        fields, body = split_frontmatter(path.read_text(encoding="utf-8"))
+        if "## Model selection" in body:
+            tier = fields.get("suggestedModel")
+            assert tier, f"{path.name} has a '## Model selection' section but no suggestedModel"
+            hints[path.stem] = tier
+    return hints
+
+
 # --- one source of truth -----------------------------------------------------
 
 
@@ -144,6 +160,10 @@ def test_built_wheel_contains_skills_and_installs_from_it(tmp_path: Path) -> Non
     """
     if shutil.which("uv") is None:
         pytest.skip("uv not available to build a wheel")
+    model_hints = _model_hints()
+    assert "help" in model_hints, (
+        f"derived no '## Model selection' skills from {REPO_COPY_DIR}: {model_hints}"
+    )
     dist = tmp_path / "dist"
     result = subprocess.run(
         ["uv", "build", "--wheel", "--out-dir", str(dist)],
@@ -169,15 +189,6 @@ def test_built_wheel_contains_skills_and_installs_from_it(tmp_path: Path) -> Non
         "sys.exit(main(sys.argv[1:]))"
     )
     env = {**os.environ, "PYTHONPATH": str(tmp_path / "site")}
-    model_hints = {
-        "board-recipe-scaffold": "sonnet",
-        "ee-review": "opus",
-        "help": "sonnet",
-        "hv-isolation-loop": "sonnet",
-        "layout-journal": "sonnet",
-        "manufacturing-readiness": "sonnet",
-        "tapeout": "sonnet",
-    }
     for harness, skill_path in (
         ("claude-code", "kct/{skill}.md"),
         ("codex", "kct-{skill}/SKILL.md"),
