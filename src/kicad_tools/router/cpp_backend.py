@@ -26,6 +26,7 @@ import os
 import time
 import zlib
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from . import wall_deadline as _wall_deadline
@@ -59,6 +60,18 @@ REPEAT_FALLBACK_BUDGET_FLOOR_S: float = 5.0
 # ``FRACTION`` of the tuned per-net iteration cap instead (never below this).
 REPEAT_FALLBACK_ITERATION_FLOOR: int = 10_000
 STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
+
+# Issue #8486: goal-side probe of a request whose latest native search ended on
+# the per-net wall clock.  The next call first searches the same request from
+# its goal for ``FRACTION`` of the per-net budget (never more than ``MAX_S``, so
+# a long stage allowance cannot make the probe dear).  A* drains only after
+# expanding everything reachable from its start, so with the goal in a small
+# enclosed region the goal-side search proves ``no_path`` where the start-side
+# one floods the board and runs out of budget.  A drained probe ends the call
+# with the forward timeout's own outcome; any other probe outcome leaves the
+# forward search its whole budget.
+REVERSE_PROBE_FRACTION: float = 0.10
+REVERSE_PROBE_MAX_S: float = 5.0
 
 # Required C++ binding-surface version (Issue #2501).
 #
@@ -1800,6 +1813,17 @@ class CppPathfinder:
         # outcome)``.  Filled and read only while a per-attempt diagnostic is
         # being collected, never consulted by a routing decision.
         self._python_attempt_history: dict[tuple, tuple[tuple, str]] = {}
+        # Issue #8486: pad-pair requests whose latest native search was ended by
+        # the per-net WALL-CLOCK deadline (``FAILURE_TIMEOUT``).  That stop is
+        # not a proof, so the next call would repeat the start-side search at
+        # the whole budget; it instead probes from the goal first
+        # (:meth:`_reverse_probe_budget`).  Key: :meth:`_native_request_key`.
+        # Value: the largest budget the start-side search has run out of.  A
+        # route or a drained verdict for the request removes it.
+        self._native_timed_out: dict[tuple, float] = {}
+        self._native_reverse_probes: int = 0
+        self._native_reverse_proofs: int = 0
+        self._native_reverse_seconds_saved: float = 0.0
         # Issue #6329: nets whose search was ended by a per-net WALL-CLOCK
         # deadline while the tuned per-net iteration cap was active (i.e.
         # under ``--deterministic-budget``).  Net name -> what bound.  Each
@@ -2168,8 +2192,8 @@ class CppPathfinder:
         was trace-fence covered; ``None`` when the connection had no
         escape fences), ``fence_decision`` (``"none"`` / ``"applied"`` /
         ``"skipped-covered"``), ``searches`` (one dict per native search:
-        ``fenced``, ``elapsed``, ``succeeded``, ``failure_reason`` token)
-        and, when the attempt was handed off, ``python_fallback``, plus the
+        ``fenced``, ``elapsed``, ``succeeded``, ``failure_reason`` token) and,
+        when the attempt was handed off, ``python_fallback``, plus the
         wall-time split ``native_search_seconds`` (the fresh searches),
         ``python_fallback_seconds`` (the fallback A*) and ``other_seconds``
         (the remainder: setup, stored-route sync, clearance-validation
@@ -2178,6 +2202,13 @@ class CppPathfinder:
         and name the exact connection and target considered -- the data
         the November 24 board trace lacked.  Purely observational: the
         produced copper is identical with tracing off and on.
+
+        Issue #8486: each native search also records ``expansions`` (the work
+        done, independent of machine load), and a goal-side probe
+        (:meth:`_reverse_probe_budget`) appears as a search with
+        ``reverse_probe`` set, with the attempt's ``reverse_probe`` dict
+        naming its ``budget_s`` and ``outcome`` (``proved`` / ``connected`` /
+        ``timeout`` / ``iteration_limit`` / ``stopped``).
 
         Returns:
             The list of timing records since the last drain (or since
@@ -2951,6 +2982,15 @@ class CppPathfinder:
         # 2x the cap (and the 10-100x-slower Python A* is exactly where
         # capped searches go to die).  ``None`` => unbudgeted (legacy).
         route_deadline = time.monotonic() + float(per_net_timeout) if per_net_timeout else None
+        # Issue #8486: a request that already ended on this deadline gets a
+        # goal-side probe before its next start-side search (``None``: no probe).
+        probe_budget = self._reverse_probe_budget(
+            start,
+            end,
+            net_class=net_class,
+            negotiated_mode=negotiated_mode,
+            per_net_timeout=per_net_timeout,
+        )
 
         # Issue #4433: narrow the C++ routable-layer vector to exclude this
         # net's hard-avoided layers for the duration of the search (initial
@@ -3104,7 +3144,21 @@ class CppPathfinder:
         # retries once with it off.
         band_state = {"on": True}
 
-        def _run_fresh_search(timeout_s: float, max_iters: int):
+        def _run_fresh_search(timeout_s: float, max_iters: int, *, reverse: bool = False):
+            if reverse:
+                # Issue #8486: the goal-side probe searches the SAME request with
+                # its two pads swapped, on the most permissive model the forward
+                # flow ever retries with -- no escape fences, no slit-band gate --
+                # so a drain here holds for every forward variant as well.
+                from_pad, to_pad = end, start
+                from_layer, to_layer = end_layer, start_layer
+                from_layers, to_layers = end_layers, start_layers
+                from_bounds, to_bounds = end_pad_bounds, start_pad_bounds
+            else:
+                from_pad, to_pad = start, end
+                from_layer, to_layer = start_layer, end_layer
+                from_layers, to_layers = start_layers, end_layers
+                from_bounds, to_bounds = start_pad_bounds, end_pad_bounds
             self._sync_pairwise_domains_to_cpp()
             # Give the C++ search the routing net's copper half-extents so the
             # cross-domain widening measures its widened radius from the SAME
@@ -3143,12 +3197,12 @@ class CppPathfinder:
                 # validator's carve-outs and the narrowest width the route
                 # conversion can emit, so the gate is never the stricter one.
                 gate_exclude, gate_clamp = self._carveout_ref_hashes(
-                    self._grid._py_grid, start, end
+                    self._grid._py_grid, from_pad, to_pad
                 )
                 self._impl.set_search_own_pad_gate(
                     gate_exclude,
                     gate_clamp,
-                    self._narrowest_emit_width(start, end, net_trace_width),
+                    self._narrowest_emit_width(from_pad, to_pad, net_trace_width),
                 )
 
             if hasattr(self._impl, "set_search_own_net_band"):
@@ -3157,7 +3211,7 @@ class CppPathfinder:
                 # skip it, as the Python search does).
                 self._impl.set_search_own_net_band(
                     0.0
-                    if self._relief_mode or not band_state["on"]
+                    if reverse or self._relief_mode or not band_state["on"]
                     else float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
                 )
 
@@ -3177,22 +3231,22 @@ class CppPathfinder:
             # observation: no budget, state or ordering is touched.
             _search_t0 = time.monotonic() if diag is not None else 0.0
             result = self._impl.route_resumable(
-                round(start.x, 4),
-                round(start.y, 4),
-                start_layer,
-                round(end.x, 4),
-                round(end.y, 4),
-                end_layer,
-                start.net,
-                start_layers or [],
-                end_layers or [],
+                round(from_pad.x, 4),
+                round(from_pad.y, 4),
+                from_layer,
+                round(to_pad.x, 4),
+                round(to_pad.y, 4),
+                to_layer,
+                from_pad.net,
+                from_layers or [],
+                to_layers or [],
                 negotiated_mode,
                 present_cost_factor,
                 weight,
                 trace_radius_cells,
                 via_radius_cells,
-                start_pad_bounds,
-                end_pad_bounds,
+                from_bounds,
+                to_bounds,
                 # Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair
                 # clearance.  When ``partner_net == -1`` (the dormant default
                 # before #2587 wired in the partner map), the C++ search uses
@@ -3231,23 +3285,90 @@ class CppPathfinder:
                 # no pad on the fine-pitch component (empty on boards
                 # without one -- pre-#9622 behaviour).
                 + self._under_body_budgets_for_net(start.net)
-                + (escape_fences if fence_state["on"] else []),
+                + ([] if reverse else escape_fences if fence_state["on"] else []),
             )
             if diag is not None:
-                diag["searches"].append(
-                    {
-                        "fenced": bool(fence_state["on"]),
-                        "elapsed": time.monotonic() - _search_t0,
-                        "succeeded": bool(result.success),
-                        "failure_reason": _failure_reason_token(result),
-                    }
-                )
+                search = {
+                    "fenced": bool(fence_state["on"]) and not reverse,
+                    "elapsed": time.monotonic() - _search_t0,
+                    "succeeded": bool(result.success),
+                    "failure_reason": _failure_reason_token(result),
+                    # Issue #8486: the work done, which unlike ``elapsed`` does
+                    # not depend on machine load.
+                    "expansions": int(self._impl.iterations),
+                }
+                if reverse:
+                    search["reverse_probe"] = True
+                diag["searches"].append(search)
             return result
 
         try:
             if pending_routable is not None:
                 saved_routable_layers = list(self._routable_layers)
                 self.set_routable_layers(pending_routable)
+            if probe_budget is not None:
+                probe = _run_fresh_search(
+                    probe_budget, self._effective_search_iterations, reverse=True
+                )
+                self._native_reverse_probes += 1
+                outcome = self._probe_outcome(probe)
+                if diag is not None:
+                    diag["reverse_probe"] = {"budget_s": probe_budget, "outcome": outcome}
+                if outcome == "proved":
+                    # The goal-side search expanded everything it can reach and
+                    # never got to this request's start pad.  The native step
+                    # model does not depend on the search direction (the
+                    # #8486 probe suite pins that on public shapes), so no
+                    # start-side search can reach the goal either.  Return what
+                    # a wall-clock stop of that search returns -- no route, the
+                    # timeout evidence and the #3876 fallback skip -- without
+                    # running it.
+                    self._native_reverse_proofs += 1
+                    if route_deadline is not None:
+                        self._native_reverse_seconds_saved += max(
+                            0.0, route_deadline - time.monotonic()
+                        )
+                    logger.debug(
+                        "Net %s: goal-side probe drained its open set (%s); no path "
+                        "exists on this grid, so the start-side search is not run "
+                        "(issue #8486)",
+                        start.net_name,
+                        self._describe_cpp_failure(probe),
+                    )
+                    self._capture_failure_info(
+                        SimpleNamespace(
+                            failure_reason=int(router_cpp.FAILURE_TIMEOUT),
+                            blocking_via_net=0,
+                            failure_x=0.0,
+                            failure_y=0.0,
+                        )
+                    )
+                    return self._try_python_fallback(
+                        start,
+                        end,
+                        net_class=net_class,
+                        negotiated_mode=negotiated_mode,
+                        present_cost_factor=present_cost_factor,
+                        weight=weight,
+                        per_net_timeout=per_net_timeout,
+                        extra_goal_cells=extra_goal_cells,
+                        deadline=route_deadline,
+                        reason=(
+                            "per-net wall-clock deadline exceeded (a goal-side search "
+                            f"drained its open set: {self._describe_cpp_failure(probe)})"
+                        ),
+                        cpp_failure_reason=int(router_cpp.FAILURE_TIMEOUT),
+                    )
+                # No proof: the probe connected, ran out of its own budget or hit
+                # the iteration cap.  The start-side search now runs exactly as it
+                # would have, on its WHOLE budget -- the probe is extra time, never
+                # taken from a search that may still connect (#10127) -- except
+                # inside a bounded excursion, whose wall stays absolute.
+                timeout_seconds = (
+                    float(_wall_deadline.clamp_search_timeout(per_net_timeout) or 0.0)
+                    if per_net_timeout
+                    else 0.0
+                )
             result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
             # Issue #9696: Python's band-relaxed wrapper returns a deadline-hit
             # search as-is (``last_route_deadline_hit``), so the two backends
@@ -3302,6 +3423,14 @@ class CppPathfinder:
                 # strategy can target rip-up at that net rather than a
                 # blanket retry.  We capture even when the Python fallback
                 # also fails, since the cpp diagnostic is still actionable.
+                self._note_native_outcome(
+                    start,
+                    end,
+                    net_class=net_class,
+                    negotiated_mode=negotiated_mode,
+                    budget=timeout_seconds,
+                    result=result,
+                )
                 self._capture_failure_info(result)
                 return self._try_python_fallback(
                     start,
@@ -3388,6 +3517,9 @@ class CppPathfinder:
                             "attempts": resume_attempts,
                             "exhausted": False,
                         }
+                    self._forget_native_timeout(
+                        start, end, net_class=net_class, negotiated_mode=negotiated_mode
+                    )
                     return route
 
                 # Validation failed. Boost avoidance cost at violation location
@@ -3514,6 +3646,14 @@ class CppPathfinder:
                     # Issue #2476: Capture failure-info before falling back
                     # so the negotiated strategy can still see the cpp-side
                     # via-blocked diagnostic.
+                    self._note_native_outcome(
+                        start,
+                        end,
+                        net_class=net_class,
+                        negotiated_mode=negotiated_mode,
+                        budget=timeout_seconds,
+                        result=result,
+                    )
                     self._capture_failure_info(result)
                     return self._try_python_fallback(
                         start,
@@ -3670,6 +3810,14 @@ class CppPathfinder:
                     # accumulates trackers from the original
                     # route_resumable() call so the most recent via-blocker
                     # is still reported.
+                    self._note_native_outcome(
+                        start,
+                        end,
+                        net_class=net_class,
+                        negotiated_mode=negotiated_mode,
+                        budget=timeout_seconds,
+                        result=result,
+                    )
                     self._capture_failure_info(result)
                     return self._try_python_fallback(
                         start,
@@ -5548,6 +5696,118 @@ class CppPathfinder:
             for key in [pair for pair in failures if pair[0] == net]:
                 del failures[key]
 
+    def _native_request_key(
+        self, start: Pad, end: Pad, *, net_class: NetClassRouting | None, negotiated_mode: bool
+    ) -> tuple:
+        """Identify one native search request, in its search direction (#8486).
+
+        The two pads, the net class and the sharing mode: every input that
+        decides which cells the native A* may pass.
+        """
+        return (
+            start.net,
+            repr(start),
+            repr(end),
+            repr(net_class),
+            bool(negotiated_mode),
+            bool(self._relief_mode),
+        )
+
+    def _reverse_probe_budget(
+        self,
+        start: Pad,
+        end: Pad,
+        *,
+        net_class: NetClassRouting | None,
+        negotiated_mode: bool,
+        per_net_timeout: float | None,
+    ) -> float | None:
+        """The goal-side probe's seconds for this call, or ``None`` for no probe (#8486).
+
+        Only a request whose latest native search ended on the wall clock, and
+        only under a wall-clock budget: the deterministic arm has no timeout to
+        learn from.  Never a relief probe.  Opt out with
+        ``KICAD_ROUTER_SKIP_REPEAT_FALLBACK=0``.
+
+        The start-side search must also have run out of a budget at least as
+        large as this call's.  A search that ran out at a smaller cap (a
+        #8486 back-off) may merely drain at this one and hand the request to
+        the Python fallback, as it always did; that call keeps its search.
+        """
+        if not self._native_timed_out or self._relief_mode:
+            return None
+        if per_net_timeout is None or per_net_timeout <= 0:
+            return None
+        if os.environ.get("KICAD_ROUTER_SKIP_REPEAT_FALLBACK", "1").strip() == "0":
+            return None
+        key = self._native_request_key(
+            start, end, net_class=net_class, negotiated_mode=negotiated_mode
+        )
+        if self._native_timed_out.get(key, 0.0) < float(per_net_timeout):
+            return None
+        return _wall_deadline.clamp_search_timeout(
+            min(REVERSE_PROBE_FRACTION * float(per_net_timeout), REVERSE_PROBE_MAX_S)
+        )
+
+    def _probe_outcome(self, probe: router_cpp.RouteResult) -> str:
+        """Classify a goal-side probe; only a drained open set is a proof (#8486)."""
+        if probe.success:
+            return "connected"
+        reason = int(getattr(probe, "failure_reason", router_cpp.FAILURE_NONE))
+        if reason == int(router_cpp.FAILURE_TIMEOUT):
+            return "timeout"
+        if reason == int(router_cpp.FAILURE_ITERATION_LIMIT):
+            return "iteration_limit"
+        if reason in (
+            int(router_cpp.FAILURE_NO_PATH),
+            int(router_cpp.FAILURE_VIA_VIA_BLOCKED),
+            int(router_cpp.FAILURE_PAIRWISE_BLOCKED),
+        ):
+            return "proved"
+        return "stopped"
+
+    def _note_native_outcome(
+        self,
+        start: Pad,
+        end: Pad,
+        *,
+        net_class: NetClassRouting | None,
+        negotiated_mode: bool,
+        budget: float,
+        result: router_cpp.RouteResult,
+    ) -> None:
+        """Remember a native search that ended on the wall clock; forget any other end.
+
+        ``budget`` is what that search had.  A geometric verdict is the
+        search's own answer and a validation exhaustion means it connected, so
+        neither needs a proof first (#8486).
+        """
+        if self._relief_mode or router_cpp is None:
+            return
+        if int(getattr(result, "failure_reason", router_cpp.FAILURE_NONE)) == int(
+            router_cpp.FAILURE_TIMEOUT
+        ):
+            key = self._native_request_key(
+                start, end, net_class=net_class, negotiated_mode=negotiated_mode
+            )
+            self._native_timed_out[key] = max(self._native_timed_out.get(key, 0.0), float(budget))
+        else:
+            self._forget_native_timeout(
+                start, end, net_class=net_class, negotiated_mode=negotiated_mode
+            )
+
+    def _forget_native_timeout(
+        self, start: Pad, end: Pad, *, net_class: NetClassRouting | None, negotiated_mode: bool
+    ) -> None:
+        """A route was found, so the request needs no proof next time (#8486)."""
+        if self._native_timed_out:
+            self._native_timed_out.pop(
+                self._native_request_key(
+                    start, end, net_class=net_class, negotiated_mode=negotiated_mode
+                ),
+                None,
+            )
+
     def _python_unreachable_key(
         self,
         start: Pad,
@@ -5841,6 +6101,15 @@ class CppPathfinder:
                   fallbacks skipped because the stage budget was spent (their
                   first-attempt seconds are added to
                   ``python_fallback_seconds_saved``).
+                - native_reverse_probes: Issue #8486.  Goal-side probes run
+                  before the start-side search of a request whose latest native
+                  search had ended on the per-net wall clock.
+                - native_reverse_proofs: Issue #8486.  Probes that drained their
+                  open set, proving no path exists on that grid; each ended its
+                  call without the start-side search.
+                - native_reverse_seconds_saved: Issue #8486.  Summed per-net
+                  budget those proofs left unspent -- an estimate of the wall
+                  time saved.
         """
         return {
             "fallback_count": self._fallback_count,
@@ -5865,6 +6134,9 @@ class CppPathfinder:
             "python_fallback_stage_spent_s": self._python_fallback_stage_spent,
             "python_fallback_stage_budget_skips": self._python_fallback_stage_budget_skips,
             "wall_bound_under_cap": dict(self._wall_bound_under_cap),
+            "native_reverse_probes": self._native_reverse_probes,
+            "native_reverse_proofs": self._native_reverse_proofs,
+            "native_reverse_seconds_saved": self._native_reverse_seconds_saved,
         }
 
     @property
