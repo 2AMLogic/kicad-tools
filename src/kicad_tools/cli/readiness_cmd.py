@@ -124,6 +124,7 @@ __all__ = [
     "ASSEMBLY_AFFECTING_RULES",
     "CheckOutcome",
     "EngineFingerprint",
+    "EvidenceEnvironmentError",
     "EngineRun",
     "Engines",
     "FillComparison",
@@ -279,6 +280,16 @@ class EngineRun:
     ok: bool
     detail: str = ""
     returncode: int = 0
+
+
+class EvidenceEnvironmentError(RuntimeError):
+    """The environment, not the board, kept the LCSC lookups from being checked.
+
+    Raised when the bundle's stock lookups ran without a usable offline parts
+    catalog (issue #10646), so its procurement evidence describes the host
+    that ran the export rather than the board.  Producers stop and write
+    nothing, exactly as for :class:`KiCadEnvironmentError` (issue #6962).
+    """
 
 
 def _run_kct_check(
@@ -3860,6 +3871,68 @@ def _stock_evaluation(
     return result, record, None
 
 
+#: Recorded states of the offline-catalog lookup in which the catalog's
+#: contents were never searched.  Every assigned number a source did not
+#: settle is then "unverified" for a reason about the host, not the board.
+_CATALOG_HOST_GAPS = ("missing", "unreadable")
+
+
+def _recorded_catalog_gap(stock_record: dict[str, Any] | None) -> str | None:
+    """Why the recorded stock check could not consult the offline catalog.
+
+    ``sources.offline_catalog`` is ``missing`` or ``unreadable`` when the
+    lookups behind the bundle never reached a usable catalog (issue #10386);
+    that describes the generating host, so it must not become evidence
+    (issue #10646).  ``hit`` and ``miss`` mean the catalog was searched -- a
+    miss is an honest result about the part -- and a record without
+    ``sources`` (written before #10386) makes no claim either way.
+    """
+    if not isinstance(stock_record, dict):
+        return None
+    sources = stock_record.get("sources")
+    if not isinstance(sources, dict):
+        return None
+    from kicad_tools.export.preflight import LOOKUP_SOURCE_CATALOG, describe_lookup_sources
+
+    state = sources.get(LOOKUP_SOURCE_CATALOG)
+    if state not in _CATALOG_HOST_GAPS:
+        return None
+    return describe_lookup_sources({LOOKUP_SOURCE_CATALOG: state})
+
+
+def _catalog_refusal(options: ReadinessOptions, gap: str) -> str:
+    from kicad_tools.parts.jlcparts_catalog import CATALOG_FILENAME, get_catalog_path
+
+    try:
+        location = str(get_catalog_path())
+    except OSError:  # pragma: no cover - unwritable cache directory
+        location = f"the cache directory, as {CATALOG_FILENAME}"
+    if options.operation == "verify":
+        return (
+            "this package's LCSC stock lookups ran without a usable offline parts "
+            f"catalog ({gap}). --verify keeps that record; it does not re-derive it from "
+            "this host, so the package's procurement evidence describes the host that "
+            "produced it, not the board. Regenerate it with `kct readiness <board> "
+            "--generate` on a host that has the catalog (`kct parts sync-catalog` "
+            f"downloads it to {location})."
+        )
+    return (
+        "the bundle's LCSC stock lookups ran without a usable offline parts catalog "
+        f"({gap}), so its procurement evidence would describe this host rather than the "
+        "board. Run `kct parts sync-catalog` to download the catalog to "
+        f"{location}, then rerun `kct readiness <board> --generate`."
+    )
+
+
+def _require_recorded_catalog(
+    options: ReadinessOptions, stock_record: dict[str, Any] | None
+) -> None:
+    """Refuse to publish a stock check the offline catalog never had a say in."""
+    gap = _recorded_catalog_gap(stock_record)
+    if gap is not None:
+        raise EvidenceEnvironmentError(_catalog_refusal(options, gap))
+
+
 def _gate_bom(
     options: ReadinessOptions,
     engines: Engines,
@@ -5030,9 +5103,9 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             report = result.report
             if options.operation == "generate":
                 report["candidate_not_published"] = True
-        except KiCadEnvironmentError:
-            # Issue #6962: the environment, not the board, failed -- write no
-            # evidence at all, not even a blocked diagnostic receipt.
+        except (KiCadEnvironmentError, EvidenceEnvironmentError):
+            # Issue #6962 / #10646: the environment, not the board, failed --
+            # write no evidence at all, not even a blocked diagnostic receipt.
             raise
         except Exception as exc:
             report = {
@@ -5184,6 +5257,10 @@ def _run_readiness_candidate(
     checks.append(_gate_bom(options, engines, tht_refs, tht_assembled))
     if options.assembly:
         _, stock_record, _ = _stock_evaluation(options, _recorded_stock_check(options))
+        # Issue #10646: a stock check the offline catalog never had a say in
+        # describes the host that ran the export, not the board.  Refusing
+        # here keeps the staged candidate from ever being published.
+        _require_recorded_catalog(options, stock_record)
         if stock_record is not None:
             metrics["lcsc_stock_order"] = stock_record
     if engines.extra_checks is not None:
@@ -5663,9 +5740,12 @@ def run_from_args(args: argparse.Namespace, engines: Engines | None = None) -> i
                     result = run_readiness(options, engines)
             else:
                 result = run_readiness(options, engines)
-    except (KiCadEnvironmentError, ReadinessPublicationBusy) as exc:
+    except (KiCadEnvironmentError, EvidenceEnvironmentError, ReadinessPublicationBusy) as exc:
         if isinstance(exc, KiCadEnvironmentError):
             error = f"KiCad environment refused; no evidence written: {exc}"
+            failure_status, exit_code = STATUS_UNVERIFIED, 2
+        elif isinstance(exc, EvidenceEnvironmentError):
+            error = f"Evidence environment refused; no evidence written: {exc}"
             failure_status, exit_code = STATUS_UNVERIFIED, 2
         else:
             error = str(exc)
