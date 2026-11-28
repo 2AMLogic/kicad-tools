@@ -214,7 +214,8 @@ A board is "ship-ready" when **all** gates are green:
 5. No open known defect is recorded in `output/readiness.json` (Issue #7261).
    An open defect adds a `known defect #N` blocker. Boards that are ready but
    carry disclosed exceptions or advisories show `YES*` / `known: #N` instead
-   of a plain `YES`.
+   of a plain `YES`. A receipt its producer published as `blocked` is itself a
+   blocker, `readiness blocked: <first recorded blocker>` (Issue #10662).
 
 If any gate fails, the table view lists the first blocker; `--format json`
 emits the full per-board breakdown. Treat `kct fleet status --ship-only`

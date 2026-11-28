@@ -27,7 +27,9 @@ _EVIDENCE_PATH = re.compile(r"^[\w./-]*(readiness|native-drc[\w-]*|fill-consiste
 #: issue that moves each onto it (operator ruling #7270 Q3=1).  Shrink only.
 ALLOWLIST = {}
 
-#: Board dir -> the one producer that owns its ``readiness.json`` re-pin.
+#: Board dir -> the one producer that owns its ``readiness.json`` re-pin.  A
+#: registered board that is published ``blocked`` (board 04 since Issue #10662)
+#: keeps its owner: the same producer flips it back once its gates pass.
 READINESS_REPIN_OWNER = {
     "00-simple-led": "refresh_readiness",
     "01-voltage-divider": "refresh_readiness",
@@ -159,14 +161,19 @@ def _refresh_readiness_boards() -> set[str]:
 
 def test_every_ready_board_has_exactly_one_repin_owner():
     boards = REPO / "boards"
+    receipts = set()
     ready = set()
     for report in boards.glob("*/output/readiness.json"):
+        name = report.parents[1].name
+        receipts.add(name)
         if json.loads(report.read_text()).get("status") == "ready":
-            ready.add(report.parents[1].name)
+            ready.add(name)
     assert ready, "no ready boards found -- guard is vacuous"
-    assert ready == set(READINESS_REPIN_OWNER), (
-        f"ready boards without an owner: {sorted(ready - set(READINESS_REPIN_OWNER))}; "
-        f"owners for non-ready/missing boards: {sorted(set(READINESS_REPIN_OWNER) - ready)}"
+    assert ready <= set(READINESS_REPIN_OWNER), (
+        f"ready boards without an owner: {sorted(ready - set(READINESS_REPIN_OWNER))}"
+    )
+    assert set(READINESS_REPIN_OWNER) <= receipts, (
+        f"owners without a committed receipt: {sorted(set(READINESS_REPIN_OWNER) - receipts)}"
     )
     for name in READINESS_REPIN_OWNER:
         assert (boards / name).is_dir()
