@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-28
 
+- **PR #10714**: fix(router): refuse unsupported chamfers on named pad links
+- **Issue #10711** (closed): link_router._chamfer_ratio over-claims a cut corner on a malformed or negative chamfer_ratio, where current_paths fails closed
 - **PR #10705**: docs: clarify model selection in the tapeout, readiness, HV-loop and help skills
 - **PR #10708**: test: cover scaffold and journal model hints in installed wheels
 - **PR #10691**: fix: guard the sharp-corner 89-degree boundary against float rounding
