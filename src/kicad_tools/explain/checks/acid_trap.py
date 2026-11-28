@@ -26,6 +26,34 @@ ANGLE_TOLERANCE_DEG = 1.0
 # another), not corners; they are a separate defect class (issue #8663).
 MIN_CORNER_ANGLE_DEG = 1.0
 
+ANGLE_FLOAT_EPS_DEG = 1e-9
+
+
+def is_acute_corner_angle(angle: float) -> bool:
+    """Whether *angle* (degrees) lies in the sharp-corner window ``[1, 89)``.
+
+    The one definition of the acid-trap angle window.  :class:`AcidTrapCheck`,
+    the ``sharp_trace_corner`` rule and the router's
+    :mod:`~kicad_tools.router.acute_foldback` gate all call it, so the
+    manufacturing rule and the router cannot disagree at an edge.
+
+    The upper edge is exclusive and carries a float-rounding guard,
+    :data:`ANGLE_FLOAT_EPS_DEG` (issue #10677).  The stored coordinates of a
+    nominal 89 deg corner are not exactly at 89 deg, and which side of the
+    bound their computed angle lands on depends on the board position and on
+    the platform ``libm``: the same corner read 88.99999999999999 deg on macOS
+    and 89.0 deg on Linux, and 88.99999999999986 deg at x = 150 mm on Linux as
+    well.  The guard is eight orders of magnitude below the 0.1 deg control
+    step, and above that dust: under 3e-12 deg for millimetre-scale legs, at
+    most about 1.1e-10 deg even for a leg at the vertex coincidence tolerance.
+    The lower edge is exact.
+    """
+    return (
+        MIN_CORNER_ANGLE_DEG
+        <= angle
+        < MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG - ANGLE_FLOAT_EPS_DEG
+    )
+
 
 class AcidTrapCheck:
     """Check for acute angles in traces (acid traps).
@@ -70,12 +98,7 @@ class AcidTrapCheck:
                         continue
 
                     angle = self._calculate_angle(seg1, seg2, junction)
-                    if (
-                        angle is not None
-                        and MIN_CORNER_ANGLE_DEG
-                        <= angle
-                        < MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG
-                    ):
+                    if angle is not None and is_acute_corner_angle(angle):
                         net = pcb.get_net(net_num)
                         net_name = net.name if net else f"Net {net_num}"
 
