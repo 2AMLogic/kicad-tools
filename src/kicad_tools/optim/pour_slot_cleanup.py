@@ -1,15 +1,14 @@
 """Pour-slot cleanup: spread or pack parallel tracks that slot a pour (Issue #8440).
 
 :class:`~kicad_tools.validate.rules.pour_slot.PourSlotRule` (Issue #8435) flags
-different-net parallel tracks whose gap is below ``2 * clearance +
-min_thickness``: the strip of pour between them cannot fill and the plane gets
+different-net parallel tracks whose clearance envelopes leave a strip narrower
+than the zone's minimum thickness. The strip cannot fill and the plane gets
 a slot.  This pass resolves such pairs by shifting one run perpendicular to
 itself:
 
 * **spread** -- widen the gap to the rule's threshold (the strip then fills);
 * **pack** -- opt-in (``pack=True``): tighten the gap to the pair's clearance.
-  This removes the slot by removing the ground strip, and the pair is still
-  flagged by the advisory, so it is never the default;
+  This removes the ground strip.
 * otherwise the pair is **left alone**.
 
 Detection is :func:`iter_pour_slot_pairs`, the same code the advisory uses.
@@ -41,7 +40,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from kicad_tools.validate.rules.pour_slot import PourSlotPair, iter_pour_slot_pairs
+from kicad_tools.validate.rules.pour_slot import (
+    PourSlotClearances,
+    PourSlotPair,
+    iter_pour_slot_pairs,
+)
 
 #: Margin (mm) added past the threshold so a spread pair is not borderline.
 SPREAD_MARGIN_MM = 0.005
@@ -267,16 +270,9 @@ def _no_worse(after: Mapping[str, int], baseline: Mapping[str, int]) -> bool:
     return all(after.get(k, 0) <= baseline.get(k, 0) for k in set(after) | set(baseline))
 
 
-def _slots(pcb: Any, netclass_clearances: Mapping[str, float] | None) -> list[PourSlotPair]:
-    """Flagged pairs that still leave an unfillable strip (``gap > 2 x clearance``).
-
-    A pair packed to ``clearance`` is still flagged by the advisory (its gap is
-    below the threshold) but has no strip left between the keep-outs, hence no
-    slot: the pour is simply absent between the tracks.
-    """
-    return [
-        p for p in iter_pour_slot_pairs(pcb, netclass_clearances) if p.gap > 2 * p.clearance + _TOL
-    ]
+def _slots(pcb: Any, netclass_clearances: PourSlotClearances | None) -> list[PourSlotPair]:
+    """Collect the pairs that the advisory would flag on this geometry."""
+    return list(iter_pour_slot_pairs(pcb, netclass_clearances))
 
 
 def _pair_key(pair: PourSlotPair) -> tuple:
@@ -290,6 +286,14 @@ def _pair_key(pair: PourSlotPair) -> tuple:
         )
 
     return tuple(sorted((k(pair.first), k(pair.second))))
+
+
+def _reduces_slots(before: list[PourSlotPair], after: list[PourSlotPair]) -> bool:
+    if len(after) >= len(before):
+        return False
+    # A smaller total can hide a newly ambiguous slot in a re-pitched bus.
+    uncertain_before = {_pair_key(p) for p in before if p.unresolved_rules}
+    return all(_pair_key(p) in uncertain_before for p in after if p.unresolved_rules)
 
 
 #: Max |sin(angle)| between two runs for them to count as parallel.
@@ -462,7 +466,7 @@ def _repitch_bus(
 
 def cleanup_pour_slots(
     pcb: Any,
-    netclass_clearances: Mapping[str, float] | None = None,
+    netclass_clearances: PourSlotClearances | None = None,
     *,
     referee: Referee,
     pack: bool = False,
@@ -474,7 +478,18 @@ def cleanup_pour_slots(
     if not pairs:
         return result
 
-    baseline = referee(pcb)
+    # An unclipped zone can support a checker advisory on an incomplete
+    # board, but cannot prove that changing copper would restore a pour.
+    from kicad_tools.analysis.layout_quality import board_material_geometry
+
+    if board_material_geometry(pcb) is None:
+        result.left_alone = len(pairs)
+        result.left_alone_reasons = ["could not establish board material from Edge.Cuts"] * len(
+            pairs
+        )
+        return result
+
+    baseline = referee(pcb) if any(not p.unresolved_rules for p in pairs) else {}
     if baseline is None:
         result.refused_reason = "referee unavailable (kicad-cli could not run); no edits applied"
         return result
@@ -484,8 +499,15 @@ def cleanup_pour_slots(
     dead_buses: set[frozenset] = set()
 
     while True:
-        pairs = [p for p in _slots(pcb, netclass_clearances) if _pair_key(p) not in dead]
+        current = _slots(pcb, netclass_clearances)
+        pairs = [p for p in current if not p.unresolved_rules and _pair_key(p) not in dead]
         if not pairs:
+            for p in current:
+                if p.unresolved_rules:
+                    result.left_alone += 1
+                    result.left_alone_reasons.append(
+                        f"unresolved clearance rules ({', '.join(p.unresolved_rules)})"
+                    )
             break
         bus_step = False
         for runs, bus_pairs in _find_buses(pairs):
@@ -493,11 +515,10 @@ def cleanup_pour_slots(
             if bkey in dead_buses:
                 continue
             bus_step = True
-            before_n = len(_slots(pcb, netclass_clearances))
             done, why = _repitch_bus(pcb, runs, bus_pairs, pads)
             if done is not None:
-                after_n = len(_slots(pcb, netclass_clearances))
-                score = referee(pcb) if after_n < before_n else None
+                after = _slots(pcb, netclass_clearances)
+                score = referee(pcb) if _reduces_slots(current, after) else None
                 if score is not None and _no_worse(score, baseline):
                     baseline = dict(score)
                     result.buses_repitched += 1
@@ -523,7 +544,11 @@ def cleanup_pour_slots(
                 # An undone attempt re-adds fresh segment objects, so look the
                 # pair up again rather than holding stale references.
                 cur = next(
-                    (p for p in _slots(pcb, netclass_clearances) if _pair_key(p) == key),
+                    (
+                        p
+                        for p in _slots(pcb, netclass_clearances)
+                        if not p.unresolved_rules and _pair_key(p) == key
+                    ),
                     None,
                 )
                 if cur is None:
@@ -551,10 +576,9 @@ def cleanup_pour_slots(
                 if not _clear_of_others(pcb, plan, cur.clearance):
                     last_why = "no clear room for the shifted run"
                     continue
-                before_n = len(_slots(pcb, netclass_clearances))
                 done = _apply(pcb, plan)
-                after_n = len(_slots(pcb, netclass_clearances))
-                score = referee(pcb) if after_n < before_n else None
+                after = _slots(pcb, netclass_clearances)
+                score = referee(pcb) if _reduces_slots(current, after) else None
                 if score is not None and _no_worse(score, baseline):
                     baseline = dict(score)
                     if kind == "spread":
@@ -571,5 +595,5 @@ def cleanup_pour_slots(
             result.left_alone += 1
             result.left_alone_reasons.append(last_why)
 
-    result.pairs_after = len(_slots(pcb, netclass_clearances))
+    result.pairs_after = len(current)
     return result

@@ -19,6 +19,17 @@ __all__ = ["ReportGenerator"]
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
+def _yaml_string(value: str) -> str:
+    """Quote a single-line YAML scalar, preserving non-BMP characters literally."""
+    # JSON quoting handles quotes, backslashes, and ASCII control characters.
+    # Escape the additional characters YAML forbids or treats as line breaks.
+    return re.sub(
+        r"[\x7f-\x9f\u2028\u2029\ufffe\uffff]",
+        lambda match: f"\\u{ord(match[0]):04x}",
+        json.dumps(value, ensure_ascii=False),
+    )
+
+
 def _short_footprint(footprint: str) -> str:
     """Strip the KiCad library prefix from a footprint name.
 
@@ -84,6 +95,7 @@ class ReportGenerator:
             trim_blocks=True,
             lstrip_blocks=True,
         )
+        self._env.filters["yaml_string"] = _yaml_string
         self._env.filters["truncate_refs"] = _truncate_refs
         self._env.filters["short_footprint"] = _short_footprint
         self._template_name = template_name

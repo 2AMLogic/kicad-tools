@@ -207,6 +207,71 @@ def test_archive_is_current(mod, tmp_path):
     assert not mod.archive_is_current(archive, [tmp_path])
 
 
+def test_archive_is_current_requires_pinned_members_with_their_bytes(mod, tmp_path):
+    (tmp_path / "a.txt").write_text("a")
+    archive = tmp_path / "x.zip"
+    mod.rr.write_deterministic_zip(archive, {"a.txt": b"a"})
+    assert not mod.archive_is_current(archive, [tmp_path], pinned={"map.json": b"m"})
+    mod.rr.write_deterministic_zip(archive, {"a.txt": b"a", "map.json": b"old"})
+    assert not mod.archive_is_current(archive, [tmp_path], pinned={"map.json": b"m"})
+    mod.rr.write_deterministic_zip(archive, {"a.txt": b"a", "map.json": b"m"})
+    # A pinned member is never looked up under the search roots.
+    assert mod.archive_is_current(archive, [tmp_path], pinned={"map.json": b"m"})
+
+
+def _legacy_project(tmp_path, mod):
+    """Board 06's shape: checked-basename project archive, no map member (Issue #10637)."""
+    board = tmp_path / "06-diffpair-test"
+    out = board / "output"
+    out.mkdir(parents=True)
+    for name, data in {
+        "board.kicad_sch": b"sch",
+        "board_routed.kicad_pcb": b"routed",
+        "board_routed.kicad_pro": b"pro",
+        "board_routed.kicad_dru": b"dru",
+        "net_class_map.json": b'{"selected": true}',
+    }.items():
+        (out / name).write_bytes(data)
+    cfg = mod.rr.BoardConfig(
+        routed_pcb="output/board_routed.kicad_pcb",
+        schematic="output/board.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+        archives=(("output/kicad_project.zip", ("output",)),),
+    )
+    return board, out, cfg
+
+
+def test_legacy_project_archive_gains_the_selected_map(mod, tmp_path):
+    board, out, cfg = _legacy_project(tmp_path, mod)
+    members = {
+        "board_routed.kicad_pcb": b"routed",
+        "board_routed.kicad_pro": b"pro",
+        "board_routed.kicad_dru": b"dru",
+    }
+    archive = out / "kicad_project.zip"
+    mod.rr.write_deterministic_zip(archive, members)
+    assert mod.bundle_is_stale(board, cfg)
+    assert mod.stage_project_map(board, cfg) == ["net_class_map.json"]
+    assert not mod.bundle_is_stale(board, cfg)
+    with zipfile.ZipFile(archive) as z:
+        assert z.read("net_class_map.json") == b'{"selected": true}'
+        assert {n: z.read(n) for n in members} == members
+        names = z.namelist()
+    # The extracted board resolves exactly the map the verifier compares.
+    from kicad_tools.sidecars import net_class_map_sidecar_candidates
+
+    assert [
+        p.as_posix()
+        for p in net_class_map_sidecar_candidates("board_routed.kicad_pcb")
+        if p.as_posix() in names
+    ] == ["net_class_map.json"]
+    assert mod.stage_project_map(board, cfg) == []
+    # A changed selected map makes the archive stale again.
+    (out / "net_class_map.json").write_bytes(b"changed")
+    assert mod.bundle_is_stale(board, cfg)
+
+
 def test_write_targets_never_adds_files(mod, tmp_path):
     (tmp_path / "kept.json").write_text("{}")
     mod._write_targets(tmp_path, ("kept.json",), b"new")
@@ -851,6 +916,23 @@ def test_board04_published_drc_preflight_matches_the_final_report(mod):
             assert [entry for entry in entries if entry["name"] == "drc"] == [expected]
 
 
+def test_board04_bundle_recognizes_the_delivered_project_names(mod, tmp_path):
+    from kicad_tools.export.manufacturing import ManufacturingPackage, ManufacturingResult
+
+    board = tmp_path / "04-stm32-devboard"
+    shutil.copytree(REPO / "boards" / board.name, board)
+    cfg = mod.rr.BOARDS[board.name]
+    routed = board / cfg.routed_pcb
+    package = ManufacturingPackage(routed, board / cfg.schematic, manufacturer=cfg.tier)
+    output = routed.parent / "manufacturing"
+    result = ManufacturingResult(output_dir=output)
+    package._generate_project_zip(output, result)
+    assert result.project_zip_path == output / "kicad_project.zip", result.errors
+    assert not mod.bundle_is_stale(board, cfg)
+    routed.write_bytes(routed.read_bytes() + b"\n")
+    assert mod.bundle_is_stale(board, cfg)
+
+
 def test_board04_stale_report_cannot_validate_its_own_preflight(mod, tmp_path):
     from kicad_tools.export.preflight import PreflightChecker
 
@@ -860,9 +942,9 @@ def test_board04_stale_report_cannot_validate_its_own_preflight(mod, tmp_path):
     routed.parent.mkdir()
     shutil.copyfile(board / cfg.routed_pcb, routed)
     current_report = (board / "output/drc_report.json").read_bytes()
-    report = json.loads(current_report)
-    report["pcb_sha256"] = "0" * 64
-    (routed.parent / "drc_report.json").write_text(json.dumps(report))
+    (routed.parent / "drc_report.json").write_bytes(current_report)
+    checked_pcb = routed.read_bytes()
+    routed.write_bytes(checked_pcb + b"\n")
     manifest = routed.parent / "manufacturing/manifest.json"
     manifest.parent.mkdir()
     stale = PreflightChecker(routed, manufacturer=cfg.tier)._check_drc().to_dict()
@@ -872,7 +954,7 @@ def test_board04_stale_report_cannot_validate_its_own_preflight(mod, tmp_path):
     assert not mod.check_recipe_drc_preflight(tmp_path, cfg, refresh=True)
     assert json.loads(manifest.read_bytes())["preflight"] == [erc, stale]
 
-    (routed.parent / "drc_report.json").write_bytes(current_report)
+    routed.write_bytes(checked_pcb)
     assert not mod.check_recipe_drc_preflight(tmp_path, cfg)
     assert mod.check_recipe_drc_preflight(tmp_path, cfg, refresh=True)
     expected = PreflightChecker(routed, manufacturer=cfg.tier)._check_drc().to_dict()
@@ -882,36 +964,61 @@ def test_board04_stale_report_cannot_validate_its_own_preflight(mod, tmp_path):
     assert manifest.read_bytes() == before
 
 
-def test_board04_refresh_measures_new_copper_before_export(mod, tmp_path, monkeypatch):
+def test_board04_refresh_finalizes_silk_before_export_preflight(mod, tmp_path, monkeypatch):
+    from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightChecker
+
     board = tmp_path / "04-stm32-devboard"
+    shutil.copytree(REPO / "boards" / board.name, board)
     cfg = mod.rr.BOARDS[board.name]
     routed = board / cfg.routed_pcb
-    routed.parent.mkdir(parents=True)
-    routed.write_text(PCB)
-    report = routed.parent / "drc_report.json"
-    report.write_text(json.dumps({"pcb_sha256": "0" * 64}))
-    monkeypatch.setattr(mod, "stage_refill", lambda *a: {})
-    monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda *a: b"{}")
-    monkeypatch.setattr(mod, "gate_parity_drc", lambda *a: None)
+    # Exercise the older package even after the repaired artwork is published.
+    old = '(property "Reference" "C11"\n\t\t\t(at -5.5 4.73 0)'
+    new = old.replace("-5.5 4.73", "-5.25 4.48")
+    artwork = routed.read_text().replace(new, old)
+    assert artwork.count(old) == 1
+    routed.write_text(artwork)
+    report = json.loads((routed.parent / "drc_report.json").read_bytes())
+
+    def refill(staged, cfg):
+        assert new in (staged / cfg.routed_pcb).read_text()
+        return {}
 
     def measure(command, **kwargs):
         pcb = Path(command[-1])
-        data = {"pcb_sha256": mod.sha256(pcb), "meta_checks": {"manifest": {"status": "FAILED"}}}
-        (pcb.parent / "drc_report.json").write_text(json.dumps(data))
+        report["pcb_sha256"] = mod.sha256(pcb)
+        report["meta_checks"]["manifest"]["status"] = "FAILED"  # pre-export
+        (pcb.parent / "drc_report.json").write_text(json.dumps(report))
         return subprocess.CompletedProcess(command, 0, stdout="run_drc: False", stderr="")
 
-    class ExportReached(Exception):
+    class PreflightReached(Exception):
         pass
 
-    def export(staged, cfg, bundle):
-        pcb = staged / cfg.routed_pcb
-        measured = json.loads((pcb.parent / "drc_report.json").read_bytes())
-        assert measured["pcb_sha256"] == mod.sha256(pcb)
-        raise ExportReached
+    def preflight(package):
+        pcb = package.pcb_path
+        entry = PreflightChecker(pcb, manufacturer=package.manufacturer)._check_drc().to_dict()
+        assert report["pcb_sha256"] == mod.sha256(pcb), entry
+        assert new in pcb.read_text()
+        assert "DRC passed" in entry["message"]
+        assert run_default_silk_pass(pcb, mfr=cfg.tier)["total_fixed"] == 0
+        raise PreflightReached
 
+    def export(staged, cfg, bundle):
+        package = ManufacturingPackage(
+            pcb_path=staged / cfg.routed_pcb,
+            manufacturer=cfg.tier,
+            config=ManufacturingConfig(emit_drc_constraints=False),
+        )
+        package.export(staged / "output/manufacturing")
+
+    monkeypatch.setattr(mod, "stage_refill", refill)
+    monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda *a: b"{}")
+    monkeypatch.setattr(mod, "gate_parity_drc", lambda *a: None)
     monkeypatch.setattr(mod, "run", measure)
     monkeypatch.setattr(mod, "stage_recipe_manufacturing", export)
-    with pytest.raises(ExportReached):
+    monkeypatch.setattr(ManufacturingPackage, "_run_preflight", preflight)
+    with pytest.raises(PreflightReached):
         mod.refresh_bundle(board, "2026-11-25T13:37:00+00:00", force_replot=True)
 
 

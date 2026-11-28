@@ -236,6 +236,7 @@ from kicad_tools.geometry.copper import (
     collinear_overlap_length,
     extends_collinear,
 )
+from kicad_tools.router.pad_geometry import routing_pad_chamfer
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -2285,8 +2286,23 @@ def _build_graph(
             if via_spans_layer(via.layers, seg.layer)
             and point_to_segment_distance(*via.position, *seg.start, *seg.end) <= _VIA_CENTRE_EPS
         }
+        # A run whose covered end already joins an on-centre run reaches the
+        # bore by that routed entry. A second edge at any vertex of the same
+        # run (e.g. a subdivision point) would bypass the short routed bend.
+        carried = {
+            run_root(i)
+            for i, seg in enumerate(segments)
+            if via_spans_layer(via.layers, seg.layer)
+            for end in (seg.start, seg.end)
+            if _via_covered_by_end(via, seg, end)
+            and any(run_root(j) in on_centre for j in at_node[_copper_node(end, seg.layer)])
+        }
         for i, seg in enumerate(segments):
-            if not via_spans_layer(via.layers, seg.layer) or run_root(i) in on_centre:
+            if (
+                not via_spans_layer(via.layers, seg.layer)
+                or run_root(i) in on_centre
+                or run_root(i) in carried
+            ):
                 continue
             for end in (seg.start, seg.end):
                 if _via_covered_by_end(via, seg, end):
@@ -4296,6 +4312,17 @@ def _physical_pad_covers(fp: Footprint, pad: Pad, point: tuple[float, float]) ->
     dy = point[1] - center[1]
     # Inverse of the forward KiCad pad rotation (board -> pad-local frame).
     local_x, local_y = rotate_pad_offset(dx, dy, -float(getattr(pad, "rotation", 0.0) or 0.0))
+    # The drill is at the anchor. The copper is displaced in pad-local axes.
+    local_x -= pad.drill_offset[0]
+    local_y -= pad.drill_offset[1]
+    if not (math.isfinite(local_x) and math.isfinite(local_y)):
+        return False
+    if (
+        pad._sexp_node is not None
+        and pad._sexp_node.find_child("chamfer") is not None
+        and pad.shape != "roundrect"
+    ):
+        return False
 
     if pad.shape == "circle":
         radius = min(half_w, half_h)
@@ -4309,9 +4336,31 @@ def _physical_pad_covers(fp: Footprint, pad: Pad, point: tuple[float, float]) ->
     if pad.shape == "rect":
         return abs(local_x) <= half_w + _PAD_EPS and abs(local_y) <= half_h + _PAD_EPS
     if pad.shape == "roundrect":
+        edge_x, edge_y = half_w - abs(local_x), half_h - abs(local_y)
+        if min(edge_x, edge_y) < -_PAD_EPS:
+            return False
+        if pad._sexp_node is not None and (
+            rratios := pad._sexp_node.find_children("roundrect_rratio")
+        ):
+            if (
+                len(rratios) != 1
+                or len(rratios[0].children) != 1
+                or not rratios[0].children[0].is_atom
+                or rratios[0].get_float(0) is None
+            ):
+                return False
         ratio = pad.roundrect_rratio
         if not 0 <= ratio <= 0.5:
             return False
+        chamfer = routing_pad_chamfer(pad)
+        if chamfer is None:
+            return False
+        selected, cut_ratio = chamfer
+        corner = ("top" if local_y < 0 else "bottom") + ("_left" if local_x < 0 else "_right")
+        if corner in selected:
+            # A straight cut joins two points this distance along the edges.
+            cut = 2 * min(half_w, half_h) * cut_ratio
+            return edge_x + edge_y >= cut - _PAD_EPS
         radius = 2 * min(half_w, half_h) * ratio
         dx = max(abs(local_x) - (half_w - radius), 0.0)
         dy = max(abs(local_y) - (half_h - radius), 0.0)

@@ -6,11 +6,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 from hardware import ROOT, generate
 from routing import apply_routing
 
+from kicad_tools.cli.place_silk_refs_cmd import main as place_silk_refs
+from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+from kicad_tools.drc.report_binding import stamp_report_hash
 from kicad_tools.manufacturers.attach_zone_dru import PAD_ZONE_CLEARANCES_META_KEY
 from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
 from kicad_tools.validate.known_warnings import unaccepted_report_warnings
@@ -30,16 +34,20 @@ def manufacturer_check_failures(check):
     return failures
 
 
-#: The router net classes the committed routed sidecars declare (#6390) and
-#: whose copper #6395 repaired.  ``Reviewed clearance - <class>`` rules for
-#: these must survive every regeneration (#7391).
+#: The net classes the staged routed sidecars declare (#6390) and whose copper
+#: #6395 repaired.  ``Motor power`` and ``Ground plane`` are the reviewed classes
+#: the board's ``net_class_map.json`` gives the motor and ground nets, which the
+#: name classifier otherwise labels ``Digital``, ``Audio``,
+#: ``HighCurrentSignal`` and ``Power`` (#10430).  ``Reviewed clearance -
+#: <class>`` rules for these must survive every regeneration (#7391).
 ROUTER_NETCLASSES = (
     "Audio",
     "Clock",
     "Debug",
     "Differential",
     "Digital",
-    "HighCurrentSignal",
+    "Ground plane",
+    "Motor power",
     "Power",
 )
 
@@ -214,41 +222,174 @@ def restore_pour_standoff(routed):
     routed.write_text(serialize_sexp(board))
 
 
+def reviewed_net_class_map(routed):
+    """The reviewed ``net_class_map.json`` entries for the nets on ``routed`` (#10430).
+
+    The map beside the routed PCB is the one ``kct check`` auto-loads, so it is
+    read from the stage rather than from the recipe source: a stage carrying
+    another copy is verified against what it actually ships.
+    """
+    from kicad_tools.cli.pcb_sync_netlist import _copper_net_usage
+    from kicad_tools.router.rules import net_class_map_from_path
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.netlist import is_unconnected_pad_net
+
+    pcb = PCB.load(routed)
+    nets = {net.name for net in pcb.nets.values() if net.name}
+    # Only flagged, single-pad nets with no routing can omit a routing class.
+    uses = Counter(pad.net_name for fp in pcb.footprints for pad in fp.pads)
+    uses.update(_copper_net_usage(pcb))
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if (
+                uses[pad.net_name] == 1
+                and (pad.pintype or "").endswith("no_connect")
+                and is_unconnected_pad_net(pad.net_name, fp.reference, pad.number)
+            ):
+                nets.discard(pad.net_name)
+    if not nets:
+        raise RuntimeError(f"No named board nets found in {routed}")
+    staged = net_class_map_from_path(routed.parent / "net_class_map.json", pcb_path=routed)
+    missing = nets.difference(staged)
+    if missing:
+        raise RuntimeError(
+            f"Reviewed net-class map is missing board nets: {', '.join(sorted(missing))}"
+        )
+    return {net: routing for net, routing in staged.items() if net in nets}
+
+
 def declare_router_netclasses(routed):
-    """Declare the router's net classes in the routed sidecars (#6390, #7391).
+    """Declare the board's reviewed net classes in the routed sidecars (#6390, #7391).
 
     ``routing.json`` was routed by ``kct route`` at the router's per-class
-    clearances (Power/Clock/HighCurrentSignal 0.2 mm, Audio/Debug/
-    Differential/Digital 0.15 mm), and #6390 declared those classes in the
-    committed ``.kicad_pro``/``.kicad_dru`` so that kicad-cli and ``kct
-    check`` hold the copper to them (#6395 repaired the copper that sat
-    below).  The authored project from ``hardware.generate`` declares only
-    ``Default``, so without this step a regeneration silently dropped the
-    seven ``Reviewed clearance - <class>`` rules, loosening those nets to the
-    0.1016 mm fab floor.
+    widths and clearances (Differential 0.15 mm wide at 0.15 mm, the signal
+    classes 0.2 mm wide at 0.15 or 0.2 mm, Power 0.5 mm wide at 0.2 mm), and
+    #6390 declared those classes in the committed ``.kicad_pro``/``.kicad_dru``
+    so that kicad-cli and ``kct check`` hold the copper to them (#6395
+    repaired the copper that sat below).  The authored project from
+    ``hardware.generate`` declares only ``Default``, so without this step a
+    regeneration silently dropped the ``Reviewed clearance - <class>`` rules,
+    loosening those nets to the 0.1016 mm fab floor.
 
-    The map is the router's effective one (``DEFAULT_NET_CLASS_MAP`` plus
-    its name classifier), exactly as ``scripts/boards/
-    declare_router_netclasses_6390.py`` derived the committed sidecars.  The
-    sidecar writer keeps stricter authored minima (``min_track_width``
-    0.15 mm, the routed copper's narrowest track). It also emits the four
-    0.2 mm net- and layer-specific pour rules before the #8048 attach-zone
-    exemptions. KiCad uses the last matching rule when refilling under U2/U3.
+    Every signal net must have its own reviewed entry before any
+    sidecar is written. These entries override the router defaults just as
+    ``kct route`` applies a loaded ``--net-class-map``. The board map
+    names the motor and ground nets ``Motor power`` and ``Ground plane`` where
+    the classifier alone called FUSED and VM ``Digital``, GND_SENSE ``Audio``
+    and GND ``Power`` (#10430).  The sidecar writer declares the classes and
+    their clearances but clones each one from ``Default``, so every class
+    inherited ``Default``'s 0.2 mm width; the route CLI's width-aware writer
+    (#10133) then declares each class's own ``trace_width``.  The sidecar
+    writer keeps the stricter authored minima (``min_track_width`` 0.15 mm, the
+    routed copper's narrowest track) and emits the four 0.2 mm net- and
+    layer-specific pour rules before the #8048 attach-zone exemptions.  KiCad
+    uses the last matching rule when refilling under U2/U3.
     """
-    from kicad_tools.cli.route_cmd import _write_drc_constraint_sidecars
-    from kicad_tools.manufacturers.project_generator import board_net_names
-    from kicad_tools.router.net_class import classify_and_apply_rules
+    from kicad_tools.cli.route_cmd import (
+        _write_drc_constraint_sidecars,
+        _write_netclasses_to_project,
+    )
     from kicad_tools.router.rules import DEFAULT_NET_CLASS_MAP
 
-    nets = sorted(name for name in (board_net_names(routed) or ()) if name)
-    effective = dict(DEFAULT_NET_CLASS_MAP)
-    for name, routing in classify_and_apply_rules(dict(enumerate(nets, 1))).items():
-        effective.setdefault(name, routing)
+    reviewed = reviewed_net_class_map(routed)
+    effective = {**DEFAULT_NET_CLASS_MAP, **reviewed}
     _write_drc_constraint_sidecars(routed, "jlcpcb", 4, quiet=True, net_class_map=effective)
+    _write_netclasses_to_project(routed, effective, quiet=True)
+    _write_reviewed_class_widths(routed, effective)
+    verify_router_netclasses(routed, reviewed)
+
+
+def _write_reviewed_class_widths(routed, effective):
+    """Declare each router class at exactly the width ``effective`` gives it.
+
+    ``_write_netclasses_to_project`` merges floors with the larger value
+    (#7385), so it raises a class above the ``Default`` clone the sidecar
+    writer made but never lowers one: ``Differential`` is routed at 0.15 mm
+    and would stay at ``Default``'s 0.2 mm, reporting every one of its own
+    segments below class.  These classes are this recipe's own, so the width
+    is overwritten and the project re-stamped as kct-owned.
+    """
+    from kicad_tools.core.project_file import add_netclass_definition, save_project
+    from kicad_tools.manufacturers.project_generator import stamp_kct_project
+
     project = json.loads(routed.with_suffix(".kicad_pro").read_text())
-    declared = project.get("meta", {}).get("kct_router_netclasses", {}).get("classes", [])
-    if tuple(sorted(declared)) != ROUTER_NETCLASSES:
+    meta = project.get("meta", {})
+    declared = set(meta.get("kct_router_netclasses", {}).get("classes", []))
+    by_class = {routing.name: routing for routing in effective.values() if routing.name in declared}
+    for class_name, routing in sorted(by_class.items()):
+        add_netclass_definition(
+            project, class_name, track_width=routing.trace_width, keep_stricter=False
+        )
+    stamp_kct_project(project)
+    save_project(project, routed.with_suffix(".kicad_pro"))
+
+
+def verify_router_netclasses(routed, reviewed):
+    """Fail unless the staged project, its rules and its copper agree (#10430).
+
+    Checking class names said nothing about what a net resolved to: FUSED was
+    ``Digital`` at 0.2 mm while the map said ``Motor power`` at 0.5 mm.  Every
+    routed net must now resolve, in the project on disk, to the class, width
+    and clearance the reviewed map gives it; each declared class must carry its
+    ``Reviewed clearance`` rule at that clearance; and the ``kct check`` rule
+    that reported the 8 project and 24 width findings must find nothing on
+    the staged copper.  Nothing here is waivable: a disagreement stops the
+    rebuild before any native step spends time on it.
+    """
+    from kicad_tools.core.project_clearance import (
+        authored_netclass_clearances,
+        authored_netclass_widths,
+    )
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.base import DRC_TOLERANCE
+    from kicad_tools.validate.rules.netclass_agreement import check_netclass_agreement
+
+    project = json.loads(routed.with_suffix(".kicad_pro").read_text())
+    meta = project.get("meta", {})
+    declared = tuple(sorted(meta.get("kct_router_netclasses", {}).get("classes", [])))
+    if declared != ROUTER_NETCLASSES:
         raise RuntimeError(f"Router net classes not declared in the routed project: {declared}")
+    if not reviewed:
+        raise RuntimeError("No reviewed net-class entry matches a net on the routed board")
+
+    nets = sorted(reviewed)
+    widths = authored_netclass_widths(project, nets)
+    clearances = authored_netclass_clearances(project, nets)
+    dru = routed.with_suffix(".kicad_dru").read_text()
+    for net, routing in sorted(reviewed.items()):
+        width = widths.get(net)
+        if (
+            width is None
+            or width.source_class != routing.name
+            or abs(width.width - routing.trace_width) > DRC_TOLERANCE
+        ):
+            raise RuntimeError(
+                f"Net {net!r} does not resolve to its reviewed class: the project says "
+                f"{width.source_class if width else 'Default'} at "
+                f"{width.width if width else 0:.3f} mm, the map says {routing.name} at "
+                f"{routing.trace_width:.3f} mm"
+            )
+        held = clearances.get(net)
+        if (
+            held is None
+            or held.source_class != routing.name
+            or abs(held.clearance - routing.clearance) > DRC_TOLERANCE
+        ):
+            raise RuntimeError(
+                f"Net {net!r} does not hold its reviewed clearance: the project gives "
+                f"{held.clearance if held else 0:.3f} mm, the map says {routing.clearance:.3f} mm"
+            )
+        marker = f'(rule "Reviewed clearance - {routing.name}"'
+        rule = dru.split(marker)[1] if dru.count(marker) == 1 else ""
+        if f"(constraint clearance (min {routing.clearance:g}mm))" not in rule.split("\n\n")[0]:
+            raise RuntimeError(f"No reviewed clearance rule for class {routing.name!r}: {marker}")
+
+    findings = check_netclass_agreement(routed, PCB.load(str(routed)), reviewed)
+    if findings.violations:
+        raise RuntimeError(
+            "Staged copper, project and net_class_map.json disagree: "
+            + "; ".join(f"{v.rule_id} {v.nets[0]}: {v.message}" for v in findings.violations)
+        )
 
 
 def cleanup_copper(routed, max_passes=10):
@@ -334,14 +475,20 @@ def prepare_routed_board(output):
     return routed, fingerprint
 
 
-def build(output):
+def generate_routed_board(output):
+    """Generate the hardware and prepare its reviewed copper and sidecars for refill."""
     output = Path(output).resolve()
     generate(output)
     # A local copy lets procurement/export discover exact identities in scratch.
     (output / "project.kct").write_text((ROOT / "project.kct").read_text().replace("output/", ""))
     # Published beside the PCB so `kct check` auto-loads the declared ampacity targets.
     shutil.copy2(ROOT / "net_class_map.json", output / "net_class_map.json")
-    routed, fingerprint = prepare_routed_board(output)
+    return prepare_routed_board(output)
+
+
+def build(output):
+    output = Path(output).resolve()
+    routed, fingerprint = generate_routed_board(output)
     evidence = output / "readiness"
     # The shared stage proves every plane net on actual refilled copper.
     # A failed or dangling stitch never replaces the staged input, and its
@@ -352,6 +499,12 @@ def build(output):
     complete_power_connections(routed, evidence_dir=stitch_evidence)
     shutil.copytree(stitch_evidence, evidence / "stitch")
     print(f"Copper cleanup (dedupe + verified prune): {cleanup_copper(routed)}")
+    silk = run_default_silk_pass(routed, mfr="jlcpcb")
+    if silk is None or not silk["applied"]:
+        raise RuntimeError(f"Board 05 silkscreen repair failed before verification: {silk}")
+    # Board 05 also keeps reference text clear of via drills.
+    if place_silk_refs([str(routed), "--over-holes", "--mfr", "jlcpcb", "--layers", "4"]) != 0:
+        raise RuntimeError("Could not place Board 05 reference text clear of drilled holes")
     subprocess.run(
         [
             "kicad-cli",
@@ -402,6 +555,12 @@ def build(output):
     if any(sheet["violations"] for sheet in erc["sheets"]):
         print(json.dumps(erc, indent=2), file=sys.stderr)
         raise RuntimeError("Fresh native schematic ERC failed")
+    if not stamp_report_hash(evidence / "native-drc.json", routed, "pcb_sha256"):
+        raise RuntimeError("Could not bind the native DRC report to the refilled Board 05 PCB")
+    if not stamp_report_hash(
+        evidence / "native-erc.json", output / "bldc_controller.kicad_sch", "schematic_sha256"
+    ):
+        raise RuntimeError("Could not bind the native ERC report to the Board 05 schematic")
     from kicad_tools.lvs import write_lvs_report
 
     write_lvs_report(output / "bldc_controller.kicad_sch", routed, output, require_clean=True)

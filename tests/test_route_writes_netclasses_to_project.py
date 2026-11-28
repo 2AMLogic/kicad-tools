@@ -11,6 +11,11 @@ exact-name ``netclass_assignments`` entry per routed net (no pattern
 metacharacter spillover across ``.``, ``+``, ``()``, ``*``, ``?``), GND and
 power rails in dedicated classes, hand-authored content and edited assignments
 preserved, and the non-fatal degradation paths.
+
+Issue #10555 is pinned here too: a router class the DRC-constraint sidecar
+writer created as a clone of a wider ``Default`` is lowered to the routed
+width -- but only while a valid kct stamp and the recorded class name prove
+the definition unedited, so a width the user raised in KiCad survives.
 """
 
 from __future__ import annotations
@@ -27,7 +32,8 @@ from kicad_tools.core.project_clearance import (
     resolve_project_clearances,
 )
 from kicad_tools.core.project_file import default_netclass_definition
-from kicad_tools.manufacturers import get_profile
+from kicad_tools.manufacturers import get_profile, write_drc_constraints
+from kicad_tools.manufacturers.project_generator import is_kct_owned_project
 from kicad_tools.router.rules import NetClassRouting
 from kicad_tools.validate.rules.netclass_floor import check_netclass_floor
 
@@ -35,6 +41,9 @@ GROUND = NetClassRouting(name="Ground", priority=1, trace_width=0.5, clearance=0
 POWER = NetClassRouting(name="Power", priority=1, trace_width=0.5, clearance=0.2, via_size=0.8)
 DIGITAL = NetClassRouting(name="Digital", priority=5, trace_width=0.2, clearance=0.2, via_size=0.6)
 PROBE = NetClassRouting(name="Probe", priority=1, trace_width=0.3, clearance=0.5, via_size=0.7)
+DIFFERENTIAL = NetClassRouting(
+    name="Differential", priority=1, trace_width=0.15, clearance=0.5, via_size=0.6
+)
 
 
 def _write_pcb(tmp_path: Path, nets: list[str], name: str = "board") -> Path:
@@ -774,3 +783,157 @@ class TestRunPostRouteDrcIntegration:
         assert resolved["SDA"].source_class == "EditorSignal"
         assert resolved["SDA"].clearance == pytest.approx(0.18)
         assert resolved["GND"].source_class == "Ground"
+
+
+def _wide_default_project() -> dict:
+    """A hand-authored project whose ``Default`` is wider than ``DIFFERENTIAL``.
+
+    ``Default`` carries no via keys, so it matches no template signature and
+    the sidecar writer keeps its authored width -- the Issue #10555
+    reproduction, in which the router class is cloned from it at 0.20 mm.
+    """
+    project = _minimal_project()
+    project["net_settings"]["classes"][0] = {
+        "name": "Default",
+        "track_width": 0.2,
+        "clearance": 0.2,
+    }
+    return project
+
+
+class TestOwnedClassWidthMatchesCopper:
+    """Issue #10555: the DRC-constraint sidecar writer creates a router class
+    as a clone of ``Default`` (Issue #6390), so a ``Default`` wider than the
+    routed width left the project declaring a width the copper does not use.
+    The width may now go down -- only while a valid kct stamp and the
+    recorded class name prove the definition unedited."""
+
+    def _sidecars(self, pcb: Path, routing: NetClassRouting = DIFFERENTIAL) -> None:
+        write_drc_constraints(
+            pcb,
+            get_profile("jlcpcb").get_design_rules(layers=2),
+            router_net_classes={"SDA": routing},
+        )
+
+    def test_sidecar_clone_is_lowered_to_the_routed_width(self, tmp_path: Path):
+        pcb = _write_pcb(tmp_path, ["SDA"])
+        pro = _write_project(tmp_path, _wide_default_project())
+
+        self._sidecars(pcb)
+
+        clone = _load(pro)
+        assert clone["meta"]["kct_router_netclasses"]["classes"] == ["Differential"]
+        assert _classes(clone)["Differential"]["track_width"] == 0.2
+
+        route_cmd._write_netclasses_to_project(pcb, {"SDA": DIFFERENTIAL}, quiet=True)
+
+        differential = _classes(_load(pro))["Differential"]
+        assert differential["track_width"] == 0.15
+        assert differential["clearance"] == 0.5
+        first = pro.read_text(encoding="utf-8")
+        route_cmd._write_netclasses_to_project(pcb, {"SDA": DIFFERENTIAL}, quiet=True)
+        assert pro.read_text(encoding="utf-8") == first
+
+    @pytest.mark.parametrize(
+        ("edit", "owned", "expected"),
+        [(None, True, 0.15), ("width", False, 0.3), ("stamp", False, 0.2)],
+        ids=["intact-clone", "width-raised-to-0.30", "stamp-removed"],
+    )
+    def test_width_goes_down_only_for_an_unedited_recorded_class(
+        self, tmp_path: Path, edit: str | None, owned: bool, expected: float
+    ):
+        pcb = _write_pcb(tmp_path, ["SDA"])
+        pro = _write_project(tmp_path, _wide_default_project())
+        self._sidecars(pcb)
+
+        clone = _load(pro)
+        if edit == "width":
+            _classes(clone)["Differential"]["track_width"] = 0.3
+        elif edit == "stamp":
+            clone["meta"].pop("kct_sidecar_sha256")
+        _write_project(tmp_path, clone)
+        assert is_kct_owned_project(_load(pro)) is owned
+
+        route_cmd._write_netclasses_to_project(pcb, {"SDA": DIFFERENTIAL}, quiet=True)
+
+        assert _classes(_load(pro))["Differential"]["track_width"] == expected
+
+    def test_stamped_unrecorded_class_keeps_its_authored_width(self, tmp_path: Path):
+        """A valid stamp alone is not ownership: a hand-authored class the
+        sidecar writer stamped but never recorded keeps its width."""
+        project = _wide_default_project()
+        project["net_settings"]["classes"].append(
+            {"name": "Differential", "track_width": 0.3, "clearance": 0.5, "via_diameter": 0.6}
+        )
+        pcb = _write_pcb(tmp_path, ["SDA"])
+        pro = _write_project(tmp_path, project)
+
+        self._sidecars(pcb)
+
+        stamped = _load(pro)
+        assert is_kct_owned_project(stamped)
+        assert stamped["meta"]["kct_router_netclasses"]["classes"] == []
+
+        route_cmd._write_netclasses_to_project(pcb, {"SDA": DIFFERENTIAL}, quiet=True)
+
+        assert _classes(_load(pro))["Differential"]["track_width"] == 0.3
+
+    def test_exact_width_leaves_larger_clearance_and_via_alone(self, tmp_path: Path):
+        pcb = _write_pcb(tmp_path, ["SDA"])
+        pro = _write_project(tmp_path, _wide_default_project())
+        bulky = NetClassRouting(
+            name="Differential", priority=1, trace_width=0.2, clearance=0.6, via_size=0.9
+        )
+        self._sidecars(pcb, bulky)
+        route_cmd._write_netclasses_to_project(pcb, {"SDA": bulky}, quiet=True)
+        before = _classes(_load(pro))["Differential"]
+        assert (before["track_width"], before["clearance"], before["via_diameter"]) == (
+            0.2,
+            0.6,
+            0.9,
+        )
+
+        route_cmd._write_netclasses_to_project(pcb, {"SDA": DIFFERENTIAL}, quiet=True)
+
+        after = _classes(_load(pro))["Differential"]
+        assert after["track_width"] == 0.15
+        assert after["clearance"] == 0.6
+        assert after["via_diameter"] == 0.9
+
+    def test_in_place_rerun_preserves_a_hand_raised_class_width(self, tmp_path: Path, capsys):
+        """The shared post-route path regenerates the sidecars before the
+        project writer runs; a width raised in KiCad between two runs must
+        survive both the regeneration and the final write."""
+        pcb = _write_pcb(tmp_path, ["SDA"])
+        ncm = {"SDA": DIFFERENTIAL}
+
+        def reroute():
+            return route_cmd.run_post_route_drc(
+                output_path=pcb,
+                manufacturer="jlcpcb",
+                layers=2,
+                net_class_map=ncm,
+                time_left=20.0,
+                drc_cost_estimate=40.0,
+            )
+
+        reroute()
+        pro = tmp_path / "board.kicad_pro"
+        assert _classes(_load(pro))["Differential"]["track_width"] == 0.15
+        edited = _load(pro)
+        _classes(edited)["Differential"]["track_width"] = 0.3
+        _write_project(tmp_path, edited)
+        assert not is_kct_owned_project(_load(pro))
+
+        capsys.readouterr()
+        assert reroute() == route_cmd.DRC_SKIPPED_FOR_TIME
+        assert "DRC-constraint sidecars" in capsys.readouterr().out
+
+        saved = _load(pro)
+        differential = _classes(saved)["Differential"]
+        assert differential["track_width"] == 0.3
+        assert differential["clearance"] == 0.5
+        assert _assignments(saved) == {"SDA": "Differential"}
+        assert _patterns(saved) == [{"netclass": "Differential", "pattern": "SDA"}]
+        assert saved["meta"]["kct_router_netclasses"]["classes"] == []
+        assert is_kct_owned_project(saved)

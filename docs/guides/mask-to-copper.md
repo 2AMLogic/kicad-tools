@@ -165,7 +165,13 @@ the `within_own_pad_failed_condition` field names):
    segment with an authored end inside the pad gets either allowance (the
    other end may exit, sit on the edge or be inside too). A segment with no
    end inside — lying wholly on it, straddling or passing through — gets
-   none;
+   none. Where the author split a straight entry makes no difference
+   (#10645): the outer piece of an entry divided exactly on the pad edge has
+   no end inside, but is read through its authored continuation — the one
+   other same-net straight segment at that joint, of the same width and
+   layer, collinear, with no third segment there — and gets the same
+   allowance when that chain ends inside the pad, its band still measured on
+   its own copper. An outer piece with no such continuation still gets none;
 5. for a via, its authored drill lies wholly outside the opening (a via ring
    touching the pad leaves copper beside the opening).
 

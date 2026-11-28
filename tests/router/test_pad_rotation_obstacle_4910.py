@@ -286,7 +286,7 @@ def test_mesh_obstacle_model_refuses_a_leg_inside_the_rotated_pad_copper() -> No
 
 
 def test_mesh_foreign_pads_layer_keeps_the_per_layer_mask() -> None:
-    """An SMD pad blocks only its own layer; a PTH pad blocks every layer."""
+    """An SMD pad blocks only its own layer; PTH and NPTH pads block every layer."""
     rules = _rules()
     stack = LayerStack.two_layer()
     smd = _mesh_rotated_pad()
@@ -313,6 +313,25 @@ def test_mesh_foreign_pads_layer_keeps_the_per_layer_mask() -> None:
     pf_pth = MeshPathfinder(_OUTLINE, [pth], rules, layer_stack=stack)
     assert pf_pth._foreign_pads_layer(net=1, layer_idx=front) == [pth]
     assert pf_pth._foreign_pads_layer(net=1, layer_idx=back) == [pth]
+
+    # NPTH (np_thru_hole): not plated (through_hole=False) but drilled, so the
+    # hole still needs clearance on every layer (#10629, #4271).
+    npth = Pad(
+        x=10.0,
+        y=10.0,
+        width=2.0,
+        height=2.0,
+        net=2,
+        net_name="N2",
+        ref="NPTH",
+        pin="1",
+        layer=Layer.F_CU,
+        through_hole=False,
+        drill=1.5,
+    )
+    pf_npth = MeshPathfinder(_OUTLINE, [npth], rules, layer_stack=stack)
+    assert pf_npth._foreign_pads_layer(net=1, layer_idx=front) == [npth]
+    assert pf_npth._foreign_pads_layer(net=1, layer_idx=back) == [npth]
 
 
 def test_mesh_foreign_pads_excludes_same_net_copper() -> None:

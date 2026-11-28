@@ -1137,6 +1137,8 @@ def build_worker_router(config: dict) -> Autorouter:
             shape=pad_data.get("shape", "rect"),
             roundrect_rratio=pad_data.get("roundrect_rratio"),
             chamfered_outline=pad_data.get("chamfered_outline", ()),
+            mask_chamfered_outline=pad_data.get("mask_chamfered_outline", ()),
+            authored_layers=pad_data.get("authored_layers", ()),
             copper_offset=pad_data.get("copper_offset", (0.0, 0.0)),
         )
         key = pad.key
@@ -3866,6 +3868,8 @@ class Autorouter:
                 shape=pad_info.get("shape", "rect"),
                 roundrect_rratio=pad_info.get("roundrect_rratio"),
                 chamfered_outline=pad_info.get("chamfered_outline", ()),
+                mask_chamfered_outline=pad_info.get("mask_chamfered_outline", ()),
+                authored_layers=pad_info.get("authored_layers", ()),
                 copper_offset=pad_info.get("copper_offset", (0.0, 0.0)),
                 # Issue #6243: a neutralised pad keeps its authored minimum.
                 authored_clearance=float(pad_info.get("authored_clearance", 0.0) or 0.0),
@@ -22127,6 +22131,8 @@ class Autorouter:
                     "shape": pad.shape,
                     "roundrect_rratio": pad.roundrect_rratio,
                     "chamfered_outline": pad.chamfered_outline,
+                    "mask_chamfered_outline": pad.mask_chamfered_outline,
+                    "authored_layers": pad.authored_layers,
                     "copper_offset": pad.copper_offset,
                     "pin_pitch": self.grid._pad_pin_pitch.get(id(pad)),
                 }
@@ -26639,7 +26645,7 @@ class Autorouter:
     def _install_pad_lane_budgets(self) -> int:
         """Install the fine-pitch neighbour entry-lane budgets (Issue #6382).
 
-        One soft-cost rectangle per long-axis pad of every detected
+        One soft-cost rectangle per routable long-axis pad of every detected
         fine-pitch package (``grid.get_fine_pitch_regions()``), from the
         copper tip outward by ``pad_lanes.LANE_LENGTH_MM`` and one pin pitch
         wide (adjacent lanes tile the column).  Foreign nets pay to cross a neighbour's lane close to its
@@ -26661,14 +26667,23 @@ class Autorouter:
 
         get_regions = getattr(self.grid, "get_fine_pitch_regions", None)
         regions = list(get_regions()) if callable(get_regions) else []
+        # The other endpoint can be on another footprint or a boundary stub.
+        # A named singleton still occupies copper, but has no exit to reserve.
+        lane_owners: set[tuple[str, str]] = set()
+        if regions:
+            for net, keys in self.nets.items():
+                targets = self._region_filtered_pad_keys(net, keys)
+                if len(targets) + len(self._stub_terminals.get(net, ())) >= 2:
+                    lane_owners.update(targets)
         budgets = build_pad_lane_budgets(
             self.grid,
             self.pads.values(),
             regions,
             float(self.rules.cost_straight),
+            lane_owners=lane_owners,
         )
         setter(budgets)
-        self._install_escape_fences(regions)
+        self._install_escape_fences(regions, lane_owners)
         if budgets and getattr(self, "_pad_lane_budget_count_logged", None) != len(budgets):
             self._pad_lane_budget_count_logged = len(budgets)
             flush_print(
@@ -26679,7 +26694,7 @@ class Autorouter:
             )
         return len(budgets)
 
-    def _install_escape_fences(self, regions: list) -> int:
+    def _install_escape_fences(self, regions: list, lane_owners: set[tuple[str, str]]) -> int:
         """Install the fine-pitch lanes for the hard escape fences (Issue #6761).
 
         A connection that starts or ends on a fine-pitch column pad may not
@@ -26714,6 +26729,7 @@ class Autorouter:
             fence_lanes,
             self._net_via_diameter,
             float(self.rules.via_clearance),
+            lane_owners=lane_owners,
         )
         setter(fence_lanes)
         if fence_lanes and getattr(self, "_escape_fence_count_logged", None) != len(fence_lanes):

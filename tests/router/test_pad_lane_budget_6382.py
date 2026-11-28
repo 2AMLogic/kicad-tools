@@ -30,6 +30,7 @@ from kicad_tools.router.pad_lanes import (
 )
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
+from kicad_tools.router.stub_terminals import StubTerminal
 
 requires_cpp = pytest.mark.requires_router_cpp
 
@@ -313,7 +314,7 @@ def _build_router(
         rules=rules,
         net_class_map={"WIDE": NetClassRouting(name="WIDE", trace_width=0.4)},
     )
-    names = {1: "WIDE", 2: "NB", 3: "N3", 4: "N4"}
+    names = {1: "WIDE", 2: "unconnected-(U1-NB-Pad2)", 3: "unconnected-(U1-N3-Pad3)", 4: "N4"}
     pins = []
     for i in range(4):
         y = Y0 + i * PITCH
@@ -365,7 +366,7 @@ def _build_router(
                 "width": 0.6,
                 "height": 0.6,
                 "net": 2,
-                "net_name": "NB",
+                "net_name": names[2],
             }
         ],
     )
@@ -432,7 +433,7 @@ def test_wide_net_crosses_neighbour_lane_beyond_lane_length(
     two vias to get past it.
     """
     installed, wide, nb, nb_y = _route_pair(monkeypatch, disabled=False)
-    assert installed == 4
+    assert installed == 2
     assert wide, "WIDE must route"
     crossings = _lane_crossings(wide, nb_y)
     assert crossings, "WIDE must cross NB's row to reach its target"
@@ -463,7 +464,7 @@ def test_never_stricter_when_only_path_crosses_lane(monkeypatch: pytest.MonkeyPa
     """
     monkeypatch.setenv("KCT_DISABLE_ESCAPE_FENCES", "1")
     router, nb_y = _build_router((8.0, 12.6), wall=True)
-    assert router._install_pad_lane_budgets() == 4
+    assert router._install_pad_lane_budgets() == 2
     wide = router.route_net(1)
     assert wide, "WIDE must still route through the lane"
     assert min(_lane_crossings(wide, nb_y)) < LANE_LENGTH_MM
@@ -475,6 +476,36 @@ def test_never_stricter_when_only_path_crosses_lane(monkeypatch: pytest.MonkeyPa
 
 
 @requires_cpp
+def test_installed_lanes_follow_routing_targets_and_keep_physical_pitch() -> None:
+    router, nb_y = _build_router((4.0, 13.5))
+    idle = router.pads[("U1", "3")]
+    # Only pins 2 and 4 own lanes. Pin 2 connects to D2 despite its NC-like
+    # name. Pin 4 has only a stub target. Pin 1 is outside its stub region.
+    router.set_stub_terminals(
+        {
+            1: [StubTerminal(1, "WIDE", 4.0, nb_y, idle.layer)],
+            4: [StubTerminal(4, "N4", 5.0, nb_y, idle.layer)],
+        },
+        region_world=(0.0, nb_y, 20.0, 20.0),
+    )
+    router._install_pad_lane_budgets()
+    pathfinder = router.router
+    assert isinstance(pathfinder, CppPathfinder)
+    assert [b.source_net for b in pathfinder._pad_lane_budgets] == [2, 4]
+    fences = [fl.lane for fl in pathfinder._pad_lane_fences]
+    assert [lane.pad_key for lane in fences] == [("U1", "2"), ("U1", "4")]
+    for budget, lane in zip(pathfinder._pad_lane_budgets, fences, strict=True):
+        y = router.pads[lane.pad_key].y
+        assert (lane.y1, lane.y2) == pytest.approx((y - PITCH / 2, y + PITCH / 2))
+        assert (budget.gx1, budget.gy1, budget.gx2, budget.gy2) == lane_grid_rect(lane, router.grid)
+
+    assert (idle.net, idle.net_name) == (3, "unconnected-(U1-N3-Pad3)")
+    for x in (idle.x, LEFT_TIP - 0.1):
+        gx, gy = router.grid.world_to_grid(x, idle.y)
+        assert router.grid.is_blocked_for_net(gx, gy, 0, 2)
+
+
+@requires_cpp
 def test_route_all_negotiated_installs_lanes_and_keeps_channel_budgets() -> None:
     router, _ = _build_router((4.0, 13.5))
     pathfinder = router.router
@@ -482,14 +513,14 @@ def test_route_all_negotiated_installs_lanes_and_keeps_channel_budgets() -> None
     channel = [_budget(99)]
     pathfinder.set_pad_channel_budgets(channel)
     router.route_all_negotiated(max_iterations=1, timeout=60)
-    assert len(pathfinder._pad_lane_budgets) == 4
+    assert len(pathfinder._pad_lane_budgets) == 2
     assert pathfinder._pad_channel_budgets == channel
 
 
 @requires_cpp
 def test_escape_hatch_clears_lanes(monkeypatch: pytest.MonkeyPatch) -> None:
     router, _ = _build_router((4.0, 13.5))
-    assert router._install_pad_lane_budgets() == 4
+    assert router._install_pad_lane_budgets() == 2
     monkeypatch.setenv(DISABLE_ENV, "1")
     assert router._install_pad_lane_budgets() == 0
     assert router.router._pad_lane_budgets == []

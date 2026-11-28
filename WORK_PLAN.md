@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-11-26*
+*Last updated: 2026-11-27*
 
 ---
 
@@ -11,7 +11,14 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#10253**: fix: translate reinforcement sidecar with pcb center-on-sheet
+- **#9711**: fix: routed-DRC identity gate fails on incomplete mask_to_copper pass, CI runs it pinned
+- **#10427**: Reject incompatible automatic parts in assembly BOM exports
+- **#10474**: feat(export): report revision-bound simulation limits and fault-case evidence
+- **#10497**: ci: retry the pinned actionlint download on a transient 504
+- **#10520**: fix(route-link): resolve the non-plated hole clearance through the board's rules
+- **#10526**: chore(loom): resync installed Loom to v0.20.37
+- **#10532**: Expand BOM reference intervals with matching designator suffixes
+- **#10544**: perf(router): prove a timed-out connection from its goal side before repeating its search
 
 ## Very Important
 
@@ -24,78 +31,78 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 `loom:important`; taken before unlabelled work.
 
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
-- **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill
 - **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#10393**: Route links around non-plated mounting holes when a straight trace would cross the drill
-- **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#9406**: Converge boards 06/07 DRC re-check into the single-sourced job scripts (latent local-gate --full failure)
+- **#8486**: Reduce repeated full-budget reroutes of six narrow nets on the 97-net board
+- **#9381**: Committed demo-board BOMs still carry the pre-#9323 duplicate-LCSC lines
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410)
-- **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill
-- **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film
-- **#10250**: pcb center-on-sheet moves wire anchors but leaves reinforcement coordinates at their old positions
-- **#10261**: Fill the routed board before optional power-plane stitching on mixed-signal layouts
-- **#10265**: Board 03 tier-1 USB_D+ route exceeds its 16 mm branch length limit
-- **#10336**: Request an explicit routing corridor on an inner layer with a partial plane
-- **#10358**: kct creepage --exceptions: docs say an unmatched selector is an error (it warns), and the gate summary double-counts a partially waived row
-- **#10364**: Identify verified reinforcement wire-end holes when reviewing native KiCad dangling-via warnings
-- **#10385**: Refresh maintained board schematics after the instance Datasheet fix
-- **#10416**: Validate repeated circuit channels against expected pins, values and assembly parts
-- **#10419**: kct pcb reinforce --clear writes the board before drop_wires fails on an unreadable sidecar envelope
-- **#10421**: Board 01 release regeneration narrows nine Power tracks below its declared minimum trace width
-- **#10422**: Export preflight: measure reinforcement mask strips against covered and exposed foreign copper in Gerbers
 - **#10424**: BOM enrichment assigns incompatible packages, tolerance and wattage despite explicit schematic intent
-- **#10430**: Reconcile 32 net-class findings blocking the Board 05 revision-B manufacturing package
-- **#10431**: Export a supplementary procurement list for accessories and off-board assembly parts
-- **#10448**: Reconcile LED_ANODE and mask clearances so Board 00 readiness can be re-pinned
-- **#10449**: Finalize Board 04 silkscreen before binding the manufacturing DRC report
-- **#10450**: Reconcile Board 06 LVDS and LVTTL project widths and re-pin the assembled demo
-- **#10457**: Coupling test misses the inner-layer widths published in the current-paths cases section
-- **#10458**: Intermittent empty staged-board path in the lint-gate SIGTERM test
+- **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes
+- **#10468**: Manufacturing review: include revision-bound simulation limits and fault-case evidence
+- **#10485**: CI flake: Install pinned actionlint download returned HTTP 504 in Test
+- **#10504**: route-link: non-plated-hole clearance ignores the board's hole_clearance rule
+- **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313
+- **#10604**: Default route-link misses a rotated, offset plated source pad
+- **#10611**: Board 03 exporter appends a second rules filename that makes the editable project fail readiness
+- **#10645**: mask_to_copper reports a new error when a straight own-pad entry is split at the pad edge
+- **#10650**: DRC preflight counts informational findings as warnings in a manufacturing manifest
+- **#10662**: Board 04 reports ready in fleet status but fails public readiness on the same PCB
+- **#10664**: Board 04: clear the ten same-net mask_to_copper errors the public readiness check reports
+- **#10667**: Board 03: 90 redundant_copper warnings outlive the mask-copper repair and readiness's cleanup, so the reissue cannot reach ready
+- **#10669**: pad_outline_is_exact() misses a single-corner chamfer, so pad copper is over-reported
+- **#10677**: Make the sharp-corner check's 89-degree boundary consistent on macOS and Linux
+- **#10681**: Installed help, HV, readiness and tapeout skills point to a missing model hint
+- **#10683**: Remaining check_all callers still grade pour_slot without the board's clearance rules
+- **#10684**: Board 04's committed DRC evidence records 5 pour_slot warnings; a fresh pinned run reportedly gives 4
+- **#10692**: No gate compares a committed board bundle's per-rule warning counts to a fresh run (Board 04 pour_slot 5 vs 4 went unnoticed)
+- **#10703**: Six other installed kct skills still assert a frontmatter suggestedModel that Codex and opencode strip
+- **#10704**: sharp_trace_corner: 'N-segment junction' text now counts directions, not segments
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
-- **#10128**: fix(validate): stop pour_slot reporting packed parallel track pairs
-- **#10248**: fix(fix-drc): guard mask-copper repairs against new warnings
-- **#10272**: fix(router): shorten aligned differential-pair pad hops
-- **#10375**: feat: route links through bounded inner-plane corridors
-- **#10378**: feat: identify verified wire ends in native dangling-via reports
-- **#10410**: fix: recognize round pad cutouts in radial polarity artwork
-- **#10418**: fix: recognize visible pin-one marks at the rim of radial capacitors
-- **#10426**: Recognize native root-relative footprint links in editable project handoffs
-- **#10427**: Reject incompatible automatic parts in assembly BOM exports
-- **#10429**: Write native symbol links when creating a PCB from a schematic
-- **#10432**: fix: refuse reinforce --clear on an unreadable destination sidecar
-- **#10435**: feat: validate repeated circuit channels against explicit design intent
-- **#10443**: feat: measure reinforcement runs against the shipped Gerbers in export preflight
-- **#10444**: feat: export a supplementary purchasing list for off-board parts
-- **#10446**: fix(board01): author the Power net class so release cleanup keeps the 0.5 mm tracks
-- **#10456**: chore(boards): refresh datasheets on four maintained schematics
-- **#10459**: fix(boards): align board 00's LED_ANODE net class and fiducial pours
-- **#10460**: docs(reference): cover inner-layer widths and unevaluated cases
-- **#10462**: fix: count creepage exception rows by their final verdict
-- **#10463**: fix(board06): declare LVTTL, LVDS and Power widths in source project
-- **#10464**: test: publish lint-gate readiness atomically before signaling
-- **#10465**: ci: restore strict release DRC on regenerated Boards 06 and 07
+- **#10507**: fix(boards): declare Board 07's reviewed class widths and re-pin its SDRAM evidence
+- **#10608**: fix: land named route-link endpoints on the pad copper outline
+- **#10653**: fix: read a pad-edge-split own-pad entry through its authored continuation
+- **#10673**: fix(drc): count only warning-severity findings as warnings
+- **#10674**: fix(geometry): cut chamfered corners from the shared pad copper outline
+- **#10687**: fix(drc): repair pour, fragment and boxed-via mask_to_copper findings; re-issue Board 04
+- **#10691**: fix: guard the sharp-corner 89-degree boundary against float rounding
+- **#10693**: fix(boards): refresh Board 04 bundle so its pour_slot count matches a fresh pinned run
+- **#10697**: feat(scripts): add --check drift gate to refresh_bundles_6404.py
+- **#10698**: feat: add fix-drc --only redundant-copper and run it in the readiness cleanup
+- **#10700**: fix: resolve pour_slot clearances from the board project in DRCChecker
+- **#10705**: docs: clarify model selection in the tapeout, readiness, HV-loop and help skills
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#10253**: fix: translate reinforcement sidecar with pcb center-on-sheet
+- **#9711**: fix: routed-DRC identity gate fails on incomplete mask_to_copper pass, CI runs it pinned
+- **#10427**: Reject incompatible automatic parts in assembly BOM exports
+- **#10474**: feat(export): report revision-bound simulation limits and fault-case evidence
+- **#10497**: ci: retry the pinned actionlint download on a transient 504
+- **#10518**: Reject simulation results with undeclared measured inputs
+- **#10520**: fix(route-link): resolve the non-plated hole clearance through the board's rules
+- **#10526**: chore(loom): resync installed Loom to v0.20.37
+- **#10532**: Expand BOM reference intervals with matching designator suffixes
+- **#10544**: perf(router): prove a timed-out connection from its goal side before repeating its search
+- **#10668**: fix(readiness): publish the public verdict for boards with a board-local check
+- **#10670**: fix(boards): group Board 06 connector headers in the JLCPCB BOM
+- **#10686**: docs: describe model selection in the installed workflow skills
 
 ## Proposed
 
@@ -107,50 +114,42 @@ Issues carrying `loom:curated`.
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
 - **#8900**: CI red on main: board 03 gates fail on default-on mask_to_copper (334 errors) *(curated)*
 - **#8943**: Record JLCDFM silkscreen line-width selection criterion and per-item rows (residue of #8844) *(curated)*
-- **#9033**: Silkscreen-to-hole: kct reports far fewer findings than the fab DFM, and only as warnings *(curated)*
 - **#9065**: Wire the silk-vs-drill tools into board 03's recipe and gate silk_hole_overlap = 0 in CI *(curated)*
-- **#9068**: Board 05: clear the strict-gate flood (29 physical_copper_gap errors, 13 silk_hole_overlap, 348 provisional mask_to_copper) and re-pin readiness *(curated)*
 - **#9093**: submit-jlcpcb: attended, exact-total-approved JLC parts purchase leg *(curated)*
 - **#9298**: Repository moved to the 2AMLogic organization: update hard-coded owner slug and the PyPI trusted publisher *(curated)*
 - **#9381**: Committed demo-board BOMs still carry the pre-#9323 duplicate-LCSC lines *(curated)*
-- **#9406**: Converge boards 06/07 DRC re-check into the single-sourced job scripts (latent local-gate --full failure) *(curated)*
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper *(curated)*
 - **#9454**: No migration path for evidence-bound waivers across the ev3 -> ev4 bump: every consumer waiver goes stale *(curated)*
 - **#9464**: Boards 03, 07 and 09 have parts off the 0.1 mm grid that pad_grid now reports (surfaced by #9434) *(curated)*
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410) *(curated)*
 - **#9748**: optimize-traces --drc-aware --mfr jlcpcb introduces mask_to_copper errors at pad entries that the un-optimised board does not have *(curated)*
 - **#9800**: Boards 02/03/05: drop per-board silk wiring and retire silk tolerances (#9795 phase 4) *(curated)*
-- **#9844**: Router: route turns back past its own via inside the slit band (board 05 RESET V-turn) *(curated)*
 - **#9893**: docs: surface JLCPCB assembly and submission automation on kicad-tools.org and in the README *(curated)*
-- **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package *(curated)*
-- **#9939**: Repair the five remaining Board 03 mask-to-copper findings after verified refill *(curated)*
 - **#10105**: Support a repository layout with editable KiCad sources and a sibling generated-output directory *(curated)*
-- **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film *(curated)*
-- **#10250**: pcb center-on-sheet moves wire anchors but leaves reinforcement coordinates at their old positions *(curated)*
-- **#10261**: Fill the routed board before optional power-plane stitching on mixed-signal layouts *(curated)*
-- **#10265**: Board 03 tier-1 USB_D+ route exceeds its 16 mm branch length limit *(curated)*
-- **#10336**: Request an explicit routing corridor on an inner layer with a partial plane *(curated)*
-- **#10358**: kct creepage --exceptions: docs say an unmatched selector is an error (it warns), and the gate summary double-counts a partially waived row *(curated)*
-- **#10364**: Identify verified reinforcement wire-end holes when reviewing native KiCad dangling-via warnings *(curated)*
 - **#10385**: Refresh maintained board schematics after the instance Datasheet fix *(curated)*
-- **#10393**: Route links around non-plated mounting holes when a straight trace would cross the drill *(curated)*
-- **#10409**: Radial-capacitor hatch warnings return after clipping strokes to a round pad clearance *(curated)*
-- **#10416**: Validate repeated circuit channels against expected pins, values and assembly parts *(curated)*
-- **#10417**: Pin-1 check misses the visible positive mark on stock radial electrolytics *(curated)*
-- **#10419**: kct pcb reinforce --clear writes the board before drop_wires fails on an unreadable sidecar envelope *(curated)*
-- **#10421**: Board 01 release regeneration narrows nine Power tracks below its declared minimum trace width *(curated)*
-- **#10422**: Export preflight: measure reinforcement mask strips against covered and exposed foreign copper in Gerbers *(curated)*
 - **#10424**: BOM enrichment assigns incompatible packages, tolerance and wattage despite explicit schematic intent *(curated)*
-- **#10425**: Editable project audit expects an extra schematic root UUID in native PCB footprint links *(curated)*
-- **#10430**: Reconcile 32 net-class findings blocking the Board 05 revision-B manufacturing package *(curated)*
-- **#10431**: Export a supplementary procurement list for accessories and off-board assembly parts *(curated)*
-- **#10445**: Board 01's committed routed PCB is behind its recipe: a fresh regen moves the board-ID silkscreen and rewrites fiducial attributes and segment UUIDs *(curated)*
-- **#10448**: Reconcile LED_ANODE and mask clearances so Board 00 readiness can be re-pinned *(curated)*
-- **#10449**: Finalize Board 04 silkscreen before binding the manufacturing DRC report *(curated)*
-- **#10450**: Reconcile Board 06 LVDS and LVTTL project widths and re-pin the assembled demo *(curated)*
 - **#10451**: Restore Board 07 SDRAM validation and evidence publication under the reviewed net classes *(curated)*
-- **#10457**: Coupling test misses the inner-layer widths published in the current-paths cases section *(curated)*
-- **#10458**: Intermittent empty staged-board path in the lint-gate SIGTERM test *(curated)*
+- **#10468**: Manufacturing review: include revision-bound simulation limits and fault-case evidence *(curated)*
+- **#10485**: CI flake: Install pinned actionlint download returned HTTP 504 in Test *(curated)*
+- **#10504**: route-link: non-plated-hole clearance ignores the board's hole_clearance rule *(curated)*
+- **#10510**: create-pr.sh exits 126 on hosts with a config tier over 128 KiB: installed config resolver predates loom#15313 *(curated)*
+- **#10530**: Expand BOM numeric reference ranges with a shared suffix such as Q1A-Q4A *(curated)*
+- **#10575**: Preserve Board 03’s connector and MCU USB widths in the routed KiCad project *(curated)*
+- **#10604**: Default route-link misses a rotated, offset plated source pad *(curated)*
+- **#10611**: Board 03 exporter appends a second rules filename that makes the editable project fail readiness *(curated)*
+- **#10645**: mask_to_copper reports a new error when a straight own-pad entry is split at the pad edge *(curated)*
+- **#10647**: config-resolver.sh passes config tiers as single jq arguments, so a >128 KiB defaults tier breaks create-issue.sh on Linux *(curated)*
+- **#10650**: DRC preflight counts informational findings as warnings in a manufacturing manifest *(curated)*
+- **#10664**: Board 04: clear the ten same-net mask_to_copper errors the public readiness check reports *(curated)*
+- **#10667**: Board 03: 90 redundant_copper warnings outlive the mask-copper repair and readiness's cleanup, so the reissue cannot reach ready *(curated)*
+- **#10669**: pad_outline_is_exact() misses a single-corner chamfer, so pad copper is over-reported *(curated)*
+- **#10677**: Make the sharp-corner check's 89-degree boundary consistent on macOS and Linux *(curated)*
+- **#10681**: Installed help, HV, readiness and tapeout skills point to a missing model hint *(curated)*
+- **#10683**: Remaining check_all callers still grade pour_slot without the board's clearance rules *(curated)*
+- **#10684**: Board 04's committed DRC evidence records 5 pour_slot warnings; a fresh pinned run reportedly gives 4 *(curated)*
+- **#10692**: No gate compares a committed board bundle's per-rule warning counts to a fresh run (Board 04 pour_slot 5 vs 4 went unnoticed) *(curated)*
+- **#10703**: Six other installed kct skills still assert a frontmatter suggestedModel that Codex and opencode strip *(curated)*
+- **#10704**: sharp_trace_corner: 'N-segment junction' text now counts directions, not segments *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -167,14 +166,14 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 1 |
+| Operator merge-risk holds | 8 |
 | Very important | 1 |
-| Important | 3 |
-| Ready (`loom:issue`) | 2 |
-| In Progress (`loom:building`) | 24 |
-| PRs awaiting review | 23 |
-| Approved PRs awaiting merge | 1 |
-| Curated | 50 |
+| Important | 2 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 25 |
+| PRs awaiting review | 13 |
+| Approved PRs awaiting merge | 12 |
+| Curated | 42 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->

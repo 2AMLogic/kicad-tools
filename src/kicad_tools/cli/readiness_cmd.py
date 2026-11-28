@@ -46,6 +46,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -123,6 +124,7 @@ __all__ = [
     "ASSEMBLY_AFFECTING_RULES",
     "CheckOutcome",
     "EngineFingerprint",
+    "EvidenceEnvironmentError",
     "EngineRun",
     "Engines",
     "FillComparison",
@@ -278,6 +280,16 @@ class EngineRun:
     ok: bool
     detail: str = ""
     returncode: int = 0
+
+
+class EvidenceEnvironmentError(RuntimeError):
+    """The environment, not the board, kept the LCSC lookups from being checked.
+
+    Raised when the bundle's stock lookups ran without a usable offline parts
+    catalog (issue #10646), so its procurement evidence describes the host
+    that ran the export rather than the board.  Producers stop and write
+    nothing, exactly as for :class:`KiCadEnvironmentError` (issue #6962).
+    """
 
 
 def _run_kct_check(
@@ -458,6 +470,7 @@ def _run_export(
     inventory_covered: frozenset[str] | None = None,
     schematic: Path | None = None,
     project_root: Path | None = None,
+    net_class_map: Path | None = None,
 ) -> EngineRun:
     """Generate a generic bundle without changing the already-checked project rules.
 
@@ -473,6 +486,7 @@ def _run_export(
             include_bom=assembly,
             include_pnp=assembly,
             emit_drc_constraints=False,
+            net_class_map_path=net_class_map,
             project_root=project_root,
             merge_lcsc_from=merge_lcsc_from,
             gerber_source_date_epoch=_readiness_gerber_epoch(),
@@ -1050,6 +1064,8 @@ class ReadinessOptions:
     # Receipt and archive paths remain relative to the directory containing
     # the output declaration when an explicit --project-root narrows source access.
     declared_project_root: Path | None = None
+    # The checker discovers implicit maps itself. Record a path only for an explicit selection.
+    net_class_map_implicit: bool = False
 
     @property
     def root(self) -> Path:
@@ -1308,6 +1324,15 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         Path(args.net_class_map).resolve() if args.net_class_map else _find_net_class_map(pcb)
     )
 
+    if net_class_map is not None:
+        net_class_map = net_class_map.resolve()
+        if not net_class_map.is_file():
+            return None, f"net-class map not found: {net_class_map}"
+        if not net_class_map.is_relative_to(boundary):
+            return None, _outside_root_message(
+                str(net_class_map), "net-class map", project_root is not None
+            )
+
     ack = frozenset(rule.strip() for rule in (args.ack_warnings or "").split(",") if rule.strip())
 
     baseline: Path | None = None
@@ -1367,6 +1392,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             include_tht=bool(args.include_tht),
             archive=not args.no_archive,
             net_class_map=net_class_map,
+            net_class_map_implicit=not args.net_class_map,
             hv_net_class=args.hv_net_class,
             hv_min=args.hv_min,
             hv_standard=args.hv_standard,
@@ -1865,14 +1891,9 @@ def _gate_kct_check(
     right after the cleanup and still blocking here -- and points at
     ``--skip-cleanup``.  No new gate: only the blocker message changes.
     """
-    invocation_args = list(options.check_args)
-    if options.schematic is not None:
-        invocation_args.extend(
-            ["--schematic", options.schematic.relative_to(options.project_base).as_posix()]
-        )
-    invocation = " ".join(
-        ["kct", "check", "<pcb>", "--mfr", options.manufacturer, *invocation_args]
-    )
+    invocation_args = ["--mfr", options.manufacturer]
+    invocation_args.extend(_current_board_check_args(options, relative_to=options.project_base))
+    invocation = f"kct check <pcb> {shlex.join(invocation_args)}"
     outcome, report = _gate_kct_check_run(options, engines)
     if outcome.status == FAILED and pre_cleanup is not None and post_cleanup is not None:
         introduced = _cleanup_introduced_errors(options, engines, pre_cleanup, post_cleanup, report)
@@ -1966,10 +1987,20 @@ def _cleanup_introduced_errors(
     ]
 
 
-def _current_board_check_args(options: ReadinessOptions) -> list[str]:
+def _current_board_check_args(
+    options: ReadinessOptions, *, relative_to: Path | None = None
+) -> list[str]:
+    """Use staged paths for checking and project-relative paths for the recorded invocation."""
     extra = list(options.check_args)
-    if options.schematic is not None:
-        extra.extend(["--schematic", str(options.schematic)])
+    for flag, path in (
+        ("--schematic", options.schematic),
+        ("--net-class-map", None if options.net_class_map_implicit else options.net_class_map),
+    ):
+        if path is not None:
+            value = (
+                path.relative_to(relative_to).as_posix() if relative_to is not None else str(path)
+            )
+            extra.extend([flag, value])
     return extra
 
 
@@ -2031,8 +2062,22 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
             changed = True
     if changed:
         report_path.write_text(json.dumps(report, indent=2) + "\n")
+    return judge_kct_check_report(report, options.known_issues, evidence_rel=evidence_rel), report
+
+
+def judge_kct_check_report(
+    report: dict, known_issues: Sequence[dict[str, Any]] = (), *, evidence_rel: str | None = None
+) -> CheckOutcome:
+    """The ``kct_check`` gate's verdict on one ``kct check`` JSON report (Issue #10662).
+
+    Pure: every input of the verdict is in *report* and *known_issues*, so a
+    committed board's producer (``scripts/boards/refresh_readiness.py``) judges
+    the generic-tier report exactly as ``kct readiness --verify`` does here --
+    same allowance, same wording -- and the two cannot disagree on one board.
+    """
     summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
     errors = int(summary.get("errors", 0) or 0)
+    meta = report.get("meta_checks", {}) if isinstance(report.get("meta_checks"), dict) else {}
     counts = _warning_counts(report)
     table = _format_warning_table(counts)
 
@@ -2040,10 +2085,10 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
     # belong to *this* runner rather than to ``kct check``:
     #
     # * ``manifest`` is NOT RUN on a first sign-off because the bundle this
-    #   command is about to produce does not exist yet.  Deferring it is safe
-    #   only because the ``artifacts`` gate below re-verifies the manifest
-    #   *and* the archived source provenance — strictly more than the
-    #   sub-check would have.
+    #    command is about to produce does not exist yet.  Deferring it is safe
+    #    only because the ``artifacts`` gate below re-verifies the manifest
+    #    *and* the archived source provenance — strictly more than the
+    #    sub-check would have.
     # * ``lvs`` has its own dedicated gate, which additionally rejects a
     #   vacuous comparison (#4006) that the sub-check reports as PASSED.
     gating = {
@@ -2058,7 +2103,7 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
     # Issue #7355: an ``exception`` known issue may account for an exact set of
     # errors (an approved deviation the generic tier cannot model).  Only an
     # exact match waives them -- and the FAILED drc/erc roll-up they cause.
-    allowance = known_error_allowance(options.known_issues)
+    allowance = known_error_allowance(known_issues)
     mismatch = _unaccepted_errors(report, allowance)
     waived_errors = 0
     if errors and mismatch == [] and not not_run:
@@ -2069,48 +2114,37 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
         failed = [name for name in failed if name != "drc"]
     elif mismatch:  # also a stale allowance naming a rule that no longer fires
         table_err = "; ".join(mismatch)
-        return (
-            CheckOutcome(
-                name="kct_check",
-                status=FAILED,
-                detail=(
-                    f"{errors} electrical/manufacturing error(s) do not match the recorded "
-                    f"exception identities: {table_err}; warning counts: {table}."
-                ),
-                evidence=evidence_rel,
-                blockers=[
-                    f"kct check reports {errors} error(s); unaccepted error(s): {table_err}."
-                ],
+        return CheckOutcome(
+            name="kct_check",
+            status=FAILED,
+            detail=(
+                f"{errors} electrical/manufacturing error(s) do not match the recorded "
+                f"exception identities: {table_err}; warning counts: {table}."
             ),
-            report,
+            evidence=evidence_rel,
+            blockers=[f"kct check reports {errors} error(s); unaccepted error(s): {table_err}."],
         )
 
     if errors or failed:
         named = ", ".join(failed) or "none"
-        return (
-            CheckOutcome(
-                name="kct_check",
-                status=FAILED,
-                detail=(
-                    f"{errors} electrical/manufacturing error(s); failed sub-checks: "
-                    f"{named}; warning counts: {table}."
-                ),
-                evidence=evidence_rel,
-                blockers=[f"kct check reports {errors} error(s); failed sub-checks: {named}."],
+        return CheckOutcome(
+            name="kct_check",
+            status=FAILED,
+            detail=(
+                f"{errors} electrical/manufacturing error(s); failed sub-checks: "
+                f"{named}; warning counts: {table}."
             ),
-            report,
+            evidence=evidence_rel,
+            blockers=[f"kct check reports {errors} error(s); failed sub-checks: {named}."],
         )
     if not_run:
         named = ", ".join(not_run)
-        return (
-            CheckOutcome(
-                name="kct_check",
-                status=NOT_RUN,
-                detail=f"Sub-checks did not run: {named}; warning counts: {table}.",
-                evidence=evidence_rel,
-                blockers=[f"kct check sub-check(s) did not run: {named}."],
-            ),
-            report,
+        return CheckOutcome(
+            name="kct_check",
+            status=NOT_RUN,
+            detail=f"Sub-checks did not run: {named}; warning counts: {table}.",
+            evidence=evidence_rel,
+            blockers=[f"kct check sub-check(s) did not run: {named}."],
         )
     # Issue #5946: "unknown is not pass".  A blocking check category that
     # could not evaluate this board (missing input, absent zone fills, an
@@ -2122,57 +2156,48 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
     # carried into a sign-off as accepted risk.
     stale = int(summary.get("stale_waivers", 0) or 0)
     if stale:
-        return (
-            CheckOutcome(
-                name="kct_check",
-                status=FAILED,
-                detail=(
-                    f"{stale} stale evidence-bound waiver(s): the evidence under a "
-                    f"reviewed finding changed; warning counts: {table}."
-                ),
-                evidence=evidence_rel,
-                blockers=[
-                    f"kct check reports {stale} stale waiver(s); re-review the "
-                    "findings and re-waive them (kct check --waive) only if still intentional."
-                ],
+        return CheckOutcome(
+            name="kct_check",
+            status=FAILED,
+            detail=(
+                f"{stale} stale evidence-bound waiver(s): the evidence under a "
+                f"reviewed finding changed; warning counts: {table}."
             ),
-            report,
+            evidence=evidence_rel,
+            blockers=[
+                f"kct check reports {stale} stale waiver(s); re-review the "
+                "findings and re-waive them (kct check --waive) only if still intentional."
+            ],
         )
     unknown = _blocking_unknown_coverage(report)
     if unknown:
         named = "; ".join(unknown)
-        return (
-            CheckOutcome(
-                name="kct_check",
-                status=NOT_RUN,
-                detail=(
-                    f"0 errors, but blocking check(s) could not evaluate the board: "
-                    f"{named}; warning counts: {table}."
-                ),
-                evidence=evidence_rel,
-                blockers=[
-                    "kct check coverage is unknown for blocking check(s) "
-                    f"({named}); unknown is not pass -- supply the missing input."
-                ],
-            ),
-            report,
-        )
-    return (
-        CheckOutcome(
+        return CheckOutcome(
             name="kct_check",
-            status=PASSED,
+            status=NOT_RUN,
             detail=(
-                (
-                    "0 electrical/manufacturing errors; DRC and ERC sub-checks passed; "
-                    if not waived_errors
-                    else f"{waived_errors} error(s) accepted exactly by the recorded exception "
-                    "allowance; no other errors; "
-                )
-                + f"warning counts: {table}.{deferred}"
+                f"0 errors, but blocking check(s) could not evaluate the board: "
+                f"{named}; warning counts: {table}."
             ),
             evidence=evidence_rel,
+            blockers=[
+                "kct check coverage is unknown for blocking check(s) "
+                f"({named}); unknown is not pass -- supply the missing input."
+            ],
+        )
+    return CheckOutcome(
+        name="kct_check",
+        status=PASSED,
+        detail=(
+            (
+                "0 electrical/manufacturing errors; DRC and ERC sub-checks passed; "
+                if not waived_errors
+                else f"{waived_errors} error(s) accepted exactly by the recorded exception "
+                "allowance; no other errors; "
+            )
+            + f"warning counts: {table}.{deferred}"
         ),
-        report,
+        evidence=evidence_rel,
     )
 
 
@@ -2818,13 +2843,14 @@ def _project_dependencies(
 
 def _project_libraries(real_root: Path, boundary: Path, explicit_root: bool) -> set[Path]:
     """Project-local library tables and their members, shared by snapshots and packaging."""
-    from kicad_tools.export.manufacturing import project_library_members
+    from kicad_tools.export.manufacturing import (
+        is_project_library_directory,
+        project_library_members,
+    )
 
     files: set[Path] = set()
     for directory in real_root.iterdir():
-        if directory.is_dir() and (
-            directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
-        ):
+        if directory.is_dir() and is_project_library_directory(directory.name):
             files.update(project_library_members(directory, real_root))
     for table in (real_root / "fp-lib-table", real_root / "sym-lib-table"):
         if not table.is_file():
@@ -2904,6 +2930,20 @@ def _kiprjmod_model_bodies(
     return bodies
 
 
+def _library_aliases(options: ReadinessOptions) -> list[Path]:
+    """In-project symlinked library members, by the library path they are found under.
+
+    Their archive name is that path, not their target's, so two notices sharing
+    one target are each delivered (and verified) at their own library path.
+    """
+    if not options.pcb.is_file():
+        return []
+    real_root = options.pcb.parent.resolve()
+    boundary = options.root.resolve()
+    libraries = _project_libraries(real_root, boundary, options.project_root is not None)
+    return sorted(member for member in libraries if member != member.resolve())
+
+
 def _required_sources(options: ReadinessOptions) -> list[Path]:
     """Every (resolved) file the archived project must contain to be the checked design.
 
@@ -2918,8 +2958,11 @@ def _required_sources(options: ReadinessOptions) -> list[Path]:
     sources: set[Path] = set()
     if options.pcb.is_file():
         sources.add(options.pcb.resolve())
+        aliases = set(_library_aliases(options))
         sources.update(
-            p.resolve() for p in _project_dependencies(options.pcb, options.root, explicit)
+            p.resolve()
+            for p in _project_dependencies(options.pcb, options.root, explicit)
+            if p not in aliases
         )
         version = options.pcb.parent / VERSION_FILE
         if version.is_file():
@@ -2935,6 +2978,8 @@ def _external_dependencies(options: ReadinessOptions) -> list[Path]:
     """Collected files that live outside ``board_dir`` but inside the project root."""
     board = options.board_dir.resolve()
     sources = set(_required_sources(options))
+    if options.net_class_map is not None:
+        sources.add(options.net_class_map.resolve())
     if options.schematic_spec is not None:
         sources.add(options.schematic_spec)
     return sorted(p for p in sources if not p.is_relative_to(board))
@@ -2965,7 +3010,7 @@ def _archive_layout(options: ReadinessOptions, sources: Sequence[Path]) -> Archi
         if all(source.resolve().is_relative_to(base) for source in sources)
         else in_project_root
     )
-    return archive_layout(identity, sources, directory_of)
+    return archive_layout(identity, sources, directory_of, _library_aliases(options))
 
 
 def _normalize_project_archive(options: ReadinessOptions) -> None:
@@ -3046,6 +3091,10 @@ def _normalize_project_archive(options: ReadinessOptions) -> None:
         if delivered not in rebuilt:
             rebuilt[delivered] = source.read_bytes()
         rebuilt[delivered] = layout.member_bytes(source, rebuilt[delivered])
+    # Engines may supply just the KiCad files. Carry the selected rule input
+    # beside the delivered board without changing the root of the project ZIP.
+    if options.net_class_map is not None and layout.net_class_map_member not in rebuilt:
+        rebuilt[layout.net_class_map_member] = options.net_class_map.read_bytes()
     if layout.record is not None:
         rebuilt[layout.record_name] = layout.record
     else:
@@ -3073,11 +3122,13 @@ _PROJECT_LIB_REEXPORT_HINT = (
 
 
 def _is_project_local_library_member(relative: str) -> bool:
-    """True for ``fp-lib-table``/``sym-lib-table``, ``*.pretty/**``, ``footprints/**``, ``symbols/**``."""
+    """Whether the archive member belongs to a project-local KiCad library."""
+    from kicad_tools.export.manufacturing import is_project_library_directory
+
     parts = relative.split("/")
     if parts[-1] in ("fp-lib-table", "sym-lib-table"):
         return True
-    return any(part.endswith(".pretty") or part in ("footprints", "symbols") for part in parts[:-1])
+    return any(is_project_library_directory(part) for part in parts[:-1])
 
 
 def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
@@ -3092,6 +3143,8 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     project-local library member missing from the zip, one extra line says the
     bundle predates the exporter writing them (#8749). Pass/fail is unchanged.
     """
+    from kicad_tools.sidecars import net_class_map_sidecar_candidates
+
     archive = options.output_dir / "kicad_project.zip"
     problems: list[str] = []
     missing_members: list[str] = []
@@ -3099,11 +3152,33 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
         sources = set(_required_sources(options)) | {options.pcb.resolve()}
         if options.schematic is not None:
             sources.add(options.schematic.resolve())
+        sources.update(_library_aliases(options))
         layout = _archive_layout(options, sorted(sources))
         with zipfile.ZipFile(archive) as zf:
             names = [info.filename for info in zf.infolist() if not info.is_dir()]
             if len(names) != len(set(names)):
                 problems.append("duplicate file identities in kicad_project.zip")
+            # Check the file an extracted board actually loads, including in
+            # a legacy archive that retains the checked PCB basename.
+            pcb = options.pcb.resolve()
+            board_member = layout.names[pcb] if layout.names[pcb] in names else layout.checked(pcb)
+            member = next(
+                (
+                    path.as_posix()
+                    for path in net_class_map_sidecar_candidates(board_member)
+                    if path.as_posix() in names
+                ),
+                None,
+            )
+            if options.net_class_map is None:
+                if member is not None:
+                    problems.append(f"{member} inside kicad_project.zip has no checked source")
+            elif member is None:
+                problems.append(f"No net-class map for {board_member} in kicad_project.zip")
+            elif zf.read(member) != options.net_class_map.read_bytes():
+                problems.append(
+                    f"{member} inside kicad_project.zip differs from the checked source"
+                )
             delivered_layout = False
             checked_layout: list[str] = []
             for source in sorted(sources):
@@ -3614,6 +3689,8 @@ def _gate_artifacts(
         export_kwargs["schematic"] = options.schematic
     if options.root != options.pcb.parent.resolve():
         export_kwargs["project_root"] = options.root
+    if options.net_class_map is not None:
+        export_kwargs["net_class_map"] = options.net_class_map
     run = engines.export(*export_args, **export_kwargs)
     if not run.ok:
         return CheckOutcome(
@@ -3792,6 +3869,68 @@ def _stock_evaluation(
         # carries the record forward; it never re-derives it from this host.
         record["sources"] = dict(sources)
     return result, record, None
+
+
+#: Recorded states of the offline-catalog lookup in which the catalog's
+#: contents were never searched.  Every assigned number a source did not
+#: settle is then "unverified" for a reason about the host, not the board.
+_CATALOG_HOST_GAPS = ("missing", "unreadable")
+
+
+def _recorded_catalog_gap(stock_record: dict[str, Any] | None) -> str | None:
+    """Why the recorded stock check could not consult the offline catalog.
+
+    ``sources.offline_catalog`` is ``missing`` or ``unreadable`` when the
+    lookups behind the bundle never reached a usable catalog (issue #10386);
+    that describes the generating host, so it must not become evidence
+    (issue #10646).  ``hit`` and ``miss`` mean the catalog was searched -- a
+    miss is an honest result about the part -- and a record without
+    ``sources`` (written before #10386) makes no claim either way.
+    """
+    if not isinstance(stock_record, dict):
+        return None
+    sources = stock_record.get("sources")
+    if not isinstance(sources, dict):
+        return None
+    from kicad_tools.export.preflight import LOOKUP_SOURCE_CATALOG, describe_lookup_sources
+
+    state = sources.get(LOOKUP_SOURCE_CATALOG)
+    if state not in _CATALOG_HOST_GAPS:
+        return None
+    return describe_lookup_sources({LOOKUP_SOURCE_CATALOG: state})
+
+
+def _catalog_refusal(options: ReadinessOptions, gap: str) -> str:
+    from kicad_tools.parts.jlcparts_catalog import CATALOG_FILENAME, get_catalog_path
+
+    try:
+        location = str(get_catalog_path())
+    except OSError:  # pragma: no cover - unwritable cache directory
+        location = f"the cache directory, as {CATALOG_FILENAME}"
+    if options.operation == "verify":
+        return (
+            "this package's LCSC stock lookups ran without a usable offline parts "
+            f"catalog ({gap}). --verify keeps that record; it does not re-derive it from "
+            "this host, so the package's procurement evidence describes the host that "
+            "produced it, not the board. Regenerate it with `kct readiness <board> "
+            "--generate` on a host that has the catalog (`kct parts sync-catalog` "
+            f"downloads it to {location})."
+        )
+    return (
+        "the bundle's LCSC stock lookups ran without a usable offline parts catalog "
+        f"({gap}), so its procurement evidence would describe this host rather than the "
+        "board. Run `kct parts sync-catalog` to download the catalog to "
+        f"{location}, then rerun `kct readiness <board> --generate`."
+    )
+
+
+def _require_recorded_catalog(
+    options: ReadinessOptions, stock_record: dict[str, Any] | None
+) -> None:
+    """Refuse to publish a stock check the offline catalog never had a say in."""
+    gap = _recorded_catalog_gap(stock_record)
+    if gap is not None:
+        raise EvidenceEnvironmentError(_catalog_refusal(options, gap))
 
 
 def _gate_bom(
@@ -4106,15 +4245,19 @@ def _gate_bom(
 
 
 def _build_archive(options: ReadinessOptions) -> Path | None:
-    """Zip the whole manufacturing directory OUTSIDE it (no checksum cycle)."""
-    archive = options.output_dir.parent / _ARCHIVE_NAME
+    return write_manufacturing_archive(options.output_dir)
+
+
+def write_manufacturing_archive(output_dir: Path) -> Path:
+    """Zip the whole manufacturing directory outside it, without a checksum cycle."""
+    archive = output_dir.parent / _ARCHIVE_NAME
     if archive.exists():
         archive.unlink()
     # Deterministic bytes (Issue #6076): sorted members, fixed timestamp and
     # permissions, so identical bundle contents always yield an identical archive.
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path in _bundle_files(options.output_dir):
-            name = (Path(options.output_dir.name) / path.relative_to(options.output_dir)).as_posix()
+        for path in _bundle_files(output_dir):
+            name = (Path(output_dir.name) / path.relative_to(output_dir)).as_posix()
             info = zipfile.ZipInfo(name, date_time=_ZIP_EPOCH)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16
@@ -4538,6 +4681,9 @@ def build_report(
         _rel(options, path): readiness_input_hash(_rel(options, path), path.read_bytes())
         for path in sorted(hashed)
     }
+    if options.net_class_map is not None and not options.net_class_map_implicit:
+        # Board refresh must preserve the explicit selection across staging.
+        report["selected_net_class_map"] = os.path.relpath(options.net_class_map, options.board_dir)
     # Issue #7277: record which source bytes each report readiness itself
     # produced was computed from, so report binding can tell "produced for
     # this PCB" from merely "pinned beside it".
@@ -4957,9 +5103,9 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             report = result.report
             if options.operation == "generate":
                 report["candidate_not_published"] = True
-        except KiCadEnvironmentError:
-            # Issue #6962: the environment, not the board, failed -- write no
-            # evidence at all, not even a blocked diagnostic receipt.
+        except (KiCadEnvironmentError, EvidenceEnvironmentError):
+            # Issue #6962 / #10646: the environment, not the board, failed --
+            # write no evidence at all, not even a blocked diagnostic receipt.
             raise
         except Exception as exc:
             report = {
@@ -5050,9 +5196,10 @@ def _run_readiness_candidate(
     if options.operation == "generate" and options.silk_fix:
         from .silk_default_pass import run_default_silk_pass
 
-        metrics["silk_fix"] = run_default_silk_pass(
-            options.pcb, mfr=options.manufacturer, quiet=True
-        )
+        silk_fix = run_default_silk_pass(options.pcb, mfr=options.manufacturer, quiet=True)
+        if silk_fix and silk_fix.get("board"):
+            silk_fix["board"] = _rel(options, options.pcb)
+        metrics["silk_fix"] = silk_fix
 
     checked_sources = {
         path: _sha256_file(path)
@@ -5110,6 +5257,10 @@ def _run_readiness_candidate(
     checks.append(_gate_bom(options, engines, tht_refs, tht_assembled))
     if options.assembly:
         _, stock_record, _ = _stock_evaluation(options, _recorded_stock_check(options))
+        # Issue #10646: a stock check the offline catalog never had a say in
+        # describes the host that ran the export, not the board.  Refusing
+        # here keeps the staged candidate from ever being published.
+        _require_recorded_catalog(options, stock_record)
         if stock_record is not None:
             metrics["lcsc_stock_order"] = stock_record
     if engines.extra_checks is not None:
@@ -5589,9 +5740,12 @@ def run_from_args(args: argparse.Namespace, engines: Engines | None = None) -> i
                     result = run_readiness(options, engines)
             else:
                 result = run_readiness(options, engines)
-    except (KiCadEnvironmentError, ReadinessPublicationBusy) as exc:
+    except (KiCadEnvironmentError, EvidenceEnvironmentError, ReadinessPublicationBusy) as exc:
         if isinstance(exc, KiCadEnvironmentError):
             error = f"KiCad environment refused; no evidence written: {exc}"
+            failure_status, exit_code = STATUS_UNVERIFIED, 2
+        elif isinstance(exc, EvidenceEnvironmentError):
+            error = f"Evidence environment refused; no evidence written: {exc}"
             failure_status, exit_code = STATUS_UNVERIFIED, 2
         else:
             error = str(exc)

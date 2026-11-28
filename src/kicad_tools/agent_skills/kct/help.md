@@ -27,10 +27,7 @@ other skills by reading the files actually vendored under
 
 ## Model selection
 
-`suggestedModel: sonnet`. Reading frontmatter and rendering an orientation
-table is summarization, not frontier judgment. Model resolves through the
-harness's normal precedence chain (explicit dispatch param → harness role
-config → this doc's frontmatter `suggestedModel` → session default).
+The help command reads the installed skill descriptions and summarizes them in an orientation table. Codex CLI and opencode use the session’s selected model. When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a model for this task. An explicit dispatch choice or role configuration takes precedence.
 
 ## Arguments
 

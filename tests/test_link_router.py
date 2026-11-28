@@ -79,6 +79,23 @@ class TestRouteLink:
         assert box(9.6, 9.6, 10.4, 10.4).contains(shapely.geometry.Point(sx, sy))
         assert box(13.6, 9.6, 14.4, 10.4).contains(shapely.geometry.Point(ex, ey))
 
+    @pytest.mark.parametrize(("mask_gap", "lands_on_pad"), [(0.0, False), (0.09, True)])
+    def test_wide_link_endpoint_beside_same_net_pad(self, mask_gap, lands_on_pad):
+        # An island's existing track protrudes 0.20 mm beyond its pad. A wide
+        # cap ending on that track would graze the opening beside the pad tip.
+        land = box(10, 9.65, 10.30, 10.35)
+        island = LinkTerminal(
+            "island", (10.15, 10), {"F.Cu": land.union(box(10.15, 9.9, 10.50, 10.1))}
+        )
+        pad = _Item(1, {"F.Cu": land}, is_pad=True)
+        rules = LinkRouteRules(trace_width=0.5, pad_entry_gap=mask_gap)
+        route = route_link(
+            None, 1, "GND", _term("start", 12, 10), island, rules, model=_model(["F.Cu"], [pad])
+        )
+        assert route is not None
+        _, _, x, y, _ = route.segments[-1]
+        assert land.contains(shapely.geometry.Point(x, y)) == lands_on_pad
+
     def test_foreign_wall_forces_detour_clear_of_it(self):
         wall = _Item(2, {"F.Cu": box(11.8, 8.0, 12.2, 12.0)})
         a, b = _term("a", 10.0, 10.0), _term("b", 14.0, 10.0)
@@ -247,3 +264,23 @@ class TestSubResolutionSliverNotWritten:
     def test_genuine_short_segment_kept(self):
         assert len(self._written([(188.98, 69.0, 189.0, 69.0, "F.Cu")])) == 1
         assert len(self._written([(188.98, 69.0, 188.99, 69.0, "F.Cu")])) == 1
+
+
+def test_plane_corridor_allows_vias_from_external_endpoints():
+    from kicad_tools.router.link_router import PlaneCorridor
+
+    layer = "In1.Cu"
+    corridor = PlaneCorridor(layer, 11, 9.8, 13, 10.2)
+    # Only the outer layers have a wall. The pour is remote from the
+    # rectangle, so even an entirely copper-free corridor requires opt-in.
+    wall = _Item(2, {l: box(11.9, 0, 12.1, 20) for l in ("F.Cu", "B.Cu")})
+    model = _model(["F.Cu", layer, "B.Cu"], [wall], {layer: [(2, box(2, 2, 5, 5))]})
+    a, b = _term("a", 10, 10), _term("b", 14, 10)
+    route = route_link(None, 1, "SIG", a, b, RULES, model=model, plane_corridor=corridor)
+    assert route is not None and len(route.vias) == 2
+    assert any(s[-1] == layer for s in route.segments)
+    assert corridor.covers_route(route)
+    # The inner-layer wall could be bypassed on the open grid, but that
+    # detour would take the track outside the authorized strip.
+    model.items.append(_Item(3, {layer: box(11.9, 9.6, 12.1, 10.4)}))
+    assert route_link(None, 1, "SIG", a, b, RULES, model=model, plane_corridor=corridor) is None

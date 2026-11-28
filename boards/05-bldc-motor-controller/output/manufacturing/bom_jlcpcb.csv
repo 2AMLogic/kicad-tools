@@ -5,7 +5,7 @@ Comment,Designator,Footprint,LCSC Part #
 10k,"R10,R11,R12,R3,R5,R6,R7,R8,R9",Resistor_SMD:R_0805_2012Metric,C17414
 10nF,"C13,C4",Capacitor_SMD:C_0805_2012Metric,C1710
 10uF,C8,Capacitor_SMD:C_0805_2012Metric,C15850
-12-24V INPUT,J1,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,C7501260
+12-24V INPUT; RUN SWITCH,"J1,J5",Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,C7501260
 1A 63V,F1,Fuse:Fuse_1206_3216Metric,C3167176
 1k,"R13,R4",Resistor_SMD:R_0805_2012Metric,C17513
 1uF,C7,Capacitor_SMD:C_0805_2012Metric,C28323
@@ -18,7 +18,6 @@ DRV8313PWPR,U2,board05_revB:TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias,C9248
 HALL,J3,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,C37208
 MOTOR ABC,J2,Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical,C49257
 RED,D3,LED_SMD:LED_0805_2012Metric,C84256
-RUN SWITCH,J5,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,C7501260
 SMBJ24A,D2,Diode_SMD:D_SMB,C224017
 SS36,D1,Diode_SMD:D_SMA,C16015
-TPS7A1650DGNR,U3,Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias,C468238
+TPS7A1650DGNR,U3,board05_revB:TI_DGN0008C_Lands1.4x0.45_EP1.57x1.89_ThermalVias,C468238

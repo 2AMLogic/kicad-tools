@@ -25,7 +25,7 @@ uv run kct build-native --check
 
 ## Model selection
 
-`suggestedModel: sonnet`. Emitting a well-understood pipeline template with marked fill-in points is a structured code-generation task, not a frontier-judgment one. Model resolves through the harness's normal precedence chain.
+Emitting a well-understood pipeline template with marked fill-in points is a structured code-generation task, not a frontier-judgment one. Codex CLI and opencode use the session's selected model. When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a model for this task. An explicit dispatch choice or role configuration takes precedence.
 
 ## Arguments
 

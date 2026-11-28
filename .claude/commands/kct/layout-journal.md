@@ -27,7 +27,7 @@ uv run kct build-native --check
 
 ## Model selection
 
-`suggestedModel: sonnet`. Maintaining a structured journal and running a referee gate is disciplined record-keeping, not frontier judgment. Model resolves through the harness's normal precedence chain.
+Maintaining a structured journal and running a referee gate is disciplined record-keeping, not frontier judgment. Codex CLI and opencode use the session's selected model. When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a model for this task. An explicit dispatch choice or role configuration takes precedence.
 
 ## Arguments
 

@@ -1158,6 +1158,8 @@ def _run_export_command(args) -> int:
         sub_argv.append("--no-auto-lcsc")
     if getattr(args, "export_no_spec", False):
         sub_argv.append("--no-spec")
+    if getattr(args, "export_project_root", None):
+        sub_argv.extend(["--project-root", args.export_project_root])
     if getattr(args, "export_spec", None):
         sub_argv.extend(["--spec", args.export_spec])
     if getattr(args, "export_no_merge_lcsc", False):
@@ -1201,6 +1203,8 @@ def _run_export_command(args) -> int:
         sub_argv.append("--include-tht")
     if getattr(args, "export_via_land_overlap", False):
         sub_argv.append("--via-land-overlap")
+    if getattr(args, "export_verify_reviewed_copper", False):
+        sub_argv.append("--verify-reviewed-copper")
     if hasattr(args, "export_format") and args.export_format != "text":
         sub_argv.extend(["--format", args.export_format])
 

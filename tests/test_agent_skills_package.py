@@ -48,6 +48,22 @@ def _repo_skill_names() -> set[str]:
     return {p.name for p in REPO_COPY_DIR.glob("*.md")}
 
 
+def _model_hints() -> dict[str, str]:
+    """``{skill: suggestedModel}`` for every source skill with a ``## Model selection`` section.
+
+    Derived from the sources rather than listed, so a skill that gains the
+    section is covered without a hand edit (issue #10717).
+    """
+    hints: dict[str, str] = {}
+    for path in sorted(REPO_COPY_DIR.glob("*.md")):
+        fields, body = split_frontmatter(path.read_text(encoding="utf-8"))
+        if "## Model selection" in body:
+            tier = fields.get("suggestedModel")
+            assert tier, f"{path.name} has a '## Model selection' section but no suggestedModel"
+            hints[path.stem] = tier
+    return hints
+
+
 # --- one source of truth -----------------------------------------------------
 
 
@@ -82,6 +98,45 @@ def test_packaged_text_has_no_demo_board_paths() -> None:
         assert not re.search(r"\bboards/\d{2}-", source.text), source.filename
 
 
+def _skill_bodies() -> list[tuple[str, str]]:
+    """``(filename, body)`` for every packaged skill, frontmatter removed."""
+    return [
+        (source.filename, split_frontmatter(source.text)[1])
+        for source in packaged_skill_sources()
+        if not source.is_readme
+    ]
+
+
+def _prose_sentences(body: str) -> list[str]:
+    """Sentences of *body* outside fenced code blocks, line wraps joined."""
+    prose = re.sub(r"```.*?```", "", body, flags=re.S)
+    sentences: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", prose):
+        sentences.extend(re.split(r"(?<=[.!?])\s+", " ".join(paragraph.split())))
+    return sentences
+
+
+@pytest.mark.parametrize(
+    "body", [pytest.param(body, id=filename) for filename, body in _skill_bodies()]
+)
+def test_body_scopes_model_hint_to_installs_that_carry_it(body: str) -> None:
+    """No sentence presents ``suggestedModel`` as a field the reader holds (#10703).
+
+    The Codex CLI and opencode renderers drop ``suggestedModel``, so prose such
+    as `` `suggestedModel: sonnet`. `` opening a paragraph or "this doc's
+    frontmatter ``suggestedModel``" describes frontmatter two of the three
+    installs do not have. The string is not banned: the house wording scopes it
+    with "when the installed frontmatter includes ...".
+    """
+    unscoped = [
+        sentence
+        for sentence in _prose_sentences(body)
+        if "suggestedModel" in sentence
+        and not re.search(r"\bwhen the installed\b", sentence, re.IGNORECASE)
+    ]
+    assert unscoped == [], f"states the model hint unconditionally: {unscoped}"
+
+
 # --- wheel contents -----------------------------------------------------------
 
 
@@ -105,6 +160,10 @@ def test_built_wheel_contains_skills_and_installs_from_it(tmp_path: Path) -> Non
     """
     if shutil.which("uv") is None:
         pytest.skip("uv not available to build a wheel")
+    model_hints = _model_hints()
+    assert "help" in model_hints, (
+        f"derived no '## Model selection' skills from {REPO_COPY_DIR}: {model_hints}"
+    )
     dist = tmp_path / "dist"
     result = subprocess.run(
         ["uv", "build", "--wheel", "--out-dir", str(dist)],
@@ -124,20 +183,42 @@ def test_built_wheel_contains_skills_and_installs_from_it(tmp_path: Path) -> Non
     # The agent primer behind `kct agent-guide` ships beside the skills (#5960).
     assert "kicad_tools/agent_skills/AGENT_GUIDE.md" in names
 
-    target = tmp_path / "x"
     code = (
         "import sys, kicad_tools; from kicad_tools.cli import main; "
         "print(kicad_tools.__file__, file=sys.stderr); "
-        f"sys.exit(main(['skills', 'install', '--target', {str(target)!r}]))"
+        "sys.exit(main(sys.argv[1:]))"
     )
     env = {**os.environ, "PYTHONPATH": str(tmp_path / "site")}
-    run = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120
-    )
-    assert run.returncode == 0, run.stderr[-2000:]
-    assert str(tmp_path / "site") in run.stderr, "imported kicad_tools from outside the wheel"
-    assert {p.name for p in (target / "kct").glob("*.md")} == _repo_skill_names()
-    assert check_installed(target).in_sync
+    for harness, skill_path in (
+        ("claude-code", "kct/{skill}.md"),
+        ("codex", "kct-{skill}/SKILL.md"),
+        ("opencode", "kct/{skill}.md"),
+    ):
+        target = tmp_path / harness
+        args = ["skills", "install", "--harness", harness, "--target", str(target)]
+        run = subprocess.run(
+            [sys.executable, "-c", code, *args],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+        assert run.returncode == 0, run.stderr[-2000:]
+        assert str(tmp_path / "site") in run.stderr, "imported kicad_tools from outside the wheel"
+        assert check_installed(target, harness).in_sync
+        if harness == "claude-code":
+            assert {p.name for p in (target / "kct").glob("*.md")} == _repo_skill_names()
+        for skill, hint in model_hints.items():
+            path = target / skill_path.format(skill=skill)
+            fields, body = split_frontmatter(path.read_text(encoding="utf-8"))
+            expected_hint = hint if harness == "claude-code" else None
+            assert fields.get("suggestedModel") == expected_hint, path
+            if harness != "claude-code":
+                selection = body.split("## Model selection", 1)[1].split("## ", 1)[0]
+                assert "is set in the frontmatter above" not in selection, path
+                assert "this doc's frontmatter" not in selection, path
+                assert re.search(r"Codex CLI and opencode[^.]*session[^.]*model", selection), path
 
     guide = subprocess.run(
         [

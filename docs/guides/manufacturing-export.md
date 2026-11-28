@@ -27,6 +27,17 @@ URIs before exporting. Libraries supplied by KiCad's global installation
 are not copied; footprint libraries and 3D models are outside this symbol
 packaging support.
 
+For a board under `kicad/`, select the assembly directory as the root when
+the export needs project-relative inputs elsewhere in that assembly.
+
+```sh
+kct export kicad/board.kicad_pcb --project-root . -o manufacturing/
+```
+
+The named directory must contain the selected board. Omitting the option uses
+the board directory. An explicitly supplied `--spec` selects BOM information
+independently of that choice.
+
 ## The Editable Project: One Basename, One Working Revision
 
 KiCad opens a project through one basename: `board.kicad_pro` pairs with
@@ -203,7 +214,8 @@ A board is "ship-ready" when **all** gates are green:
 5. No open known defect is recorded in `output/readiness.json` (Issue #7261).
    An open defect adds a `known defect #N` blocker. Boards that are ready but
    carry disclosed exceptions or advisories show `YES*` / `known: #N` instead
-   of a plain `YES`.
+   of a plain `YES`. A receipt its producer published as `blocked` is itself a
+   blocker, `readiness blocked: <first recorded blocker>` (Issue #10662).
 
 If any gate fails, the table view lists the first blocker; `--format json`
 emits the full per-board breakdown. Treat `kct fleet status --ship-only`
@@ -458,6 +470,162 @@ R1,10k,0402,30.00,20.00,0,top
 U1,ATmega328P,TQFP-32,50.00,40.00,0,top
 ```
 
+## Accessories and Off-Board Parts: the Purchasing List
+
+The BOM and CPL describe what the factory places. A complete assembly often
+needs more: a cover for each fuse holder, a cartridge bought separately,
+chassis resistors wired to land footprints on the board. None of those has a
+placement, so none can appear in the BOM or CPL, and a prose list kept beside
+the project goes stale as soon as the board quantity or the revision changes.
+
+Declare them in the project `.kct` instead. Each `purchasing` row has a
+description, a whole-number `quantity` **per board**, optional `refs` naming the
+board designators the item belongs to (wire lands included), and either a
+`manufacturer` and `mpn` or a `pending` note saying what is still undecided:
+
+```yaml
+purchasing:
+  - description: Snap-on cover for the 5 x 20 mm fuse holder
+    quantity: 3            # one for each holder: F1, F2 and F3
+    refs: [F1, F2, F3]
+    manufacturer: Example Fuse Co
+    mpn: "SYN-COVER-1"     # quote a part number that begins with a digit
+  - description: 5 x 20 mm cartridge, AC
+    quantity: 1
+    refs: [F1]
+    manufacturer: Example Fuse Co
+    mpn: "SYN-CART-AC"
+  - description: 5 x 20 mm cartridge, DC
+    quantity: 2
+    refs: [F2, F3]
+    pending: DC rating and breaking capacity still to be chosen
+  - description: Mains cord set
+    quantity: 1            # nothing on the board to link it to
+    manufacturer: Example Cable Co
+    mpn: "SYN-CORD-1"
+```
+
+A row's `quantity` already covers all of its `refs`, and several rows may name
+the same designator (the holder's cover and its cartridge both link to `F1`).
+The holder itself stays in the BOM through `bom_entries`, exactly as before.
+
+`kct export` reads the declaration and writes `purchasing.json` into the
+manufacturing bundle, with its SHA-256 and size in `manifest.json`. The
+fabricator BOM and CPL are byte-for-byte what they would be without the
+declaration. The console names the file and every selection still pending:
+
+```text
+  [ok] Purchasing list: purchasing.json
+  1 purchasing selection(s) still pending:
+    - 5 x 20 mm cartridge, DC
+```
+
+An invalid row (a zero quantity, a selected part without a part number, a
+pending row that also names one) fails the export and names the row, so a list
+that cannot be trusted never ships. Removing the declaration or setting it to
+an empty list withdraws the earlier export. An unreadable spec on a rerun
+preserves the last exported list and reports an error. Each generated list carries a checksum of its original rows, so the exporter
+can recognize it after the manifest is renamed or removed. For an older list
+without that checksum, the exporter checks the configured manifest. If neither
+identifies a valid purchasing list, export asks you to move it aside.
+
+A buyer can keep an independently created `purchasing.json` in the output
+directory when the project declares no purchasing rows. If a declared list
+would overwrite that file, or if another enabled output uses the same path,
+export reports the collision before writing the package.
+
+### Wire landings: mapping pads to a purchased part's terminals
+
+A purchased part can wire to a landing on the board whose pad numbers differ
+from the part's own terminal numbers. A panel switch has lugs numbered in
+another order than its two-pad landing, with a third lug left insulated:
+following the numbers one-to-one would wire the wrong throw, and the list above
+can only carry the correspondence as free text.
+
+A **selected** row declares it as a `terminals` map:
+
+```yaml
+purchasing:
+  - description: Panel toggle switch for the arm position
+    quantity: 1
+    refs: [SW1]
+    manufacturer: Example Switch Co
+    mpn: "SYN-TOGGLE-1"
+    terminals:
+      - terminal: 3          # the part's own numbering, from its datasheet
+        ref: SW1
+        pad: 1
+        net: VDD_CTRL
+      - terminal: 2
+        ref: SW1
+        pad: 2
+        net: ARMED_3V3
+      - terminal: 1          # deliberately left unconnected
+        unused: true
+```
+
+Four identifiers stay distinct, and nothing is inferred from the part number:
+
+- `terminal` is an external terminal of the part the row's `mpn` names,
+  numbered as its datasheet numbers it. **This is your declaration**, read from
+  the datasheet by hand; the tools never derive it.
+- `ref` and `pad` name a landing on the board.
+- `net` is the net that landing is expected to carry.
+
+Each terminal appears once. An `unused` terminal names no landing.
+
+When the row lists `refs`, every mapped `ref` must be one of them. A part that
+bridges two footprints, such as one wired across two wire lands, lists both
+designators on the same row with `quantity: 1`; it needs no extra row, and a
+listed reference with no terminal on it is fine. A `ref` that is not in the
+row's `refs` is a spec error, even when the board has that footprint and its pad
+carries the declared net, because the landing would be frozen under the wrong
+part. An omitted or empty `refs` declares nothing to compare against, so only the
+PCB check below applies.
+
+The map belongs to a selected row: a `pending` row has no part to number the terminals
+of, and must not declare one.
+
+`kct export` checks the board side of every mapped assignment against the PCB
+it is exporting, and refuses the export before anything is written when:
+
+- `ref` is not a footprint on the board;
+- `pad` is not a copper pad of that footprint;
+- any matching copper pad carries a net other than `net` (including when repeated pads of that number carry conflicting nets).
+
+The terminal numbers are not checked; they stay the project's declaration. A
+map that contradicts itself is refused the same way, whether one terminal is
+assigned to two landings or a terminal is both mapped and `unused`. Each fault
+names the purchasing row, the terminal and the landing:
+
+```text
+Invalid project spec; the purchasing list cannot be read from project.kct: purchasing row 1 (Panel toggle switch for the arm position) terminal '3': SW1 pad 1 carries ARMED_3V3 on the board, not VDD_CTRL
+```
+
+The part stays out of the fabricator BOM and CPL, and adding or changing a map
+leaves both byte-identical to the export without it.
+
+### For the buyer
+
+`kct submit-jlcpcb` reads the frozen list, multiplies each row by the ordered
+board quantity and publishes it as `purchasing.json` in the review page, listed
+in `review-page-manifest.json`. The page's "Purchasing list" section shows the
+per-board and build quantities, and "Outstanding selections" names every
+pending row by description and linked designators. For two boards the example
+above asks for 6 covers, 2 AC cartridges and 4 DC cartridges, the last still
+marked pending and carrying no part number. Resolve the row in the `.kct`,
+then export and submit again: the revised page lists nothing outstanding.
+
+A row with a `terminals` map adds a "Terminal map" table beneath the list: the
+part, every declared terminal, the board landing and net that `kct export`
+checked, and whether the terminal is mapped or unused. An unused terminal shows
+no landing. The column headings separate the project's terminal declarations
+from the board lookups, and the board quantity scales the purchase only: the
+same assignments apply to every board.
+
+The list is for purchasing only. Nothing in it is placed, matched or
+stock-checked by the factory, and it never reaches the JLCPCB stock gate.
+
 ## CLI Commands
 
 ### Export Gerbers
@@ -658,6 +826,79 @@ lies outside the opening still counts when its edge reaches it.
 The result is `OK` when coverage is complete and every intersection is
 declared, and `WARN` otherwise; it never blocks the export. A standard export
 does not run the measurement.
+
+## Publish Only Reviewed Copper (`--verify-reviewed-copper`)
+
+`kct export` regenerates the manufacturer `.kicad_dru` and refills the zones,
+so the Gerbers obey the rules that ship (#9987). A refill can also plot copper
+nobody reviewed: an inner plane that shrinks under a new clearance, or an
+outlined zone with no saved fill that gains copper during export. A team that
+signed off the saved copper can ask for the package to be published only when
+the final copper equals what was reviewed (Issue #10492):
+
+```bash
+kct export board.kicad_pcb --mfr jlcpcb --verify-reviewed-copper
+```
+
+The opt-in works in three steps:
+
+1. It plots the saved board natively, before any rule is written or any zone
+   refilled. That plot is the reference.
+2. It runs the ordinary export (manufacturer rules, refill, silk pass,
+   preflight, BOM, CPL, Gerbers, project ZIP) on a private working copy. The
+   checked-out `.kicad_pcb`, `.kicad_pro` and `.kicad_dru` are never written,
+   whether the package is published or withheld.
+3. Before anything is published, it compares every copper layer of the staged
+   Gerber archive with the reference as geometry. Added area is candidate
+   minus reference; removed area is reference minus candidate, both in mm².
+
+Timestamps, X2 metadata and a polygon's starting vertex never read as a
+change. Copper that moved while keeping its area does, because each direction
+is measured on its own. Each direction is compared against a tolerance of
+0.000001 mm², which the result records. Inner layers are matched by their X2
+file function, so renamed copper layers are verified too.
+
+- **Identical on every layer**: the normal package is published, and
+  `manifest.json` and `README.txt` name the reviewed PCB by file name and
+  SHA-256 with each layer's reference and candidate plot digests.
+- **Changed, or a layer that is missing, ambiguous or unreadable**: exit code
+  1, nothing published, and an earlier package in the output directory is left
+  as it was. The error lists each affected layer with its added and removed
+  area, and the proposed board, its rules and the candidate Gerbers are copied
+  to `<output>-reviewed-copper/<attempt>/` beside the output directory, with
+  `reviewed-copper.json` and `reviewed-copper.txt`. That directory is outside
+  the package.
+
+```json
+{
+  "reviewed_copper": {
+    "schema": "kct.reviewed-copper.v1",
+    "status": "identical",
+    "reviewed_pcb": {"name": "board.kicad_pcb", "sha256": "927e4621…"},
+    "tolerance_mm2": 1e-06,
+    "layers": [
+      {
+        "layer": "In1.Cu",
+        "status": "identical",
+        "added_mm2": 0.0,
+        "removed_mm2": 0.0,
+        "reference": {"member": "board-In1_Cu.g1", "sha256": "…"},
+        "candidate": {"member": "board-In1_Cu.g1", "sha256": "…"}
+      }
+    ],
+    "changed_layers": [],
+    "unreadable_layers": []
+  }
+}
+```
+
+To adopt a proposed refill, review `proposed/<board>.kicad_pcb` with its
+`.kicad_pro` and `.kicad_dru`, copy them over the checked-out files, and
+export again: the copper is then identical and the package publishes.
+
+The comparison needs Gerber artwork, so `--no-gerbers --verify-reviewed-copper`
+is refused before anything is written. A standard export does not run the
+comparison and keeps its in-place refill.
 
 ## Other Manufacturers
 

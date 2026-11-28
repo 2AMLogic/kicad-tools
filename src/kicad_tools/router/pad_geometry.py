@@ -1,4 +1,4 @@
-"""Geometry of router pads' rotated rectangular envelopes.
+"""Pad geometry used for routing.
 
 Router Pad retains shape but not corner radius. These conservative predicates
 describe its rectangle, not exact circle/roundrect/oval copper. The grid acceptance
@@ -8,9 +8,47 @@ paths separately distinguish circles. Bounds alone are for broad phase.
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 from .geometry import segment_to_segment_distance
 from .primitives import Pad
+
+if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import Pad as BoardPad
+
+
+_CHAMFER_CORNERS = frozenset({"top_left", "top_right", "bottom_left", "bottom_right"})
+
+
+def routing_pad_chamfer(pad: BoardPad) -> tuple[frozenset[str], float] | None:
+    """Read the selected corners and cut ratio, or return None for unsupported geometry.
+
+    A missing corner list leaves the pad unchamfered. KiCad's default ratio
+    for selected corners is 0.2. Both routing models support ratios up to 0.5.
+    """
+    node = getattr(pad, "_sexp_node", None)
+    if node is None or pad.shape.lower() != "roundrect":
+        return frozenset(), 0.0
+    chamfers = node.find_children("chamfer")
+    if not chamfers:
+        return frozenset(), 0.0
+    if len(chamfers) != 1 or not chamfers[0].children:
+        return None
+    selected: set[str] = set()
+    for corner in chamfers[0].children:
+        if not corner.is_atom or corner.value not in _CHAMFER_CORNERS:
+            return None
+        selected.add(corner.value)
+
+    ratios = node.find_children("chamfer_ratio")
+    if not ratios:
+        return frozenset(selected), 0.2
+    if len(ratios) != 1 or len(ratios[0].children) != 1 or not ratios[0].children[0].is_atom:
+        return None
+    ratio = ratios[0].get_float(0)
+    if ratio is None or not 0.0 <= ratio <= 0.5:
+        return None
+    return frozenset(selected), ratio
 
 
 def pad_local_point(pad: Pad, x: float, y: float) -> tuple[float, float]:

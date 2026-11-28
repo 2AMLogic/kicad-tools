@@ -1,5 +1,6 @@
 """Opt-in wiring preserves the existing CI workload rather than replacing it."""
 
+import inspect
 import json
 import os
 import re
@@ -70,7 +71,160 @@ def test_opt_in_and_resources_and_artifact_retention():
     assert artifact["with"]["path"] == "${{ runner.temp }}/native-observer/"
 
 
-@pytest.mark.parametrize("group", GROUPS)
+def test_board05_recipe_staging_group_and_timeout():
+    from tests import test_board05_recipe_dru_reproduces_8357 as recipe
+
+    for name, case in inspect.getmembers(recipe, inspect.isfunction):
+        if not name.startswith("test_"):
+            continue
+        marks = {mark.name: mark.args for mark in getattr(case, "pytestmark", ())}
+        if "staged" in inspect.signature(case).parameters:
+            assert marks.get("xdist_group") == ("board05_recipe_staged",), name
+            assert marks.get("timeout") == (180,), name
+        elif name in {
+            "test_committed_dru_carries_the_attach_zone_block",
+            "test_export_replays_committed_rules_and_respects_a_designer_clearance",
+            "test_mask_standoff_preserves_fiducial_geometry",
+        }:
+            assert "xdist_group" not in marks and "timeout" not in marks, name
+
+
+def test_board05_staged_cases_reach_one_worker(tmp_path):
+    # Exercise the installed scheduler. pytest 9.2.0 and xdist 3.8 can collect
+    # the right marks while sending the seven cases to four separate workers.
+    (tmp_path / "record_staged_worker.py").write_text(
+        "from pathlib import Path\n"
+        "def pytest_runtest_setup(item):\n"
+        "    if 'staged' in item.fixturenames:\n"
+        "        worker = item.config.workerinput['workerid']\n"
+        "        Path(__file__).with_suffix('.' + worker).touch()\n"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-n",
+            "2",
+            "--dist",
+            "loadgroup",
+            "--setup-plan",
+            "-o",
+            "addopts=",
+            "-p",
+            "record_staged_worker",
+            "tests/test_board05_recipe_dru_reproduces_8357.py",
+        ],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join([str(tmp_path), os.environ.get("PYTHONPATH", "")]),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(list(tmp_path.glob("record_staged_worker.gw*"))) == 1
+
+
+def test_kelvin_replay_cache_consumers_reach_one_worker(tmp_path):
+    # Under --dist loadgroup, all consumers of test_access_witness_replay_5508._CACHE
+    # (_routed_kelvin / _stranding_kelvin / stranding_witness) across both 5508 and
+    # 6292 must land on one worker while bulk selection still excludes ci_extended.
+    # Supply a controlled timing list so routine refreshes of tests/ci_extended.txt
+    # cannot change which cases belong to bulk vs extended here.
+    extended_ids = {
+        "tests/router/test_access_witness_replay_5508.py::"
+        "TestStrandedTerminals::test_witness_is_memoized_per_router",
+        "tests/router/test_access_witness_replay_5508.py::"
+        "TestReplayOnTheKelvinFixture::test_comp_closes_u3_at_iteration_zero_of_the_initial_pass",
+    }
+    (tmp_path / "ci_extended.txt").write_text("\n".join(sorted(extended_ids)) + "\n")
+    (tmp_path / "record_kelvin_worker.py").write_text(
+        "import inspect, json\n"
+        "from pathlib import Path\n"
+        "import pytest\n"
+        "def _canonical_nodeid(nodeid):\n"
+        "    return nodeid.rsplit('@', 1)[0] if nodeid.rfind('@') > nodeid.rfind(']') else nodeid\n"
+        "def _consumer_flags(item):\n"
+        "    src = ''\n"
+        "    try:\n"
+        "        src = inspect.getsource(item.obj)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    uses_stranding = 'stranding_witness' in item.fixturenames or '_stranding_kelvin(' in src\n"
+        "    uses_routed = '_routed_kelvin(' in src\n"
+        "    return uses_stranding, uses_routed\n"
+        "def pytest_plugin_registered(plugin):\n"
+        "    if hasattr(plugin, '_CI_EXTENDED_LIST'):\n"
+        "        plugin._CI_EXTENDED_LIST = Path(__file__).with_name('ci_extended.txt')\n"
+        "@pytest.hookimpl(tryfirst=True)\n"
+        "def pytest_collection_modifyitems(config, items):\n"
+        "    if not hasattr(config, 'workerinput') or config.workerinput['workerid'] != 'gw0':\n"
+        "        return\n"
+        "    collected = [\n"
+        "        _canonical_nodeid(item.nodeid)\n"
+        "        for item in items\n"
+        "        if item.get_closest_marker('slow') is None and any(_consumer_flags(item))\n"
+        "    ]\n"
+        "    Path(__file__).with_suffix('.collected.json').write_text(json.dumps(collected))\n"
+        "def pytest_runtest_setup(item):\n"
+        "    uses_stranding, uses_routed = _consumer_flags(item)\n"
+        "    if uses_stranding or uses_routed:\n"
+        "        worker = item.config.workerinput['workerid']\n"
+        "        entry = {\n"
+        "            'worker': worker,\n"
+        "            'nodeid': _canonical_nodeid(item.nodeid),\n"
+        "            'stranding': uses_stranding,\n"
+        "            'routed': uses_routed,\n"
+        "        }\n"
+        "        with Path(__file__).with_suffix('.' + worker + '.jsonl').open('a') as f:\n"
+        "            f.write(json.dumps(entry) + '\\n')\n"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-n",
+            "4",
+            "--dist",
+            "loadgroup",
+            "--setup-plan",
+            "-o",
+            "addopts=",
+            "-m",
+            "not slow and not ci_extended",
+            "-p",
+            "record_kelvin_worker",
+            "tests/router/test_access_witness_replay_5508.py",
+            "tests/router/test_access_witness_replay_6292.py",
+        ],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join([str(tmp_path), os.environ.get("PYTHONPATH", "")]),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    all_consumers = set(json.loads((tmp_path / "record_kelvin_worker.collected.json").read_text()))
+    worker_files = sorted(tmp_path.glob("record_kelvin_worker.gw*.jsonl"))
+    entries = [json.loads(line) for path in worker_files for line in path.read_text().splitlines()]
+    workers = {entry["worker"] for entry in entries}
+    nodeids = {entry["nodeid"] for entry in entries}
+    assert extended_ids < all_consumers
+    assert extended_ids.isdisjoint(nodeids)
+    assert nodeids == all_consumers - extended_ids
+    assert {nid.split("::", 1)[0] for nid in nodeids} == {
+        "tests/router/test_access_witness_replay_5508.py",
+        "tests/router/test_access_witness_replay_6292.py",
+    }
+    assert len(workers) == 1, entries
+
+
+@pytest.mark.parametrize("group", [*GROUPS, "extended"])
 @pytest.mark.parametrize("board07", ["true", "false"])
 def test_existing_workflow_command_and_failure_propagation(tmp_path, group, board07):
     # Execute the actual YAML bash body, substituting ONLY the uv executable.
@@ -94,7 +248,11 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
         "raise SystemExit(0 if 'build-native' in args else 7)\n"
     )
     uv.chmod(0o755)
-    step = next(s for s in JOB["steps"] if s.get("name") == GROUPS[group])
+    if group == "extended":
+        steps, step_name = WORKFLOW["jobs"]["test-extended"]["steps"], "Run ci_extended tests"
+    else:
+        steps, step_name = JOB["steps"], GROUPS[group]
+    step = next(s for s in steps if s.get("name") == step_name)
     env = dict(
         os.environ,
         PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
@@ -146,6 +304,7 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
             "run",
             "pytest",
             "tests/test_stitch_physical_completion.py",
+            "tests/test_stitch_plane_bonded_pads_10136.py",
             *common,
             "--basetemp",
             str(tmp_path / "stitch-physical-native/pytest"),
@@ -169,6 +328,8 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
             "pytest",
             "-n",
             "auto",
+            "--dist",
+            "loadgroup",
             # Issue #7214: list skip/xfail reasons in the short summary.
             "-rfEsx",
             # Issue #6013: the ci_extended slow tail runs in "Test (extended)",
@@ -192,6 +353,7 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
                     "test_board06_pad_departures.py",
                     "test_mask_copper_native.py",
                     "test_stitch_physical_completion.py",
+                    "test_stitch_plane_bonded_pads_10136.py",
                     "test_zones_cmd.py",
                     "test_zones_hv_keepout.py",
                     "test_zones_fill_probe_timeout_9938.py",
@@ -208,6 +370,23 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
             # step forwards the artifact path, which lands last.
             "--junitxml",
             str(tmp_path / "junit/bulk.xml"),
+        ],
+        "extended": [
+            "run",
+            "pytest",
+            "-n",
+            "auto",
+            "--dist",
+            "loadgroup",
+            "-rfEsx",
+            "-o",
+            "addopts=",
+            "--benchmark-disable",
+            "--timeout=60",
+            "-m",
+            "ci_extended and not slow",
+            "--junitxml",
+            str(tmp_path / "junit/extended.xml"),
         ],
     }[group]
     if group == "bulk" and board07 != "true":

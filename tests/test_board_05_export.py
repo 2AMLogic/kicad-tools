@@ -32,7 +32,6 @@ future "clean preflight" state:
 
 from __future__ import annotations
 
-import csv
 import json
 import os
 import re
@@ -90,18 +89,23 @@ def _seed_parts_cache(board_dir: Path, xdg_cache: Path) -> None:
         for name in ("project.kct", "bldc_controller.kicad_sch")
     )
     (xdg_cache / "kicad-tools").mkdir(parents=True, exist_ok=True)
-    # Pin header/socket numbers are left unseeded: a seeded record without a
-    # readable pin count would make ``bom_lcsc_values`` FAIL under strict
-    # preflight, which is a different contract than the one under test.
-    bom_csv = BOARD_DIR / "output" / "manufacturing" / "bom_jlcpcb.csv"
-    headers = {
-        row["LCSC Part #"]
-        for row in csv.DictReader(bom_csv.open(encoding="utf-8"))
-        if "PinHeader" in row["Footprint"] or "PinSocket" in row["Footprint"]
+    # Strict value validation also checks the connector geometry in each part record.
+    header_descriptions = {
+        "C7501260": "Pin header, 1x2",
+        "C65114": "Pin header, 2x3",
+        "C37208": "Pin header, 1x6",
+        "C49257": "Pin header, 1x3",
     }
     cache = PartsCache(db_path=xdg_cache / "kicad-tools" / "parts.db")
-    for lcsc in sorted(set(re.findall(r"\bC\d{4,8}\b", text)) - headers):
-        cache.put(Part(lcsc_part=lcsc, stock=1_000_000, stock_source="live"))
+    for lcsc in sorted(set(re.findall(r"\bC\d{4,8}\b", text))):
+        cache.put(
+            Part(
+                lcsc_part=lcsc,
+                description=header_descriptions.get(lcsc, ""),
+                stock=1_000_000,
+                stock_source="live",
+            )
+        )
 
 
 @pytest.fixture(scope="module")
@@ -130,14 +134,11 @@ def export_strict_preflight_result(
     staged_dir = tmp_path_factory.mktemp("export_strict_preflight_board") / "output"
     shutil.copytree(routed_pcb_path.parent, staged_dir, ignore=_STAGING_IGNORE)
     staged_pcb = staged_dir / routed_pcb_path.name
-    # Issue #8154: ``bom_lcsc_stock`` now FAILs under --strict-preflight when
-    # none of the BOM's LCSC numbers resolve in the parts cache/catalog
-    # (previously a false OK).  Seed a scratch cache -- via XDG_CACHE_HOME so
-    # the host cache is never read or written -- so the check really
-    # evaluates board 05's numbers.
+    # Give strict preflight recorded stock for every assigned code in a scratch cache.
     xdg_cache = tmp_path_factory.mktemp("export_strict_preflight_cache")
     _seed_parts_cache(staged_dir, xdg_cache)
-    env = {**os.environ, "XDG_CACHE_HOME": str(xdg_cache)}
+    env = {k: v for k, v in os.environ.items() if k != "KCT_JLCPARTS_CATALOG"}
+    env["XDG_CACHE_HOME"] = str(xdg_cache)
     cmd = [
         sys.executable,
         "-m",

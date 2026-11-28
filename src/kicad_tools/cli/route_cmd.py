@@ -2079,6 +2079,9 @@ def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: b
         net_anchors=_detour_net_anchors(router),
     )
     _provide_via_connection_context(router, optimizer)
+    mask_guard = getattr(args, "_mfr_mask_guard", None)
+    if mask_guard is not None:
+        optimizer.set_mask_opening_guard(*mask_guard)
 
     # Issue #2596: snapshot per-net connectivity before optimize so any net
     # whose pad-to-pad connectivity regresses can be reverted.
@@ -5652,7 +5655,21 @@ def _write_netclasses_to_project(
       classes, colours and diff-pair keys survive verbatim.  Note that
       ``keep_stricter=True`` is one-directional: if a user lowers a floor key
       on a kct-declared class below the router's value, a later route raises
-      it back to the router's floor;
+      it back to the router's floor.  One exception (Issue #10555):
+      ``track_width`` is written exactly, so it may go down, for a class
+      that the project's *pre-mutation* state proves kct created and nobody
+      edited since -- its :func:`~kicad_tools.manufacturers.project_generator.stamp_kct_project`
+      digest validates, and ``meta.kct_router_netclasses`` records its name
+      -- provided the router's aggregated width for it is positive.  The
+      DRC-constraint sidecar writer runs first and creates such a class as a
+      clone of ``Default`` (Issue #6390), so a ``Default`` wider than the
+      routed width would otherwise leave the project declaring a width the
+      copper does not use.  The exception covers width alone: clearance, via
+      diameter and via drill keep the floor merge.  A class that fails
+      either check -- a missing or stale stamp (a hand edit anywhere,
+      including a width raised in KiCad, is what stale means), or a
+      same-named class kct never recorded -- keeps the floor merge for
+      width too, so an authored width is never lowered here;
     * a net a hand-authored pattern or explicit assignment already
       classifies keeps its authored class (the #6390 rule).  Provenance under
       ``meta.kct_netclass_assignments`` records ``{net: class_name}`` so a
@@ -5876,6 +5893,15 @@ def _write_netclasses_to_project(
                     else (None if class_name in existing_class_names else default_via_drill)
                 )
                 clearance_val = max(agg["clearance"], min_clearance_floor)
+                if (
+                    restamp
+                    and class_name in r_classes
+                    and class_name in existing_class_names
+                    and agg["width"] > 0
+                ):
+                    add_netclass_definition(
+                        project, class_name, track_width=agg["width"], keep_stricter=False
+                    )
                 add_netclass_definition(
                     project,
                     class_name,
@@ -8487,7 +8513,7 @@ def _canonicalize_routed_uuids(output_path: Path, *, args=None) -> None:
 
 
 def _fill_zones_after_route(
-    output_path: Path, quiet: bool = False, *, router=None, args=None
+    output_path: Path, quiet: bool = False, *, router=None, args=None, require_saved: bool = False
 ) -> None:
     """Fill copper-pour zones after routing completes.
 
@@ -8515,6 +8541,7 @@ def _fill_zones_after_route(
     Args:
         output_path: Path to the routed PCB file (modified in place).
         quiet: Suppress informational output.
+        require_saved: Also verify selective placement fills against a full native refill.
     """
     record_stage("native-zone-fill")
     if args is not None:
@@ -8556,6 +8583,16 @@ def _fill_zones_after_route(
 
                 write_native_zone_clearance_rules(output_path)
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
+            if require_saved:
+                # Selective filling intentionally leaves protected pours fixed.
+                # A new through via must still clear them in the saved board.
+                from kicad_tools.cli.runner import find_kicad_cli
+                from kicad_tools.export.manufacturing import _saved_zone_fill_matches_native_refill
+
+                cli = find_kicad_cli()
+                args._zone_fill_verified = (
+                    cli is not None and _saved_zone_fill_matches_native_refill(output_path, cli)
+                )
             if not quiet:
                 print("  Zone fill: complete; placement-excluded copper preserved")
         except Exception as exc:
@@ -8692,7 +8729,7 @@ def _fill_zones_after_route(
     # Validate net format after zone fill -- kicad-cli may corrupt nets.
     report = validate_net_format(output_path)
     if args is not None:
-        args._zone_fill_verified = report.valid
+        args._zone_fill_verified = report.valid and result.refill_saved
     if not report.valid:
         logger.warning(
             "Net format corruption detected after zone fill: "
@@ -11317,17 +11354,21 @@ def _publish_preserved_departure(pcb_path, output_path, route_sexp, args, router
         )
         trial = copy(args)
         trial._preserved_departure_trial = True
-        _run_post_save_stitching(trial, staged, quiet=quiet)
         _fill_zones_after_route(staged, quiet=quiet, router=router, args=trial)
         _complete_pour_nets_with_oracle(staged, args=trial, quiet=quiet, router=router)
-        if not (
-            getattr(trial, "_zone_fill_verified", False)
-            and getattr(trial, "_pour_connectivity_verified", False)
-        ):
-            # Keep the input's saved fills. The declined signal and its
-            # temporary cut through the original power pour stay together.
-            relocate({staged: None})
-            _write_routed_pcb(source, output_path, "", guard_copper_loss=True)
+        verified = False
+        try:
+            _run_post_save_stitching(trial, staged, router=router, pour_pass_ran=True, quiet=quiet)
+            verified = getattr(trial, "_zone_fill_verified", False) and getattr(
+                trial, "_pour_connectivity_verified", False
+            )
+        finally:
+            if not verified:
+                # Retain the source even if the post-stitch refill raised
+                # before this speculative departure could be published.
+                relocate({staged: None})
+                _write_routed_pcb(source, output_path, "", guard_copper_loss=True)
+        if not verified:
             return False
 
         moves: list[tuple[Path, Path | None]] = [
@@ -11380,6 +11421,7 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
 
     args._stranded_pour_links = 0
     args._pour_connectivity_verified = False
+    args._oracle_changed_copper = False
     args._exhausted_mixed_plane_pads = frozenset()
     # Issue #6273: True when the check was cut by --timeout before KiCad
     # reported anything -- the count above is then unknown, not 0.
@@ -11420,11 +11462,17 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
         def refill(path: Path) -> object:
             return run_fill_zones(path, kicad_cli=find_kicad_cli())
 
+        from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+        mask_request = default_request_for_manufacturer(getattr(args, "manufacturer", None))
         closer = PourLinkCloser(
             via_size=float(getattr(args, "via_diameter", 0.6)),
             via_drill=float(getattr(args, "via_drill", 0.3)),
             clearance=float(getattr(args, "clearance", 0.2)),
             trace_width=float(getattr(args, "trace_width", 0.2)),
+            mask_entry_clearance=mask_request.policy.clearance_mm
+            if mask_request and mask_request.policy
+            else 0.0,
             refill=refill,
             # Issue #6374: new pour copper keeps each net's class clearance.
             net_class_map=_pour_closer_net_class_map(router, args),
@@ -11440,6 +11488,12 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             same_net_pad_gap_mm=float(
                 getattr(getattr(router, "rules", None), "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
             ),
+            # Issue #10627: full class-width weld stubs keep the fab-view
+            # same-net trace slit band too.
+            same_net_trace_gap_mm=float(
+                getattr(getattr(router, "rules", None), "same_net_trace_gap_band_edge_mm", 0.0)
+                or 0.0
+            ),
             # Issue #8027: oracle copper keeps the --voltage-map pairwise gaps.
             pairwise_table=(
                 getattr(getattr(router, "rules", None), "pairwise_clearance", None)
@@ -11449,6 +11503,8 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
         )
         if not quiet:
             print("\n--- KiCad Oracle Completion (pour nets) ---")
+        # If the closer raises mid-edit, its incoming fill is no longer proven.
+        args._oracle_changed_copper = True
         result = run_oracle_completion(
             output_path,
             oracle=_make_pour_oracle(args),
@@ -11467,6 +11523,7 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             # regression merely for being below the project's via floors.
             declared_via=(closer.via_size, closer.via_drill),
         )
+        args._oracle_changed_copper = any(round_.kept for round_ in result.rounds)
     except Exception as exc:  # advisory machinery must never fail a route
         logger.warning("Oracle completion skipped: %s", exc)
         return 0
@@ -12399,6 +12456,68 @@ def _sub_floor_net_class_widths(net_class_map, floor: float) -> list[tuple[str, 
     return sorted(worst.items(), key=lambda kv: (kv[1], kv[0]))
 
 
+def _uniform_board_mask_margin(pcb_path) -> float | None:
+    """The board's solder-mask expansion when no pad overrides it, else ``None``.
+
+    The trace optimizer's mask-opening guard (Issue #9424) models each pad's
+    opening as its copper grown by one margin.  A per-pad or per-footprint
+    ``solder_mask_margin``, or a custom rule file that touches the mask, makes
+    that false. Nonzero minimum web widths can merge adjacent openings, so
+    board or project settings that require this also disable the guard. A board
+    that declares no ``pad_to_mask_clearance`` has no expansion (0.0).
+    """
+    import json
+
+    from kicad_tools.sexp import parse_string
+    from kicad_tools.validate.mask_geometry import board_mask_margin_from_sexp
+
+    try:
+        board = parse_string(Path(pcb_path).read_text(errors="replace"))
+        setup = board.find_child("setup")
+        minimum = setup.find_child("solder_mask_min_width") if setup is not None else None
+        if minimum is not None and minimum.get_float(0) != 0:
+            return None
+        project = Path(pcb_path).with_suffix(".kicad_pro")
+        if project.is_file():
+            settings = json.loads(project.read_text()).get("board", {}).get("design_settings", {})
+            rules_settings = settings.get("rules", {})
+            if any(
+                rules_settings.get(key, 0)
+                for key in ("solder_mask_min_width", "solder_mask_clearance")
+            ):
+                return None
+        if board.find("solder_mask_margin") is not None:
+            return None
+        rules = Path(pcb_path).with_suffix(".kicad_dru")
+        if rules.is_file() and "solder_mask" in rules.read_text(errors="replace"):
+            return None
+        margin, _ = board_mask_margin_from_sexp(board)
+        return margin
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _resolve_route_mask_guard(manufacturer, pcb_path) -> tuple[float, float] | None:
+    """``(clearance, mask_margin)`` for the trace optimizer's mask-opening guard.
+
+    Issue #9424.  The clearance is the cited mask policy ``kct check --mfr``
+    judges ``mask_to_copper`` with; the margin comes from
+    :func:`_uniform_board_mask_margin`.  ``None`` -- no manufacturer, no cited
+    policy, or a board without one mask margin -- keeps the guard off.
+    """
+    if not manufacturer:
+        return None
+    from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+    request = default_request_for_manufacturer(str(manufacturer))
+    if request is None or request.policy is None:
+        return None
+    margin = _uniform_board_mask_margin(pcb_path)
+    if margin is None:
+        return None
+    return request.policy.clearance_mm, margin
+
+
 def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False) -> int:
     """Resolve the trace-width default/floor from the manufacturer profile.
 
@@ -12491,6 +12610,8 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
         if manufacturer
         else None
     )
+
+    args._mfr_mask_guard = _resolve_route_mask_guard(manufacturer, pcb_path)
 
     explicit_width = getattr(args, "trace_width", None)
     with contextlib.suppress(AttributeError):
@@ -15295,19 +15416,23 @@ def route_with_layer_escalation(
         quiet=quiet,
     )
 
-    # Issue #7377: --stitch-power-planes runs on every tail, after the save
-    # and before the zone fill (same position as the single-attempt path).
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
     # Fill copper-pour zones now that traces exist (issue #2516).
     # Must run BEFORE DRC so the DRC sees filled zones rather than bare
     # zone outlines and does not flag zone-to-trace clearance against
     # unfilled polygons.
-    if final_result.nets_routed > 0:
+    run_pour_pass = final_result.nets_routed > 0
+    if run_pour_pass:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+    _run_post_save_stitching(
+        args,
+        output_path,
+        router=final_result.router,
+        pour_pass_ran=run_pour_pass,
+        quiet=quiet,
+    )
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
@@ -16354,16 +16479,20 @@ def route_with_rule_relaxation(
         quiet=quiet,
     )
 
-    # Issue #7377: --stitch-power-planes runs on every tail, after the save
-    # and before the zone fill (same position as the single-attempt path).
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
     # Fill copper-pour zones now that traces exist (issue #2516).
-    if final_result.nets_routed > 0:
+    run_pour_pass = final_result.nets_routed > 0
+    if run_pour_pass:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+    _run_post_save_stitching(
+        args,
+        output_path,
+        router=final_result.router,
+        pour_pass_ran=run_pour_pass,
+        quiet=quiet,
+    )
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
@@ -18971,16 +19100,20 @@ def route_with_combined_escalation(
         quiet=quiet,
     )
 
-    # Issue #7377: --stitch-power-planes runs on every tail, after the save
-    # and before the zone fill (same position as the single-attempt path).
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
     # Fill copper-pour zones now that traces exist (issue #2516).
-    if final_result.nets_routed > 0:
+    run_pour_pass = final_result.nets_routed > 0
+    if run_pour_pass:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+    _run_post_save_stitching(
+        args,
+        output_path,
+        router=final_result.router,
+        pour_pass_ran=run_pour_pass,
+        quiet=quiet,
+    )
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
@@ -19606,19 +19739,28 @@ def _warn_bus_flags_ignored_early(args, router, multi_res_plan=None) -> None:
         _warn_bus_flags_ignored(args, reason)
 
 
-def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
+class _PostStitchRefillError(RuntimeError):
+    """KiCad did not save a verified fill around the proposed stitch copper."""
+
+
+def _run_post_save_stitching(
+    args, output_path: Path, *, router, pour_pass_ran: bool, quiet: bool = False
+):
     """Run ``--stitch-power-planes`` on the saved board; shared by every tail (#7377).
 
-    Must run after the routed board is saved and verified, and before the
-    copper-pour zone fill so the fill and DRC see the stitching vias.  Returns
-    the ``run_stitch`` result, or ``None`` when the flag is off, ``--dry-run``
-    is set, or the board has no plane nets.
+    The stitcher checks pads against the pour left by signal routing and oracle
+    completion. A plane-only board skips that ordinary pass, so run it here
+    before deciding which pads still need copper. If stitching edits the board,
+    repeat the fill and connectivity check on the geometry that will ship.
     """
     if not getattr(args, "stitch_power_planes", False) or args.dry_run:
         return None
 
     from kicad_tools.cli.stitch_cmd import find_all_plane_nets, run_stitch
     from kicad_tools.core.sexp_file import load_pcb as load_stitch_pcb
+    from kicad_tools.sidecars import PROJECT_SIDECAR_SUFFIXES, copy_project_sidecars
+
+    from .route_receipt import relocate
 
     if not quiet:
         print("\n--- Stitching Power Planes ---")
@@ -19630,18 +19772,60 @@ def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
             print("  No power plane nets found (no zones with assigned nets)")
         return None
 
+    if not pour_pass_ran:
+        _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
+        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
+
     net_names = list(plane_nets.keys())
     if not quiet:
         print(f"  Found {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
 
-    stitch_result = run_stitch(
-        pcb_path=output_path,
-        net_names=net_names,
-        via_size=args.via_diameter,  # Use same via size as routing
-        drill=args.via_drill,
-        clearance=args.clearance,
-        dry_run=False,
-    )
+    # Keep the published board and project together while the new via or
+    # trace still crosses the previous fill. Only promote the refilled copy.
+    with tempfile.TemporaryDirectory(prefix=".kct-stitch-", dir=output_path.parent) as directory:
+        staged = Path(directory) / output_path.name
+        shutil.copy2(output_path, staged)
+        copy_project_sidecars(output_path, staged)
+        refresh_fill = not getattr(args, "_zone_fill_verified", False) or getattr(
+            args, "_oracle_changed_copper", False
+        )
+        if refresh_fill:
+            _fill_zones_after_route(
+                staged, quiet=quiet, router=router, args=args, require_saved=True
+            )
+            if not args._zone_fill_verified:
+                relocate({staged: None})
+                raise _PostStitchRefillError(
+                    "Could not verify a saved zone refill before stitching."
+                )
+        stitch_result = run_stitch(
+            pcb_path=staged,
+            net_names=net_names,
+            via_size=args.via_diameter,
+            drill=args.via_drill,
+            clearance=args.clearance,
+            dry_run=False,
+            fill_verified=True,
+        )
+        added_copper = bool(stitch_result.vias_added or stitch_result.traces_added)
+        if added_copper:
+            _fill_zones_after_route(
+                staged, quiet=quiet, router=router, args=args, require_saved=True
+            )
+            if not args._zone_fill_verified:
+                relocate({staged: None})
+                raise _PostStitchRefillError(
+                    "Post-stitch zone refill could not be verified. Discarded the proposed stitch."
+                )
+        if refresh_fill or added_copper:
+            moves: list[tuple[Path, Path | None]] = [
+                (output_path.with_suffix(ext), staged.with_suffix(ext))
+                for ext in PROJECT_SIDECAR_SUFFIXES
+                if staged.with_suffix(ext).is_file()
+            ]
+            _publish_transaction([*moves, (output_path, staged)])
+            relocate({staged: output_path})
+            _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
 
     if not quiet:
         if stitch_result.vias_added:
@@ -25541,6 +25725,9 @@ def _main_impl(argv: list[str] | None = None, *, plane_pads: frozenset[str] = fr
                         # completion pass a no-op.
                         result = _chain_budget_coarser_pass(args, argv, result)
                         result = _chain_complete_pass(args, argv, result)
+                    except _PostStitchRefillError as exc:
+                        print(f"Error: {exc}", file=sys.stderr)
+                        result = EXIT_UNVERIFIED
                     except BaseException:
                         if gate is not None:
                             # Never leave an unjudged board at --output.
@@ -28541,12 +28728,15 @@ def _run_main_impl(args, parser, argv) -> int:
     output_verification_regressed = output_verification.regressed
 
     if departure is None:
-        _run_post_save_stitching(args, output_path, quiet=quiet)
         # Fill before DRC so KiCad sees poured copper (issue #2516). A
         # provisional departure already ran both steps on its staged board.
-        if not args.dry_run and stats["nets_routed"] > 0:
+        run_pour_pass = not args.dry_run and stats["nets_routed"] > 0
+        if run_pour_pass:
             _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
             _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
+        _run_post_save_stitching(
+            args, output_path, router=router, pour_pass_ran=run_pour_pass, quiet=quiet
+        )
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.

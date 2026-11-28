@@ -25,15 +25,15 @@ uv run kct build-native --check
 
 If the local KiCad is not the pinned release, `kct readiness` refuses before any gate; run it with `KCT_KICAD_DOCKER=1` to use the pinned image.
 
+If the host has no usable offline parts catalog, `kct readiness` refuses with exit 2 after Gate 4 instead of publishing a stock check that describes the host rather than the board (issue #10646; the same refusal covers `--verify` of a package recorded that way). Run `kct parts sync-catalog` first — the catalog lands under `$XDG_CACHE_HOME` — and re-run; the catalog is not auto-downloaded.
+
 `kicad-cli` is required by both the mandatory DRC cross-gate (Gate 2, delegated) and the drawing-export gates (Gates 5–6), and `jq` by the pre-gates and Gate 4b. The venv does not provide `kicad-cli`, and a stock macOS install is not on `PATH`, so resolve it the way `kct` does — with the `find_kicad_cli()` one-liner from `{{skill:manufacturing-readiness}}` Gate 2 (it checks `PATH`, then the macOS app bundle, Homebrew and the Linux and Windows default install paths; `kct doctor` prints the path it found). Only an empty result means it is missing; then `tapeout` **refuses** (see Refusal conditions) — there is no partial-package fallback.
 
 ## Model selection
 
-`suggestedModel: sonnet`. Like `{{skill:manufacturing-readiness}}`, this is deterministic checklist execution — run gates in order, read exit codes and reports, and refuse on any failure or unresolved BOM line. It does not require frontier judgment.
+Run the gates in order and stop on a failed gate or an unresolved BOM line. Codex CLI and opencode use the session’s selected model. When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a model for this task. An explicit dispatch choice or role configuration takes precedence.
 
-One open question worth flagging rather than silently resolving: the **BOM-resolution gate** (Gate 4) can involve a judgment call when the part matcher returns an *ambiguous* candidate (multiple plausible LCSC parts) rather than a clean hit or a clean miss. This skill treats ambiguity conservatively — an ambiguous line is an **unresolved** line (human selection required), never an auto-accepted guess — so `sonnet` remains appropriate. If a future consumer needs the skill to *adjudicate* ambiguous matches, that is a reason to revisit the model, and it should be raised as a follow-up rather than papered over here.
-
-Model resolves through the harness's normal precedence chain (explicit dispatch param → harness role config → this doc's frontmatter `suggestedModel` → session default).
+At Gate 4, an ambiguous match means the matcher found several plausible LCSC parts. Leave that BOM line **unresolved** until a person selects the part. Automated selection would require a separate change to Gate 4.
 
 ## Arguments
 

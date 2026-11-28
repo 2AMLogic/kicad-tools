@@ -20,6 +20,7 @@ from kicad_tools.router.link_router import (  # noqa: E402
     LinkRoute,
     LinkRouteRules,
     _build_model,
+    append_link_route,
     route_clears_floors,
     route_link,
     terminal_for_pad,
@@ -144,6 +145,39 @@ def test_routed_geometry_clears_hole_and_pad_copper(tmp_path, size):
     assert _min_gap_to_hole(route, 13, 10, 0.3, half_w) >= rules.hole_clearance - 1e-3
     # The written route re-checks clean against every obstacle (incl. the hole).
     assert route_clears_floors(route, model, rules)
+
+
+@pytest.mark.parametrize("with_hole", [False, True], ids=["no-hole", "mounting-hole"])
+def test_existing_positional_layer_width_is_written_to_copper(tmp_path, with_hole):
+    board = _write(tmp_path, SIG + (_npth(113, 111.8, 0.6) if with_hole else ""))
+    # Existing callers can supply both width_by_layer and pad_entry_gap positionally.
+    rules = LinkRouteRules(
+        0.2,
+        0.2,
+        0.6,
+        0.3,
+        0.5,
+        0.25,
+        0.5,
+        0.05,
+        4.0,
+        2.0,
+        4.0,
+        1_500_000,
+        0.0,
+        None,
+        (),
+        frozenset(),
+        None,
+        None,
+        {"F.Cu": 0.45},
+        0.1,
+    )
+    assert rules.pad_entry_gap == 0.1
+    route, _, _ = _route(board, rules)
+    assert route is not None
+    append_link_route(board, route, PCB.load(str(board)).board_origin)
+    assert {segment.width for segment in PCB.load(str(board)).segments} == {0.45}
 
 
 def test_hole_clearance_is_a_rule_knob(tmp_path):

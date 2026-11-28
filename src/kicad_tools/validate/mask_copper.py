@@ -66,11 +66,19 @@ segment with at least one authored end strictly inside the pad gets that
 allowance (issue #9261) -- or, when its copper already covers the whole
 perimeter band, the allowance is that band itself: a bar wider than the pad
 leaves the pad's own perimeter under mask, not a second trace, so round and
-square pads agree (issue #9750). So a track that straddles, runs along or
-passes through the pad, a shallower entry, an arc, a via or pour touching the
-pad (ring copper beside the opening), a positive expansion ring wider than
-``u``, solder-mask-defined, padstack and chamfered pads, pads with no net,
-and any different-net copper all keep their measured verdict.
+square pads agree (issue #9750). Where the author split a straight entry
+makes no difference (issue #10645): an outer piece divided out exactly on
+the pad edge has no end inside, so it is read through its authored
+continuation -- the one other same-net straight segment at the joint, same
+width and layer, collinear, unbranched at every joint followed -- and gets
+the same allowance when that chain ends inside the pad, its band still
+measured on its own copper. An edge-ending piece with no continuation, a
+bend, a change of width or layer and a branch at the joint are not that
+entry. So a track that straddles, runs along or passes through the pad, a
+shallower entry, an arc, a via or pour touching the pad (ring copper beside
+the opening), a positive expansion ring wider than ``u``, solder-mask-defined,
+padstack and chamfered pads, pads with no net, and any different-net copper
+all keep their measured verdict.
 ``exposed_beyond_owner_mm2`` and ``beside_owner_excess_mm2`` record the two
 measured quantities, and ``within_own_pad_failed_condition`` names the
 ``_within_own_pad`` docstring condition (1-5) that kept a same-net,
@@ -411,6 +419,14 @@ class MaskCopperAssessment:
         """
         if self.coverage == "complete":
             return None
+        if any(
+            "[Errno 28]" in reason or "no space left on device" in reason.lower()
+            for reason in self.reasons
+        ):
+            return (
+                "free space on the temporary filesystem or set TMPDIR to a writable "
+                "directory with enough space, then re-run the mask assessment"
+            )
         return (
             "run the mask assessment on a qualified KiCad build "
             "(native interpreter): set KCT_KICAD_DOCKER=1 to use the pinned "
@@ -603,6 +619,150 @@ _ENTRY_CROSSING_FACTOR = 1.45
 _AREA_EPSILON_MM2 = 1e-9
 
 
+#: Declared (authored) widths agree at board-coordinate precision: KiCad stores
+#: coordinates and widths in nanometres, so 1e-6 mm. The construction budget is
+#: a polygon-approximation allowance, never a licence to treat 0.20 mm and
+#: 0.21 mm tracks as one width.
+_AUTHORED_WIDTH_TOLERANCE_MM = 1e-6
+
+
+def _tracks_at(conductors, index, net, point, tolerance):
+    """Same-net tracks and vias whose copper reaches *point* on this layer.
+
+    Every segment, arc or via of the net whose copper lies within *tolerance*
+    of the joint counts -- one ending there, one starting there, or one
+    passing through it -- so a branch is seen however it was authored or
+    split. Each entry is ``(identity, item, copper)``.
+    """
+    from shapely.geometry import LineString, Point, box
+
+    x, y = point
+    probe = Point(point)
+    found = []
+    for position in index.query(box(x - tolerance, y - tolerance, x + tolerance, y + tolerance)):
+        identity, item, copper = conductors[position]
+        if item.get("net") != net or item["kind"] not in ("segment", "arc", "via"):
+            continue
+        ends = item.get("endpoints_mm")
+        if item["kind"] == "segment" and ends:
+            # A straight track's end cap is not a branch: measure its authored
+            # centreline, so a neighbour ending a cap-radius away is not "at" the joint.
+            reaches = LineString([tuple(e) for e in ends]).distance(probe) <= tolerance
+        else:
+            reaches = copper.distance(probe) <= tolerance
+        if reaches:
+            found.append((identity, item, copper))
+    return found
+
+
+def _collinear_step(current, joint, outer, heading, norm, width, joined, tol):
+    """``(identity, item, copper, far end)`` of the unbranched collinear piece at *joint*.
+
+    Only when *current* and one other straight, same-net segment are the only
+    tracks or vias at the joint, the other has an authored end there, is of
+    the same declared width, lies on the line through *outer* along *heading*
+    within *tol* and runs forward of the joint. ``None`` otherwise.
+    """
+    if len(joined) != 2 or current not in (entry[0] for entry in joined):
+        return None
+    following_identity, following, copper = joined[0] if joined[0][0] != current else joined[1]
+    if following["kind"] != "segment" or not following.get("endpoints_mm"):
+        return None
+    ends = following["endpoints_mm"]
+    if not any(math.hypot(e[0] - joint[0], e[1] - joint[1]) <= tol for e in ends):
+        return None
+    far = max(ends, key=lambda e: (e[0] - joint[0]) ** 2 + (e[1] - joint[1]) ** 2)
+    off_line = abs(heading[0] * (far[1] - outer[1]) - heading[1] * (far[0] - outer[0]))
+    if (
+        abs((following.get("width_mm") or 0.0) - width) > _AUTHORED_WIDTH_TOLERANCE_MM
+        or off_line > tol * norm
+        or (far[0] - joint[0]) * heading[0] + (far[1] - joint[1]) * heading[1] <= 0
+    ):
+        return None
+    return following_identity, following, copper, far
+
+
+def _continuation_end(identity, item, core, conductors, index, tolerance):
+    """``(outer end, inside end, chain copper)`` when the authored continuation reaches the pad.
+
+    The walk of issue #10645. From each end of the straight segment in turn,
+    the joint is followed to the other same-net straight segment ending there
+    -- only when the two are the only tracks, arcs or vias at that joint
+    (counting any that pass through it), so a branch stops the walk -- which
+    must be of the same declared width, lie on the segment's own line within
+    *tolerance* and run forward of the joint, never back. After entering
+    ``core`` (the pad shrunk by the construction budget), the run must stay
+    inside and end at a joint touched only by its final piece. Each step moves
+    forward along the line and visits a new segment. The chain copper is the
+    union of all visited pieces. Return ``None`` without a proven inside end.
+    """
+    from shapely.geometry import Point
+    from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+    ends = item["endpoints_mm"]
+    width = item["width_mm"]
+    net = item["net"]
+    for joint_index, first in enumerate(ends):
+        outer = ends[1 - joint_index]
+        heading = (first[0] - outer[0], first[1] - outer[1])
+        norm = math.hypot(*heading)
+        if not norm:
+            return None
+        joint, current, visited = first, identity, {identity}
+        pieces = [next(c for i, _, c in conductors if i == identity)]
+        inside = False
+        while True:
+            joined = _tracks_at(conductors, index, net, joint, tolerance)
+            if inside and len(joined) == 1 and joined[0][0] == current:
+                return (outer, joint, unary_union(pieces))
+            step = _collinear_step(current, joint, outer, heading, norm, width, joined, tolerance)
+            if step is None or step[0] in visited:
+                break
+            following_identity, _, copper, far = step
+            far_inside = core.contains(Point(far))
+            if inside and not far_inside:
+                break
+            pieces.append(copper)
+            visited.add(following_identity)
+            current, joint, inside = following_identity, far, far_inside
+    return None
+
+
+def _entry_item(identity, item, owner_copper, conductors, index, uncertainty, entry_check=None):
+    """The conductor as the within-own-pad class reads its authored ends (issue #10645).
+
+    A straight segment with an authored end strictly inside the pad is
+    returned as it is. One with none -- the outer piece of a straight entry
+    the author split exactly on the pad edge -- is read through its *authored
+    continuation* (``_continuation_end``): when that chain reaches an authored
+    end strictly inside the pad, the result is the segment with its ends
+    replaced by ``(outer end, inside end)``, so the one-crossing allowance
+    applies as it would to the unsplit entry while ``_within_own_pad`` still
+    measures the piece's own copper. The allowance is granted only when the
+    equivalent continuous entry -- the chain's joined copper, read through
+    ``entry_check(item, chain_copper)`` -- earns it itself, so a split never
+    clears what the unsplit track would keep. No chain, and the segment is
+    returned unchanged and keeps its measured verdict; so is every other
+    conductor kind. The joint and collinearity tolerance is the construction
+    budget ``u``: a gap or bend past it is not one straight entry.
+    """
+    from shapely.geometry import Point
+
+    if item["kind"] != "segment" or not item.get("width_mm") or not item.get("endpoints_mm"):
+        return item
+    core = owner_copper.buffer(-uncertainty)
+    if any(core.contains(Point(p)) for p in item["endpoints_mm"]):
+        return item
+    reached = _continuation_end(identity, item, core, conductors, index, uncertainty)
+    if reached is None:
+        return item
+    outer, inside, chain_copper = reached
+    merged = {**item, "endpoints_mm": (outer, inside)}
+    if entry_check is not None and not entry_check(merged, chain_copper):
+        return item
+    return merged
+
+
 def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearance, uncertainty):
     """``(qualifies, beside_excess_mm2, failed_condition)`` for the within-own-pad class.
 
@@ -635,6 +795,11 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
        numerically zero. So a track that straddles, runs along or passes
        through the pad, an entry shallower than about 45 degrees, a via or
        pour with ring copper beside the pad, and arcs all keep their verdict.
+       ``endpoints_mm`` are the entry's authored ends as the caller reads
+       them: the segment's own, or -- for the outer piece of an entry split on
+       the pad edge -- its outer end and the inside end its unbranched
+       collinear continuation reaches (``_entry_item``, issue #10645). ``B`` is
+       always the piece's own copper, whichever ends are passed.
     5. For a via, its authored drill lies wholly outside the opening.
 
     ``failed_condition`` is the docstring number (1-5) of the first condition
@@ -897,7 +1062,7 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[ReinforceRun]:
     really stands on, within the strip tolerance (Issue #9315).
     """
     from shapely.geometry import Point
-    from shapely.ops import unary_union  # type: ignore[import-untyped]
+    from shapely.ops import unary_union
 
     from .rules.reinforcement_incomplete import MASK_TOLERANCE_MM
 
@@ -1766,7 +1931,26 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                         copper,
                         owner_copper,
                         owner_items[0],
-                        item,
+                        _entry_item(
+                            identity,
+                            item,
+                            owner_copper,
+                            conductors,
+                            index,
+                            uncertainty,
+                            lambda merged, chain, _o=opening, _own=owner_copper, _it=owner_items[0], _m=margin: (
+                                _within_own_pad(
+                                    _o,
+                                    chain,
+                                    _own,
+                                    _it,
+                                    merged,
+                                    _m,
+                                    policy.clearance_mm,
+                                    uncertainty,
+                                )[0]
+                            ),
+                        ),
                         margin,
                         policy.clearance_mm,
                         uncertainty,

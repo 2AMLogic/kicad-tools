@@ -13,15 +13,19 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.cli.stitch_cmd import run_stitch
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.sidecars import copy_project_sidecars
 
 FIXTURE = Path(__file__).parent / "fixtures" / "stitch-5388" / "continuous.kicad_pcb"
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -84,15 +88,20 @@ def make_board(
     return board
 
 
+def run_phase(name: str, command: list[str], **kwargs) -> None:
+    started = time.monotonic()
+    print(f"Starting {name} ({shlex.join(command)})", flush=True)
+    subprocess.run(command, capture_output=True, text=True, check=True, **kwargs)
+    print(f"Completed {name} in {time.monotonic() - started:.3f} s", flush=True)
+
+
 def refill(board: Path, cli: str) -> dict:
     report = board.parent / "native.json"
-    subprocess.run(
+    run_phase(
+        f"native refill of {board.name}",
         [cli, "pcb", "drc", str(board), "--refill-zones", "--save-board", "--format", "json"]
         + ["-o", str(report)],
-        capture_output=True,
-        text=True,
         timeout=180,
-        check=True,
     )
     return json.loads(report.read_text())
 
@@ -206,37 +215,236 @@ def test_stale_fill_with_pad_connection_disabled_earns_no_skip(tmp_path, native_
     assert stitched_pads(result) == {"C1.1"}
 
 
-def route_and_refill(board: Path, native_cli: str) -> tuple[int, int]:
+def route_args(board: Path, *route_options: str, stitch_planes: bool = True) -> list[str]:
+    return (
+        [str(board)]
+        + (["--stitch-power-planes"] if stitch_planes else [])
+        + list(route_options)
+        + ["--layers", "4", "--via-diameter", "0.6"]
+        + [
+            "--via-drill",
+            "0.3",
+            "--clearance",
+            "0.2",
+            "-o",
+            str(board.with_name("routed.kicad_pcb")),
+        ]
+    )
+
+
+def route_and_refill(
+    board: Path, native_cli: str, *route_options: str, stitch_planes: bool = True
+) -> PCB:
     routed = board.with_name("routed.kicad_pcb")
-    subprocess.run(
-        [sys.executable, "-m", "kicad_tools.cli", "route", str(board)]
-        + ["--layers", "4", "--stitch-power-planes", "--via-diameter", "0.6"]
-        + ["--via-drill", "0.3", "--clearance", "0.2", "-o", str(routed)],
-        capture_output=True,
-        text=True,
+    original = board.read_bytes()
+    run_phase(
+        "power-plane routing",
+        [sys.executable, "-m", "kicad_tools.cli", "route"]
+        + route_args(board, *route_options, stitch_planes=stitch_planes),
         timeout=240,
         cwd=board.parent,
         env={**os.environ, "PYTHONPATH": str(SRC)},
-        check=True,
     )
+    assert board.read_bytes() == original
     probe = board.with_name("after.kicad_pcb")
     shutil.copy2(routed, probe)
+    copy_project_sidecars(routed, probe)
     after = refill(probe, native_cli)
     assert after["unconnected_items"] == []
-    text = routed.read_text()
-    segments = len(re.findall(r'\(segment\b[^"]*?\(layer "[^"]+"\)\s*\(net "GNDA"\)', text, re.S))
-    vias = len(re.findall(r'\(via\b.*?\(net "GNDA"\)', text, re.S))
-    return segments, vias
+    return PCB.load(routed)
 
 
+def ground_copper(pcb: PCB) -> tuple[int, int]:
+    return (
+        sum(segment.net_name == "GNDA" for segment in pcb.segments),
+        sum(via.net_name == "GNDA" for via in pcb.vias),
+    )
+
+
+# Each case runs the public router and independently refills and checks its output.
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("prefilled", [False, True], ids=["unfilled", "prefilled"])
+@pytest.mark.parametrize("stitch_planes", [False, True], ids=["default", "stitch"])
+def test_mixed_signal_route_keeps_the_bonded_ground_copper(
+    tmp_path, native_cli, prefilled, stitch_planes
+):
+    board = make_board(tmp_path)
+    text = board.read_text().rstrip()[:-1]
+    # SIG crosses the F.Cu GNDA pour between two new one-pad footprints.
+    for i, x in enumerate((115, 125), 1):
+        text += f"""
+        (footprint "Test:OnePad" (layer "F.Cu") (at {x} 112)
+          (property "Reference" "R{i}" (at 0 -1.5) (layer "F.SilkS"))
+          (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask" "F.Paste")
+            (net "SIG")))
+        """
+    board.write_text(text + ")\n")
+    if prefilled:
+        assert len(refill(board, native_cli)["unconnected_items"]) == 1
+    assert ground_copper(PCB.load(board)) == (2, 2)
+    routed = route_and_refill(board, native_cli, stitch_planes=stitch_planes)
+    assert sum(segment.net_name == "SIG" for segment in routed.segments) == 1
+    assert ground_copper(routed) == (2, 2)
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    ("prefilled", "oracle_options", "report_only"),
+    [
+        (False, [], False),
+        (True, [], False),
+        (True, ["--oracle-rounds", "0"], False),
+        (True, [], True),
+    ],
+    ids=["unfilled", "prefilled", "disabled-oracle", "first-fill-report-only"],
+)
+def test_route_reuses_verified_fill_without_a_bond_check_refill(
+    tmp_path, native_cli, monkeypatch, prefilled, oracle_options, report_only
+):
+    """A refused stitcher bond-check refill must not cost the bonded ground copper (#10261)."""
+    from kicad_tools.cli import route_cmd, runner
+
+    board = make_board(tmp_path)
+    text = board.read_text().rstrip()[:-1]
+    for i, x in enumerate((115, 125), 1):
+        text += f"""
+        (footprint "Test:OnePad" (layer "F.Cu") (at {x} 112)
+          (property "Reference" "R{i}" (at 0 -1.5) (layer "F.SilkS"))
+          (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask" "F.Paste")
+            (net "SIG")))
+        """
+    board.write_text(text + ")\n")
+    if prefilled:
+        assert len(refill(board, native_cli)["unconnected_items"]) == 1
+    original = board.read_bytes()
+    native_refill = runner.run_refill_zones
+    bond_check_calls = []
+
+    def refuse_bond_check(path, *args, **kwargs):
+        if "kct-stitch-fill-" in str(path):
+            bond_check_calls.append(path)
+            return runner.KiCadCLIResult(success=False, stderr="refused bond-check refill")
+        return native_refill(path, *args, **kwargs)
+
+    monkeypatch.setattr(runner, "run_refill_zones", refuse_bond_check)
+    if report_only:
+        native_fill = runner.run_fill_zones
+
+        def first_fill_without_save(path, **kwargs):
+            monkeypatch.setattr(runner, "run_fill_zones", native_fill)
+            return runner.KiCadCLIResult(success=True, refill_saved=False)
+
+        monkeypatch.setattr(runner, "run_fill_zones", first_fill_without_save)
+    result = route_cmd.main(route_args(board, "--native-zone-clearance", *oracle_options))
+    assert result == 0
+    assert not bond_check_calls
+    assert board.read_bytes() == original
+    output = board.with_name("routed.kicad_pcb")
+    routed = PCB.load(output)
+    assert sum(segment.net_name == "SIG" for segment in routed.segments) == 1
+    assert ground_copper(routed) == (2, 2)
+    assert "C1.1" in bonded_pads(stitch(output, fill_verified=True))
+    assert refill(output, native_cli)["unconnected_items"] == []
+    assert ground_copper(PCB.load(output)) == (2, 2)
+
+
+# The complete public route and independent native refill share one test budget.
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize("island", [False, True], ids=["bonded", "island"])
 def test_public_route_command_and_native_refill(tmp_path, native_cli, island):
     board = make_board(tmp_path, right_edge=115 if island else 135)
     before = refill(board, native_cli)
     assert len(before["unconnected_items"]) == (1 if island else 0)
-    assert route_and_refill(board, native_cli) == ((3, 3) if island else (2, 2))
+    routed = route_and_refill(board, native_cli)
+    assert ground_copper(routed) == ((3, 3) if island else (2, 2))
+    refilled = PCB.load(board.with_name("after.kicad_pcb"))
+    assert {z.layer: z.filled_polygons for z in routed.zones} == {
+        z.layer: z.filled_polygons for z in refilled.zones
+    }
 
 
+@pytest.fixture
+def board_with_shield(tmp_path):
+    board = make_board(tmp_path, right_edge=115)
+    # A through via must clear this floating shield even when no SIG net routed.
+    shield = """
+    (zone (net "SHIELD") (layer "B.Cu") (uuid "22222222-2222-5333-8444-555555555555")
+      (hatch edge 0.5) (connect_pads yes (clearance 0.2)) (min_thickness 0.25)
+      (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5) (island_removal_mode 1))
+      (polygon (pts (xy 105 105) (xy 135 105) (xy 135 115) (xy 105 115))))
+    """
+    board.write_text(board.read_text().rstrip()[:-1] + shield + ")\n")
+    return board
+
+
+def test_zero_signal_stitch_saves_the_hole_in_a_foreign_plane(board_with_shield, native_cli):
+    from shapely.geometry import Point, Polygon
+
+    board = board_with_shield
+    before_path = board.with_name("before.kicad_pcb")
+    shutil.copyfile(board, before_path)
+    assert len(refill(before_path, native_cli)["unconnected_items"]) == 1
+    before = PCB.load(before_path)
+    assert ground_copper(before) == (2, 2)
+    # Leave the input unfilled. The disabled oracle makes the stitcher supply
+    # the bridge, and native zone rules let KiCad reproduce its exact cutout.
+    routed = route_and_refill(board, native_cli, "--oracle-rounds", "0", "--native-zone-clearance")
+    assert len(routed.vias) == 3
+    (added_position,) = {v.position for v in routed.vias} - {v.position for v in before.vias}
+    center = Point(added_position)
+
+    def shield_polygon(pcb):
+        (polygon,) = next(z for z in pcb.zones if z.net_name == "SHIELD").filled_polygons
+        return Polygon(polygon)
+
+    assert shield_polygon(before).covers(center)
+    saved = shield_polygon(routed)
+    assert saved.distance(center) >= 0.5  # 0.3 mm via radius + 0.2 mm clearance
+    assert saved.equals(shield_polygon(PCB.load(board.with_name("after.kicad_pcb"))))
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("reports_success", [False, True], ids=["refused", "report-without-save"])
+def test_route_discards_stitch_without_a_saved_refill(
+    board_with_shield, native_cli, monkeypatch, capsys, reports_success
+):
+    from kicad_tools.cli import route_cmd, runner
+
+    board = board_with_shield
+    original = board.read_bytes()
+    routed = board.with_name("routed.kicad_pcb")
+    native_fill = runner.run_fill_zones
+    fills = []
+
+    def refuse_added_copper(path, **kwargs):
+        vias = len(PCB.load(path).vias)
+        if vias == 3:
+            result = runner.KiCadCLIResult(
+                success=reports_success, stderr="refused post-stitch refill"
+            )
+        else:
+            result = native_fill(path, **kwargs)
+        fills.append((vias, result.success))
+        return result
+
+    monkeypatch.setattr(runner, "run_fill_zones", refuse_added_copper)
+    options = ["--oracle-rounds", "0", "--native-zone-clearance"]
+    if reports_success:
+        options += ["--format", "json"]
+    result = route_cmd.main(route_args(board, *options))
+    assert (2, True) in fills and fills[-1] == (3, reports_success)
+    assert result == route_cmd.EXIT_UNVERIFIED
+    assert json.loads(routed.with_suffix(".route.json").read_text())["route_exit_code"] == result
+    captured = capsys.readouterr()
+    assert "post-stitch" in captured.err.lower()
+    if reports_success:
+        document = json.loads(captured.out)
+        assert document.get("summary", document)["verdict"] == "unverified"
+    assert board.read_bytes() == original
+    assert ground_copper(PCB.load(routed)) == (2, 2)
+
+
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize("refill_first", [False, True], ids=["stale", "refilled"])
 def test_board_cutout_cannot_hide_a_required_stitch(tmp_path, native_cli, refill_first):
     board = make_board(tmp_path)
@@ -259,7 +467,8 @@ def test_board_cutout_cannot_hide_a_required_stitch(tmp_path, native_cli, refill
     if refill_first:
         shutil.copyfile(probe, board)
     original = board.read_bytes()
-    assert route_and_refill(board, native_cli) == (3, 3)
+    assert ground_copper(route_and_refill(board, native_cli, "--oracle-rounds", "0")) == (3, 3)
+    assert ground_copper(PCB.load(board.with_name("after.kicad_pcb"))) == (3, 3)
     assert board.read_bytes() == original
 
 
@@ -331,3 +540,99 @@ def test_isolated_surface_island_is_not_its_own_plane_regardless_of_zone_order(
     for ordering in (zones, zones[::-1]):
         board.write_text(head + "".join(marker + z for z in ordering) + tail)
         assert "C1.1" not in bonded_pads(stitch(board))
+
+
+def _starved_board(tmp_path: Path) -> Path:
+    """C1.1 forms one thermal spoke where the pour's left edge sits at x=110.2."""
+    board = make_board(tmp_path, connect="connect_pads")
+    text = board.read_text()
+    text = text.replace("(xy 105 105)", "(xy 110.2 105)").replace("(xy 105 115)", "(xy 110.2 115)")
+    board.write_text(text)
+    return board
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("refuse_refill", [False, True], ids=["recovered", "refused"])
+def test_fill_after_thermal_edit_is_saved_only_if_its_refill_succeeded(
+    tmp_path, native_cli, monkeypatch, refuse_refill
+):
+    """A refill refused right after remediation edits a pad leaves stale copper (#10261)."""
+    from kicad_tools.cli import runner
+    from kicad_tools.zones.fill_clearance import starved_thermal_pad_uuids
+
+    board = _starved_board(tmp_path)
+    native_report = runner._kicad_drc_report
+    calls = []  # (refill, edit_pending, refused)
+    state = {"edit_pending": False}
+
+    def drc(path, cli, *, refill, require_save=False):
+        refused = refill and state["edit_pending"] and refuse_refill
+        report = (
+            None if refused else native_report(path, cli, refill=refill, require_save=require_save)
+        )
+        calls.append((refill, state["edit_pending"], refused))
+        if refill:
+            state["edit_pending"] = state["edit_pending"] and refused
+        elif report is not None and starved_thermal_pad_uuids(report):
+            state["edit_pending"] = True  # remediation writes the pad setting next
+        return report
+
+    monkeypatch.setattr(runner, "_kicad_drc_report", drc)
+    result = runner.run_fill_zones(board, kicad_cli=Path(native_cli))
+    assert result.success
+    assert any(pending for _, pending, _ in calls), "the pad edit never happened"
+    assert any(refused for *_, refused in calls) == refuse_refill
+    assert result.refill_saved is not refuse_refill
+    if not refuse_refill:
+        saved = {z.layer: z.filled_polygons for z in PCB.load(board).zones}
+        probe = board.with_name("probe.kicad_pcb")
+        shutil.copy2(board, probe)
+        copy_project_sidecars(board, probe)
+        refill(probe, native_cli)
+        assert saved == {z.layer: z.filled_polygons for z in PCB.load(probe).zones}
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    ("allow_retry", "save_status"),
+    [(True, 0), (False, 0), (False, 4)],
+    ids=["retry-saves", "report-only", "save-error"],
+)
+def test_route_requires_saved_copper_after_thermal_report(
+    tmp_path, native_cli, monkeypatch, allow_retry, save_status
+):
+    from kicad_tools.cli import route_cmd
+
+    board = _starved_board(tmp_path)
+    original = board.read_bytes()
+    run = subprocess.run
+    refused = []
+
+    def report_without_save(argv, *args, **kwargs):
+        if "--save-board" in argv and "--output" in argv:
+            report = Path(argv[argv.index("--output") + 1])
+            first_thermal = not refused and report.name.startswith("thermal_drc_")
+            if first_thermal or (refused and not allow_retry):
+                # Run native DRC and generate its complete report, leaving the board untouched.
+                proc = run([arg for arg in argv if arg != "--save-board"], *args, **kwargs)
+                assert isinstance(json.loads(report.read_text())["violations"], list)
+                refused.append(report)
+                assert proc.returncode == 0
+                proc.returncode = save_status
+                return proc
+        return run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", report_without_save)
+    result = route_cmd.main(route_args(board, "--native-zone-clearance", "--oracle-rounds", "0"))
+    assert refused
+    assert result == (0 if allow_retry else route_cmd.EXIT_UNVERIFIED)
+    routed = board.with_name("routed.kicad_pcb")
+    assert json.loads(routed.with_suffix(".route.json").read_text())["route_exit_code"] == result
+    assert board.read_bytes() == original
+    if allow_retry:
+        saved = {zone.layer: zone.filled_polygons for zone in PCB.load(routed).zones}
+        probe = board.with_name("probe.kicad_pcb")
+        shutil.copy2(routed, probe)
+        copy_project_sidecars(routed, probe)
+        refill(probe, native_cli)
+        assert saved == {zone.layer: zone.filled_polygons for zone in PCB.load(probe).zones}

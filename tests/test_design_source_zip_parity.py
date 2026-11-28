@@ -32,40 +32,7 @@ REFRESH_SCRIPT = REPO_ROOT / "scripts" / "boards" / "refresh_readiness.py"
 # "<board-dir>/<member path inside the zip>".  Each entry cites the issue that
 # owns the refresh; remove the entry when that lands (strict xfail turns an
 # unexpected pass into a failure).
-EXPECTED_STALE: dict[str, str] = {
-    "02-charlieplex-led/generate_design.py": (
-        "Issue #9800: the live recipe uses the shared silk pass. The registered "
-        "producer keeps the previous design-source.zip until the five via-only "
-        "warnings (#9112/#9033) and the changed artwork's render binding pass."
-    ),
-    "02-charlieplex-led/package_release.py": (
-        "Issue #9800: the live publisher gained the changed-artwork render "
-        "binding (renders ship only with kct render's render-provenance.json "
-        "tied to the checked PCB). The registered producer keeps the previous "
-        "design-source.zip until the five via-only warnings (#9112/#9033) "
-        "clear and the package can be re-issued."
-    ),
-    # Zip last refreshed in 99122e5a1; the live recipe has moved since, and
-    # ``refresh_readiness.py`` cannot re-emit the zip while the strict gate
-    # refuses on the unaccepted warning flood (#8399 stalemate).
-    "05-bldc-motor-controller/redesign/build.py": (
-        "Issue #9068: #9057/#8532 added the wedge fix and the global "
-        "fiducials + board-ID silk to redesign/build.py after the archive was "
-        "last refreshed; the gate-pass rebuild + re-pin (blocked by the #8399 "
-        "warning-flood stalemate) re-emits the zip."
-    ),
-    "05-bldc-motor-controller/redesign/hardware.py": (
-        "Issue #9068: #9071's silk_hole_overlap fixes (reference-field offsets, "
-        "SILK_STROKE_EDITS) landed in redesign/hardware.py after the archive "
-        "was last refreshed; the gate-pass rebuild + re-pin (blocked by the "
-        "#8399 warning-flood stalemate) re-emits the zip."
-    ),
-    "05-bldc-motor-controller/redesign/routing.py": (
-        "Issue #9921: the published Board 05 archive uses the previous U2 footprint. "
-        "The live recipe also accepts the grounded pad-29 footprint. Remove this entry "
-        "when the manufacturing rebuild publishes the matching source archive."
-    ),
-}
+EXPECTED_STALE: dict[str, str] = {}
 
 
 def _zip_members() -> list[tuple[Path, str]]:
