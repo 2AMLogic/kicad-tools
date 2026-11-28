@@ -29,11 +29,11 @@ geometry table (Issue #8930).
 The detector matches ``sharp_trace_corner``'s semantics so the router does not
 repair copper the gate never flags, nor leave copper it does:
 
-* angle in the sharp-corner window -- ``[1, 89)`` degrees, the upper edge
-  less a float-rounding guard -- as decided by
+* angle in the sharp-corner window -- nominally ``[1, 89)`` degrees, each
+  edge carrying a 0.001 deg guard -- as decided by
   :func:`~kicad_tools.explain.checks.acid_trap.is_acute_corner_angle`,
   **imported** from :mod:`kicad_tools.explain.checks.acid_trap` and never
-  re-declared here (issue #10677);
+  re-declared here (issues #10677, #10690);
 * the vertex is not buried under same-net pad/via copper
   (:meth:`CopperDisc.covers`, inscribed circles -- the rule also honours a
   pad's full outline, see ``tests/router/test_acute_foldback_parity_8930.py``);
@@ -124,7 +124,7 @@ JUNCTION_TOL = 0.01
 #: A corner at or above this angle (degrees) is not a gating acid trap.
 #: Derived from the ``acid_trap`` constants rather than restated: 89.0 deg.
 #: The gate itself is :func:`is_acute_corner_angle`, which applies this bound
-#: less a float-rounding guard (issue #10677).
+#: less the window's edge guard (issues #10677, #10690).
 MAX_GATING_ANGLE_DEG = MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG
 
 #: Shortest replacement segment the pass will emit (mm).  Below this a new
@@ -464,7 +464,7 @@ def find_foldbacks(
 
     A fold-back qualifies when the vertex has degree exactly 2, both legs are
     same-net and same-layer, the interior angle is in the sharp-corner window
-    of :func:`is_acute_corner_angle` (``[1, 89)`` degrees), the vertex is not
+    of :func:`is_acute_corner_angle` (nominally ``[1, 89)`` degrees), the vertex is not
     buried under same-net pad/via copper, and the wedge is open (see
     :func:`wedge_is_open`).  These are precisely ``sharp_trace_corner``'s
     conditions narrowed to the two-segment case this pass repairs.

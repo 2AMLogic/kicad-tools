@@ -16,6 +16,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-28
 
+- **Issue #10667** (closed): Board 03: 90 redundant_copper warnings outlive the mask-copper repair and readiness's cleanup, so the reissue cannot reach ready
+- **PR #10698**: feat: add fix-drc --only redundant-copper and run it in the readiness cleanup
+- **PR #10726**: ci(board-05): declare the pour neck in the unattended route
+- **Issue #10723** (closed): Pour-completion neck escape disables the mask-entry pad keepout (pad_entry_gap=0.0)
+- **PR #10725**: fix(router): preserve mask-entry clearance on necked pour escapes
+- **Issue #10664** (closed): Board 04: clear the ten same-net mask_to_copper errors the public readiness check reports
+- **PR #10687**: fix(drc): repair pour, fragment and boxed-via mask_to_copper findings; re-issue Board 04
 - **Issue #10692** (closed): No gate compares a committed board bundle's per-rule warning counts to a fresh run (Board 04 pour_slot 5 vs 4 went unnoticed)
 - **PR #10697**: feat(scripts): add --check drift gate to refresh_bundles_6404.py
 - **Issue #10720** (closed): link_router accepts a (chamfer ...) token on a non-roundrect pad that current_paths refuses
