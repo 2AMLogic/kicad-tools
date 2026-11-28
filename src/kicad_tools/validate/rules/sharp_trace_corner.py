@@ -233,17 +233,13 @@ class _TraceJunction:
         return len({bearing for bearing, _width in self.legs})
 
     def open_angles(self, check: AcidTrapCheck) -> Iterator[float]:
-        from kicad_tools.explain.checks.acid_trap import (
-            ANGLE_TOLERANCE_DEG,
-            MIN_CORNER_ANGLE_DEG,
-            MIN_TRACE_ANGLE_DEG,
-        )
+        from kicad_tools.explain.checks.acid_trap import is_acute_corner_angle
 
         for first, second in combinations(self.legs.values(), 2):
             angle = check._calculate_angle(first, second, self.location)
             if (
                 angle is not None
-                and MIN_CORNER_ANGLE_DEG <= angle < MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG
+                and is_acute_corner_angle(angle)
                 and _wedge_is_open(first, second, self.location, angle)
             ):
                 yield angle
