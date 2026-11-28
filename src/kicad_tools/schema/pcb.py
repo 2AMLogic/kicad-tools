@@ -3442,6 +3442,7 @@ class PCB:
             )
         self._sexp = sexp
         self._path: Path | None = Path(path) if path else None
+        self._source_path = self._path.absolute() if self._path is not None else None
         self._layers: dict[int, Layer] = {}
         self._nets: dict[int, Net] = {}
         self._footprints: list[Footprint] = []
@@ -8834,6 +8835,11 @@ class PCB:
         """
         return self._path
 
+    @property
+    def source_path(self) -> Path | None:
+        """Absolute path of the loaded or last saved file, retaining any symlink name."""
+        return self._source_path
+
     def strip_traces(
         self,
         *,
@@ -9471,17 +9477,19 @@ class PCB:
         """
         self._check_no_unpersisted_edits()
         if path is None:
-            if self._path is None:
+            if self._source_path is None:
                 raise ValueError(
                     "No path specified and PCB has no stored path. "
                     "Provide a path or use PCB.load() to load from a file."
                 )
-            path = self._path
-        else:
-            path = Path(path)
-            self._path = path
+            save_pcb(self._sexp, self._source_path)
+            return
 
-        save_pcb(self._sexp, path)
+        path = Path(path)
+        source_path = path.absolute()
+        save_pcb(self._sexp, source_path)
+        self._path = path
+        self._source_path = source_path
 
     # =========================================================================
     # Manufacturing Export Methods

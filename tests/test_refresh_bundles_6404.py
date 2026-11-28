@@ -935,6 +935,45 @@ def test_board04_bundle_recognizes_the_delivered_project_names(mod, tmp_path):
     assert mod.bundle_is_stale(board, cfg)
 
 
+@pytest.mark.parametrize("change", ["metadata", "copper", "added", "removed", "first", "corrupt"])
+def test_board04_recipe_keeps_only_member_identical_project_zips(
+    mod, tmp_path, monkeypatch, change
+):
+    board = tmp_path / "04-stm32-devboard"
+    cfg = mod.rr.BOARDS[board.name]
+    bundle = mod.BUNDLES[board.name]
+    project = board / "output/manufacturing/kicad_project.zip"
+    project.parent.mkdir(parents=True)
+    routed = board / cfg.routed_pcb
+    routed.write_text(PCB.replace("(at 1 2)", "(at 2 2)") if change == "copper" else PCB)
+    original = {"board.kicad_pcb": PCB.encode(), "fp-lib-table": b"(fp_lib_table)"}
+    if change == "removed":
+        original["obsolete.kicad_dru"] = b"(version 1)"
+    if change != "first":
+        mod.rr.write_deterministic_zip(project, original)
+    if change == "corrupt":
+        project.write_bytes(b"incomplete zip")
+    previous = project.read_bytes() if project.is_file() else None
+
+    exported = {"fp-lib-table": b"(fp_lib_table)", "board.kicad_pcb": routed.read_bytes()}
+    if change == "added":
+        exported["board.kicad_dru"] = b"(version 1)"
+
+    def export(cmd, **kwargs):
+        with zipfile.ZipFile(project, "w", compression=zipfile.ZIP_STORED) as archive:
+            for name, data in exported.items():
+                archive.writestr(name, data)
+        assert project.read_bytes() != previous
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.delenv("SOURCE_DATE_EPOCH", raising=False)
+    monkeypatch.setattr(mod, "run", export)
+    mod.stage_recipe_manufacturing(board, cfg, bundle)
+    assert (project.read_bytes() == previous) == (change == "metadata")
+    with zipfile.ZipFile(project) as archive:
+        assert {name: archive.read(name) for name in archive.namelist()} == exported
+
+
 def test_board04_stale_report_cannot_validate_its_own_preflight(mod, tmp_path):
     from kicad_tools.export.preflight import PreflightChecker
 

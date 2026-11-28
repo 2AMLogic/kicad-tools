@@ -25,10 +25,13 @@ table to keep in sync -- ``TestTableIsNotVacuous`` only checks that the table
 exercises both outcomes.  The mutation check that proves the test has teeth
 is recorded in the PR description for Issue #8930.
 
-The one exception is the angle window's edges (Issue #10677).  Every engine
-applies the same window, so a shared drift at the 89 deg bound is invisible
-to parity, and those controls carry the documented decision -- a nominal
-89 deg corner is clear, 88.9 deg is flagged -- as their expected verdict.
+The one exception is the angle window's edges (Issues #10677, #10690).  Every
+engine applies the same window, so a shared drift at the 1 deg and 89 deg
+bounds is invisible to parity, and those controls carry the documented
+decision as their expected verdict: a nominal 1 deg corner is flagged, a
+nominal 89 deg corner is clear even with its endpoints stored on KiCad's 1 nm
+grid, 0.9995 deg is flagged, 88.9995 deg is clear, and the 88.9 / 89.1 deg
+controls keep their verdicts.
 """
 
 from __future__ import annotations
@@ -124,6 +127,22 @@ def leg(
     return (far, origin, width) if inward else (origin, far, width)
 
 
+def nm_leg(bearing: float, length: float, width: float = 0.05, *, origin: Point = J):
+    """A leg leaving ``origin`` whose far end is stored on KiCad's 1 nm grid.
+
+    KiCad keeps coordinates to the nanometre, so a short leg's stored endpoint
+    sits up to half a nanometre from where its nominal bearing would put it:
+    a nominal 89 deg corner with 0.3 mm legs reads 88.9999458724 deg
+    (Issue #10690).  The 0.05 mm width keeps these short legs clear of the
+    width-filled exemption, so only the angle window decides their verdict.
+    """
+    far = (
+        round(origin[0] + length * math.cos(math.radians(bearing)), 6),
+        round(origin[1] + length * math.sin(math.radians(bearing)), 6),
+    )
+    return (origin, far, width)
+
+
 def _s0(w1: float, w2: float, angle: float) -> float:
     """The open-wedge threshold the rule documents (``(w1+w2) / (4 sin(theta/2))``)."""
     return (w1 + w2) / (4 * math.sin(math.radians(angle) / 2))
@@ -141,7 +160,14 @@ CASES: tuple[Case, ...] = (
         (leg(0, 3.0, origin=J_FAR), leg(88.9, 3.0, origin=J_FAR)),
         junction=J_FAR,
     ),
-    Case("open_wedge_1_0_lower_bound", (leg(0, 8.0), leg(1.0, 8.0))),
+    Case("open_wedge_88_9_short_leg_on_nm_grid", (nm_leg(0, 0.3), nm_leg(88.9, 0.3))),
+    Case(
+        "open_wedge_1_0_lower_bound",
+        (leg(0, 8.0, 0.05), leg(1.0, 8.0, 0.05)),
+        note="thin legs keep the 1 deg wedge open (s0 = 2.86 mm < 8 mm); at 0.2 mm "
+        "an 8 mm leg is width-filled there and nothing gates",
+    ),
+    Case("open_wedge_0_9995_inside_lower_guard", (leg(0, 8.0, 0.05), leg(0.9995, 8.0, 0.05))),
     # -- the angle window: not gated ---------------------------------------
     Case("angle_89_0_upper_bound", (leg(0, 3.0), leg(89.0, 3.0))),
     Case(
@@ -150,11 +176,15 @@ CASES: tuple[Case, ...] = (
         junction=J_FAR,
         note="the same bend at x = 150 reads 88.99999999999986 deg on Linux too",
     ),
+    Case("angle_89_0_short_leg_on_nm_grid", (nm_leg(0, 0.3), nm_leg(89.0, 0.3))),
+    Case("angle_88_9995_inside_upper_guard", (nm_leg(0, 1.0), nm_leg(88.9995, 1.0))),
     Case("angle_89_1_above_upper_bound", (leg(0, 3.0), leg(89.1, 3.0))),
+    Case("angle_89_1_short_leg_on_nm_grid", (nm_leg(0, 0.3), nm_leg(89.1, 0.3))),
     Case("right_angle_90", (leg(0, 3.0), leg(90, 3.0))),
     Case("obtuse_135", (leg(0, 3.0), leg(135, 3.0))),
     Case("straight_180", (leg(0, 3.0), leg(180, 3.0))),
     Case("below_window_0_5", (leg(0, 8.0), leg(0.5, 8.0))),
+    Case("below_window_0_998_beyond_lower_guard", (leg(0, 8.0, 0.05), leg(0.998, 8.0, 0.05))),
     # -- collinear doubling-back: angle 0, sin(theta/2) == 0 ---------------
     Case(
         "collinear_doubling_back",
@@ -512,9 +542,10 @@ def test_collinear_doubling_back_does_not_raise_on_the_rule_side():
 
     The router copy guards ``sin(theta/2) <= 0`` and returns ``False``; the
     rule copy used to divide by it and raise ``ZeroDivisionError``.  Neither
-    production call site reaches angle 0 (both gate on ``angle >= 1``), but the
-    shared geometry set includes collinear doubling-back, so the rule copy now
-    carries the same guard and the two agree.
+    production call site reaches angle 0 (both gate on the angle window's
+    lower edge), but the shared geometry set includes collinear
+    doubling-back, so the rule copy now carries the same guard and the two
+    agree.
     """
     a = Segment(x1=J[0], y1=J[1], x2=J[0] + 2, y2=J[1], width=0.2, layer=Layer.F_CU, net=SIG_NET)
     b = Segment(x1=J[0], y1=J[1], x2=J[0] + 1, y2=J[1], width=0.2, layer=Layer.F_CU, net=SIG_NET)
@@ -552,6 +583,9 @@ class TestTableIsNotVacuous:
             ("angle_89_0_upper_bound", "open_wedge_88_9"),
             ("angle_89_0_upper_bound_at_x150", "open_wedge_88_9_at_x150"),
             ("angle_89_1_above_upper_bound", "open_wedge_88_9"),
+            ("angle_89_0_short_leg_on_nm_grid", "open_wedge_88_9_short_leg_on_nm_grid"),
+            ("angle_89_1_short_leg_on_nm_grid", "open_wedge_88_9_short_leg_on_nm_grid"),
+            ("below_window_0_998_beyond_lower_guard", "open_wedge_0_9995_inside_lower_guard"),
         ],
     )
     def test_each_exemption_has_a_flagged_twin(self, exempt, flagged, tmp_path):
@@ -637,13 +671,16 @@ class TestUpperEdgeBoundary:
 
     The stored coordinates of a nominal 89 deg bend are not exactly at 89 deg,
     and which side of the bound their computed angle lands on depends on the
-    board position and the platform ``libm``: the same corner read
-    88.99999999999999 deg on macOS and 89.0 on Linux at ``(10, 10)``, and
-    88.99999999999986 deg at ``(150, 10)`` on Linux as well (Issue #10677).
-    Parity cannot see this -- every engine drifts together -- so these
-    controls carry the documented decision as their expected verdict.  The
-    translated one is the control that fails on Linux CI without the guard,
-    not only on macOS.
+    board position, the platform ``libm`` and KiCad's 1 nm coordinate grid:
+    the same corner read 88.99999999999999 deg on macOS and 89.0 on Linux at
+    ``(10, 10)``, 88.99999999999986 deg at ``(150, 10)`` on Linux as well
+    (Issue #10677), and a nominal 89 deg corner with 0.3 mm legs reads
+    88.9999458724 deg once its endpoints are rounded to the nanometre
+    (Issue #10690).  Parity cannot see this -- every engine drifts together --
+    so these controls carry the documented decision as their expected verdict.
+    The translated one is the control that fails on Linux CI without the
+    ``libm`` guard, not only on macOS; the 1 nm one fails on every platform
+    without the wider guard.
     """
 
     @pytest.mark.parametrize(
@@ -651,13 +688,23 @@ class TestUpperEdgeBoundary:
         [
             "angle_89_0_upper_bound",
             "angle_89_0_upper_bound_at_x150",
+            "angle_89_0_short_leg_on_nm_grid",
+            "angle_88_9995_inside_upper_guard",
             "angle_89_1_above_upper_bound",
+            "angle_89_1_short_leg_on_nm_grid",
         ],
     )
     def test_nominal_89_degree_corner_is_not_flagged(self, name, tmp_path):
         assert _nothing_flagged(_flagged_by_every_engine(_BY_NAME[name], tmp_path)) == {}
 
-    @pytest.mark.parametrize("name", ["open_wedge_88_9", "open_wedge_88_9_at_x150"])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "open_wedge_88_9",
+            "open_wedge_88_9_at_x150",
+            "open_wedge_88_9_short_leg_on_nm_grid",
+        ],
+    )
     def test_88_9_is_still_flagged_by_every_engine(self, name, tmp_path):
         case = _BY_NAME[name]
         assert _flagged_by_every_engine(case, tmp_path) == dict.fromkeys(
@@ -665,11 +712,31 @@ class TestUpperEdgeBoundary:
         )
 
 
-class TestLowerEdgeStaysAtOneDegree:
-    """Below ``MIN_CORNER_ANGLE_DEG`` a joint is a collinear overlap, not a corner."""
+class TestLowerEdgeBoundary:
+    """A nominal 1 deg corner is flagged on all four engines; below the guard it is not.
 
-    @pytest.mark.parametrize("name", ["below_window_0_5", "collinear_doubling_back"])
-    def test_sub_one_degree_is_excluded_by_every_engine(self, name, tmp_path):
+    ``acos`` is ill-conditioned near zero, so the computed angle of a nominal
+    1 deg corner lands below 1 deg -- 0.9999999999999002 deg for 8 mm legs --
+    and with an exact lower bound the same corner was an acid trap on one host
+    and a collinear overlap on another (Issue #10690).  Below
+    ``MIN_CORNER_ANGLE_DEG`` less the guard a joint is still a collinear
+    overlap, not a corner (issue #8663).
+    """
+
+    @pytest.mark.parametrize(
+        "name", ["open_wedge_1_0_lower_bound", "open_wedge_0_9995_inside_lower_guard"]
+    )
+    def test_nominal_1_degree_corner_is_flagged_by_every_engine(self, name, tmp_path):
+        case = _BY_NAME[name]
+        assert _flagged_by_every_engine(case, tmp_path) == dict.fromkeys(
+            _ENGINES, {_key(case.junction)}
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        ["below_window_0_5", "below_window_0_998_beyond_lower_guard", "collinear_doubling_back"],
+    )
+    def test_below_the_guard_is_excluded_by_every_engine(self, name, tmp_path):
         assert _nothing_flagged(_flagged_by_every_engine(_BY_NAME[name], tmp_path)) == {}
 
 
@@ -677,7 +744,7 @@ class TestWindowPredicate:
     """``is_acute_corner_angle`` is the one definition of the window.
 
     Exact-value checks at both edges, which the board controls above cannot
-    pin: no geometry computes an angle of exactly ``nextafter(89.0, 0.0)``.
+    pin: no geometry computes an angle of exactly ``nextafter(88.999, 0.0)``.
     """
 
     @pytest.mark.parametrize(
@@ -685,11 +752,18 @@ class TestWindowPredicate:
         [
             (0.0, False),
             (0.5, False),
-            (math.nextafter(1.0, 0.0), False),
+            (0.998, False),
+            (math.nextafter(0.999, 0.0), False),
+            (0.999, True),
+            (math.nextafter(0.999, math.inf), True),
+            (0.9995, True),
+            (math.nextafter(1.0, 0.0), True),
             (1.0, True),
-            (math.nextafter(1.0, math.inf), True),
             (45.0, True),
             (88.9, True),
+            (math.nextafter(88.999, 0.0), True),
+            (88.999, False),
+            (88.9995, False),
             (math.nextafter(89.0, 0.0), False),
             (89.0, False),
             (89.1, False),
@@ -699,16 +773,44 @@ class TestWindowPredicate:
     def test_edges(self, angle, acute):
         assert is_acute_corner_angle(angle) is acute
 
-    @pytest.mark.parametrize("dust", (1.4e-14, 1.42e-13, 1.1e-10))
-    def test_float_dust_under_the_bound_is_absorbed(self, dust):
-        """The macOS ``libm`` step, the x = 150 Linux reading, the worst measured dust."""
-        assert is_acute_corner_angle(89.0 - dust) is False
+    @pytest.mark.parametrize("angle", (0.9999999999999002, 0.9994999999996441))
+    def test_lower_edge_readings_resolve_to_a_corner(self, angle):
+        """A nominal 1 deg corner (8 mm legs) and a deliberate 0.9995 deg corner."""
+        assert is_acute_corner_angle(angle) is True
+
+    @pytest.mark.parametrize(
+        "angle",
+        (
+            88.99999999999986,
+            88.99999999999999,
+            89.0 - 1.1e-10,
+            88.99994587236449,
+            88.99950800516828,
+        ),
+    )
+    def test_upper_edge_dust_is_absorbed(self, angle):
+        """Readings a nominal 89 deg corner takes, plus the deliberate 88.9995 deg control.
+
+        The x = 150 Linux reading, the macOS ``libm`` step and the worst
+        measured ``libm`` dust (Issue #10677); a nominal 89 deg corner with
+        0.3 mm legs on the 1 nm grid and a deliberate 88.9995 deg corner
+        (Issue #10690).
+        """
+        assert is_acute_corner_angle(angle) is False
 
     def test_guard_sits_between_the_controls(self):
-        edge = MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG - ANGLE_FLOAT_EPS_DEG
-        assert 88.9 < edge < 89.1
-        assert is_acute_corner_angle(edge) is False
-        assert is_acute_corner_angle(math.nextafter(edge, 0.0)) is True
+        lower = MIN_CORNER_ANGLE_DEG - ANGLE_FLOAT_EPS_DEG
+        upper = MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG - ANGLE_FLOAT_EPS_DEG
+        assert 0.998 < lower < 0.9995
+        assert 88.9 < upper <= 88.9995
+        assert is_acute_corner_angle(lower) is True
+        assert is_acute_corner_angle(math.nextafter(lower, 0.0)) is False
+        assert is_acute_corner_angle(upper) is False
+        assert is_acute_corner_angle(math.nextafter(upper, 0.0)) is True
+
+    def test_guard_is_a_thousandth_of_a_degree(self):
+        """A hundred times smaller than the 0.1 deg control step (Issue #10690)."""
+        assert ANGLE_FLOAT_EPS_DEG == 1e-3
 
     def test_manufacturing_thresholds_are_unchanged(self):
         assert MIN_TRACE_ANGLE_DEG == 90
