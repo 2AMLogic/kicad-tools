@@ -716,3 +716,63 @@ The original class map left both pour links open and added no copper.
 Setting only the two neck widths to the reviewed 0.15 mm added one F.Cu
 segment and one 0.60 mm via on each of GND and +5V. Native DRC reported zero violations and the
 single existing VM open. The public JLCPCB audit found zero width mismatches.
+
+## The unattended route declares the pour neck, 2026-11-28 (issue #9424)
+
+Measured on Linux x86_64 (`loom-crew-2`, Intel Xeon Platinum 8488C, 16 vCPU
+shared with other work; 1-minute load 6 to 33) with C++ router build 79 and
+pinned kicad-cli 10.0.6 (`KCT_KICAD_DOCKER=1`).
+
+The nightly route passes no net-class map, so `+5V` and `GND` take the
+router's default `Power` class, which declares no `neck_trace_width`. With
+the correction above that leaves U2.16 on `+5V` and U2.20 on `GND` open.
+`scripts/ci/board_05_unattended.py` now writes a `--net-class-map` for each
+seed: the router's `Power` class with the 0.15 mm `neck_trace_width` the
+reviewed `redesign/net_class_map.json` declares for those two nets, and no
+other net. A missing or unusable neck refuses the route. The rest of the
+reviewed account is not adopted.
+
+| Revision | Seed | Route exit | Nets | Connections | Native DRC err / warn / open | ERC | Nightly errors / warnings | Width mismatches | Copper and label LVS | Vias | Wall (s) |
+| --- | ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: |
+| `2c088ca39` (base) | 42 | 3 | 44/46 | 141/143 | 0 / 0 / 2 | 0 | 0 / 13 | 0 | copper dirty | 120 | 480.5 |
+| `cd67091bf` | 42 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 13 | 0 | clean | 122 | 421.0 |
+| `cd67091bf` | 7 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 13 | 0 | clean | 122 | 483.1 |
+| `cd67091bf` | 1337 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 13 | 0 | clean | 122 | 483.4 |
+
+Seeds 7 and 1337 were not run on the base. On the base the oracle stage
+stopped at 43 -> 2 (`no_closer`): `+5V` U2.16 and `GND` U2.20 to its thermal
+pad U2.29. Seeds 7 and 1337 of the change ran in parallel. The three saved
+boards are byte-identical (SHA-256
+`d3ea9cfffa955ea5fd7504e821a084209506eff265ea7ca212022383e1862721`), each
+oracle stage converged in round 1 (43 -> 0), and no route log carries a
+`per-net wall clock bound` or `stage deadline fired` line.
+
+Against the base's seed-42 board the signal copper is unchanged. Four new
+0.15 mm F.Cu pad escapes carry the two pour nets: `+5V` U2.16 east 1.24 mm to
+a via at (142.60, 103.58), `GND` U2.20 west 1.20 mm into U2.29, `+5V` U3.1
+west 1.20 mm to a via at (158.10, 74.03) and `GND` U3.4 south 1.20 mm to a
+via at (159.30, 77.17). The base had closed U3.1 and U3.4 with 0.50 mm copper
+(`+5V` (158.65, 73.85) to (158.65, 73.35) and its via; `GND` (159.95, 76.05)
+to (160.75, 75.90)): the weld tries the declared neck on every pad its
+0.50 mm stub skipped, before the link router. The 42 pour segments the two
+boards share (16 `+5V`, 26 `GND`) are 0.50 mm.
+
+The 13 nightly warnings are the base's, identity for identity: 8
+`redundant_copper_covered`, 4 `redundant_copper_detour` and 1
+`sharp_trace_corner` on `RESET` at (160.10, 95.06). The journal dates all
+three RESET chains that meet there (records 777, 779 and 781) to the
+optimizer's post pass: each rewrite starts at (160.10, 95.84) and runs up
+the same vertical line, to 95.14, 90.31 and 95.06, and the last turns 45
+degrees to its via beside the one that continues straight.
+
+The full JLCPCB check on the graded seed-42 board (91 rules, zero waivers)
+reports 12 errors (9 `mask_to_copper` overlaps and 3 disjoint openings), 16
+warnings (3 `mask_to_copper` and the 13 nightly) and 265 infos, and exits 2.
+Two findings sit on the new escapes: `GND` U2.20 in the opening of U2.29
+(same-net pass-through, an error) and the `+5V` U2.16 via in the opening of
+U2.16 (same-net pass-through, a warning). `--skip mask_to_copper` stays in
+the gate (operator ruling, 2026-11-23).
+
+`--grade-only` on the graded seed-42 board exits 1 with that one failure,
+`kct check --mfr jlcpcb warnings: 13`; every native gate passes and the mask
+coverage is complete.
