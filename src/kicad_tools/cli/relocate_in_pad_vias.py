@@ -69,6 +69,7 @@ from shapely.geometry import LineString, Point, Polygon, box  # type: ignore[imp
 
 from kicad_tools.cli.stitch_cmd import point_in_polygon
 from kicad_tools.core.geometry import point_to_segment_distance
+from kicad_tools.schema.pcb import source_path_of
 from kicad_tools.validate.rules.base import WRITER_CLEARANCE_MARGIN_MM
 from kicad_tools.validate.rules.via_pad_geometry import (
     drill_to_mask_aperture_gap,
@@ -625,7 +626,8 @@ def _resolve_hole_clearance(pcb: PCB, explicit: float | None = None) -> float:
 
     Invalid project data raises before relocation mutates any geometry.
     """
-    project = pcb.path.with_suffix(".kicad_pro") if pcb.path else None
+    source = source_path_of(pcb)
+    project = source.with_suffix(".kicad_pro") if source is not None else None
     value = 0.25
     if project is not None and project.exists():
         data = json.loads(project.read_text())
@@ -990,7 +992,8 @@ def _pad_floors(
         pad_clearance_override,
     )
 
-    rules = BoardClearanceRules.from_board(pcb.path) if pcb.path else BoardClearanceRules()
+    source = source_path_of(pcb)
+    rules = BoardClearanceRules.from_board(source) if source is not None else BoardClearanceRules()
     if rules.dru_error:
         raise ValueError(rules.dru_error)
     net = pcb.get_net(via.net_number)
@@ -1565,7 +1568,7 @@ def relocate_in_pad_vias(
             means all nets.
         dry_run: When True, compute the report but do not mutate the board.
         min_hole_clearance_mm: Additional native drill-to-copper floor; cannot lower the project.
-            Read the sibling project at ``pcb.path``; default to 0.25 mm. This
+            Read the sibling project of the loaded board; default to 0.25 mm. This
             never reduces independent manufacturer copper or hole floors.
 
     Returns:
@@ -2021,7 +2024,8 @@ def _diff_pair_net_names(pcb: PCB) -> set[str]:
 
     names = {net.name for net in pcb.nets.values() if net.name}
     legs = {name for name in names if kicad_coupled_complement(name) in names}
-    project = load_project(pcb.path) if pcb.path is not None else None
+    source = source_path_of(pcb)
+    project = load_project(source) if source is not None else None
     if project is not None:
         for pair in recorded_router_coupled_pairs(project):
             if all(name in names for name in pair):
@@ -2106,7 +2110,7 @@ def relocate_pad_edge_vias(
     min_hole_to_hole = design_rules.min_hole_to_hole_mm
     min_hole_clearance = _resolve_hole_clearance(pcb, min_hole_clearance_mm)
     try:
-        pair_requirement = netclass_pair_requirement(pcb.path, pcb, min_clearance)
+        pair_requirement = netclass_pair_requirement(source_path_of(pcb), pcb, min_clearance)
         unsupported = None
     except ProjectClearanceError as exc:
         pair_requirement = None

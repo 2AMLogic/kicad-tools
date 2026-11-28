@@ -283,11 +283,13 @@ class KiCadPCBExporter:
 
     def _rules_for(self, pcb: PCB) -> BoardClearanceRules:
         from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+        from kicad_tools.schema.pcb import source_path_of
 
         if self.clearance_rules is not None:
             return self.clearance_rules
-        if pcb.path is not None:
-            return BoardClearanceRules.from_board(pcb.path)
+        source = source_path_of(pcb)
+        if source is not None:
+            return BoardClearanceRules.from_board(source)
         return BoardClearanceRules()
 
     def _check_geometry(

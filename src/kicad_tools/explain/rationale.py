@@ -22,8 +22,9 @@ Example:
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
+
+from kicad_tools.schema.pcb import source_path_of
 
 from .decisions import (
     DecisionStore,
@@ -90,7 +91,7 @@ def record_decision(
     from .decisions import Alternative, Decision
 
     # Get or create decision store
-    pcb_path = Path(pcb.path) if hasattr(pcb, "path") and pcb.path else None
+    pcb_path = source_path_of(pcb)
     if pcb_path:
         decisions_path = get_decisions_path(pcb_path)
         store = DecisionStore.load(decisions_path)
@@ -160,7 +161,7 @@ def get_decisions(
         >>> # Get all routing decisions for USB_D+
         >>> decisions = get_decisions(pcb, action="route", net="USB_D+")
     """
-    pcb_path = Path(pcb.path) if hasattr(pcb, "path") and pcb.path else None
+    pcb_path = source_path_of(pcb)
 
     if pcb_path:
         decisions_path = get_decisions_path(pcb_path)
@@ -302,7 +303,7 @@ def get_decision_store(pcb: PCB) -> DecisionStore:
     Returns:
         The DecisionStore for this PCB
     """
-    pcb_path = Path(pcb.path) if hasattr(pcb, "path") and pcb.path else None
+    pcb_path = source_path_of(pcb)
 
     if pcb_path:
         decisions_path = get_decisions_path(pcb_path)
@@ -324,7 +325,7 @@ def save_decisions(pcb: PCB) -> bool:
     Returns:
         True if saved successfully, False if no path available
     """
-    pcb_path = Path(pcb.path) if hasattr(pcb, "path") and pcb.path else None
+    pcb_path = source_path_of(pcb)
 
     if not pcb_path:
         return False
