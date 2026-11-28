@@ -2500,16 +2500,17 @@ def _sharp_corner_board(path: Path) -> Path:
 
 def test_avoidable_copper_counts_both_rules(tmp_path):
     clean = _redundant_board(tmp_path / "clean.kicad_pcb", [_rule_module()._Seg((0, 0), (5, 0))])
-    assert readiness_cmd._avoidable_copper(clean) == (frozenset(), 0)
-    assert readiness_cmd._avoidable_copper(_staircase_board(tmp_path / "stair.kicad_pcb")) == (
-        frozenset(),
-        1,
+    assert readiness_cmd._avoidable_copper(clean, "jlcpcb-tier1") == (frozenset(), {})
+    staircase = _staircase_board(tmp_path / "stair.kicad_pcb")
+    sharp, redundant = readiness_cmd._avoidable_copper(staircase, "jlcpcb-tier1")
+    assert not sharp and redundant.total() == 1
+    # The plain JLCPCB profile requires a stackup for the slit check. This
+    # board has none, so that profile cannot offer the staircase shortcut.
+    assert readiness_cmd._avoidable_copper(staircase, "jlcpcb") == (frozenset(), {})
+    sharp, redundant = readiness_cmd._avoidable_copper(
+        _sharp_corner_board(tmp_path / "fold.kicad_pcb"), "jlcpcb-tier1"
     )
-    sharp_sites, redundant_count = readiness_cmd._avoidable_copper(
-        _sharp_corner_board(tmp_path / "fold.kicad_pcb")
-    )
-    assert len(sharp_sites) == 1
-    assert redundant_count == 0
+    assert len(sharp) == 1 and not redundant
 
 
 def test_cleanup_pass_that_replaces_a_sharp_corner_at_a_new_site_is_put_back(tmp_path):
@@ -2576,6 +2577,21 @@ def test_cleanup_pass_that_removes_a_finding_is_kept(tmp_path):
     assert record == {"status": "applied", "segments_removed": 7}
 
 
+def test_cleanup_rejects_a_staircase_that_replaces_a_covered_finding(tmp_path):
+    module = _rule_module()
+    options = _tier1_options(tmp_path, [module._Seg((0, 0), (10, 0)), module._Seg((2, 0), (5, 0))])
+    before = options.pcb.read_bytes()
+
+    def replace_covered_with_staircase(options):
+        _staircase_board(options.pcb)
+        return {"status": "applied"}
+
+    record = readiness_cmd._guarded_cleanup_step(options, replace_covered_with_staircase)
+    assert record["status"] == "not-applied"
+    assert record["detail"] == "would introduce 1 redundant_copper finding(s)"
+    assert options.pcb.read_bytes() == before
+
+
 def test_cleanup_pass_that_only_trades_findings_is_put_back(tmp_path):
     options = _tier1_options(tmp_path, [_rule_module()._Seg((0, 0), (5, 0))])
     options.pcb.write_bytes(_sharp_corner_board(tmp_path / "fold.kicad_pcb").read_bytes())
@@ -2593,7 +2609,7 @@ def test_cleanup_pass_that_only_trades_findings_is_put_back(tmp_path):
 
 def test_cleanup_guard_keeps_the_step_when_the_rules_cannot_run(tmp_path, monkeypatch):
     options = _tier1_options(tmp_path, [_rule_module()._Seg((0, 0), (5, 0))])
-    monkeypatch.setattr(readiness_cmd, "_avoidable_copper", lambda path: None)
+    monkeypatch.setattr(readiness_cmd, "_avoidable_copper", lambda path, manufacturer: None)
     record = readiness_cmd._guarded_cleanup_step(options, lambda o: {"status": "applied", "x": 1})
     assert record == {"status": "applied", "x": 1}
 

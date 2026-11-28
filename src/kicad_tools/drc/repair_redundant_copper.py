@@ -105,6 +105,7 @@ class TrimmedSegment:
     kept: Point2
     end: Point2  # the junction the chain ended at (the new far end)
     width: float
+    original_length: float
 
 
 @dataclass(frozen=True)
@@ -164,8 +165,20 @@ class CopperEdit:
         )
 
     @property
+    def length_delta(self) -> float:
+        """Change in summed track length from the segments the writer actually edits."""
+        return (
+            sum(math.dist(s.start, s.end) for s in self.added)
+            - sum(math.dist(s.start, s.end) for s in self.removed)
+            + sum(math.dist(s.kept, s.end) - s.original_length for s in self.trimmed)
+        )
+
+    @property
     def path_key(self) -> tuple[Point2, ...]:
-        """The replacement path, to 1 um -- what a veto remembers."""
+        """The replacement path or hidden segment, to 1 um, for veto retries."""
+        if self.kind == "remove_covered":
+            hidden = self.removed[0]
+            return tuple(sorted((_q(hidden.start), _q(hidden.end))))
         return tuple(_q(p) for p in self.legs)
 
     def to_dict(self) -> dict[str, Any]:
@@ -460,7 +473,9 @@ class RedundantCopperRepairer:
                     declined[(rule_id, witnesses)] = "segment_not_found"
                     continue
                 if rule_id == "redundant_copper_covered":
-                    edit: CopperEdit | str = self._plan_covered(first, rule_id, witnesses)
+                    edit: CopperEdit | str = self._plan_covered(
+                        first, rule_id, witnesses, pairs.get(first.net_number)
+                    )
                 else:
                     edit = self._plan_chain(rule_id, witnesses, first, pairs)
                 if isinstance(edit, CopperEdit):
@@ -516,13 +531,13 @@ class RedundantCopperRepairer:
         return None
 
     def _plan_covered(
-        self, first: Segment, rule_id: str, witnesses: tuple[str, ...]
+        self, first: Segment, rule_id: str, witnesses: tuple[str, ...], partner: int | None
     ) -> CopperEdit | str:
         """Remove the hidden segment; the covering track stays whole."""
         locked = self._lock_reason([first])
         if locked:
             return locked
-        return CopperEdit(
+        edit = CopperEdit(
             kind="remove_covered",
             rule_id=rule_id,
             net_name=first.net_name,
@@ -536,6 +551,12 @@ class RedundantCopperRepairer:
             template=self._seg_nodes[self.pcb.segments.index(first)].to_string(),
             witnesses=witnesses,
         )
+        refused = self._rejected.get(edit.finding, {}).get(edit.path_key)
+        if refused is not None:
+            return refused
+        if self._worsens_skew(first.net_number, partner, edit.length_delta):
+            return "would_widen_pair_skew"
+        return edit
 
     def _two_bend_paths(self, ends: Sequence[Point2], chain: Sequence[Any]) -> list[list[Point2]]:
         """Shift a dogleg along the two original routing directions.
@@ -650,12 +671,12 @@ class RedundantCopperRepairer:
                 legal = legal[:1]
         old_sites = self._sharp_sites(group, first) if try_junction_paths and legal else set()
         for option, cand, duplicates in legal:
-            if self._worsens_skew(first, pairs.get(first.net_number), chain, option, cand, width):
-                reason = "would_widen_pair_skew"
-                continue
             edit = self._edit_for(rule_id, witnesses, first, chain, option, cand, duplicates, width)
             if isinstance(edit, str):
                 reason = edit
+                continue
+            if self._worsens_skew(first.net_number, pairs.get(first.net_number), edit.length_delta):
+                reason = "would_widen_pair_skew"
                 continue
             if try_junction_paths:
                 removed = {s.uuid for s in edit.removed} | {s.uuid for s in edit.trimmed}
@@ -740,7 +761,9 @@ class RedundantCopperRepairer:
             if _q(inner) not in (_q(seg.start), _q(seg.end)):
                 return "cut_piece_interior"
             kept = max((seg.start, seg.end), key=lambda p: math.dist(p, inner))
-            trimmed.append(TrimmedSegment(seg.uuid, kept, cut, seg.width))
+            trimmed.append(
+                TrimmedSegment(seg.uuid, kept, cut, seg.width, math.dist(seg.start, seg.end))
+            )
         legs = [(a, b, width) for a, b in zip(exact, exact[1:], strict=False)]
         kept_legs = set()
         if self._allow_junction_paths:
@@ -807,35 +830,13 @@ class RedundantCopperRepairer:
                     return True
         return False
 
-    def _worsens_skew(
-        self,
-        member: Segment,
-        partner: int | None,
-        chain: list[Any],
-        option: Any,
-        cand: list[Point2],
-        width: float,
-    ) -> bool:
-        """Would the rewrite widen |length(member) - length(partner)| beyond tolerance?"""
+    def _worsens_skew(self, net_number: int, partner: int | None, length_delta: float) -> bool:
+        """Would this edit increase the pair's current absolute length difference?"""
         if partner is None:
             return False
         lengths = self._net_lengths()
-        before = abs(lengths.get(member.net_number, 0.0) - lengths.get(partner, 0.0))
-        old = 0.0
-        for index, trims in ((0, option.trims[0]), (-1, option.trims[1])):
-            seg, (a, b) = self._rule._step_line(chain[index])
-            if (a, b) == (seg.start, seg.end) or not trims:
-                old += math.dist(seg.start, seg.end)
-            else:
-                pts = self._rule.chain_points(chain)
-                inner = pts[1 if index == 0 else -2]
-                kept = max((seg.start, seg.end), key=lambda p: math.dist(p, inner))
-                old += math.dist(kept, self._exact(option.ends[0 if index == 0 else 1]))
-        for step in chain[1:-1]:
-            old += math.dist(step[0].start, step[0].end)
-        new = sum(math.dist(a, b) for a, b in zip(cand, cand[1:], strict=False))
-        after = abs(lengths.get(member.net_number, 0.0) - old + new - lengths.get(partner, 0.0))
-        return after > before + SKEW_TOLERANCE_MM
+        difference = lengths.get(net_number, 0.0) - lengths.get(partner, 0.0)
+        return abs(difference + length_delta) > abs(difference) + SKEW_TOLERANCE_MM
 
     def _net_lengths(self) -> dict[int, float]:
         lengths: dict[int, float] = {}
@@ -865,8 +866,7 @@ class RedundantCopperRepairer:
         index = self._edits.index(edit)
         dropped = self._edits[index:]
         del self._edits[index:]
-        if edit.legs:
-            self._rejected.setdefault(edit.finding, {})[edit.path_key] = reason
+        self._rejected.setdefault(edit.finding, {})[edit.path_key] = reason
         self._rebuild()
         return [
             CopperUnrepaired(
@@ -902,6 +902,11 @@ class RedundantCopperRepairer:
                 return None
         stub_ids = {stub.uuid for stub in stubs}
         net_number = stubs[0].net_number
+        # The first removal is already applied. Only the extra stubs would
+        # change the length of the board under verification.
+        delta = -sum(math.dist(s.start, s.end) for s in stubs)
+        if self._worsens_skew(net_number, _pair_partners(self.pcb).get(net_number), delta):
+            return None
         keep = [
             LineString([s.start, s.end]).buffer(s.width / 2.0)
             for s in self.pcb.segments

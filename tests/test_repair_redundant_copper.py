@@ -131,6 +131,25 @@ def test_covered_edit_widens_to_remove_a_stub_its_removal_left_dangling(tmp_path
     assert [e.uuid for e in repairer.edits] == [widened.uuid]
 
 
+def test_widening_a_covered_edit_cannot_unbalance_a_pair(tmp_path):
+    segments = [
+        Board._Seg((0, 0), (10, 10), width=0.5),
+        Board._Seg((4, 4), (6, 6), width=0.5),
+        Board._Seg((6, 6), (6, 6.1), width=0.5),
+        Board._Seg((6, 6.1), (6, 11), width=0.5),
+    ]
+    # Removing only the hidden segment puts the two members at equal length.
+    other = sum(math.dist(s.start, s.end) for i, s in enumerate(segments) if i != 1)
+    segments.append(Board._Seg((0, 50), (other, 50), width=0.5, net_number=2))
+    path = _write(tmp_path, segments)
+    path.write_text(path.read_text().replace('"SIG"', '"USB_D+"').replace('"OTHER"', '"USB_D-"'))
+    repairer = _repairer(path)
+    (edit,) = repairer.plan(_findings(repairer)).edits
+    stub = next(s.uuid for s in repairer.pcb.segments if s.end == (6.0, 6.1))
+    assert repairer.widen(edit, [stub]) is None
+    assert repairer.edits == (edit,)
+
+
 def test_widen_refuses_a_stub_that_is_not_inside_copper_that_stays(tmp_path):
     path = _write(
         tmp_path,
@@ -234,6 +253,34 @@ def test_chain_cut_at_a_tap_runs_on_through_it_when_the_line_is_clear(tmp_path):
     landing = next(p for p in (tap.start, tap.end) if p == (3.0, 0.0))
     assert _on_leg(landing, trunk)
     assert _findings(_repairer(out)) == []
+
+
+def test_trimmed_edit_predicts_the_length_written_to_disk(tmp_path):
+    # A tap 2 mm along a 6 mm trunk leaves 2 mm and removes 4 mm.
+    segments = [
+        Board._Seg((0, 0), (6, 0)),
+        *(Board._Seg(a, b) for a, b in Board._zip_pairs(Board._JOY_TAIL)),
+        Board._Seg((2, 0), (0.5, 1.5)),
+    ]
+    repairer = _repairer(_write(tmp_path, segments))
+    (finding,) = _findings(repairer)
+    witnesses = tuple(finding.witnesses)
+    rule = repairer._rule
+    chain = rule.chain_for(witnesses)
+    option = next(o for o in rule.chain_options(chain) if o.trims[0])
+    candidate = rule.shortcut_candidates(list(option.ends))[0]
+    first = repairer._segment(witnesses[0])
+    edit = repairer._edit_for(
+        finding.rule_id, witnesses, first, chain, option, candidate, False, first.width
+    )
+    assert isinstance(edit, CopperEdit) and len(edit.trimmed) == 1
+    before = sum(math.dist(s.start, s.end) for s in repairer.pcb.segments)
+    repairer._apply(edit)
+    destination = tmp_path / "trimmed.kicad_pcb"
+    repairer.pcb.save(destination)
+    after = sum(math.dist(s.start, s.end) for s in PCB.load(destination).segments)
+    assert edit.length_delta == pytest.approx(after - before, abs=1e-9)
+    assert after == pytest.approx(before)
 
 
 def _on_leg(point, seg) -> bool:
@@ -363,16 +410,19 @@ def test_worsens_skew_measures_the_pair_not_the_net(tmp_path):
     assert math.dist(*longer[0:2]) + math.dist(*longer[1:3]) > original
     assert math.dist(*shorter[0:2]) + math.dist(*shorter[1:3]) < original
     member = chain[0][0]
-    assert repairer._worsens_skew(member, None, chain, option, shorter, 0.2) is False
-    lengths = {member.net_number: 10.0, 7: 4.0}
+    shortening = sum(math.dist(a, b) for a, b in zip(shorter, shorter[1:], strict=False)) - original
+    lengthening = sum(math.dist(a, b) for a, b in zip(longer, longer[1:], strict=False)) - original
+    net = member.net_number
+    assert not repairer._worsens_skew(net, None, shortening)
+    lengths = {net: 10.0, 7: 4.0}
     repairer._net_lengths = lambda: lengths  # type: ignore[method-assign]
-    assert repairer._worsens_skew(member, 7, chain, option, shorter, 0.2) is False
-    assert repairer._worsens_skew(member, 7, chain, option, longer, 0.2) is True
+    assert not repairer._worsens_skew(net, 7, shortening)
+    assert repairer._worsens_skew(net, 7, lengthening)
     lengths[7] = 14.0
-    assert repairer._worsens_skew(member, 7, chain, option, shorter, 0.2) is True
-    assert repairer._worsens_skew(member, 7, chain, option, longer, 0.2) is True
+    assert repairer._worsens_skew(net, 7, shortening)
+    assert repairer._worsens_skew(net, 7, lengthening)
     lengths[7] = 20.0
-    assert repairer._worsens_skew(member, 7, chain, option, longer, 0.2) is False
+    assert not repairer._worsens_skew(net, 7, lengthening)
 
 
 @pytest.mark.parametrize("edit_kind", ["remove_covered", "rewrite_chain"])

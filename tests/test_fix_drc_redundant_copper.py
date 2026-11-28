@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import sys
 from collections import Counter
 from pathlib import Path
@@ -263,6 +264,49 @@ def test_unchanged_sharp_corner_at_same_coordinate_is_not_treated_as_new(tmp_pat
     saved = PCB.load(board)
     assert RedundantCopperRule().check(saved, None).violations == []
     assert len(saved.segments) == 2
+
+
+def test_balanced_pair_stays_balanced_when_a_staircase_reuses_a_leg(tmp_path, quiet):
+    chain = [(0, 0), (3, 0), (4, 1), (6, 1), (7, 2), (8, 2), (9, 3), (10, 3)]
+    retained = [((0, 0), (2, 2)), ((2, 2), (5, 2)), ((0, 0), (-2, -2))]
+    edges = [*zip(chain, chain[1:], strict=False), *retained]
+    length = sum(math.dist(a, b) for a, b in edges)
+    segments = [Board._Seg(a, b, width=0.2) for a, b in edges]
+    segments.append(Board._Seg((0, 50), (length, 50), width=0.2, net_number=2))
+    board = _write(tmp_path, segments)
+    board.write_text(board.read_text().replace('"PWR"', '"USB_D+"').replace('"OTHER"', '"USB_D-"'))
+
+    fix_drc_cmd.main(_argv(board))
+    saved = PCB.load(board)
+    lengths = {
+        net: sum(math.dist(s.start, s.end) for s in saved.segments if s.net_name == net)
+        for net in ("USB_D+", "USB_D-")
+    }
+    assert lengths["USB_D-"] == pytest.approx(length)
+    assert lengths["USB_D+"] == pytest.approx(lengths["USB_D-"], abs=0.001)
+
+
+def test_refused_covered_removal_preserves_an_independent_repair(tmp_path, quiet, monkeypatch):
+    segments = [
+        Board._Seg((a, y), (b, y), width=0.2, net_number=net)
+        for net, y in ((1, 0), (2, 50))
+        for a, b in ((0, 10), (2, 5))
+    ]
+    board = _write(tmp_path, segments)
+    candidates = []
+
+    def check(path, **kwargs):
+        report = quiet(path, **kwargs)
+        counts = Counter(seg.net_name for seg in PCB.load(path).segments)
+        candidates.append((counts["PWR"], counts["OTHER"]))
+        if counts["OTHER"] == 1:
+            report.violations.append(_warning("sharp_trace_corner", ("OTHER",), 2, 50))
+        return report
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", check)
+    assert fix_drc_cmd.main(_argv(board)) == 2
+    assert (1, 1) in candidates and (1, 2) in candidates
+    assert Counter(s.net_name for s in PCB.load(board).segments) == {"PWR": 1, "OTHER": 2}
 
 
 def test_partial_veto_rechecks_surviving_edits_before_publishing(tmp_path, quiet):

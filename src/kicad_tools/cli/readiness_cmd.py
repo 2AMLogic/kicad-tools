@@ -52,6 +52,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
@@ -3474,28 +3475,17 @@ def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
     return {"copper_cleanup": "applied", "removed": removed, "steps": steps}
 
 
-def _avoidable_copper(pcb_path: Path) -> tuple[frozenset[tuple[Any, ...]], int] | None:
-    """``(sharp_trace_corner sites, redundant_copper* count)``, or ``None``.
-
-    The two rules that judge a cleanup pass's *shape* -- native DRC accepts an
-    explicit acute junction and a split-off stub (Issue #10667).  Sharp corners
-    are tracked by ``(nets, layer, x, y)`` site (0.01 mm precision) rather than
-    only by total count so a pass that replaces an old corner with a new one is
-    caught.  ``None`` when they cannot run; a caller then keeps the step's own
-    verification.
-    """
+def _avoidable_copper(
+    pcb_path: Path, manufacturer: str
+) -> tuple[frozenset[tuple[Any, ...]], Counter[tuple[Any, ...]]] | None:
+    """Identify sharp-corner sites and redundant-copper findings under the project's rules."""
     try:
+        from kicad_tools.cli.check_cmd import build_check_rule_set
         from kicad_tools.schema.pcb import PCB
-        from kicad_tools.validate.checker import DRCChecker
         from kicad_tools.validate.rules.sharp_trace_corner import SharpTraceCornerRule
 
         pcb = PCB.load(pcb_path)
-        checker = DRCChecker(
-            pcb,
-            manufacturer="jlcpcb-tier1",
-            layers=len(pcb.copper_layers),
-            warn_on_inactive_skew_rules=False,
-        )
+        checker = build_check_rule_set(pcb_path, manufacturer=manufacturer, pcb=pcb).checker
         sharp = SharpTraceCornerRule().check(pcb, checker.design_rules)
         redundant = checker.redundant_copper_rule().check(pcb, checker.design_rules)
     except Exception:  # noqa: BLE001 - an unreadable board is the gates' to report
@@ -3510,10 +3500,12 @@ def _avoidable_copper(pcb_path: Path) -> tuple[frozenset[tuple[Any, ...]], int] 
         for v in sharp.violations
         if v.rule_id == "sharp_trace_corner"
     )
-    return (
-        sharp_sites,
-        sum(1 for v in redundant.violations if v.rule_id.startswith("redundant_copper")),
+    redundant_sites = Counter(
+        (v.key, tuple(sorted(v.witnesses)), tuple(round(n, 2) for n in (v.location or ())))
+        for v in redundant.violations
+        if v.rule_id.startswith("redundant_copper")
     )
+    return sharp_sites, redundant_sites
 
 
 def _guarded_cleanup_step(
@@ -3529,17 +3521,17 @@ def _guarded_cleanup_step(
     and the step is recorded as ``not-applied`` with what it would have added.
     """
     pcb_path = Path(options.pcb)
-    before = _avoidable_copper(pcb_path)
+    before = _avoidable_copper(pcb_path, options.manufacturer)
     if before is None:
         return step(options)
     snapshot = pcb_path.read_bytes()
     record = step(options)
     if record.get("status") != "applied":
         return record
-    after = _avoidable_copper(pcb_path)
+    after = _avoidable_copper(pcb_path, options.manufacturer)
     if after is not None:
         new_sharp = len(after[0] - before[0])
-        new_redundant = max(0, after[1] - before[1])
+        new_redundant = (after[1] - before[1]).total()
         if new_sharp or new_redundant:
             pcb_path.write_bytes(snapshot)
             added = ", ".join(
