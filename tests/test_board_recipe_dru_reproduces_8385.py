@@ -3,10 +3,11 @@
 The follow-up to #8357 (board 05, ``test_board05_recipe_dru_reproduces_8357.py``):
 under the same operator ruling (commit what the recipe emits, consistent with
 #8029), a board's committed routed ``.kicad_dru`` must be the file its recipe
-leaves on disk. Boards 02, 04 and 07 emit the #8048 attach-zone block. Board
-01 authors its ``Power`` net class (#10421), and board 06 authors ``LVTTL``,
-``LVDS`` and ``Power`` (#10450). Neither project has a router-class floor
-to relax. Both remain in the byte-for-byte recipe comparison.
+leaves on disk. Boards 04 and 07 emit the #8048 attach-zone block. Board
+01 authors its ``Power`` net class (#10421), board 02 authors the five
+classes it reviewed (#10663), and board 06 authors ``LVTTL``, ``LVDS`` and
+``Power`` (#10450). None of those projects has a router-class floor to
+relax. All remain in the byte-for-byte recipe comparison.
 
 Each recipe's *last* DRU write is replayed on the committed routed board in a
 scratch directory, starting -- as a fresh recipe run does -- from no
@@ -109,7 +110,9 @@ PARAMS = [
     pytest.param("07-matchgroup-test", id="board07"),
 ]
 
-ATTACH_ZONE_PARAMS = [param for param in PARAMS if param.id not in {"board01", "board06"}]
+AUTHORED_CLASS_BOARDS = {"board01", "board02", "board06"}
+
+ATTACH_ZONE_PARAMS = [param for param in PARAMS if param.id not in AUTHORED_CLASS_BOARDS]
 
 
 def _committed_dru(board: str) -> str:
@@ -147,6 +150,16 @@ def test_board06_authored_classes_emit_no_attach_zone_block():
     stem = CASES["06-diffpair-test"][0]
     project = json.loads(
         (BOARDS / "06-diffpair-test" / "output" / f"{stem}.kicad_pro").read_text(encoding="utf-8")
+    )
+    assert router_netclass_provenance(project) == ([], [])
+
+
+def test_board02_authored_classes_emit_no_attach_zone_block():
+    """Board 02's project authors its five reviewed classes (#10663): no floor to relax."""
+    assert not has_attach_zone_block(_committed_dru("02-charlieplex-led"))
+    stem = CASES["02-charlieplex-led"][0]
+    project = json.loads(
+        (BOARDS / "02-charlieplex-led" / "output" / f"{stem}.kicad_pro").read_text(encoding="utf-8")
     )
     assert router_netclass_provenance(project) == ([], [])
 

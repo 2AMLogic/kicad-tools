@@ -1,14 +1,14 @@
 {
   "file": "output/charlieplex_3x3_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "cb39664c7c36d2a1ece95b72d2749750ab238bec59c28ddd583a9a7743e3ff8f",
+  "pcb_sha256": "3717d1ac6504f0098646bc4eac56e1cf1b938595a8aebd0d7ac4a3d78be349ab",
   "layers": 2,
   "summary": {
     "errors": 0,
     "warnings": 7,
-    "infos": 71,
+    "infos": 78,
     "waived": 0,
-    "rules_checked": 84,
+    "rules_checked": 87,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -22,9 +22,12 @@
       "redundant_copper_via_offcentre": 1,
       "redundant_copper_covered": 1,
       "redundant_copper_staircase": 1,
+      "redundant_copper_pour_stub": 0,
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
+      "netclass_sidecar_mismatch": 1,
+      "netclass_track_width_mismatch": 1,
       "netclass_clearance_copper": 1,
       "netclass_clearance_unsupported": 1,
       "netclass_track_width": 1,
@@ -48,7 +51,7 @@
     "passed": true,
     "stale_waivers": 0,
     "orphan_waivers": 0,
-    "coverage_checked": 45,
+    "coverage_checked": 47,
     "coverage_skipped": 6,
     "coverage_unknown": [
       "mask_multi_segment",
@@ -57,7 +60,7 @@
       "spec_conformance"
     ],
     "coverage_blocking_unknown": [],
-    "attach_zone_exemption": "active"
+    "attach_zone_exemption": "not_applicable"
   },
   "violations": [
     {
@@ -71,6 +74,7 @@
       "required_value": null,
       "items": [],
       "nets": [],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -95,6 +99,7 @@
         "J1"
       ],
       "nets": [],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -119,6 +124,7 @@
         "J2"
       ],
       "nets": [],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -126,6 +132,190 @@
       "waived": false,
       "key": "connector_edge_distance|J2||F.Cu",
       "evidence_hash": "ev4:d3a430975d4e0d29"
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C1 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        153.55,
+        117.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C1"
+      ],
+      "nets": [
+        "VCC"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C1|VCC|",
+      "evidence_hash": "ev4:602a50471881c1b9"
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C2 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        129.55,
+        119.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C2"
+      ],
+      "nets": [
+        "VCC"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C2|VCC|",
+      "evidence_hash": "ev4:8eb489c9e9c277c7"
+    },
+    {
+      "rule_id": "silk_hole_overlap",
+      "type": "silk_overlap",
+      "severity": "info",
+      "message": "Silkscreen C1 (reference) overlaps drilled hole of via at (151.500, 115.900)",
+      "location": [
+        152.05,
+        115.77
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.0,
+      "required_value": 0.0,
+      "items": [
+        "C1 (reference)",
+        "via at (151.500, 115.900)"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "silk_hole_overlap|C1 (reference),via at (151.500, 115.900)||F.SilkS",
+      "evidence_hash": "ev4:9456325c55948dd4"
+    },
+    {
+      "rule_id": "silk_hole_overlap",
+      "type": "silk_overlap",
+      "severity": "info",
+      "message": "Silkscreen C1 (reference) overlaps drilled hole of via at (152.350, 116.300)",
+      "location": [
+        152.05,
+        115.77
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.0,
+      "required_value": 0.0,
+      "items": [
+        "C1 (reference)",
+        "via at (152.350, 116.300)"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "silk_hole_overlap|C1 (reference),via at (152.350, 116.300)||F.SilkS",
+      "evidence_hash": "ev4:3446e46778ff6644"
+    },
+    {
+      "rule_id": "silk_hole_overlap",
+      "type": "silk_overlap",
+      "severity": "info",
+      "message": "Silkscreen D4 (reference) overlaps drilled hole of via at (137.600, 93.900)",
+      "location": [
+        138.5,
+        93.3
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.0,
+      "required_value": 0.0,
+      "items": [
+        "D4 (reference)",
+        "via at (137.600, 93.900)"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "silk_hole_overlap|D4 (reference),via at (137.600, 93.900)||F.SilkS",
+      "evidence_hash": "ev4:c79fa90f95445b4b"
+    },
+    {
+      "rule_id": "silk_hole_overlap",
+      "type": "silk_overlap",
+      "severity": "info",
+      "message": "Silkscreen D9 (fp_line) overlaps drilled hole of via at (156.625, 105.500)",
+      "location": [
+        158.5,
+        105.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.0,
+      "required_value": 0.0,
+      "items": [
+        "D9 (fp_line)",
+        "via at (156.625, 105.500)"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "silk_hole_overlap|D9 (fp_line),via at (156.625, 105.500)||F.SilkS",
+      "evidence_hash": "ev4:c74315d554df5c2b"
+    },
+    {
+      "rule_id": "silk_hole_overlap",
+      "type": "silk_overlap",
+      "severity": "info",
+      "message": "Silkscreen D9 (reference) overlaps drilled hole of via at (158.000, 103.800)",
+      "location": [
+        158.5,
+        103.3
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.0,
+      "required_value": 0.0,
+      "items": [
+        "D9 (reference)",
+        "via at (158.000, 103.800)"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "silk_hole_overlap|D9 (reference),via at (158.000, 103.800)||F.SilkS",
+      "evidence_hash": "ev4:0cc8403d3999d5a1"
     },
     {
       "rule_id": "mask_to_copper",
@@ -146,6 +336,7 @@
       "nets": [
         "VCC"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -173,6 +364,7 @@
       "nets": [
         "VCC"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -200,6 +392,7 @@
       "nets": [
         "RESET"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -227,6 +420,7 @@
       "nets": [
         "LINE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -254,6 +448,7 @@
       "nets": [
         "NODE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -281,6 +476,7 @@
       "nets": [
         "NODE_B"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -308,6 +504,7 @@
       "nets": [
         "NODE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -335,6 +532,7 @@
       "nets": [
         "NODE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -362,6 +560,7 @@
       "nets": [
         "NODE_B"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -389,6 +588,7 @@
       "nets": [
         "NODE_C"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -416,6 +616,7 @@
       "nets": [
         "NODE_C"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -428,88 +629,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.460674225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 11; opening pad:C1/1; exposed copper segment (net VCC); same-net own-pad entry",
-      "location": [
-        153.55,
-        117.1375
-      ],
-      "layer": "F.Cu",
-      "actual_value": 0.0,
-      "required_value": 0.09,
-      "items": [
-        "90c61153-9acf-58ca-8451-6aff8d392c1c",
-        "0a7bd000-186a-5573-b6d5-fbf57d10033c"
-      ],
-      "nets": [
-        "VCC"
-      ],
-      "same_net": null,
-      "fab_band": null,
-      "corner_class": null,
-      "status": "info",
-      "waived": false,
-      "key": "mask_to_copper|0a7bd000-186a-5573-b6d5-fbf57d10033c,90c61153-9acf-58ca-8451-6aff8d392c1c|VCC|F.Cu",
-      "evidence_hash": "ev4:0172029b3c1af014"
-    },
-    {
-      "rule_id": "mask_to_copper",
-      "type": "mask_to_copper",
-      "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.254188412 mm\u00b2; beyond owner pad copper 3.34581648e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 12; opening pad:C1/1; exposed copper segment (net VCC); same-net own-pad entry",
-      "location": [
-        153.289231,
-        117.1484885
-      ],
-      "layer": "F.Cu",
-      "actual_value": 0.0,
-      "required_value": 0.09,
-      "items": [
-        "90c61153-9acf-58ca-8451-6aff8d392c1c",
-        "73a53e35-cdd9-5cda-bb9f-eb1cc9a9b765"
-      ],
-      "nets": [
-        "VCC"
-      ],
-      "same_net": null,
-      "fab_band": null,
-      "corner_class": null,
-      "status": "info",
-      "waived": false,
-      "key": "mask_to_copper|73a53e35-cdd9-5cda-bb9f-eb1cc9a9b765,90c61153-9acf-58ca-8451-6aff8d392c1c|VCC|F.Cu",
-      "evidence_hash": "ev4:4428e784725fcb05"
-    },
-    {
-      "rule_id": "mask_to_copper",
-      "type": "mask_to_copper",
-      "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.348174225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 13; opening pad:C1/2; exposed copper segment (net GND); same-net own-pad entry",
-      "location": [
-        155.3249995,
-        117.5
-      ],
-      "layer": "F.Cu",
-      "actual_value": 0.0,
-      "required_value": 0.09,
-      "items": [
-        "9298e2c0-3a01-5ce9-a1bc-ec9e0563ed7d",
-        "05e73374-8501-5380-9a70-ed98ea727e00"
-      ],
-      "nets": [
-        "GND"
-      ],
-      "same_net": null,
-      "fab_band": null,
-      "corner_class": null,
-      "status": "info",
-      "waived": false,
-      "key": "mask_to_copper|05e73374-8501-5380-9a70-ed98ea727e00,9298e2c0-3a01-5ce9-a1bc-ec9e0563ed7d|GND|F.Cu",
-      "evidence_hash": "ev4:6d64f8a39ebed2bc"
-    },
-    {
-      "rule_id": "mask_to_copper",
-      "type": "mask_to_copper",
-      "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.1568252 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 14; opening pad:R3/1; exposed copper segment (net LINE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.1568252 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 11; opening pad:R3/1; exposed copper segment (net LINE_C); same-net own-pad entry",
       "location": [
         152.8083945,
         113.7208945
@@ -524,6 +644,7 @@
       "nets": [
         "LINE_C"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -536,7 +657,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824388 mm\u00b2; beyond owner pad copper 2.28094035e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 15; opening pad:R3/1; exposed copper segment (net LINE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824388 mm\u00b2; beyond owner pad copper 2.28094035e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 12; opening pad:R3/1; exposed copper segment (net LINE_C); same-net own-pad entry",
       "location": [
         152.3666055520119,
         113.7208944234996
@@ -551,6 +672,7 @@
       "nets": [
         "LINE_C"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -563,7 +685,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824189 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 16; opening pad:R3/2; exposed copper segment (net NODE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824189 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 13; opening pad:R3/2; exposed copper segment (net NODE_C); same-net own-pad entry",
       "location": [
         154.19160503018776,
         113.27910504440091
@@ -578,6 +700,7 @@
       "nets": [
         "NODE_C"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -590,7 +713,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824172 mm\u00b2; beyond owner pad copper 2.28094035e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 17; opening pad:R4/1; exposed copper segment (net LINE_D); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824172 mm\u00b2; beyond owner pad copper 2.28094035e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 14; opening pad:R4/1; exposed copper segment (net LINE_D); same-net own-pad entry",
       "location": [
         162.36660501904075,
         113.72089497199435
@@ -605,6 +728,7 @@
       "nets": [
         "LINE_D"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -617,7 +741,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156825139 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 18; opening pad:R4/1; exposed copper segment (net LINE_D); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156825139 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 15; opening pad:R4/1; exposed copper segment (net LINE_D); same-net own-pad entry",
       "location": [
         162.80839453838558,
         113.72089455645866
@@ -632,6 +756,7 @@
       "nets": [
         "LINE_D"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -644,7 +769,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156825223 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 19; opening pad:R4/2; exposed copper segment (net NODE_D); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156825223 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 16; opening pad:R4/2; exposed copper segment (net NODE_D); same-net own-pad entry",
       "location": [
         164.1916055,
         113.2791055
@@ -659,6 +784,7 @@
       "nets": [
         "NODE_D"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -671,7 +797,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 20; opening pad:D2/1; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 17; opening pad:D2/1; exposed copper segment (net NODE_A); same-net own-pad entry",
       "location": [
         147.36874949999998,
         85.5
@@ -686,6 +812,7 @@
       "nets": [
         "NODE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -698,7 +825,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 21; opening pad:D2/1; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 18; opening pad:D2/1; exposed copper segment (net NODE_A); same-net own-pad entry",
       "location": [
         147.5625,
         85.15
@@ -713,6 +840,7 @@
       "nets": [
         "NODE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -725,7 +853,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 22; opening pad:D2/1; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 19; opening pad:D2/1; exposed copper segment (net NODE_A); same-net own-pad entry",
       "location": [
         147.5625,
         85.85
@@ -740,6 +868,7 @@
       "nets": [
         "NODE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -752,7 +881,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 23; opening pad:D2/2; exposed copper segment (net NODE_B); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 20; opening pad:D2/2; exposed copper segment (net NODE_B); same-net own-pad entry",
       "location": [
         149.4375,
         85.85
@@ -767,6 +896,7 @@
       "nets": [
         "NODE_B"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -779,7 +909,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.523174225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 24; opening pad:J1/1; exposed copper segment (net VCC); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.523174225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 21; opening pad:J1/1; exposed copper segment (net VCC); same-net own-pad entry",
       "location": [
         128.5,
         123.075
@@ -794,6 +924,7 @@
       "nets": [
         "VCC"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -806,7 +937,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.516965087 mm\u00b2; beyond owner pad copper 6.8522041e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 25; opening pad:J1/2; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.516965087 mm\u00b2; beyond owner pad copper 6.8522041e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 22; opening pad:J1/2; exposed copper segment (net GND); same-net own-pad entry",
       "location": [
         128.7872280804425,
         125.75277191955752
@@ -821,6 +952,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -833,7 +965,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.304464364 mm\u00b2; beyond owner pad copper 1.28728746e-07 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 26; opening pad:J1/2; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.304464364 mm\u00b2; beyond owner pad copper 1.28728746e-07 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 23; opening pad:J1/2; exposed copper segment (net GND); same-net own-pad entry",
       "location": [
         129.01250022977996,
         126.04035300000001
@@ -848,6 +980,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -860,115 +993,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 27; opening pad:D9/1; exposed copper segment (net NODE_D); same-net own-pad entry",
-      "location": [
-        157.36874949999998,
-        105.5
-      ],
-      "layer": "F.Cu",
-      "actual_value": 0.0,
-      "required_value": 0.09,
-      "items": [
-        "5646ba26-34f2-50c0-9c40-79d52d7013fc",
-        "df7b0f7d-8bf4-5bc9-9620-2eff07952b88"
-      ],
-      "nets": [
-        "NODE_D"
-      ],
-      "same_net": null,
-      "fab_band": null,
-      "corner_class": null,
-      "status": "info",
-      "waived": false,
-      "key": "mask_to_copper|5646ba26-34f2-50c0-9c40-79d52d7013fc,df7b0f7d-8bf4-5bc9-9620-2eff07952b88|NODE_D|F.Cu",
-      "evidence_hash": "ev4:6c5c516bcc81d267"
-    },
-    {
-      "rule_id": "mask_to_copper",
-      "type": "mask_to_copper",
-      "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 28; opening pad:D9/1; exposed copper segment (net NODE_D); same-net own-pad entry",
-      "location": [
-        157.5625,
-        105.85
-      ],
-      "layer": "F.Cu",
-      "actual_value": 0.0,
-      "required_value": 0.09,
-      "items": [
-        "5646ba26-34f2-50c0-9c40-79d52d7013fc",
-        "fae9e1b4-bb22-590c-ba5f-31da8dd7cb6d"
-      ],
-      "nets": [
-        "NODE_D"
-      ],
-      "same_net": null,
-      "fab_band": null,
-      "corner_class": null,
-      "status": "info",
-      "waived": false,
-      "key": "mask_to_copper|5646ba26-34f2-50c0-9c40-79d52d7013fc,fae9e1b4-bb22-590c-ba5f-31da8dd7cb6d|NODE_D|F.Cu",
-      "evidence_hash": "ev4:a750eaf227a77b2e"
-    },
-    {
-      "rule_id": "mask_to_copper",
-      "type": "mask_to_copper",
-      "severity": "warning",
-      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 29; opening pad:D9/1; exposed copper via (net NODE_D); same-net pass-through",
-      "location": [
-        157.075,
-        105.49923
-      ],
-      "layer": "F.Cu",
-      "actual_value": 0.15000099999997474,
-      "required_value": 0.09,
-      "items": [
-        "5646ba26-34f2-50c0-9c40-79d52d7013fc",
-        "b3df6219-c14a-517b-942b-107b1f78ab2d"
-      ],
-      "nets": [
-        "NODE_D"
-      ],
-      "same_net": null,
-      "fab_band": null,
-      "corner_class": null,
-      "status": "warning",
-      "waived": false,
-      "key": "mask_to_copper|5646ba26-34f2-50c0-9c40-79d52d7013fc,b3df6219-c14a-517b-942b-107b1f78ab2d|NODE_D|F.Cu",
-      "evidence_hash": "ev4:5a4602dd222ebe55"
-    },
-    {
-      "rule_id": "mask_to_copper",
-      "type": "mask_to_copper",
-      "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151117753 mm\u00b2; beyond owner pad copper 2.84994978e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 30; opening pad:D9/2; exposed copper segment (net NODE_B); same-net own-pad entry",
-      "location": [
-        159.2291055,
-        105.29160549999999
-      ],
-      "layer": "F.Cu",
-      "actual_value": 0.0,
-      "required_value": 0.09,
-      "items": [
-        "ac22cff5-747a-54a3-9f0f-a7611724766a",
-        "69612e11-7ea0-56b0-8db4-fa740c8b4c17"
-      ],
-      "nets": [
-        "NODE_B"
-      ],
-      "same_net": null,
-      "fab_band": null,
-      "corner_class": null,
-      "status": "info",
-      "waived": false,
-      "key": "mask_to_copper|69612e11-7ea0-56b0-8db4-fa740c8b4c17,ac22cff5-747a-54a3-9f0f-a7611724766a|NODE_B|F.Cu",
-      "evidence_hash": "ev4:0888870469ddec2e"
-    },
-    {
-      "rule_id": "mask_to_copper",
-      "type": "mask_to_copper",
-      "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 31; opening pad:D4/1; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 24; opening pad:D4/1; exposed copper segment (net NODE_A); same-net own-pad entry",
       "location": [
         137.75625050000002,
         95.5
@@ -983,6 +1008,7 @@
       "nets": [
         "NODE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -995,7 +1021,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151116938 mm\u00b2; beyond owner pad copper 2.84992751e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 32; opening pad:D4/1; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151116938 mm\u00b2; beyond owner pad copper 2.84992751e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 25; opening pad:D4/1; exposed copper segment (net NODE_A); same-net own-pad entry",
       "location": [
         137.35410554370932,
         95.7083944338429
@@ -1010,6 +1036,7 @@
       "nets": [
         "NODE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1022,7 +1049,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 33; opening pad:D4/2; exposed copper segment (net NODE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 26; opening pad:D4/2; exposed copper segment (net NODE_C); same-net own-pad entry",
       "location": [
         139.4375,
         95.85
@@ -1037,6 +1064,7 @@
       "nets": [
         "NODE_C"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1049,7 +1077,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.175290705 mm\u00b2; beyond owner pad copper 1.5841283e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 34; opening pad:U1/3; exposed copper segment (net LINE_B); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.175290705 mm\u00b2; beyond owner pad copper 1.5841283e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 27; opening pad:U1/3; exposed copper segment (net LINE_B); same-net own-pad entry",
       "location": [
         143.21937590170995,
         125.29937590170994
@@ -1064,6 +1092,7 @@
       "nets": [
         "LINE_B"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1076,7 +1105,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.491565194 mm\u00b2; beyond owner pad copper 6.4228085e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 35; opening pad:U1/4; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.491565194 mm\u00b2; beyond owner pad copper 6.4228085e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 28; opening pad:U1/4; exposed copper segment (net GND); same-net own-pad entry",
       "location": [
         143.23132281776788,
         127.85132281776785
@@ -1091,6 +1120,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1103,7 +1133,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.491565287 mm\u00b2; beyond owner pad copper 6.42280866e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 36; opening pad:U1/4; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.491565287 mm\u00b2; beyond owner pad copper 6.42280866e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 29; opening pad:U1/4; exposed copper segment (net GND); same-net own-pad entry",
       "location": [
         143.76867718223212,
         128.38867718223213
@@ -1118,6 +1148,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1130,7 +1161,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.175289748 mm\u00b2; beyond owner pad copper 1.5841091e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 37; opening pad:U1/5; exposed copper segment (net LINE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.175289748 mm\u00b2; beyond owner pad copper 1.5841091e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 30; opening pad:U1/5; exposed copper segment (net LINE_C); same-net own-pad entry",
       "location": [
         150.83937568150887,
         127.83937573130508
@@ -1145,6 +1176,7 @@
       "nets": [
         "LINE_C"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1157,7 +1189,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.175289983 mm\u00b2; beyond owner pad copper 5.95782401e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 38; opening pad:U1/7; exposed copper segment (net ISP_SCK); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.175289983 mm\u00b2; beyond owner pad copper 5.95782401e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 31; opening pad:U1/7; exposed copper segment (net ISP_SCK); same-net own-pad entry",
       "location": [
         151.47000032379887,
         123.039777
@@ -1172,6 +1204,7 @@
       "nets": [
         "ISP_SCK"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1184,7 +1217,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.491564609 mm\u00b2; beyond owner pad copper 1.43485661e-07 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 39; opening pad:U1/8; exposed copper segment (net VCC); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.491564609 mm\u00b2; beyond owner pad copper 1.43485661e-07 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 32; opening pad:U1/8; exposed copper segment (net VCC); same-net own-pad entry",
       "location": [
         151.12,
         120.12003341448917
@@ -1199,6 +1232,7 @@
       "nets": [
         "VCC"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1211,7 +1245,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 40; opening pad:D3/1; exposed copper segment (net NODE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 33; opening pad:D3/1; exposed copper segment (net NODE_C); same-net own-pad entry",
       "location": [
         157.36874949999998,
         85.5
@@ -1226,6 +1260,7 @@
       "nets": [
         "NODE_C"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1238,7 +1273,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 41; opening pad:D3/2; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 34; opening pad:D3/2; exposed copper segment (net NODE_A); same-net own-pad entry",
       "location": [
         159.24374949999998,
         85.5
@@ -1253,6 +1288,7 @@
       "nets": [
         "NODE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1265,7 +1301,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151116842 mm\u00b2; beyond owner pad copper 2.8499305e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 42; opening pad:D3/2; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151116842 mm\u00b2; beyond owner pad copper 2.8499305e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 35; opening pad:D3/2; exposed copper segment (net NODE_A); same-net own-pad entry",
       "location": [
         159.2291050734314,
         85.70839488885628
@@ -1280,6 +1316,7 @@
       "nets": [
         "NODE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1292,7 +1329,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 43; opening pad:R2/1; exposed copper segment (net LINE_B); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 36; opening pad:R2/1; exposed copper segment (net LINE_B); same-net own-pad entry",
       "location": [
         142.5875,
         113.85
@@ -1307,6 +1344,7 @@
       "nets": [
         "LINE_B"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1319,7 +1357,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824189 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 44; opening pad:R2/2; exposed copper segment (net NODE_B); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824189 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 37; opening pad:R2/2; exposed copper segment (net NODE_B); same-net own-pad entry",
       "location": [
         144.19160503018776,
         113.27910504440091
@@ -1334,6 +1372,7 @@
       "nets": [
         "NODE_B"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1346,7 +1385,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.254188857 mm\u00b2; beyond owner pad copper 3.34583679e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 45; opening pad:C2/1; exposed copper segment (net VCC); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.254188857 mm\u00b2; beyond owner pad copper 3.34583679e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 38; opening pad:C2/1; exposed copper segment (net VCC); same-net own-pad entry",
       "location": [
         129.810769,
         119.1484885
@@ -1361,6 +1400,7 @@
       "nets": [
         "VCC"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1373,7 +1413,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.430965773 mm\u00b2; beyond owner pad copper 3.34584287e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 46; opening pad:C2/1; exposed copper segment (net VCC); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.430965773 mm\u00b2; beyond owner pad copper 3.34584287e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 39; opening pad:C2/1; exposed copper segment (net VCC); same-net own-pad entry",
       "location": [
         129.31383275000002,
         119.82588849999999
@@ -1388,6 +1428,7 @@
       "nets": [
         "VCC"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1400,7 +1441,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.279424225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 47; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.279424225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 40; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
       "location": [
         131.45,
         120.04374999999999
@@ -1415,6 +1456,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1427,7 +1469,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.366663807 mm\u00b2; beyond owner pad copper 4.81566059e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 48; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.366663807 mm\u00b2; beyond owner pad copper 4.81566059e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 41; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
       "location": [
         131.5717705,
         119.137006
@@ -1442,6 +1484,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1454,7 +1497,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.32134845 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 49; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.32134845 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 42; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
       "location": [
         131.45,
         119.375
@@ -1469,6 +1512,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1481,7 +1525,91 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 50; opening pad:D7/1; exposed copper segment (net NODE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.460674225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 43; opening pad:C1/1; exposed copper segment (net VCC); same-net own-pad entry",
+      "location": [
+        153.55,
+        117.1375
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "90c61153-9acf-58ca-8451-6aff8d392c1c",
+        "0a7bd000-186a-5573-b6d5-fbf57d10033c"
+      ],
+      "nets": [
+        "VCC"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|0a7bd000-186a-5573-b6d5-fbf57d10033c,90c61153-9acf-58ca-8451-6aff8d392c1c|VCC|F.Cu",
+      "evidence_hash": "ev4:0172029b3c1af014"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.254188412 mm\u00b2; beyond owner pad copper 3.34581648e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 44; opening pad:C1/1; exposed copper segment (net VCC); same-net own-pad entry",
+      "location": [
+        153.289231,
+        117.1484885
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "90c61153-9acf-58ca-8451-6aff8d392c1c",
+        "73a53e35-cdd9-5cda-bb9f-eb1cc9a9b765"
+      ],
+      "nets": [
+        "VCC"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|73a53e35-cdd9-5cda-bb9f-eb1cc9a9b765,90c61153-9acf-58ca-8451-6aff8d392c1c|VCC|F.Cu",
+      "evidence_hash": "ev4:4428e784725fcb05"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.348174225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 45; opening pad:C1/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        155.3249995,
+        117.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "9298e2c0-3a01-5ce9-a1bc-ec9e0563ed7d",
+        "05e73374-8501-5380-9a70-ed98ea727e00"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|05e73374-8501-5380-9a70-ed98ea727e00,9298e2c0-3a01-5ce9-a1bc-ec9e0563ed7d|GND|F.Cu",
+      "evidence_hash": "ev4:6d64f8a39ebed2bc"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 46; opening pad:D7/1; exposed copper segment (net NODE_C); same-net own-pad entry",
       "location": [
         137.5625,
         105.85
@@ -1496,6 +1624,7 @@
       "nets": [
         "NODE_C"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1508,7 +1637,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 51; opening pad:D7/1; exposed copper segment (net NODE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 47; opening pad:D7/1; exposed copper segment (net NODE_C); same-net own-pad entry",
       "location": [
         137.5625,
         105.15
@@ -1523,6 +1652,7 @@
       "nets": [
         "NODE_C"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1535,7 +1665,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 52; opening pad:D7/2; exposed copper segment (net NODE_B); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 48; opening pad:D7/2; exposed copper segment (net NODE_B); same-net own-pad entry",
       "location": [
         139.4375,
         105.15
@@ -1550,6 +1680,7 @@
       "nets": [
         "NODE_B"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1562,7 +1693,7 @@
       "rule_id": "mask_to_copper",
       "type": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 53; opening pad:D7/2; exposed copper segment (net NODE_B); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 49; opening pad:D7/2; exposed copper segment (net NODE_B); same-net own-pad entry",
       "location": [
         139.4375,
         105.85
@@ -1577,6 +1708,7 @@
       "nets": [
         "NODE_B"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1584,6 +1716,118 @@
       "waived": false,
       "key": "mask_to_copper|6f03906b-966e-55a0-a9ad-79cc1ef9da20,f236ac1c-5e9a-52c6-a8ed-a57fd0ad2af2|NODE_B|F.Cu",
       "evidence_hash": "ev4:cb91a7366568eb1e"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 50; opening pad:D9/1; exposed copper segment (net NODE_D); same-net own-pad entry",
+      "location": [
+        157.36874949999998,
+        105.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "5646ba26-34f2-50c0-9c40-79d52d7013fc",
+        "df7b0f7d-8bf4-5bc9-9620-2eff07952b88"
+      ],
+      "nets": [
+        "NODE_D"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|5646ba26-34f2-50c0-9c40-79d52d7013fc,df7b0f7d-8bf4-5bc9-9620-2eff07952b88|NODE_D|F.Cu",
+      "evidence_hash": "ev4:6c5c516bcc81d267"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 51; opening pad:D9/1; exposed copper segment (net NODE_D); same-net own-pad entry",
+      "location": [
+        157.5625,
+        105.85
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "5646ba26-34f2-50c0-9c40-79d52d7013fc",
+        "fae9e1b4-bb22-590c-ba5f-31da8dd7cb6d"
+      ],
+      "nets": [
+        "NODE_D"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|5646ba26-34f2-50c0-9c40-79d52d7013fc,fae9e1b4-bb22-590c-ba5f-31da8dd7cb6d|NODE_D|F.Cu",
+      "evidence_hash": "ev4:a750eaf227a77b2e"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 52; opening pad:D9/1; exposed copper via (net NODE_D); same-net pass-through",
+      "location": [
+        157.075,
+        105.49923
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15000099999997474,
+      "required_value": 0.09,
+      "items": [
+        "5646ba26-34f2-50c0-9c40-79d52d7013fc",
+        "b3df6219-c14a-517b-942b-107b1f78ab2d"
+      ],
+      "nets": [
+        "NODE_D"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|5646ba26-34f2-50c0-9c40-79d52d7013fc,b3df6219-c14a-517b-942b-107b1f78ab2d|NODE_D|F.Cu",
+      "evidence_hash": "ev4:5a4602dd222ebe55"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151117753 mm\u00b2; beyond owner pad copper 2.84994978e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 53; opening pad:D9/2; exposed copper segment (net NODE_B); same-net own-pad entry",
+      "location": [
+        159.2291055,
+        105.29160549999999
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "ac22cff5-747a-54a3-9f0f-a7611724766a",
+        "69612e11-7ea0-56b0-8db4-fa740c8b4c17"
+      ],
+      "nets": [
+        "NODE_B"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|69612e11-7ea0-56b0-8db4-fa740c8b4c17,ac22cff5-747a-54a3-9f0f-a7611724766a|NODE_B|F.Cu",
+      "evidence_hash": "ev4:0888870469ddec2e"
     },
     {
       "rule_id": "mask_to_copper",
@@ -1604,6 +1848,7 @@
       "nets": [
         "NODE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1631,6 +1876,7 @@
       "nets": [
         "NODE_D"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1658,6 +1904,7 @@
       "nets": [
         "LINE_D"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1685,6 +1932,7 @@
       "nets": [
         "ISP_SCK"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1712,6 +1960,7 @@
       "nets": [
         "LINE_C"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1739,6 +1988,7 @@
       "nets": [
         "RESET"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1766,6 +2016,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1793,6 +2044,7 @@
       "nets": [
         "GND"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1820,6 +2072,7 @@
       "nets": [
         "NODE_D"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1847,6 +2100,7 @@
       "nets": [
         "NODE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1874,6 +2128,7 @@
       "nets": [
         "RESET"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1901,6 +2156,7 @@
       "nets": [
         "RESET"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1928,6 +2184,7 @@
       "nets": [
         "LINE_A"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1955,6 +2212,7 @@
       "nets": [
         "LINE_D"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -1982,6 +2240,7 @@
       "nets": [
         "VCC"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2001,6 +2260,7 @@
       "required_value": null,
       "items": [],
       "nets": [],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2013,34 +2273,7 @@
       "rule_id": "tht_smd_spacing",
       "type": "tht_smd_spacing",
       "severity": "warning",
-      "message": "THT/via to SMD pad spacing 2.4250mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (129.350000, 122.650000) and (129.350000, 120.225000)",
-      "location": [
-        129.35,
-        121.438
-      ],
-      "layer": "F.Cu",
-      "actual_value": 2.424999999999997,
-      "required_value": 3.05,
-      "items": [
-        "952137cb-6367-589a-bf72-41ce1a9f8f41",
-        "c4ebcd42-772c-5e63-88bf-c3fccec88356"
-      ],
-      "nets": [
-        "8"
-      ],
-      "same_net": null,
-      "fab_band": null,
-      "corner_class": null,
-      "status": "warning",
-      "waived": false,
-      "key": "tht_smd_spacing|952137cb-6367-589a-bf72-41ce1a9f8f41,c4ebcd42-772c-5e63-88bf-c3fccec88356|8|F.Cu",
-      "evidence_hash": "ev4:7a5b22af7a05c489"
-    },
-    {
-      "rule_id": "tht_smd_spacing",
-      "type": "tht_smd_spacing",
-      "severity": "warning",
-      "message": "THT/via to SMD pad spacing 3.0024mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (129.350000, 122.650000) and (131.061107, 120.182867)",
+      "message": "THT/via to SMD pad (J1.1 to C2.2) spacing 3.0024mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (129.350000, 122.650000) and (131.061107, 120.182867)",
       "location": [
         130.206,
         121.416
@@ -2056,6 +2289,7 @@
         "4",
         "8"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2068,7 +2302,35 @@
       "rule_id": "tht_smd_spacing",
       "type": "tht_smd_spacing",
       "severity": "warning",
-      "message": "THT/via to SMD pad spacing 2.5295mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (142.756747, 119.791402) and (140.868253, 118.108598)",
+      "message": "THT/via to SMD pad (J1.1 to C2.1) spacing 2.4250mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (129.350000, 122.650000) and (129.350000, 120.225000)",
+      "location": [
+        129.35,
+        121.438
+      ],
+      "layer": "F.Cu",
+      "actual_value": 2.424999999999997,
+      "required_value": 3.05,
+      "items": [
+        "952137cb-6367-589a-bf72-41ce1a9f8f41",
+        "c4ebcd42-772c-5e63-88bf-c3fccec88356"
+      ],
+      "nets": [
+        "8"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "tht_smd_spacing|952137cb-6367-589a-bf72-41ce1a9f8f41,c4ebcd42-772c-5e63-88bf-c3fccec88356|8|F.Cu",
+      "evidence_hash": "ev4:7a5b22af7a05c489"
+    },
+    {
+      "rule_id": "tht_smd_spacing",
+      "type": "tht_smd_spacing",
+      "severity": "warning",
+      "message": "THT/via to SMD pad (U1.1 to R5.2) spacing 2.5295mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (142.756747, 119.791402) and (140.868253, 118.108598)",
       "location": [
         141.813,
         118.95
@@ -2083,6 +2345,7 @@
       "nets": [
         "1"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2095,7 +2358,7 @@
       "rule_id": "tht_smd_spacing",
       "type": "tht_smd_spacing",
       "severity": "warning",
-      "message": "THT/via to SMD pad spacing 2.2863mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (151.627515, 119.881592) and (153.141402, 118.168253)",
+      "message": "THT/via to SMD pad (U1.8 to C1.1) spacing 2.2863mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (151.627515, 119.881592) and (153.141402, 118.168253)",
       "location": [
         152.384,
         119.025
@@ -2110,6 +2373,7 @@
       "nets": [
         "8"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2122,7 +2386,7 @@
       "rule_id": "tht_smd_spacing",
       "type": "tht_smd_spacing",
       "severity": "warning",
-      "message": "THT/via to SMD pad spacing 2.6512mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (165.650000, 127.580000) and (163.000000, 127.500000)",
+      "message": "THT/via to SMD pad (J2.5 to FID2.#0) spacing 2.6512mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (165.650000, 127.580000) and (163.000000, 127.500000)",
       "location": [
         164.325,
         127.54
@@ -2138,6 +2402,7 @@
         "0",
         "1"
       ],
+      "witnesses": [],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
@@ -2161,10 +2426,10 @@
         "warning_clearance_mm": 0.15
       },
       "binding": {
-        "source_sha256": "cb39664c7c36d2a1ece95b72d2749750ab238bec59c28ddd583a9a7743e3ff8f",
-        "project_sha256": "229dbb7c91a7eb4314d94b8e7a7e1d339b978e129f67675a941d7a0d7b1aac19",
-        "rules_sha256": "94043e6c5e8e06fbb8e5841f354070022dfc6fd6971756669c3b1ecac2d2fbe7",
-        "export_profile_sha256": "c87cc391c17a847bfb03eb6c3127e950783e6c85a110020795264084959628aa"
+        "source_sha256": "3717d1ac6504f0098646bc4eac56e1cf1b938595a8aebd0d7ac4a3d78be349ab",
+        "project_sha256": "5ea235d2344128ba7d00b691dc988b000f7ab4da9e0853ebce3eef4b4f765f32",
+        "rules_sha256": "b995a131e858fc9f81150ce3eab2b8da1a1403e59a66f6d6d69dac52826f5191",
+        "export_profile_sha256": "91fd17e2a8939eb76db3680efd9b759eac781acbca256926feb14c2796ed1aff"
       },
       "measurements": [
         {
@@ -2582,120 +2847,6 @@
           "pour_spoke_width_mm": null,
           "owner_nets": [
             "NODE_C"
-          ],
-          "within_own_pad_failed_condition": null
-        },
-        {
-          "opening_uuids": [
-            "90c61153-9acf-58ca-8451-6aff8d392c1c"
-          ],
-          "conductor_uuid": "0a7bd000-186a-5573-b6d5-fbf57d10033c",
-          "mask_side": "F.Mask",
-          "copper_layer": "F.Cu",
-          "location_mm": [
-            153.55,
-            117.1375
-          ],
-          "clearance_mm": 0.0,
-          "exposed_area_mm2": 0.460674225239997,
-          "relation": "overlap",
-          "disposition": "within_own_pad",
-          "uncertainty_mm": 0.010004,
-          "opening_kind": "pad:roundrect",
-          "mask_defined": false,
-          "margin_provenance": "board:pad_to_mask_clearance=0",
-          "rationale": null,
-          "negative_expansion": false,
-          "owner_net": "VCC",
-          "conductor_net": "VCC",
-          "conductor_kind": "segment",
-          "same_net": true,
-          "own_pad_entry": true,
-          "owner_ref": "C1/1",
-          "exposed_beyond_owner_mm2": 0.0,
-          "beside_owner_excess_mm2": 0.0,
-          "owner_run": null,
-          "pour_spokes": null,
-          "pour_relief_gap_mm": null,
-          "pour_spoke_width_mm": null,
-          "owner_nets": [
-            "VCC"
-          ],
-          "within_own_pad_failed_condition": null
-        },
-        {
-          "opening_uuids": [
-            "90c61153-9acf-58ca-8451-6aff8d392c1c"
-          ],
-          "conductor_uuid": "73a53e35-cdd9-5cda-bb9f-eb1cc9a9b765",
-          "mask_side": "F.Mask",
-          "copper_layer": "F.Cu",
-          "location_mm": [
-            153.289231,
-            117.1484885
-          ],
-          "clearance_mm": 0.0,
-          "exposed_area_mm2": 0.2541884120858233,
-          "relation": "overlap",
-          "disposition": "within_own_pad",
-          "uncertainty_mm": 0.010004,
-          "opening_kind": "pad:roundrect",
-          "mask_defined": false,
-          "margin_provenance": "board:pad_to_mask_clearance=0",
-          "rationale": null,
-          "negative_expansion": false,
-          "owner_net": "VCC",
-          "conductor_net": "VCC",
-          "conductor_kind": "segment",
-          "same_net": true,
-          "own_pad_entry": true,
-          "owner_ref": "C1/1",
-          "exposed_beyond_owner_mm2": 3.3458164833631e-08,
-          "beside_owner_excess_mm2": 0.0,
-          "owner_run": null,
-          "pour_spokes": null,
-          "pour_relief_gap_mm": null,
-          "pour_spoke_width_mm": null,
-          "owner_nets": [
-            "VCC"
-          ],
-          "within_own_pad_failed_condition": null
-        },
-        {
-          "opening_uuids": [
-            "9298e2c0-3a01-5ce9-a1bc-ec9e0563ed7d"
-          ],
-          "conductor_uuid": "05e73374-8501-5380-9a70-ed98ea727e00",
-          "mask_side": "F.Mask",
-          "copper_layer": "F.Cu",
-          "location_mm": [
-            155.3249995,
-            117.5
-          ],
-          "clearance_mm": 0.0,
-          "exposed_area_mm2": 0.34817422524000613,
-          "relation": "overlap",
-          "disposition": "within_own_pad",
-          "uncertainty_mm": 0.010004,
-          "opening_kind": "pad:roundrect",
-          "mask_defined": false,
-          "margin_provenance": "board:pad_to_mask_clearance=0",
-          "rationale": null,
-          "negative_expansion": false,
-          "owner_net": "GND",
-          "conductor_net": "GND",
-          "conductor_kind": "segment",
-          "same_net": true,
-          "own_pad_entry": true,
-          "owner_ref": "C1/2",
-          "exposed_beyond_owner_mm2": 0.0,
-          "beside_owner_excess_mm2": 0.0,
-          "owner_run": null,
-          "pour_spokes": null,
-          "pour_relief_gap_mm": null,
-          "pour_spoke_width_mm": null,
-          "owner_nets": [
-            "GND"
           ],
           "within_own_pad_failed_condition": null
         },
@@ -3190,158 +3341,6 @@
           "pour_spoke_width_mm": null,
           "owner_nets": [
             "GND"
-          ],
-          "within_own_pad_failed_condition": null
-        },
-        {
-          "opening_uuids": [
-            "5646ba26-34f2-50c0-9c40-79d52d7013fc"
-          ],
-          "conductor_uuid": "df7b0f7d-8bf4-5bc9-9620-2eff07952b88",
-          "mask_side": "F.Mask",
-          "copper_layer": "F.Cu",
-          "location_mm": [
-            157.36874949999998,
-            105.5
-          ],
-          "clearance_mm": 0.0,
-          "exposed_area_mm2": 0.11320776510399663,
-          "relation": "overlap",
-          "disposition": "within_own_pad",
-          "uncertainty_mm": 0.010004,
-          "opening_kind": "pad:roundrect",
-          "mask_defined": false,
-          "margin_provenance": "board:pad_to_mask_clearance=0",
-          "rationale": null,
-          "negative_expansion": false,
-          "owner_net": "NODE_D",
-          "conductor_net": "NODE_D",
-          "conductor_kind": "segment",
-          "same_net": true,
-          "own_pad_entry": true,
-          "owner_ref": "D9/1",
-          "exposed_beyond_owner_mm2": 0.0,
-          "beside_owner_excess_mm2": 0.0,
-          "owner_run": null,
-          "pour_spokes": null,
-          "pour_relief_gap_mm": null,
-          "pour_spoke_width_mm": null,
-          "owner_nets": [
-            "NODE_D"
-          ],
-          "within_own_pad_failed_condition": null
-        },
-        {
-          "opening_uuids": [
-            "5646ba26-34f2-50c0-9c40-79d52d7013fc"
-          ],
-          "conductor_uuid": "fae9e1b4-bb22-590c-ba5f-31da8dd7cb6d",
-          "mask_side": "F.Mask",
-          "copper_layer": "F.Cu",
-          "location_mm": [
-            157.5625,
-            105.85
-          ],
-          "clearance_mm": 0.0,
-          "exposed_area_mm2": 0.15570776510399253,
-          "relation": "overlap",
-          "disposition": "within_own_pad",
-          "uncertainty_mm": 0.010004,
-          "opening_kind": "pad:roundrect",
-          "mask_defined": false,
-          "margin_provenance": "board:pad_to_mask_clearance=0",
-          "rationale": null,
-          "negative_expansion": false,
-          "owner_net": "NODE_D",
-          "conductor_net": "NODE_D",
-          "conductor_kind": "segment",
-          "same_net": true,
-          "own_pad_entry": true,
-          "owner_ref": "D9/1",
-          "exposed_beyond_owner_mm2": 0.0,
-          "beside_owner_excess_mm2": 0.0,
-          "owner_run": null,
-          "pour_spokes": null,
-          "pour_relief_gap_mm": null,
-          "pour_spoke_width_mm": null,
-          "owner_nets": [
-            "NODE_D"
-          ],
-          "within_own_pad_failed_condition": null
-        },
-        {
-          "opening_uuids": [
-            "5646ba26-34f2-50c0-9c40-79d52d7013fc"
-          ],
-          "conductor_uuid": "b3df6219-c14a-517b-942b-107b1f78ab2d",
-          "mask_side": "F.Mask",
-          "copper_layer": "F.Cu",
-          "location_mm": [
-            157.075,
-            105.49923
-          ],
-          "clearance_mm": 0.15000099999997474,
-          "exposed_area_mm2": 0.0,
-          "relation": "disjoint",
-          "disposition": "warning",
-          "uncertainty_mm": 0.010004,
-          "opening_kind": "pad:roundrect",
-          "mask_defined": false,
-          "margin_provenance": "board:pad_to_mask_clearance=0",
-          "rationale": null,
-          "negative_expansion": false,
-          "owner_net": "NODE_D",
-          "conductor_net": "NODE_D",
-          "conductor_kind": "via",
-          "same_net": true,
-          "own_pad_entry": false,
-          "owner_ref": "D9/1",
-          "exposed_beyond_owner_mm2": null,
-          "beside_owner_excess_mm2": null,
-          "owner_run": null,
-          "pour_spokes": null,
-          "pour_relief_gap_mm": null,
-          "pour_spoke_width_mm": null,
-          "owner_nets": [
-            "NODE_D"
-          ],
-          "within_own_pad_failed_condition": null
-        },
-        {
-          "opening_uuids": [
-            "ac22cff5-747a-54a3-9f0f-a7611724766a"
-          ],
-          "conductor_uuid": "69612e11-7ea0-56b0-8db4-fa740c8b4c17",
-          "mask_side": "F.Mask",
-          "copper_layer": "F.Cu",
-          "location_mm": [
-            159.2291055,
-            105.29160549999999
-          ],
-          "clearance_mm": 0.0,
-          "exposed_area_mm2": 0.15111775317951356,
-          "relation": "overlap",
-          "disposition": "within_own_pad",
-          "uncertainty_mm": 0.010004,
-          "opening_kind": "pad:roundrect",
-          "mask_defined": false,
-          "margin_provenance": "board:pad_to_mask_clearance=0",
-          "rationale": null,
-          "negative_expansion": false,
-          "owner_net": "NODE_B",
-          "conductor_net": "NODE_B",
-          "conductor_kind": "segment",
-          "same_net": true,
-          "own_pad_entry": true,
-          "owner_ref": "D9/2",
-          "exposed_beyond_owner_mm2": 2.8499497797969244e-08,
-          "beside_owner_excess_mm2": 0.0,
-          "owner_run": null,
-          "pour_spokes": null,
-          "pour_relief_gap_mm": null,
-          "pour_spoke_width_mm": null,
-          "owner_nets": [
-            "NODE_B"
           ],
           "within_own_pad_failed_condition": null
         },
@@ -4069,6 +4068,120 @@
         },
         {
           "opening_uuids": [
+            "90c61153-9acf-58ca-8451-6aff8d392c1c"
+          ],
+          "conductor_uuid": "0a7bd000-186a-5573-b6d5-fbf57d10033c",
+          "mask_side": "F.Mask",
+          "copper_layer": "F.Cu",
+          "location_mm": [
+            153.55,
+            117.1375
+          ],
+          "clearance_mm": 0.0,
+          "exposed_area_mm2": 0.460674225239997,
+          "relation": "overlap",
+          "disposition": "within_own_pad",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:roundrect",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "VCC",
+          "conductor_net": "VCC",
+          "conductor_kind": "segment",
+          "same_net": true,
+          "own_pad_entry": true,
+          "owner_ref": "C1/1",
+          "exposed_beyond_owner_mm2": 0.0,
+          "beside_owner_excess_mm2": 0.0,
+          "owner_run": null,
+          "pour_spokes": null,
+          "pour_relief_gap_mm": null,
+          "pour_spoke_width_mm": null,
+          "owner_nets": [
+            "VCC"
+          ],
+          "within_own_pad_failed_condition": null
+        },
+        {
+          "opening_uuids": [
+            "90c61153-9acf-58ca-8451-6aff8d392c1c"
+          ],
+          "conductor_uuid": "73a53e35-cdd9-5cda-bb9f-eb1cc9a9b765",
+          "mask_side": "F.Mask",
+          "copper_layer": "F.Cu",
+          "location_mm": [
+            153.289231,
+            117.1484885
+          ],
+          "clearance_mm": 0.0,
+          "exposed_area_mm2": 0.2541884120858233,
+          "relation": "overlap",
+          "disposition": "within_own_pad",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:roundrect",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "VCC",
+          "conductor_net": "VCC",
+          "conductor_kind": "segment",
+          "same_net": true,
+          "own_pad_entry": true,
+          "owner_ref": "C1/1",
+          "exposed_beyond_owner_mm2": 3.3458164833631e-08,
+          "beside_owner_excess_mm2": 0.0,
+          "owner_run": null,
+          "pour_spokes": null,
+          "pour_relief_gap_mm": null,
+          "pour_spoke_width_mm": null,
+          "owner_nets": [
+            "VCC"
+          ],
+          "within_own_pad_failed_condition": null
+        },
+        {
+          "opening_uuids": [
+            "9298e2c0-3a01-5ce9-a1bc-ec9e0563ed7d"
+          ],
+          "conductor_uuid": "05e73374-8501-5380-9a70-ed98ea727e00",
+          "mask_side": "F.Mask",
+          "copper_layer": "F.Cu",
+          "location_mm": [
+            155.3249995,
+            117.5
+          ],
+          "clearance_mm": 0.0,
+          "exposed_area_mm2": 0.34817422524000613,
+          "relation": "overlap",
+          "disposition": "within_own_pad",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:roundrect",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "GND",
+          "conductor_net": "GND",
+          "conductor_kind": "segment",
+          "same_net": true,
+          "own_pad_entry": true,
+          "owner_ref": "C1/2",
+          "exposed_beyond_owner_mm2": 0.0,
+          "beside_owner_excess_mm2": 0.0,
+          "owner_run": null,
+          "pour_spokes": null,
+          "pour_relief_gap_mm": null,
+          "pour_spoke_width_mm": null,
+          "owner_nets": [
+            "GND"
+          ],
+          "within_own_pad_failed_condition": null
+        },
+        {
+          "opening_uuids": [
             "e1121b12-dbb7-5947-bb4a-8f6659cb5181"
           ],
           "conductor_uuid": "7cdf0ab6-18ab-59d4-b68e-dd19d26c8bb3",
@@ -4209,6 +4322,158 @@
           "own_pad_entry": true,
           "owner_ref": "D7/2",
           "exposed_beyond_owner_mm2": 0.0,
+          "beside_owner_excess_mm2": 0.0,
+          "owner_run": null,
+          "pour_spokes": null,
+          "pour_relief_gap_mm": null,
+          "pour_spoke_width_mm": null,
+          "owner_nets": [
+            "NODE_B"
+          ],
+          "within_own_pad_failed_condition": null
+        },
+        {
+          "opening_uuids": [
+            "5646ba26-34f2-50c0-9c40-79d52d7013fc"
+          ],
+          "conductor_uuid": "df7b0f7d-8bf4-5bc9-9620-2eff07952b88",
+          "mask_side": "F.Mask",
+          "copper_layer": "F.Cu",
+          "location_mm": [
+            157.36874949999998,
+            105.5
+          ],
+          "clearance_mm": 0.0,
+          "exposed_area_mm2": 0.11320776510399663,
+          "relation": "overlap",
+          "disposition": "within_own_pad",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:roundrect",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "NODE_D",
+          "conductor_net": "NODE_D",
+          "conductor_kind": "segment",
+          "same_net": true,
+          "own_pad_entry": true,
+          "owner_ref": "D9/1",
+          "exposed_beyond_owner_mm2": 0.0,
+          "beside_owner_excess_mm2": 0.0,
+          "owner_run": null,
+          "pour_spokes": null,
+          "pour_relief_gap_mm": null,
+          "pour_spoke_width_mm": null,
+          "owner_nets": [
+            "NODE_D"
+          ],
+          "within_own_pad_failed_condition": null
+        },
+        {
+          "opening_uuids": [
+            "5646ba26-34f2-50c0-9c40-79d52d7013fc"
+          ],
+          "conductor_uuid": "fae9e1b4-bb22-590c-ba5f-31da8dd7cb6d",
+          "mask_side": "F.Mask",
+          "copper_layer": "F.Cu",
+          "location_mm": [
+            157.5625,
+            105.85
+          ],
+          "clearance_mm": 0.0,
+          "exposed_area_mm2": 0.15570776510399253,
+          "relation": "overlap",
+          "disposition": "within_own_pad",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:roundrect",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "NODE_D",
+          "conductor_net": "NODE_D",
+          "conductor_kind": "segment",
+          "same_net": true,
+          "own_pad_entry": true,
+          "owner_ref": "D9/1",
+          "exposed_beyond_owner_mm2": 0.0,
+          "beside_owner_excess_mm2": 0.0,
+          "owner_run": null,
+          "pour_spokes": null,
+          "pour_relief_gap_mm": null,
+          "pour_spoke_width_mm": null,
+          "owner_nets": [
+            "NODE_D"
+          ],
+          "within_own_pad_failed_condition": null
+        },
+        {
+          "opening_uuids": [
+            "5646ba26-34f2-50c0-9c40-79d52d7013fc"
+          ],
+          "conductor_uuid": "b3df6219-c14a-517b-942b-107b1f78ab2d",
+          "mask_side": "F.Mask",
+          "copper_layer": "F.Cu",
+          "location_mm": [
+            157.075,
+            105.49923
+          ],
+          "clearance_mm": 0.15000099999997474,
+          "exposed_area_mm2": 0.0,
+          "relation": "disjoint",
+          "disposition": "warning",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:roundrect",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "NODE_D",
+          "conductor_net": "NODE_D",
+          "conductor_kind": "via",
+          "same_net": true,
+          "own_pad_entry": false,
+          "owner_ref": "D9/1",
+          "exposed_beyond_owner_mm2": null,
+          "beside_owner_excess_mm2": null,
+          "owner_run": null,
+          "pour_spokes": null,
+          "pour_relief_gap_mm": null,
+          "pour_spoke_width_mm": null,
+          "owner_nets": [
+            "NODE_D"
+          ],
+          "within_own_pad_failed_condition": null
+        },
+        {
+          "opening_uuids": [
+            "ac22cff5-747a-54a3-9f0f-a7611724766a"
+          ],
+          "conductor_uuid": "69612e11-7ea0-56b0-8db4-fa740c8b4c17",
+          "mask_side": "F.Mask",
+          "copper_layer": "F.Cu",
+          "location_mm": [
+            159.2291055,
+            105.29160549999999
+          ],
+          "clearance_mm": 0.0,
+          "exposed_area_mm2": 0.15111775317951356,
+          "relation": "overlap",
+          "disposition": "within_own_pad",
+          "uncertainty_mm": 0.010004,
+          "opening_kind": "pad:roundrect",
+          "mask_defined": false,
+          "margin_provenance": "board:pad_to_mask_clearance=0",
+          "rationale": null,
+          "negative_expansion": false,
+          "owner_net": "NODE_B",
+          "conductor_net": "NODE_B",
+          "conductor_kind": "segment",
+          "same_net": true,
+          "own_pad_entry": true,
+          "owner_ref": "D9/2",
+          "exposed_beyond_owner_mm2": 2.8499497797969244e-08,
           "beside_owner_excess_mm2": 0.0,
           "owner_run": null,
           "pour_spokes": null,
@@ -4573,7 +4838,7 @@
             95.29160511114372
           ],
           "clearance_mm": 0.0,
-          "exposed_area_mm2": 0.1511168416351133,
+          "exposed_area_mm2": 0.15111684163511324,
           "relation": "overlap",
           "disposition": "within_own_pad",
           "uncertainty_mm": 0.010004,
@@ -4588,7 +4853,7 @@
           "same_net": true,
           "own_pad_entry": true,
           "owner_ref": "D5/2",
-          "exposed_beyond_owner_mm2": 2.849930497519069e-08,
+          "exposed_beyond_owner_mm2": 2.8499304975190687e-08,
           "beside_owner_excess_mm2": 0.0,
           "owner_run": null,
           "pour_spokes": null,
@@ -4793,9 +5058,9 @@
       "intent_audit": [],
       "geometry_provenance": {
         "export": {
-          "source_sha256": "cb39664c7c36d2a1ece95b72d2749750ab238bec59c28ddd583a9a7743e3ff8f",
-          "project_sha256": "229dbb7c91a7eb4314d94b8e7a7e1d339b978e129f67675a941d7a0d7b1aac19",
-          "rules_sha256": "94043e6c5e8e06fbb8e5841f354070022dfc6fd6971756669c3b1ecac2d2fbe7",
+          "source_sha256": "3717d1ac6504f0098646bc4eac56e1cf1b938595a8aebd0d7ac4a3d78be349ab",
+          "project_sha256": "5ea235d2344128ba7d00b691dc988b000f7ab4da9e0853ebce3eef4b4f765f32",
+          "rules_sha256": "b995a131e858fc9f81150ce3eab2b8da1a1403e59a66f6d6d69dac52826f5191",
           "native_version": "10.0.6",
           "export_identity": {
             "command": [
@@ -4818,7 +5083,7 @@
             "profile": "macro-free-native-gerber",
             "board_plot_params": false,
             "variables": [],
-            "plot_profile_source_sha256": "cb39664c7c36d2a1ece95b72d2749750ab238bec59c28ddd583a9a7743e3ff8f",
+            "plot_profile_source_sha256": "3717d1ac6504f0098646bc4eac56e1cf1b938595a8aebd0d7ac4a3d78be349ab",
             "stdout": "Plotted to '<scratch>/gerbers/charlieplex_3x3_routed-F_Cu.gbr'.\nPlotted to '<scratch>/gerbers/charlieplex_3x3_routed-B_Cu.gbr'.\nPlotted to '<scratch>/gerbers/charlieplex_3x3_routed-F_Mask.gbr'.\nPlotted to '<scratch>/gerbers/charlieplex_3x3_routed-B_Mask.gbr'.\n",
             "stderr": ""
           },
@@ -5210,7 +5475,7 @@
             },
             {
               "source_uuid": "2058a994-85c2-5a89-aed0-bba7442a9e9a",
-              "parent_uuid": "6d0722e4-e221-581d-920c-0ea9e39c305c",
+              "parent_uuid": "5cba0a15-5aaa-5bf4-b2a4-1e421b5681e8",
               "kind": "pad:circle",
               "layers": [
                 "F.Cu",
@@ -5348,7 +5613,7 @@
             },
             {
               "source_uuid": "2a762dac-9e64-504e-967e-5e0c65cff1af",
-              "parent_uuid": "c57819a2-8db9-57d8-aa19-f7a749217402",
+              "parent_uuid": "4f73f41d-0f9c-5cb3-b188-39d7631ecb87",
               "kind": "pad:circle",
               "layers": [
                 "F.Cu",
@@ -5830,7 +6095,7 @@
             },
             {
               "source_uuid": "5646ba26-34f2-50c0-9c40-79d52d7013fc",
-              "parent_uuid": "6cfa5086-e66d-5c1e-9a61-dae0a11c6f27",
+              "parent_uuid": "cab39a84-073b-5a88-ad3d-582dbdefe1fe",
               "kind": "pad:roundrect",
               "layers": [
                 "F.Cu",
@@ -6477,7 +6742,7 @@
             },
             {
               "source_uuid": "90c61153-9acf-58ca-8451-6aff8d392c1c",
-              "parent_uuid": "5566cbc5-ecd1-5630-a015-1e63a6fa788e",
+              "parent_uuid": "c952ac93-d61c-55e3-8cb4-1806ef6f96a6",
               "kind": "pad:roundrect",
               "layers": [
                 "F.Cu",
@@ -6517,7 +6782,7 @@
             },
             {
               "source_uuid": "9298e2c0-3a01-5ce9-a1bc-ec9e0563ed7d",
-              "parent_uuid": "5566cbc5-ecd1-5630-a015-1e63a6fa788e",
+              "parent_uuid": "c952ac93-d61c-55e3-8cb4-1806ef6f96a6",
               "kind": "pad:roundrect",
               "layers": [
                 "F.Cu",
@@ -6866,7 +7131,7 @@
             },
             {
               "source_uuid": "ac22cff5-747a-54a3-9f0f-a7611724766a",
-              "parent_uuid": "6cfa5086-e66d-5c1e-9a61-dae0a11c6f27",
+              "parent_uuid": "cab39a84-073b-5a88-ad3d-582dbdefe1fe",
               "kind": "pad:roundrect",
               "layers": [
                 "F.Cu",
@@ -6949,7 +7214,7 @@
             },
             {
               "source_uuid": "afa1105a-0d9b-5b97-b4c6-21b3136b29c2",
-              "parent_uuid": "7ac972c3-9c84-54b4-be6b-2f3033ed6a49",
+              "parent_uuid": "7bb21350-e256-54b6-879f-585872d6ba38",
               "kind": "pad:roundrect",
               "layers": [
                 "F.Cu",
@@ -7581,7 +7846,7 @@
             },
             {
               "source_uuid": "dbfa4d2b-73ed-5d16-a93a-f54be5a7753c",
-              "parent_uuid": "ed1554f2-16bd-5872-a54d-54256c6fab2c",
+              "parent_uuid": "389c043f-cc2e-5062-9cbd-2d3d351845f1",
               "kind": "pad:circle",
               "layers": [
                 "F.Cu",
@@ -8186,7 +8451,7 @@
             },
             {
               "source_uuid": "fdc90509-ce4f-5804-8e96-af329ddef068",
-              "parent_uuid": "7ac972c3-9c84-54b4-be6b-2f3033ed6a49",
+              "parent_uuid": "7bb21350-e256-54b6-879f-585872d6ba38",
               "kind": "pad:roundrect",
               "layers": [
                 "F.Cu",
@@ -8227,27 +8492,27 @@
           "curve_error_mm_per_construction": 1e-06,
           "layers_wkt": {
             "B.Cu": {
-              "sha256": "36ff115102e30bbf7d7e88575ce3c731116b6e3e8e7ded0ba3bf65b7caef9fcf",
-              "bytes": 2304562
+              "sha256": "f6b844b2f6c597f5e0ad108e967f6a8b8b9ba36c821264d2aaf69c6c9c0252c4",
+              "bytes": 2304560
             },
             "B.Mask": {
               "sha256": "ab299a871b38a48cae8360c7326ef9c01df95d6adbb0852a8689d3ecc0c70c8b",
               "bytes": 1052376
             },
             "F.Cu": {
-              "sha256": "c041829be4507794e1f69457aae29e952c8e94dcd2a4a38d2c6951998c261510",
-              "bytes": 3842575
+              "sha256": "2350c4bc656eb0b265fa8009bf3373b6d809a30ef4ed28a0ff4a163a4e826c13",
+              "bytes": 3842579
             },
             "F.Mask": {
-              "sha256": "7e0110eb3d1443aed9f970067a3b996440d16e3d82f266bada65ccd02a01e4a0",
+              "sha256": "59b16aeb9e2286991bcd23bcd3e5af7c4a5db32ae222f51d26c8137ae6cbf306",
               "bytes": 2657806
             }
           },
           "gerber_sha256": {
-            "F.Mask": "8e18cc5985858dd94962d6f82def54b5bd737e2dee03fc9e62cf4b8e55b18adb",
-            "B.Mask": "4576598c9ceac0e8cb645f3d6a4e52291de74c04344b8e2b0349b27eb9bbd207",
-            "F.Cu": "ec447b235e0bc6ac9b4f0736383ec487fd32ed8e2fe9d6813d49e538801158b1",
-            "B.Cu": "5dd621c909e95a801c9a7a6289d1f3f1a27a0457c499ded4068ee03d3c5fc41a"
+            "F.Mask": "7b739a9e8c65e92a951bfcaf44f11654832a6068941ff07e5bbbaddb3c3becc5",
+            "B.Mask": "95de6a9f8c4468d6579802ecfff78692e53310f079c1d71a79ab023aeca4d39c",
+            "F.Cu": "4c7371cc072e944ae5fe3ac449662eee0f8c9068ee767fd0376cfb82e6ea6d69",
+            "B.Cu": "9820dae93be182b1bb2a95c6fe395c080f1626925f99caa07097324a97d5d900"
           },
           "unsupported": [],
           "source_geometries": {}
@@ -8261,7 +8526,7 @@
             "python3"
           ],
           "native_version": "10.0.6",
-          "objects_sha256": "cab701e89b7dcf9014bc0e29ae5921d7e709edc55e878aa345c8d1c9aacd66a3",
+          "objects_sha256": "13ef5dc7d7754350893af0178da8c3cdb5a2621a4549954db29450388ddbe49c",
           "max_error_mm_per_construction": 0.005,
           "attribution": "native full-board object UUID; no neighbor removal"
         },
@@ -8338,6 +8603,24 @@
               }
             }
           },
+          "dbfa4d2b-73ed-5d16-a93a-f54be5a7753c": {
+            "kind": "pad:circle",
+            "net": "",
+            "margin_mm": {
+              "F.Mask": 0.5
+            },
+            "margin_source": "object:dbfa4d2b-73ed-5d16-a93a-f54be5a7753c:solder_mask_margin=0.5",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "4409e980bb4ba9bd845ca5779cae4968f65c728cf290ccd900d239301a3ff5bb",
+                "bytes": 34304
+              },
+              "F.Mask": {
+                "sha256": "3a2236c915fc005f4c4252068fbc654fed507eba89fdd4ea70a0ff52944afd9e",
+                "bytes": 48320
+              }
+            }
+          },
           "a3875f2b-829c-54ba-a612-f4227053bec3": {
             "kind": "pad:roundrect",
             "net": "NODE_B",
@@ -8410,39 +8693,21 @@
               }
             }
           },
-          "90c61153-9acf-58ca-8451-6aff8d392c1c": {
-            "kind": "pad:roundrect",
-            "net": "VCC",
+          "2a762dac-9e64-504e-967e-5e0c65cff1af": {
+            "kind": "pad:circle",
+            "net": "",
             "margin_mm": {
-              "F.Mask": 0.0
+              "F.Mask": 0.5
             },
-            "margin_source": "board:pad_to_mask_clearance=0",
+            "margin_source": "object:2a762dac-9e64-504e-967e-5e0c65cff1af:solder_mask_margin=0.5",
             "layers_wkt": {
               "F.Cu": {
-                "sha256": "8837835dd6a76f843c455614e592a482f103afe2a152be1d96a0122c030f8381",
-                "bytes": 25402
+                "sha256": "25da575be6a227c5b2315ad745c38b4c530344acd0fbdf4c5c515af78fdfd552",
+                "bytes": 35881
               },
               "F.Mask": {
-                "sha256": "8837835dd6a76f843c455614e592a482f103afe2a152be1d96a0122c030f8381",
-                "bytes": 25402
-              }
-            }
-          },
-          "9298e2c0-3a01-5ce9-a1bc-ec9e0563ed7d": {
-            "kind": "pad:roundrect",
-            "net": "GND",
-            "margin_mm": {
-              "F.Mask": 0.0
-            },
-            "margin_source": "board:pad_to_mask_clearance=0",
-            "layers_wkt": {
-              "F.Cu": {
-                "sha256": "d742390fb3b974b1878e8f144929c3ea23631a2cd75822444ed092f2053dcb2c",
-                "bytes": 25402
-              },
-              "F.Mask": {
-                "sha256": "d742390fb3b974b1878e8f144929c3ea23631a2cd75822444ed092f2053dcb2c",
-                "bytes": 25402
+                "sha256": "6416d89770ff2a0d24beff2d70554a0bff5644c0f8375c1a3def148c22ecec9c",
+                "bytes": 50545
               }
             }
           },
@@ -8515,6 +8780,24 @@
               "F.Mask": {
                 "sha256": "89bf736db4ce9f145c05750d818c23acf18586e23d26db97744980c169d7dedb",
                 "bytes": 25394
+              }
+            }
+          },
+          "2058a994-85c2-5a89-aed0-bba7442a9e9a": {
+            "kind": "pad:circle",
+            "net": "",
+            "margin_mm": {
+              "F.Mask": 0.5
+            },
+            "margin_source": "object:2058a994-85c2-5a89-aed0-bba7442a9e9a:solder_mask_margin=0.5",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "7ba8949ec586d885057b0a08ea4377b19c107ea7909d49dcdac01614ebe98974",
+                "bytes": 35881
+              },
+              "F.Mask": {
+                "sha256": "1f3b62ce6b94b7defdc588dee210c1d2ff0615efbab48c8c364872feec7ec2e9",
+                "bytes": 50545
               }
             }
           },
@@ -8605,60 +8888,6 @@
               "B.Mask": {
                 "sha256": "333ffabbe6abc8d89c4edce75c18ee786e5dc8a9b69404a6d1590e7be790dc23",
                 "bytes": 46649
-              }
-            }
-          },
-          "5646ba26-34f2-50c0-9c40-79d52d7013fc": {
-            "kind": "pad:roundrect",
-            "net": "NODE_D",
-            "margin_mm": {
-              "F.Mask": 0.0
-            },
-            "margin_source": "board:pad_to_mask_clearance=0",
-            "layers_wkt": {
-              "F.Cu": {
-                "sha256": "409996775bf934eb86bd812beafdcc7fafac21f41a479f3339a32baf820cc7dc",
-                "bytes": 25171
-              },
-              "F.Mask": {
-                "sha256": "409996775bf934eb86bd812beafdcc7fafac21f41a479f3339a32baf820cc7dc",
-                "bytes": 25171
-              }
-            }
-          },
-          "ac22cff5-747a-54a3-9f0f-a7611724766a": {
-            "kind": "pad:roundrect",
-            "net": "NODE_B",
-            "margin_mm": {
-              "F.Mask": 0.0
-            },
-            "margin_source": "board:pad_to_mask_clearance=0",
-            "layers_wkt": {
-              "F.Cu": {
-                "sha256": "0f89ace0ef523913ed5c66c6cd2058cf5d23cd51201068632b281d32cb88daf3",
-                "bytes": 25170
-              },
-              "F.Mask": {
-                "sha256": "0f89ace0ef523913ed5c66c6cd2058cf5d23cd51201068632b281d32cb88daf3",
-                "bytes": 25170
-              }
-            }
-          },
-          "2058a994-85c2-5a89-aed0-bba7442a9e9a": {
-            "kind": "pad:circle",
-            "net": "",
-            "margin_mm": {
-              "F.Mask": 0.5
-            },
-            "margin_source": "object:2058a994-85c2-5a89-aed0-bba7442a9e9a:solder_mask_margin=0.5",
-            "layers_wkt": {
-              "F.Cu": {
-                "sha256": "7ba8949ec586d885057b0a08ea4377b19c107ea7909d49dcdac01614ebe98974",
-                "bytes": 35881
-              },
-              "F.Mask": {
-                "sha256": "1f3b62ce6b94b7defdc588dee210c1d2ff0615efbab48c8c364872feec7ec2e9",
-                "bytes": 50545
               }
             }
           },
@@ -9022,21 +9251,39 @@
               }
             }
           },
-          "2a762dac-9e64-504e-967e-5e0c65cff1af": {
-            "kind": "pad:circle",
-            "net": "",
+          "90c61153-9acf-58ca-8451-6aff8d392c1c": {
+            "kind": "pad:roundrect",
+            "net": "VCC",
             "margin_mm": {
-              "F.Mask": 0.5
+              "F.Mask": 0.0
             },
-            "margin_source": "object:2a762dac-9e64-504e-967e-5e0c65cff1af:solder_mask_margin=0.5",
+            "margin_source": "board:pad_to_mask_clearance=0",
             "layers_wkt": {
               "F.Cu": {
-                "sha256": "25da575be6a227c5b2315ad745c38b4c530344acd0fbdf4c5c515af78fdfd552",
-                "bytes": 35881
+                "sha256": "8837835dd6a76f843c455614e592a482f103afe2a152be1d96a0122c030f8381",
+                "bytes": 25402
               },
               "F.Mask": {
-                "sha256": "6416d89770ff2a0d24beff2d70554a0bff5644c0f8375c1a3def148c22ecec9c",
-                "bytes": 50545
+                "sha256": "8837835dd6a76f843c455614e592a482f103afe2a152be1d96a0122c030f8381",
+                "bytes": 25402
+              }
+            }
+          },
+          "9298e2c0-3a01-5ce9-a1bc-ec9e0563ed7d": {
+            "kind": "pad:roundrect",
+            "net": "GND",
+            "margin_mm": {
+              "F.Mask": 0.0
+            },
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "d742390fb3b974b1878e8f144929c3ea23631a2cd75822444ed092f2053dcb2c",
+                "bytes": 25402
+              },
+              "F.Mask": {
+                "sha256": "d742390fb3b974b1878e8f144929c3ea23631a2cd75822444ed092f2053dcb2c",
+                "bytes": 25402
               }
             }
           },
@@ -9072,6 +9319,42 @@
               },
               "F.Mask": {
                 "sha256": "eeef7d05313f2f844d90554fc1b4524a4500972bb683900f1f54f02186ceba7d",
+                "bytes": 25170
+              }
+            }
+          },
+          "5646ba26-34f2-50c0-9c40-79d52d7013fc": {
+            "kind": "pad:roundrect",
+            "net": "NODE_D",
+            "margin_mm": {
+              "F.Mask": 0.0
+            },
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "409996775bf934eb86bd812beafdcc7fafac21f41a479f3339a32baf820cc7dc",
+                "bytes": 25171
+              },
+              "F.Mask": {
+                "sha256": "409996775bf934eb86bd812beafdcc7fafac21f41a479f3339a32baf820cc7dc",
+                "bytes": 25171
+              }
+            }
+          },
+          "ac22cff5-747a-54a3-9f0f-a7611724766a": {
+            "kind": "pad:roundrect",
+            "net": "NODE_B",
+            "margin_mm": {
+              "F.Mask": 0.0
+            },
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "0f89ace0ef523913ed5c66c6cd2058cf5d23cd51201068632b281d32cb88daf3",
+                "bytes": 25170
+              },
+              "F.Mask": {
+                "sha256": "0f89ace0ef523913ed5c66c6cd2058cf5d23cd51201068632b281d32cb88daf3",
                 "bytes": 25170
               }
             }
@@ -9271,24 +9554,6 @@
               "B.Mask": {
                 "sha256": "d92e1273639d564c886b5a5778ed37aae8e9abcbd0772e865cfdbe75597f9754",
                 "bytes": 46649
-              }
-            }
-          },
-          "dbfa4d2b-73ed-5d16-a93a-f54be5a7753c": {
-            "kind": "pad:circle",
-            "net": "",
-            "margin_mm": {
-              "F.Mask": 0.5
-            },
-            "margin_source": "object:dbfa4d2b-73ed-5d16-a93a-f54be5a7753c:solder_mask_margin=0.5",
-            "layers_wkt": {
-              "F.Cu": {
-                "sha256": "4409e980bb4ba9bd845ca5779cae4968f65c728cf290ccd900d239301a3ff5bb",
-                "bytes": 34304
-              },
-              "F.Mask": {
-                "sha256": "3a2236c915fc005f4c4252068fbc654fed507eba89fdd4ea70a0ff52944afd9e",
-                "bytes": 48320
               }
             }
           },
@@ -11522,7 +11787,1441 @@
           }
         }
       },
-      "evaluated_pairs": 10887
+      "evaluated_pairs": 10887,
+      "nominal_exposure": {
+        "artwork_source": "internal_replot",
+        "status": "complete",
+        "nominal_area_threshold_mm2": 0.0,
+        "construction_uncertainty_mm": 0.010004,
+        "opening_counts": {
+          "plotted": 67,
+          "matched": 64,
+          "unresolved": 0,
+          "excluded": 3
+        },
+        "measured_opening_counts": {
+          "evaluated": 64,
+          "foreign_net": 0,
+          "same_net_beyond_land": 30
+        },
+        "finding_counts": {
+          "foreign_net": 0,
+          "same_net_beyond_land": 36,
+          "registration_or_near_pad_only": 2,
+          "no_nominal_exposure": 31,
+          "unevaluated": 0,
+          "excluded": 0
+        },
+        "faces": {
+          "F.Mask": {
+            "status": "complete",
+            "missing_layers": [],
+            "gerber_sha256": {
+              "F.Mask": "7b739a9e8c65e92a951bfcaf44f11654832a6068941ff07e5bbbaddb3c3becc5",
+              "F.Cu": "4c7371cc072e944ae5fe3ac449662eee0f8c9068ee767fd0376cfb82e6ea6d69"
+            },
+            "openings": [
+              {
+                "opening_uuids": [
+                  "2058a994-85c2-5a89-aed0-bba7442a9e9a"
+                ],
+                "bounds_mm": [
+                  131.0,
+                  128.0,
+                  133.0,
+                  130.0
+                ],
+                "status": "excluded",
+                "reason": "unnetted_fiducial",
+                "owner_ref": null,
+                "owner_net": null,
+                "footprint_ref": "FID3",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "baeab444-1a2c-52fd-8a90-85df19d096fd"
+                ],
+                "bounds_mm": [
+                  127.65,
+                  125.19000000000001,
+                  129.35,
+                  126.89
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J1/2",
+                "owner_net": "GND",
+                "footprint_ref": "J1",
+                "measurement_indices": [
+                  22,
+                  23
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "952137cb-6367-589a-bf72-41ce1a9f8f41"
+                ],
+                "bounds_mm": [
+                  127.65,
+                  122.65,
+                  129.35,
+                  124.35
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J1/1",
+                "owner_net": "VCC",
+                "footprint_ref": "J1",
+                "measurement_indices": [
+                  21
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "c4ebcd42-772c-5e63-88bf-c3fccec88356"
+                ],
+                "bounds_mm": [
+                  129.05,
+                  118.775,
+                  130.05,
+                  120.225
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "C2/1",
+                "owner_net": "VCC",
+                "footprint_ref": "C2",
+                "measurement_indices": [
+                  38,
+                  39
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "92fcdf7c-5c83-5053-8cae-03107bf2bd19"
+                ],
+                "bounds_mm": [
+                  130.95,
+                  118.775,
+                  131.95,
+                  120.225
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "C2/2",
+                "owner_net": "GND",
+                "footprint_ref": "C2",
+                "measurement_indices": [
+                  40,
+                  41,
+                  42
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "8ca2c009-383b-5834-8c6e-c153aab144fd"
+                ],
+                "bounds_mm": [
+                  139.9,
+                  116.8,
+                  140.925,
+                  118.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "R5/2",
+                "owner_net": "RESET",
+                "footprint_ref": "R5",
+                "measurement_indices": [
+                  2
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "5bc43742-56d2-5a67-826d-4d77b7201071"
+                ],
+                "bounds_mm": [
+                  138.075,
+                  116.8,
+                  139.1,
+                  118.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "R5/1",
+                "owner_net": "VCC",
+                "footprint_ref": "R5",
+                "measurement_indices": [
+                  0,
+                  1
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "06539d6b-117f-5e88-b14a-4d1e8c58ce00"
+                ],
+                "bounds_mm": [
+                  142.075,
+                  112.8,
+                  143.1,
+                  114.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "R2/1",
+                "owner_net": "LINE_B",
+                "footprint_ref": "R2",
+                "measurement_indices": [
+                  36
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "fc17e08a-61ae-583c-9d3a-65a2a5b5d775"
+                ],
+                "bounds_mm": [
+                  133.9,
+                  112.8,
+                  134.925,
+                  114.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "R1/2",
+                "owner_net": "NODE_A",
+                "footprint_ref": "R1",
+                "measurement_indices": [
+                  4
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "cae03adf-0f73-5264-9fff-c525042fa672"
+                ],
+                "bounds_mm": [
+                  132.075,
+                  112.8,
+                  133.1,
+                  114.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "R1/1",
+                "owner_net": "LINE_A",
+                "footprint_ref": "R1",
+                "measurement_indices": [
+                  3
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "e1121b12-dbb7-5947-bb4a-8f6659cb5181"
+                ],
+                "bounds_mm": [
+                  137.075,
+                  104.8,
+                  138.05,
+                  106.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D7/1",
+                "owner_net": "NODE_C",
+                "footprint_ref": "D7",
+                "measurement_indices": [
+                  46,
+                  47
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "6f03906b-966e-55a0-a9ad-79cc1ef9da20"
+                ],
+                "bounds_mm": [
+                  138.95,
+                  104.8,
+                  139.925,
+                  106.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D7/2",
+                "owner_net": "NODE_B",
+                "footprint_ref": "D7",
+                "measurement_indices": [
+                  48,
+                  49
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "fdc90509-ce4f-5804-8e96-af329ddef068"
+                ],
+                "bounds_mm": [
+                  137.075,
+                  94.8,
+                  138.05,
+                  96.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D4/1",
+                "owner_net": "NODE_A",
+                "footprint_ref": "D4",
+                "measurement_indices": [
+                  24,
+                  25
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "afa1105a-0d9b-5b97-b4c6-21b3136b29c2"
+                ],
+                "bounds_mm": [
+                  138.95,
+                  94.8,
+                  139.925,
+                  96.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D4/2",
+                "owner_net": "NODE_C",
+                "footprint_ref": "D4",
+                "measurement_indices": [
+                  26
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "a3875f2b-829c-54ba-a612-f4227053bec3"
+                ],
+                "bounds_mm": [
+                  137.075,
+                  84.8,
+                  138.05,
+                  86.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D1/1",
+                "owner_net": "NODE_B",
+                "footprint_ref": "D1",
+                "measurement_indices": [
+                  5
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "ed5055c4-e7ff-5e62-a24e-306ce51566ce"
+                ],
+                "bounds_mm": [
+                  138.95,
+                  84.8,
+                  139.925,
+                  86.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D1/2",
+                "owner_net": "NODE_A",
+                "footprint_ref": "D1",
+                "measurement_indices": [
+                  6,
+                  7
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "dbfa4d2b-73ed-5d16-a93a-f54be5a7753c"
+                ],
+                "bounds_mm": [
+                  126.0,
+                  80.0,
+                  128.0,
+                  82.0
+                ],
+                "status": "excluded",
+                "reason": "unnetted_fiducial",
+                "owner_ref": null,
+                "owner_net": null,
+                "footprint_ref": "FID1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "e9355260-3ff3-5902-8f07-4cc059b788af"
+                ],
+                "bounds_mm": [
+                  142.7,
+                  127.32000000000001,
+                  144.3,
+                  128.92000000000002
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/4",
+                "owner_net": "GND",
+                "footprint_ref": "U1",
+                "measurement_indices": [
+                  28,
+                  29
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "f9def7c1-71e4-53f1-aa05-4b9deeb7b6a0"
+                ],
+                "bounds_mm": [
+                  150.32,
+                  127.32000000000001,
+                  151.92000000000002,
+                  128.92000000000002
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/5",
+                "owner_net": "LINE_C",
+                "footprint_ref": "U1",
+                "measurement_indices": [
+                  30
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "3ca7db0f-92a4-5a3f-9d40-a79a8f606e1e"
+                ],
+                "bounds_mm": [
+                  142.7,
+                  124.78,
+                  144.3,
+                  126.38
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/3",
+                "owner_net": "LINE_B",
+                "footprint_ref": "U1",
+                "measurement_indices": [
+                  27
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "92c7abd5-a82d-56dc-a7b2-abc8d70a81f6"
+                ],
+                "bounds_mm": [
+                  150.32,
+                  124.78,
+                  151.92000000000002,
+                  126.38
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/6",
+                "owner_net": "LINE_D",
+                "footprint_ref": "U1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "c66ad289-3432-5d3e-9c32-a6b268ee2343"
+                ],
+                "bounds_mm": [
+                  142.7,
+                  122.24000000000001,
+                  144.3,
+                  123.84
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/2",
+                "owner_net": "LINE_A",
+                "footprint_ref": "U1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "a4fbc017-2c13-5895-af37-71f2e9d676c8"
+                ],
+                "bounds_mm": [
+                  150.32,
+                  122.24000000000001,
+                  151.92000000000002,
+                  123.84
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/7",
+                "owner_net": "ISP_SCK",
+                "footprint_ref": "U1",
+                "measurement_indices": [
+                  31
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "bb59d3e0-70ca-58e3-85e6-8e82e12a2cb4"
+                ],
+                "bounds_mm": [
+                  142.7,
+                  119.7,
+                  144.3,
+                  121.3
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/1",
+                "owner_net": "RESET",
+                "footprint_ref": "U1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "1ab7b4f8-809c-51c6-be33-98d2a47234cb"
+                ],
+                "bounds_mm": [
+                  150.32,
+                  119.7,
+                  151.92000000000002,
+                  121.3
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/8",
+                "owner_net": "VCC",
+                "footprint_ref": "U1",
+                "measurement_indices": [
+                  32
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "90c61153-9acf-58ca-8451-6aff8d392c1c"
+                ],
+                "bounds_mm": [
+                  153.05,
+                  116.775,
+                  154.05,
+                  118.225
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "C1/1",
+                "owner_net": "VCC",
+                "footprint_ref": "C1",
+                "measurement_indices": [
+                  43,
+                  44
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "4d4ce5a3-0090-5150-90c6-22402369d02b"
+                ],
+                "bounds_mm": [
+                  152.075,
+                  112.8,
+                  153.1,
+                  114.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "R3/1",
+                "owner_net": "LINE_C",
+                "footprint_ref": "R3",
+                "measurement_indices": [
+                  11,
+                  12
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "a1201363-6ede-57d1-89ca-388813c86de9"
+                ],
+                "bounds_mm": [
+                  143.9,
+                  112.8,
+                  144.925,
+                  114.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "R2/2",
+                "owner_net": "NODE_B",
+                "footprint_ref": "R2",
+                "measurement_indices": [
+                  37
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "c865428a-fdb7-5b4c-bd64-511536e65302"
+                ],
+                "bounds_mm": [
+                  148.95,
+                  104.8,
+                  149.925,
+                  106.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D8/2",
+                "owner_net": "NODE_C",
+                "footprint_ref": "D8",
+                "measurement_indices": [
+                  9,
+                  10
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "4c1ec54f-5f55-507d-b76c-c024c42777a3"
+                ],
+                "bounds_mm": [
+                  147.075,
+                  104.8,
+                  148.05,
+                  106.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D8/1",
+                "owner_net": "NODE_B",
+                "footprint_ref": "D8",
+                "measurement_indices": [
+                  8
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "3411ddf8-b42d-5ffa-98e9-adf82f9caab4"
+                ],
+                "bounds_mm": [
+                  148.95,
+                  94.8,
+                  149.925,
+                  96.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D5/2",
+                "owner_net": "NODE_A",
+                "footprint_ref": "D5",
+                "measurement_indices": [
+                  63
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "22233338-c210-5c27-a3f3-f118f4e20b92"
+                ],
+                "bounds_mm": [
+                  147.075,
+                  94.8,
+                  148.05,
+                  96.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D5/1",
+                "owner_net": "NODE_D",
+                "footprint_ref": "D5",
+                "measurement_indices": [
+                  62
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "e3bcc308-9453-5f33-8614-608c4a4416c2"
+                ],
+                "bounds_mm": [
+                  148.95,
+                  84.8,
+                  149.925,
+                  86.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D2/2",
+                "owner_net": "NODE_B",
+                "footprint_ref": "D2",
+                "measurement_indices": [
+                  20
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "2702c444-68fd-545d-b961-d97d768ed4cc"
+                ],
+                "bounds_mm": [
+                  147.075,
+                  84.8,
+                  148.05,
+                  86.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D2/1",
+                "owner_net": "NODE_A",
+                "footprint_ref": "D2",
+                "measurement_indices": [
+                  17,
+                  18,
+                  19
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "ad500ed4-915b-56bd-9286-1e5de8f76529"
+                ],
+                "bounds_mm": [
+                  168.19,
+                  126.73,
+                  169.89,
+                  128.43
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J2/6",
+                "owner_net": "GND",
+                "footprint_ref": "J2",
+                "measurement_indices": [
+                  60,
+                  61
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "568f8156-8e82-52a7-a1b9-8b18a464a6a1"
+                ],
+                "bounds_mm": [
+                  165.65,
+                  126.73,
+                  167.35,
+                  128.43
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J2/5",
+                "owner_net": "RESET",
+                "footprint_ref": "J2",
+                "measurement_indices": [
+                  59
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "2a762dac-9e64-504e-967e-5e0c65cff1af"
+                ],
+                "bounds_mm": [
+                  161.5,
+                  126.5,
+                  163.5,
+                  128.5
+                ],
+                "status": "excluded",
+                "reason": "unnetted_fiducial",
+                "owner_ref": null,
+                "owner_net": null,
+                "footprint_ref": "FID2",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "125d6614-fa19-5c4d-97e3-1c640271b684"
+                ],
+                "bounds_mm": [
+                  165.65,
+                  124.19000000000001,
+                  167.35,
+                  125.89
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J2/3",
+                "owner_net": "ISP_SCK",
+                "footprint_ref": "J2",
+                "measurement_indices": [
+                  57
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "2872e382-2a98-59a1-a95a-defb5ce52441"
+                ],
+                "bounds_mm": [
+                  168.19,
+                  124.19000000000001,
+                  169.89,
+                  125.89
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J2/4",
+                "owner_net": "LINE_C",
+                "footprint_ref": "J2",
+                "measurement_indices": [
+                  58
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "1beb47c0-0e2f-52a9-97ab-2f84de3f85f7"
+                ],
+                "bounds_mm": [
+                  165.65,
+                  121.65,
+                  167.35,
+                  123.35
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J2/1",
+                "owner_net": "LINE_D",
+                "footprint_ref": "J2",
+                "measurement_indices": [
+                  56
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "c3b6c742-e960-58c6-975b-e1b8bb7dfbb8"
+                ],
+                "bounds_mm": [
+                  168.19,
+                  121.65,
+                  169.89,
+                  123.35
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J2/2",
+                "owner_net": "VCC",
+                "footprint_ref": "J2",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "9298e2c0-3a01-5ce9-a1bc-ec9e0563ed7d"
+                ],
+                "bounds_mm": [
+                  154.95,
+                  116.775,
+                  155.95,
+                  118.225
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "C1/2",
+                "owner_net": "GND",
+                "footprint_ref": "C1",
+                "measurement_indices": [
+                  45
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "5b2e6429-9851-5635-ad79-b96980f36ca4"
+                ],
+                "bounds_mm": [
+                  153.9,
+                  112.8,
+                  154.925,
+                  114.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "R3/2",
+                "owner_net": "NODE_C",
+                "footprint_ref": "R3",
+                "measurement_indices": [
+                  13
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "e3635eee-ac5c-5bd4-9de7-7e8747e39437"
+                ],
+                "bounds_mm": [
+                  162.075,
+                  112.8,
+                  163.1,
+                  114.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "R4/1",
+                "owner_net": "LINE_D",
+                "footprint_ref": "R4",
+                "measurement_indices": [
+                  14,
+                  15
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "baa94516-116c-5771-b754-3d64e915bdf8"
+                ],
+                "bounds_mm": [
+                  163.9,
+                  112.8,
+                  164.925,
+                  114.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "R4/2",
+                "owner_net": "NODE_D",
+                "footprint_ref": "R4",
+                "measurement_indices": [
+                  16
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "5646ba26-34f2-50c0-9c40-79d52d7013fc"
+                ],
+                "bounds_mm": [
+                  157.075,
+                  104.8,
+                  158.05,
+                  106.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D9/1",
+                "owner_net": "NODE_D",
+                "footprint_ref": "D9",
+                "measurement_indices": [
+                  50,
+                  51,
+                  52
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "ac22cff5-747a-54a3-9f0f-a7611724766a"
+                ],
+                "bounds_mm": [
+                  158.95,
+                  104.8,
+                  159.925,
+                  106.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D9/2",
+                "owner_net": "NODE_B",
+                "footprint_ref": "D9",
+                "measurement_indices": [
+                  53
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "ebae1b81-fc9e-53e5-bb44-2b0a172f6f41"
+                ],
+                "bounds_mm": [
+                  157.075,
+                  94.8,
+                  158.05,
+                  96.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D6/1",
+                "owner_net": "NODE_A",
+                "footprint_ref": "D6",
+                "measurement_indices": [
+                  54
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "a6cd5c22-8af3-565c-a659-29fe8a4e759e"
+                ],
+                "bounds_mm": [
+                  158.95,
+                  94.8,
+                  159.925,
+                  96.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D6/2",
+                "owner_net": "NODE_D",
+                "footprint_ref": "D6",
+                "measurement_indices": [
+                  55
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "e14e3a13-e76d-5b29-9d7b-fe3e5bce3572"
+                ],
+                "bounds_mm": [
+                  158.95,
+                  84.8,
+                  159.925,
+                  86.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D3/2",
+                "owner_net": "NODE_A",
+                "footprint_ref": "D3",
+                "measurement_indices": [
+                  34,
+                  35
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "70ee7e6b-4bab-5b14-bd3c-957e1d5103be"
+                ],
+                "bounds_mm": [
+                  157.075,
+                  84.8,
+                  158.05,
+                  86.2
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "D3/1",
+                "owner_net": "NODE_C",
+                "footprint_ref": "D3",
+                "measurement_indices": [
+                  33
+                ]
+              }
+            ],
+            "opening_counts": {
+              "plotted": 51,
+              "matched": 48,
+              "unresolved": 0,
+              "excluded": 3
+            },
+            "measured_opening_counts": {
+              "evaluated": 48,
+              "foreign_net": 0,
+              "same_net_beyond_land": 26
+            },
+            "exclusions_by_reason": {
+              "unnetted_fiducial": 3
+            },
+            "measurement_indices": {
+              "foreign_net": [],
+              "same_net_beyond_land": [
+                1,
+                2,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                22,
+                23,
+                25,
+                27,
+                28,
+                29,
+                30,
+                31,
+                32,
+                35,
+                37,
+                38,
+                39,
+                41,
+                44,
+                53,
+                57,
+                58,
+                59,
+                60,
+                62,
+                63
+              ],
+              "registration_or_near_pad_only": [
+                52,
+                61
+              ],
+              "no_nominal_exposure": [
+                0,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                17,
+                18,
+                19,
+                20,
+                21,
+                24,
+                26,
+                33,
+                34,
+                36,
+                40,
+                42,
+                43,
+                45,
+                46,
+                47,
+                48,
+                49,
+                50,
+                51,
+                54,
+                55,
+                56
+              ],
+              "unevaluated": [],
+              "excluded": []
+            },
+            "finding_counts": {
+              "foreign_net": 0,
+              "same_net_beyond_land": 31,
+              "registration_or_near_pad_only": 2,
+              "no_nominal_exposure": 31,
+              "unevaluated": 0,
+              "excluded": 0
+            }
+          },
+          "B.Mask": {
+            "status": "complete",
+            "missing_layers": [],
+            "gerber_sha256": {
+              "B.Mask": "95de6a9f8c4468d6579802ecfff78692e53310f079c1d71a79ab023aeca4d39c",
+              "B.Cu": "9820dae93be182b1bb2a95c6fe395c080f1626925f99caa07097324a97d5d900"
+            },
+            "openings": [
+              {
+                "opening_uuids": [
+                  "e9355260-3ff3-5902-8f07-4cc059b788af"
+                ],
+                "bounds_mm": [
+                  142.7,
+                  127.32000000000001,
+                  144.3,
+                  128.92000000000002
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/4",
+                "owner_net": "GND",
+                "footprint_ref": "U1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "f9def7c1-71e4-53f1-aa05-4b9deeb7b6a0"
+                ],
+                "bounds_mm": [
+                  150.32,
+                  127.32000000000001,
+                  151.92000000000002,
+                  128.92000000000002
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/5",
+                "owner_net": "LINE_C",
+                "footprint_ref": "U1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "baeab444-1a2c-52fd-8a90-85df19d096fd"
+                ],
+                "bounds_mm": [
+                  127.65,
+                  125.19000000000001,
+                  129.35,
+                  126.89
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J1/2",
+                "owner_net": "GND",
+                "footprint_ref": "J1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "3ca7db0f-92a4-5a3f-9d40-a79a8f606e1e"
+                ],
+                "bounds_mm": [
+                  142.7,
+                  124.78,
+                  144.3,
+                  126.38
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/3",
+                "owner_net": "LINE_B",
+                "footprint_ref": "U1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "92c7abd5-a82d-56dc-a7b2-abc8d70a81f6"
+                ],
+                "bounds_mm": [
+                  150.32,
+                  124.78,
+                  151.92000000000002,
+                  126.38
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/6",
+                "owner_net": "LINE_D",
+                "footprint_ref": "U1",
+                "measurement_indices": [
+                  67
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "952137cb-6367-589a-bf72-41ce1a9f8f41"
+                ],
+                "bounds_mm": [
+                  127.65,
+                  122.65,
+                  129.35,
+                  124.35
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J1/1",
+                "owner_net": "VCC",
+                "footprint_ref": "J1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "c66ad289-3432-5d3e-9c32-a6b268ee2343"
+                ],
+                "bounds_mm": [
+                  142.7,
+                  122.24000000000001,
+                  144.3,
+                  123.84
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/2",
+                "owner_net": "LINE_A",
+                "footprint_ref": "U1",
+                "measurement_indices": [
+                  66
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "bb59d3e0-70ca-58e3-85e6-8e82e12a2cb4"
+                ],
+                "bounds_mm": [
+                  142.7,
+                  119.7,
+                  144.3,
+                  121.3
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/1",
+                "owner_net": "RESET",
+                "footprint_ref": "U1",
+                "measurement_indices": [
+                  64,
+                  65
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "568f8156-8e82-52a7-a1b9-8b18a464a6a1"
+                ],
+                "bounds_mm": [
+                  165.65,
+                  126.73,
+                  167.35,
+                  128.43
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J2/5",
+                "owner_net": "RESET",
+                "footprint_ref": "J2",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "ad500ed4-915b-56bd-9286-1e5de8f76529"
+                ],
+                "bounds_mm": [
+                  168.19,
+                  126.73,
+                  169.89,
+                  128.43
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J2/6",
+                "owner_net": "GND",
+                "footprint_ref": "J2",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "125d6614-fa19-5c4d-97e3-1c640271b684"
+                ],
+                "bounds_mm": [
+                  165.65,
+                  124.19000000000001,
+                  167.35,
+                  125.89
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J2/3",
+                "owner_net": "ISP_SCK",
+                "footprint_ref": "J2",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "2872e382-2a98-59a1-a95a-defb5ce52441"
+                ],
+                "bounds_mm": [
+                  168.19,
+                  124.19000000000001,
+                  169.89,
+                  125.89
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J2/4",
+                "owner_net": "LINE_C",
+                "footprint_ref": "J2",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "a4fbc017-2c13-5895-af37-71f2e9d676c8"
+                ],
+                "bounds_mm": [
+                  150.32,
+                  122.24000000000001,
+                  151.92000000000002,
+                  123.84
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/7",
+                "owner_net": "ISP_SCK",
+                "footprint_ref": "U1",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "1beb47c0-0e2f-52a9-97ab-2f84de3f85f7"
+                ],
+                "bounds_mm": [
+                  165.65,
+                  121.65,
+                  167.35,
+                  123.35
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J2/1",
+                "owner_net": "LINE_D",
+                "footprint_ref": "J2",
+                "measurement_indices": []
+              },
+              {
+                "opening_uuids": [
+                  "c3b6c742-e960-58c6-975b-e1b8bb7dfbb8"
+                ],
+                "bounds_mm": [
+                  168.19,
+                  121.65,
+                  169.89,
+                  123.35
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "J2/2",
+                "owner_net": "VCC",
+                "footprint_ref": "J2",
+                "measurement_indices": [
+                  68
+                ]
+              },
+              {
+                "opening_uuids": [
+                  "1ab7b4f8-809c-51c6-be33-98d2a47234cb"
+                ],
+                "bounds_mm": [
+                  150.32,
+                  119.7,
+                  151.92000000000002,
+                  121.3
+                ],
+                "status": "matched",
+                "reason": null,
+                "owner_ref": "U1/8",
+                "owner_net": "VCC",
+                "footprint_ref": "U1",
+                "measurement_indices": []
+              }
+            ],
+            "opening_counts": {
+              "plotted": 16,
+              "matched": 16,
+              "unresolved": 0,
+              "excluded": 0
+            },
+            "measured_opening_counts": {
+              "evaluated": 16,
+              "foreign_net": 0,
+              "same_net_beyond_land": 4
+            },
+            "exclusions_by_reason": {},
+            "measurement_indices": {
+              "foreign_net": [],
+              "same_net_beyond_land": [
+                64,
+                65,
+                66,
+                67,
+                68
+              ],
+              "registration_or_near_pad_only": [],
+              "no_nominal_exposure": [],
+              "unevaluated": [],
+              "excluded": []
+            },
+            "finding_counts": {
+              "foreign_net": 0,
+              "same_net_beyond_land": 5,
+              "registration_or_near_pad_only": 0,
+              "no_nominal_exposure": 0,
+              "unevaluated": 0,
+              "excluded": 0
+            }
+          }
+        }
+      }
     }
   ],
   "schema_version": 1,
@@ -11574,6 +13273,126 @@
       ],
       "bbox": null,
       "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "bypass_distance_unassociated",
+      "severity": "info",
+      "message": "C1 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "refs": [
+        "C1"
+      ],
+      "pads": [],
+      "nets": [
+        "VCC"
+      ],
+      "point": [
+        153.55,
+        117.5
+      ],
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "bypass_distance_unassociated",
+      "severity": "info",
+      "message": "C2 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "refs": [
+        "C2"
+      ],
+      "pads": [],
+      "nets": [
+        "VCC"
+      ],
+      "point": [
+        129.55,
+        119.5
+      ],
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "silk_hole_overlap",
+      "severity": "info",
+      "message": "Silkscreen C1 (reference) overlaps drilled hole of via at (151.500, 115.900)",
+      "refs": [],
+      "pads": [],
+      "nets": [],
+      "point": [
+        152.05,
+        115.77
+      ],
+      "bbox": null,
+      "layer": "F.SilkS",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "silk_hole_overlap",
+      "severity": "info",
+      "message": "Silkscreen C1 (reference) overlaps drilled hole of via at (152.350, 116.300)",
+      "refs": [],
+      "pads": [],
+      "nets": [],
+      "point": [
+        152.05,
+        115.77
+      ],
+      "bbox": null,
+      "layer": "F.SilkS",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "silk_hole_overlap",
+      "severity": "info",
+      "message": "Silkscreen D4 (reference) overlaps drilled hole of via at (137.600, 93.900)",
+      "refs": [],
+      "pads": [],
+      "nets": [],
+      "point": [
+        138.5,
+        93.3
+      ],
+      "bbox": null,
+      "layer": "F.SilkS",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "silk_hole_overlap",
+      "severity": "info",
+      "message": "Silkscreen D9 (fp_line) overlaps drilled hole of via at (156.625, 105.500)",
+      "refs": [],
+      "pads": [],
+      "nets": [],
+      "point": [
+        158.5,
+        105.5
+      ],
+      "bbox": null,
+      "layer": "F.SilkS",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "silk_hole_overlap",
+      "severity": "info",
+      "message": "Silkscreen D9 (reference) overlaps drilled hole of via at (158.000, 103.800)",
+      "refs": [],
+      "pads": [],
+      "nets": [],
+      "point": [
+        158.5,
+        103.3
+      ],
+      "bbox": null,
+      "layer": "F.SilkS",
       "waived": false
     },
     {
@@ -11778,61 +13597,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.460674225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 11; opening pad:C1/1; exposed copper segment (net VCC); same-net own-pad entry",
-      "refs": [],
-      "pads": [],
-      "nets": [
-        "VCC"
-      ],
-      "point": [
-        153.55,
-        117.1375
-      ],
-      "bbox": null,
-      "layer": "F.Cu",
-      "waived": false
-    },
-    {
-      "schema_version": 1,
-      "rule_id": "mask_to_copper",
-      "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.254188412 mm\u00b2; beyond owner pad copper 3.34581648e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 12; opening pad:C1/1; exposed copper segment (net VCC); same-net own-pad entry",
-      "refs": [],
-      "pads": [],
-      "nets": [
-        "VCC"
-      ],
-      "point": [
-        153.289231,
-        117.1484885
-      ],
-      "bbox": null,
-      "layer": "F.Cu",
-      "waived": false
-    },
-    {
-      "schema_version": 1,
-      "rule_id": "mask_to_copper",
-      "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.348174225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 13; opening pad:C1/2; exposed copper segment (net GND); same-net own-pad entry",
-      "refs": [],
-      "pads": [],
-      "nets": [
-        "GND"
-      ],
-      "point": [
-        155.3249995,
-        117.5
-      ],
-      "bbox": null,
-      "layer": "F.Cu",
-      "waived": false
-    },
-    {
-      "schema_version": 1,
-      "rule_id": "mask_to_copper",
-      "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.1568252 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 14; opening pad:R3/1; exposed copper segment (net LINE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.1568252 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 11; opening pad:R3/1; exposed copper segment (net LINE_C); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -11850,7 +13615,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824388 mm\u00b2; beyond owner pad copper 2.28094035e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 15; opening pad:R3/1; exposed copper segment (net LINE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824388 mm\u00b2; beyond owner pad copper 2.28094035e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 12; opening pad:R3/1; exposed copper segment (net LINE_C); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -11868,7 +13633,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824189 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 16; opening pad:R3/2; exposed copper segment (net NODE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824189 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 13; opening pad:R3/2; exposed copper segment (net NODE_C); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -11886,7 +13651,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824172 mm\u00b2; beyond owner pad copper 2.28094035e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 17; opening pad:R4/1; exposed copper segment (net LINE_D); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824172 mm\u00b2; beyond owner pad copper 2.28094035e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 14; opening pad:R4/1; exposed copper segment (net LINE_D); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -11904,7 +13669,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156825139 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 18; opening pad:R4/1; exposed copper segment (net LINE_D); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156825139 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 15; opening pad:R4/1; exposed copper segment (net LINE_D); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -11922,7 +13687,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156825223 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 19; opening pad:R4/2; exposed copper segment (net NODE_D); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156825223 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 16; opening pad:R4/2; exposed copper segment (net NODE_D); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -11940,7 +13705,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 20; opening pad:D2/1; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 17; opening pad:D2/1; exposed copper segment (net NODE_A); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -11958,7 +13723,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 21; opening pad:D2/1; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 18; opening pad:D2/1; exposed copper segment (net NODE_A); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -11976,7 +13741,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 22; opening pad:D2/1; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 19; opening pad:D2/1; exposed copper segment (net NODE_A); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -11994,7 +13759,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 23; opening pad:D2/2; exposed copper segment (net NODE_B); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 20; opening pad:D2/2; exposed copper segment (net NODE_B); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12012,7 +13777,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.523174225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 24; opening pad:J1/1; exposed copper segment (net VCC); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.523174225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 21; opening pad:J1/1; exposed copper segment (net VCC); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12030,7 +13795,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.516965087 mm\u00b2; beyond owner pad copper 6.8522041e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 25; opening pad:J1/2; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.516965087 mm\u00b2; beyond owner pad copper 6.8522041e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 22; opening pad:J1/2; exposed copper segment (net GND); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12048,7 +13813,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.304464364 mm\u00b2; beyond owner pad copper 1.28728746e-07 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 26; opening pad:J1/2; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.304464364 mm\u00b2; beyond owner pad copper 1.28728746e-07 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 23; opening pad:J1/2; exposed copper segment (net GND); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12066,79 +13831,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 27; opening pad:D9/1; exposed copper segment (net NODE_D); same-net own-pad entry",
-      "refs": [],
-      "pads": [],
-      "nets": [
-        "NODE_D"
-      ],
-      "point": [
-        157.36874949999998,
-        105.5
-      ],
-      "bbox": null,
-      "layer": "F.Cu",
-      "waived": false
-    },
-    {
-      "schema_version": 1,
-      "rule_id": "mask_to_copper",
-      "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 28; opening pad:D9/1; exposed copper segment (net NODE_D); same-net own-pad entry",
-      "refs": [],
-      "pads": [],
-      "nets": [
-        "NODE_D"
-      ],
-      "point": [
-        157.5625,
-        105.85
-      ],
-      "bbox": null,
-      "layer": "F.Cu",
-      "waived": false
-    },
-    {
-      "schema_version": 1,
-      "rule_id": "mask_to_copper",
-      "severity": "warning",
-      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 29; opening pad:D9/1; exposed copper via (net NODE_D); same-net pass-through",
-      "refs": [],
-      "pads": [],
-      "nets": [
-        "NODE_D"
-      ],
-      "point": [
-        157.075,
-        105.49923
-      ],
-      "bbox": null,
-      "layer": "F.Cu",
-      "waived": false
-    },
-    {
-      "schema_version": 1,
-      "rule_id": "mask_to_copper",
-      "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151117753 mm\u00b2; beyond owner pad copper 2.84994978e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 30; opening pad:D9/2; exposed copper segment (net NODE_B); same-net own-pad entry",
-      "refs": [],
-      "pads": [],
-      "nets": [
-        "NODE_B"
-      ],
-      "point": [
-        159.2291055,
-        105.29160549999999
-      ],
-      "bbox": null,
-      "layer": "F.Cu",
-      "waived": false
-    },
-    {
-      "schema_version": 1,
-      "rule_id": "mask_to_copper",
-      "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 31; opening pad:D4/1; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 24; opening pad:D4/1; exposed copper segment (net NODE_A); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12156,7 +13849,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151116938 mm\u00b2; beyond owner pad copper 2.84992751e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 32; opening pad:D4/1; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151116938 mm\u00b2; beyond owner pad copper 2.84992751e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 25; opening pad:D4/1; exposed copper segment (net NODE_A); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12174,7 +13867,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 33; opening pad:D4/2; exposed copper segment (net NODE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 26; opening pad:D4/2; exposed copper segment (net NODE_C); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12192,7 +13885,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.175290705 mm\u00b2; beyond owner pad copper 1.5841283e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 34; opening pad:U1/3; exposed copper segment (net LINE_B); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.175290705 mm\u00b2; beyond owner pad copper 1.5841283e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 27; opening pad:U1/3; exposed copper segment (net LINE_B); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12210,7 +13903,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.491565194 mm\u00b2; beyond owner pad copper 6.4228085e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 35; opening pad:U1/4; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.491565194 mm\u00b2; beyond owner pad copper 6.4228085e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 28; opening pad:U1/4; exposed copper segment (net GND); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12228,7 +13921,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.491565287 mm\u00b2; beyond owner pad copper 6.42280866e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 36; opening pad:U1/4; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.491565287 mm\u00b2; beyond owner pad copper 6.42280866e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 29; opening pad:U1/4; exposed copper segment (net GND); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12246,7 +13939,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.175289748 mm\u00b2; beyond owner pad copper 1.5841091e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 37; opening pad:U1/5; exposed copper segment (net LINE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.175289748 mm\u00b2; beyond owner pad copper 1.5841091e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 30; opening pad:U1/5; exposed copper segment (net LINE_C); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12264,7 +13957,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.175289983 mm\u00b2; beyond owner pad copper 5.95782401e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 38; opening pad:U1/7; exposed copper segment (net ISP_SCK); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.175289983 mm\u00b2; beyond owner pad copper 5.95782401e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 31; opening pad:U1/7; exposed copper segment (net ISP_SCK); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12282,7 +13975,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.491564609 mm\u00b2; beyond owner pad copper 1.43485661e-07 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 39; opening pad:U1/8; exposed copper segment (net VCC); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.491564609 mm\u00b2; beyond owner pad copper 1.43485661e-07 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 32; opening pad:U1/8; exposed copper segment (net VCC); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12300,7 +13993,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 40; opening pad:D3/1; exposed copper segment (net NODE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 33; opening pad:D3/1; exposed copper segment (net NODE_C); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12318,7 +14011,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 41; opening pad:D3/2; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 34; opening pad:D3/2; exposed copper segment (net NODE_A); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12336,7 +14029,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151116842 mm\u00b2; beyond owner pad copper 2.8499305e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 42; opening pad:D3/2; exposed copper segment (net NODE_A); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151116842 mm\u00b2; beyond owner pad copper 2.8499305e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 35; opening pad:D3/2; exposed copper segment (net NODE_A); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12354,7 +14047,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 43; opening pad:R2/1; exposed copper segment (net LINE_B); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 36; opening pad:R2/1; exposed copper segment (net LINE_B); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12372,7 +14065,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824189 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 44; opening pad:R2/2; exposed copper segment (net NODE_B); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.156824189 mm\u00b2; beyond owner pad copper 2.28094019e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 37; opening pad:R2/2; exposed copper segment (net NODE_B); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12390,7 +14083,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.254188857 mm\u00b2; beyond owner pad copper 3.34583679e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 45; opening pad:C2/1; exposed copper segment (net VCC); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.254188857 mm\u00b2; beyond owner pad copper 3.34583679e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 38; opening pad:C2/1; exposed copper segment (net VCC); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12408,7 +14101,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.430965773 mm\u00b2; beyond owner pad copper 3.34584287e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 46; opening pad:C2/1; exposed copper segment (net VCC); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.430965773 mm\u00b2; beyond owner pad copper 3.34584287e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 39; opening pad:C2/1; exposed copper segment (net VCC); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12426,7 +14119,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.279424225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 47; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.279424225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 40; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12444,7 +14137,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.366663807 mm\u00b2; beyond owner pad copper 4.81566059e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 48; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.366663807 mm\u00b2; beyond owner pad copper 4.81566059e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 41; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12462,7 +14155,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.32134845 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 49; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.32134845 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 42; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12480,7 +14173,61 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 50; opening pad:D7/1; exposed copper segment (net NODE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.460674225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 43; opening pad:C1/1; exposed copper segment (net VCC); same-net own-pad entry",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "VCC"
+      ],
+      "point": [
+        153.55,
+        117.1375
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.254188412 mm\u00b2; beyond owner pad copper 3.34581648e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 44; opening pad:C1/1; exposed copper segment (net VCC); same-net own-pad entry",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "VCC"
+      ],
+      "point": [
+        153.289231,
+        117.1484885
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.348174225 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 45; opening pad:C1/2; exposed copper segment (net GND); same-net own-pad entry",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "GND"
+      ],
+      "point": [
+        155.3249995,
+        117.5
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 46; opening pad:D7/1; exposed copper segment (net NODE_C); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12498,7 +14245,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 51; opening pad:D7/1; exposed copper segment (net NODE_C); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 47; opening pad:D7/1; exposed copper segment (net NODE_C); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12516,7 +14263,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 52; opening pad:D7/2; exposed copper segment (net NODE_B); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 48; opening pad:D7/2; exposed copper segment (net NODE_B); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12534,7 +14281,7 @@
       "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "info",
-      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 53; opening pad:D7/2; exposed copper segment (net NODE_B); same-net own-pad entry",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 49; opening pad:D7/2; exposed copper segment (net NODE_B); same-net own-pad entry",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12543,6 +14290,78 @@
       "point": [
         139.4375,
         105.85
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.113207765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 50; opening pad:D9/1; exposed copper segment (net NODE_D); same-net own-pad entry",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "NODE_D"
+      ],
+      "point": [
+        157.36874949999998,
+        105.5
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.155707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 51; opening pad:D9/1; exposed copper segment (net NODE_D); same-net own-pad entry",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "NODE_D"
+      ],
+      "point": [
+        157.5625,
+        105.85
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 52; opening pad:D9/1; exposed copper via (net NODE_D); same-net pass-through",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "NODE_D"
+      ],
+      "point": [
+        157.075,
+        105.49923
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151117753 mm\u00b2; beyond owner pad copper 2.84994978e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 53; opening pad:D9/2; exposed copper segment (net NODE_B); same-net own-pad entry",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "NODE_B"
+      ],
+      "point": [
+        159.2291055,
+        105.29160549999999
       ],
       "bbox": null,
       "layer": "F.Cu",
@@ -12835,25 +14654,7 @@
       "schema_version": 1,
       "rule_id": "tht_smd_spacing",
       "severity": "warning",
-      "message": "THT/via to SMD pad spacing 2.4250mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (129.350000, 122.650000) and (129.350000, 120.225000)",
-      "refs": [],
-      "pads": [],
-      "nets": [
-        "8"
-      ],
-      "point": [
-        129.35,
-        121.438
-      ],
-      "bbox": null,
-      "layer": "F.Cu",
-      "waived": false
-    },
-    {
-      "schema_version": 1,
-      "rule_id": "tht_smd_spacing",
-      "severity": "warning",
-      "message": "THT/via to SMD pad spacing 3.0024mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (129.350000, 122.650000) and (131.061107, 120.182867)",
+      "message": "THT/via to SMD pad (J1.1 to C2.2) spacing 3.0024mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (129.350000, 122.650000) and (131.061107, 120.182867)",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12872,7 +14673,25 @@
       "schema_version": 1,
       "rule_id": "tht_smd_spacing",
       "severity": "warning",
-      "message": "THT/via to SMD pad spacing 2.5295mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (142.756747, 119.791402) and (140.868253, 118.108598)",
+      "message": "THT/via to SMD pad (J1.1 to C2.1) spacing 2.4250mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (129.350000, 122.650000) and (129.350000, 120.225000)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "8"
+      ],
+      "point": [
+        129.35,
+        121.438
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "tht_smd_spacing",
+      "severity": "warning",
+      "message": "THT/via to SMD pad (U1.1 to R5.2) spacing 2.5295mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (142.756747, 119.791402) and (140.868253, 118.108598)",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12890,7 +14709,7 @@
       "schema_version": 1,
       "rule_id": "tht_smd_spacing",
       "severity": "warning",
-      "message": "THT/via to SMD pad spacing 2.2863mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (151.627515, 119.881592) and (153.141402, 118.168253)",
+      "message": "THT/via to SMD pad (U1.8 to C1.1) spacing 2.2863mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (151.627515, 119.881592) and (153.141402, 118.168253)",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12908,7 +14727,7 @@
       "schema_version": 1,
       "rule_id": "tht_smd_spacing",
       "severity": "warning",
-      "message": "THT/via to SMD pad spacing 2.6512mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (165.650000, 127.580000) and (163.000000, 127.500000)",
+      "message": "THT/via to SMD pad (J2.5 to FID2.#0) spacing 2.6512mm < 3.050mm (copper edge to copper edge) on F.Cu; closest points (165.650000, 127.580000) and (163.000000, 127.500000)",
       "refs": [],
       "pads": [],
       "nets": [
@@ -12936,7 +14755,7 @@
     "flag_overrides_stackup": false,
     "floors_outer_oz": 1.0,
     "dfm_table": {
-      "version": 2,
+      "version": 4,
       "stackup": "2-layer, 1oz outer / 0oz inner (assumed: no stackup/--copper weight declared)",
       "entry": "2layer_1oz",
       "thresholds": {
@@ -12979,6 +14798,14 @@
           "basis": "capability_page",
           "source_url": "https://jlcpcb.com/capabilities/pcb-capabilities",
           "retrieved": "2026-01-16"
+        },
+        "tht_smd_spacing": {
+          "danger_mm": 2.032,
+          "warning_mm": 3.05,
+          "warning_basis": "observed_jlcdfm",
+          "basis": "observed_jlcdfm",
+          "source_url": "https://github.com/2AMLogic/kicad-tools/issues/9421",
+          "retrieved": "2026-11-18"
         }
       }
     }
@@ -12986,7 +14813,7 @@
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "84 rules checked, 0 error(s), 7 warning(s)"
+      "detail": "87 rules checked, 0 error(s), 7 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -13009,8 +14836,8 @@
     "schematic_missing": false,
     "incomplete_categories": [],
     "schematic": {
-      "path": "charlieplex_3x3.kicad_sch",
-      "source": "project.kct"
+      "path": "output/charlieplex_3x3.kicad_sch",
+      "source": "--schematic"
     }
   },
   "routing_quality": {
@@ -13040,6 +14867,12 @@
       "blocking": true
     },
     "board_id": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "bypass_distance": {
       "status": "checked",
       "state": "checked",
       "reason": null,
@@ -13175,6 +15008,12 @@
       "status": "unknown:host_library_refs (19 footprint(s); per-host detail: kct pcb model-audit)",
       "state": "unknown",
       "reason": "host_library_refs (19 footprint(s); per-host detail: kct pcb model-audit)",
+      "blocking": false
+    },
+    "netclass_agreement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": false
     },
     "netclass_clearance_copper": {
@@ -13365,7 +15204,7 @@
     }
   },
   "fab_dfm_parity": {
-    "table_version": "6e136337",
+    "table_version": "1e283ac8",
     "source": "https://github.com/2AMLogic/kicad-tools/issues/8838",
     "retrieved": "2026-11-12",
     "manufacturer": "jlcpcb",
@@ -13424,7 +15263,7 @@
         ],
         "status": "partial",
         "danger_capable": true,
-        "note": "`silk_hole_overlap` (#8844) flags silk that *overlaps* a via/PTH/NPTH drill circle, tented vias included -- a rule id under the `silkscreen` category. Threshold is 0 mm, so a silk-to-hole gap narrower than JLCDFM's clearance but not touching is still unchecked, and text is tested as its bounding box rather than glyph outlines. Observed 75 danger, not reproduced against the live tool. Fab thresholds read 2026-11-17/18 (jlcdfm.com Alert value panel, 4-layer, 2 oz outer copper): danger 0.13 mm / warning 0.18 mm silk-to-hole, against kct's overlap-only threshold of 0 -- 27 kct warnings vs 50 fab danger on that board. `SILK_HOLE_CLEARANCE_MM` is shared with the silkscreen repair tool, so it is deliberately unchanged (#9421)."
+        "note": "JLCPCB profiles grade silk intersecting PTH, NPTH and mounting drills as an error; via drills of either tenting state are informational (operator ruling on #9112). In the 4-layer/2 oz Gerber replay (#8858, comment 6970004546), all 50 displayed danger items were strokes at 0 mm over 0.3 or 0.4 mm via holes: 50 via, 0 component holes. Board 01 separately position-matched a 0.04 mm danger to the R2.1 via (#8858, comment 6963569039). The historical 50/0 (#8938) and 75/0 (#8838) danger/warning totals have no per-item attribution. The fab's Alert value panel on 2026-11-17/18 showed 0.13 mm danger and 0.18 mm warning; kct grades actual overlap (0 mm) and measures text by bounding box (#9421)."
       },
       {
         "category": "annular_ring",
@@ -13495,6 +15334,15 @@
         "status": "covered",
         "danger_capable": false,
         "note": "checked; no finding on the board."
+      },
+      {
+        "category": "trace_width",
+        "kct_rules": [
+          "dimension_trace_width"
+        ],
+        "status": "partial",
+        "danger_capable": true,
+        "note": "JLCDFM rated 0.1016 mm outer-layer tracks Danger (listed as 0.1 mm) and 0.1524 mm Good on one 4-layer board (#10173; the Danger count was not recorded, so no recorded-board fixture carries this row). The published capability still allows 0.1016 mm, so the `dimension_trace_width` ERROR floor is unchanged; kct adds a WARNING for outer-layer tracks below the stackup's optional `trace_width` dfm_thresholds `warning_mm` (0.1524 mm on 4layer_1oz only). Stackups without that entry, and inner layers, get no warning. Partial because the fab's Danger edge between the two observed widths is unknown and only one stackup has evidence."
       }
     ],
     "incomplete_categories": []
