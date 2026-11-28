@@ -307,8 +307,10 @@ class TestEntryPointRegistryParity:
         tolerance policy (issues #3061 / #3497), so the call carries the
         ``pad_grid_auto_derive=True`` argument.
         """
+        import re
+
         src = self._read_source("kicad_tools.audit.auditor")
-        assert "checker.check_all(pad_grid_auto_derive=True)" in src, (
+        assert re.search(r"checker\.check_all\(\s*pad_grid_auto_derive=True\s*[,)]", src), (
             "ManufacturingAudit._check_drc must invoke checker.check_all("
             "pad_grid_auto_derive=True) so it inherits the unified rule "
             "registry (Issue #3044) AND matches the kct-check pad_grid "
