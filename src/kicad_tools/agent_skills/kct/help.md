@@ -27,11 +27,7 @@ other skills by reading the files actually vendored under
 
 ## Model selection
 
-Reading frontmatter and rendering an orientation table is summarization, not
-frontier judgment. Codex CLI and opencode use the session's selected model.
-When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a
-model for this task. An explicit dispatch choice or role configuration takes
-precedence.
+The help command reads the installed skill descriptions and summarizes them in an orientation table. Codex CLI and opencode use the session’s selected model. When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a model for this task. An explicit dispatch choice or role configuration takes precedence.
 
 ## Arguments
 

@@ -4,7 +4,7 @@
       "issue": 6269,
       "kind": "exception",
       "summary": "Paid 0.15 mm mechanical-drill via process (ruling #7147); the generic jlcpcb-tier1 kct check reports the reviewed vias as errors, the board's own check_manufacturing.py models the process",
-      "recorded": "2026-11-19",
+      "recorded": "2026-11-27",
       "errors": [
         {
           "rule": "dimension_annular_ring",
@@ -44,22 +44,29 @@
         {
           "rule": "dimension_annular_ring",
           "at": [
-            137.78,
-            83.08
-          ]
-        },
-        {
-          "rule": "dimension_annular_ring",
-          "at": [
-            145.0,
+            139.0,
             84.65
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            146.0,
-            104.65
+            141.0,
+            85.45
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            141.8,
+            85.65
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            145.65,
+            83.1
           ]
         },
         {
@@ -81,13 +88,6 @@
           "at": [
             147.75,
             86.58
-          ]
-        },
-        {
-          "rule": "dimension_annular_ring",
-          "at": [
-            151.0,
-            104.65
           ]
         },
         {
@@ -170,22 +170,29 @@
         {
           "rule": "dimension_via_diameter",
           "at": [
-            137.78,
-            83.08
-          ]
-        },
-        {
-          "rule": "dimension_via_diameter",
-          "at": [
-            145.0,
+            139.0,
             84.65
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            146.0,
-            104.65
+            141.0,
+            85.45
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            141.8,
+            85.65
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            145.65,
+            83.1
           ]
         },
         {
@@ -207,13 +214,6 @@
           "at": [
             147.75,
             86.58
-          ]
-        },
-        {
-          "rule": "dimension_via_diameter",
-          "at": [
-            151.0,
-            104.65
           ]
         },
         {
@@ -296,29 +296,29 @@
         {
           "rule": "dimension_via_drill",
           "at": [
-            137.25,
-            83.75
+            139.0,
+            84.65
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            137.78,
-            83.08
+            141.0,
+            85.45
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            143.1,
-            87.4
+            141.53,
+            83.2
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            143.35,
-            89.1
+            141.8,
+            85.65
           ]
         },
         {
@@ -331,15 +331,8 @@
         {
           "rule": "dimension_via_drill",
           "at": [
-            145.0,
-            84.65
-          ]
-        },
-        {
-          "rule": "dimension_via_drill",
-          "at": [
-            146.0,
-            104.65
+            145.65,
+            83.1
           ]
         },
         {
@@ -361,13 +354,6 @@
           "at": [
             147.75,
             86.58
-          ]
-        },
-        {
-          "rule": "dimension_via_drill",
-          "at": [
-            151.0,
-            104.65
           ]
         },
         {
@@ -495,6 +481,12 @@
           "item": "netclass:Default"
         }
       ]
+    },
+    {
+      "issue": 10664,
+      "kind": "defect",
+      "summary": "Ten same-net mask_to_copper errors block the board under the public readiness check; the copper repair is tracked here",
+      "recorded": "2026-11-27"
     }
   ]
 }

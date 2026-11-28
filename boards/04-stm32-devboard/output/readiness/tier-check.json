@@ -1,0 +1,5700 @@
+{
+  "file": "output/stm32_devboard_routed.kicad_pcb",
+  "manufacturer": "jlcpcb-tier1",
+  "pcb_sha256": "ab4c02899b71e0a248d8133692f06c2e630135870b08364d6813fbe83fd592c6",
+  "layers": 2,
+  "summary": {
+    "errors": 79,
+    "warnings": 44,
+    "infos": 72,
+    "waived": 0,
+    "rules_checked": 84,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "copper_sliver": 1,
+      "track_dangling": 1,
+      "via_dangling": 1,
+      "plane_split": 1,
+      "pour_slot": 1,
+      "redundant_copper_duplicate": 1,
+      "redundant_copper_fragments": 1,
+      "redundant_copper_detour": 1,
+      "redundant_copper_via_offcentre": 1,
+      "redundant_copper_covered": 1,
+      "redundant_copper_staircase": 1,
+      "redundant_copper_pour_stub": 0,
+      "doc_drift_stale_pin": 1,
+      "doc_drift_unresolvable_pin": 1,
+      "isolated_copper": 1,
+      "netclass_sidecar_mismatch": 1,
+      "netclass_track_width_mismatch": 1,
+      "netclass_clearance_copper": 1,
+      "netclass_clearance_unsupported": 1,
+      "netclass_track_width": 1,
+      "netclass_clearance": 1,
+      "netclass_via_diameter": 1,
+      "netclass_via_drill": 1,
+      "netclass_annular_ring": 1,
+      "sch_field_offset": 1,
+      "sch_field_overlap": 1,
+      "sch_wire_through_symbol": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1,
+      "mask_to_copper": 1,
+      "mask_negative_expansion": 1,
+      "mask_multi_segment": 1
+    },
+    "passed": false,
+    "stale_waivers": 0,
+    "orphan_waivers": 0,
+    "coverage_checked": 45,
+    "coverage_skipped": 8,
+    "coverage_unknown": [
+      "mask_multi_segment",
+      "mask_negative_expansion",
+      "model_coverage",
+      "spec_conformance"
+    ],
+    "coverage_blocking_unknown": [],
+    "attach_zone_exemption": "active"
+  },
+  "violations": [
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "location": [
+        173.5,
+        89.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.229999999999997,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J1||F.Cu",
+      "evidence_hash": "ev4:19b198d274d26483"
+    },
+    {
+      "rule_id": "pour_slot",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Possible pour slot between [OSC_OUT] and [NRST] on F.Cu at a 0.636 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct net class clearance - Power, kct net class clearance - Clock, kct attach zone - J1, kct net class clearance - Debug).",
+      "location": [
+        144.144,
+        89.632
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.6364999999999972,
+      "required_value": null,
+      "items": [],
+      "nets": [
+        "OSC_OUT",
+        "NRST"
+      ],
+      "witnesses": [
+        "c37bef08-4cd5-5e36-a13b-fa8428fd7924",
+        "2ec70768-c464-525f-8c1d-943285442f4b"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "pour_slot||NRST,OSC_OUT|F.Cu",
+      "evidence_hash": "ev4:b172bc4dcee17a4d"
+    },
+    {
+      "rule_id": "pour_slot",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Possible pour slot between [OSC_OUT] and [NRST] on F.Cu at a 0.386 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct net class clearance - Power, kct net class clearance - Clock, kct attach zone - J1, kct net class clearance - Debug).",
+      "location": [
+        144.5,
+        89.507
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3864999999999972,
+      "required_value": null,
+      "items": [],
+      "nets": [
+        "OSC_OUT",
+        "NRST"
+      ],
+      "witnesses": [
+        "c37bef08-4cd5-5e36-a13b-fa8428fd7924",
+        "b16f7cad-2706-5cd8-ad68-db7a624db711"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "pour_slot||NRST,OSC_OUT|F.Cu",
+      "evidence_hash": "ev4:03a27ebf8ffd5610"
+    },
+    {
+      "rule_id": "pour_slot",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Possible pour slot between [OSC_OUT] and [NRST] on F.Cu at a 0.337 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct net class clearance - Power, kct net class clearance - Clock, kct attach zone - J1, kct net class clearance - Debug).",
+      "location": [
+        144.988,
+        89.482
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3365,
+      "required_value": null,
+      "items": [],
+      "nets": [
+        "OSC_OUT",
+        "NRST"
+      ],
+      "witnesses": [
+        "c37bef08-4cd5-5e36-a13b-fa8428fd7924",
+        "d6fd2a29-88ad-5bf5-b841-ab92ab754674"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "pour_slot||NRST,OSC_OUT|F.Cu",
+      "evidence_hash": "ev4:45c4b1996f8129f2"
+    },
+    {
+      "rule_id": "pour_slot",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Possible pour slot between [OSC_IN] and [OSC_OUT] on F.Cu at a 0.386 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct net class clearance - Power, kct net class clearance - Clock).",
+      "location": [
+        144.864,
+        88.993
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3864999999999972,
+      "required_value": null,
+      "items": [],
+      "nets": [
+        "OSC_IN",
+        "OSC_OUT"
+      ],
+      "witnesses": [
+        "df76680f-60b2-5609-bbe0-d9b9f0232fa7",
+        "c37bef08-4cd5-5e36-a13b-fa8428fd7924"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "pour_slot||OSC_IN,OSC_OUT|F.Cu",
+      "evidence_hash": "ev4:ac749917d886b8cc"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        158.7,
+        84.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "SWCLK"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|SWCLK||F.Cu",
+      "evidence_hash": "ev4:cffa0a17c964525b"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        124.65,
+        86.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:380a61b2919f91d0"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        124.65,
+        86.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:4524a5b69b9fb652"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        124.65,
+        86.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:71ed757838a97ea5"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        124.85,
+        78.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:cd33d575cff69d3e"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        124.85,
+        78.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:1b7cbced1092b3e9"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        124.85,
+        78.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:75b80d371bae0939"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        130.15,
+        79.9
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:20ac533103e9d7e2"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        130.15,
+        79.9
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:180b7ad31eeeb24e"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        130.15,
+        79.9
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:4ebfbbebcfc65c23"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        143.9,
+        90.05
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "NRST"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|NRST||F.Cu",
+      "evidence_hash": "ev4:b1fdee5348110799"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        135.0,
+        78.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:545fc91fede3aa55"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        135.0,
+        78.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:4e9d94f69377d3a3"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        135.0,
+        78.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:d6997279f677f363"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        153.15,
+        93.3
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "NRST"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|NRST||F.Cu",
+      "evidence_hash": "ev4:fc4bcb599361b87c"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        135.0,
+        84.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:b57ab245682e7b52"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        135.0,
+        84.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:6288abbb7cb98a06"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        135.0,
+        84.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:a83fc78e881238c9"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        163.85,
+        83.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "SWO"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|SWO||F.Cu",
+      "evidence_hash": "ev4:a1f8d08f6befcb92"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        139.0,
+        84.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:c508c85659f52f9a"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        139.0,
+        84.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:128e7b40026de93f"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        139.0,
+        84.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:60ee494a45bb83b0"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        141.8,
+        85.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:3b450bf07c5a26fa"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        141.8,
+        85.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:373f06899ab1bdb4"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        141.8,
+        85.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:60f0c27f2ec33bbf"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        141.535,
+        83.2
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "OSC_OUT"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|OSC_OUT||F.Cu",
+      "evidence_hash": "ev4:abf3e64511fb72d2"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        141.0,
+        85.45
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:1682599c88066088"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        141.0,
+        85.45
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:57b52516619b7a26"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        141.0,
+        85.45
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:365e4c5dd93a188b"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        145.65,
+        83.1
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:9ebd014c375d8326"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        145.65,
+        83.1
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:328b030a072a17c8"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        145.65,
+        83.1
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:fac904a6c0f27bfc"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        146.58,
+        90.75
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:ccb979a1de4656a4"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        146.58,
+        90.75
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:9981caba1be94ac0"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        146.58,
+        90.75
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:cc804b0c719f994d"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        146.65,
+        100.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:132b82190cab4e88"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        146.65,
+        100.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:89ec88e7ba313311"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        146.65,
+        100.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:dc08ec1eed3f5821"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        160.45,
+        85.45
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "BOOT0"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|BOOT0||F.Cu",
+      "evidence_hash": "ev4:24d72980c4f4b4b0"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        147.75,
+        86.58
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:3318db70780b6a6f"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        147.75,
+        86.58
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:53d271ec36d93290"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        147.75,
+        86.58
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:50058092cf140340"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        151.65,
+        100.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:6ef0628aeb93f4f2"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        151.65,
+        100.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:a17e85c4b5533efa"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        151.65,
+        100.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:08c5169cb758c6cd"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        169.8,
+        87.15
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "SWO"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|SWO||F.Cu",
+      "evidence_hash": "ev4:d3e279e32880f1c4"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        172.6,
+        87.4
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "SWCLK"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|SWCLK||F.Cu",
+      "evidence_hash": "ev4:85e4268df54d5140"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        158.2,
+        87.7
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "SWDIO"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|SWDIO||F.Cu",
+      "evidence_hash": "ev4:b1282d5847b8bcfb"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        152.25,
+        94.9
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:32ec74986cc064d9"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        152.25,
+        94.9
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:edc9757ef269dd65"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        152.25,
+        94.9
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:9de4a2f15532ed7c"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        154.9,
+        86.75
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:dd67bd27eed81525"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        154.9,
+        86.75
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:69b98b0407153fe8"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        154.9,
+        86.75
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:8245ab78f5bf8f34"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        170.95,
+        88.3
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "SWO"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|SWO||F.Cu",
+      "evidence_hash": "ev4:feb9000b787bbd38"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        161.3,
+        86.3
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "BOOT0"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|BOOT0||F.Cu",
+      "evidence_hash": "ev4:c399f319b892090a"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        156.0,
+        100.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:03d3f002f8d70037"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        156.0,
+        100.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:4f6ab4f804fd56e3"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        156.0,
+        100.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:e69677c6e4c3c760"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        163.5,
+        87.7
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "SWDIO"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|SWDIO||F.Cu",
+      "evidence_hash": "ev4:c1cdf2dad5db63cb"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        167.0,
+        90.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:2f3e04a4ee7c194e"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        167.0,
+        90.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:97c1911bd639f0a1"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        167.0,
+        90.65
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:24ba645e75445281"
+    },
+    {
+      "rule_id": "dimension_via_drill",
+      "type": "dimension_via_drill",
+      "severity": "error",
+      "message": "Via drill 0.150mm < minimum 0.300mm",
+      "location": [
+        175.05,
+        96.35
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_drill|GND||F.Cu",
+      "evidence_hash": "ev4:efbfd404c0c93eba"
+    },
+    {
+      "rule_id": "dimension_via_diameter",
+      "type": "dimension_via_diameter",
+      "severity": "error",
+      "message": "Via diameter 0.300mm < minimum 0.600mm",
+      "location": [
+        175.05,
+        96.35
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_via_diameter|GND||F.Cu",
+      "evidence_hash": "ev4:1f93f912002cff32"
+    },
+    {
+      "rule_id": "dimension_annular_ring",
+      "type": "dimension_annular_ring",
+      "severity": "error",
+      "message": "Annular ring 0.075mm < minimum 0.150mm",
+      "location": [
+        175.05,
+        96.35
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "GND"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "dimension_annular_ring|GND||F.Cu",
+      "evidence_hash": "ev4:ded8b90f914bf3a2"
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C1 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        121.5,
+        85.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C1"
+      ],
+      "nets": [
+        "+5V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C1|+5V|",
+      "evidence_hash": "ev4:6e329c5cd7b30951"
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C12 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        143.5,
+        99.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C12"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C12|+3.3V|",
+      "evidence_hash": "ev4:befbb0da17e3ab41"
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C13 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        148.5,
+        99.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C13"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C13|+3.3V|",
+      "evidence_hash": "ev4:4a94411af0dafbcd"
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C14 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        153.5,
+        99.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C14"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C14|+3.3V|",
+      "evidence_hash": "ev4:dfd7644805fdf9f4"
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C2 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        132.5,
+        77.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C2"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C2|+3.3V|",
+      "evidence_hash": "ev4:15ff48c1e117ef40"
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C3 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        132.5,
+        83.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C3"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C3|+3.3V|",
+      "evidence_hash": "ev4:f1c2dd3604a0f490"
+    },
+    {
+      "rule_id": "netclass_sidecar_mismatch",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Net '+3.3V': sidecar trace_width 0.250mm but project class 'Power' track_width 0.500mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.25,
+      "required_value": 0.5,
+      "items": [
+        "net:+3.3V",
+        "netclass:Power"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "netclass_sidecar_mismatch|net:+3.3V,netclass:Power|+3.3V|",
+      "evidence_hash": "ev4:10e78998b2627596"
+    },
+    {
+      "rule_id": "netclass_sidecar_mismatch",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Net '+5V': sidecar trace_width 0.250mm but project class 'Power' track_width 0.500mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.25,
+      "required_value": 0.5,
+      "items": [
+        "net:+5V",
+        "netclass:Power"
+      ],
+      "nets": [
+        "+5V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "netclass_sidecar_mismatch|net:+5V,netclass:Power|+5V|",
+      "evidence_hash": "ev4:092c5aa8d7930256"
+    },
+    {
+      "rule_id": "netclass_track_width_mismatch",
+      "type": "track_width",
+      "severity": "warning",
+      "message": "Net 'GND': 35 copper segment(s) narrower than class 'Power' track_width 0.500mm; narrowest 0.200mm",
+      "location": [
+        123.35,
+        77.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.2,
+      "required_value": 0.5,
+      "items": [
+        "net:GND",
+        "netclass:Power"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "netclass_track_width_mismatch|net:GND,netclass:Power|GND|F.Cu",
+      "evidence_hash": "ev4:4217ab374d054b4d"
+    },
+    {
+      "rule_id": "netclass_track_width_mismatch",
+      "type": "track_width",
+      "severity": "warning",
+      "message": "Net 'OSC_OUT': 1 copper segment(s) narrower than class 'Clock' track_width 0.200mm; narrowest 0.127mm",
+      "location": [
+        145.338,
+        89.25
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.127,
+      "required_value": 0.2,
+      "items": [
+        "net:OSC_OUT",
+        "netclass:Clock"
+      ],
+      "nets": [
+        "OSC_OUT"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "netclass_track_width_mismatch|net:OSC_OUT,netclass:Clock|OSC_OUT|F.Cu",
+      "evidence_hash": "ev4:81a4845e275fcab7"
+    },
+    {
+      "rule_id": "netclass_track_width_mismatch",
+      "type": "track_width",
+      "severity": "warning",
+      "message": "Net 'SWO': 1 copper segment(s) narrower than class 'Debug' track_width 0.200mm; narrowest 0.127mm",
+      "location": [
+        151.25,
+        85.338
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.127,
+      "required_value": 0.2,
+      "items": [
+        "net:SWO",
+        "netclass:Debug"
+      ],
+      "nets": [
+        "SWO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "netclass_track_width_mismatch|net:SWO,netclass:Debug|SWO|F.Cu",
+      "evidence_hash": "ev4:8fb534cbebc67f74"
+    },
+    {
+      "rule_id": "netclass_annular_ring",
+      "type": "netclass_annular_ring",
+      "severity": "error",
+      "message": "Netclass 'Default' implied annular ring 0.075mm < minimum 0.150mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.075,
+      "required_value": 0.15,
+      "items": [
+        "netclass:Default"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "netclass_annular_ring|netclass:Default||",
+      "evidence_hash": "ev4:d4bc1e54b02ea88a"
+    },
+    {
+      "rule_id": "netclass_via_diameter",
+      "type": "netclass_via_diameter",
+      "severity": "error",
+      "message": "Netclass 'Default' via_diameter 0.300mm < minimum 0.600mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.3,
+      "required_value": 0.6,
+      "items": [
+        "netclass:Default"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "netclass_via_diameter|netclass:Default||",
+      "evidence_hash": "ev4:e258e73ca394045e"
+    },
+    {
+      "rule_id": "netclass_via_drill",
+      "type": "netclass_via_drill",
+      "severity": "error",
+      "message": "Netclass 'Default' via_drill 0.150mm < minimum 0.300mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.15,
+      "required_value": 0.3,
+      "items": [
+        "netclass:Default"
+      ],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "netclass_via_drill|netclass:Default||",
+      "evidence_hash": "ev4:176b05535abacea9"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.6 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 0; opening pad:C14/1; exposed copper zone (net +3.3V); same-net; 4 thermal spokes (declared spoke 0.3 mm, relief gap 0.2 mm)",
+      "location": [
+        153.5,
+        99.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "6abda378-dedd-5b98-a7cd-84eb2d53d9e0",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,6abda378-dedd-5b98-a7cd-84eb2d53d9e0|+3.3V|F.Cu",
+      "evidence_hash": "ev4:7f762a085b530c84"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.145707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 1; opening pad:C14/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        155.5,
+        99.825
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "1f0e5717-37c0-5c42-bb44-173d54634d3b",
+        "e388757d-cff5-570c-9b02-53cd3b568ed1"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|1f0e5717-37c0-5c42-bb44-173d54634d3b,e388757d-cff5-570c-9b02-53cd3b568ed1|GND|F.Cu",
+      "evidence_hash": "ev4:7ac5f00cf4db59e5"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 2; opening pad:C14/2; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        156.0,
+        99.1
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749904110113428,
+      "required_value": 0.09,
+      "items": [
+        "1f0e5717-37c0-5c42-bb44-173d54634d3b",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,1f0e5717-37c0-5c42-bb44-173d54634d3b|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:839a91c0a7548e30"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151032257 mm\u00b2; beyond owner pad copper 2.36707193e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 3; opening pad:R2/1; exposed copper segment (net BOOT0); same-net own-pad entry",
+      "location": [
+        164.28535504497938,
+        89.28535506707641
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "6ed80cad-8f34-5072-ba59-5e49a859484c",
+        "ed40d127-f7e1-51c3-8a99-08585b63db50"
+      ],
+      "nets": [
+        "BOOT0"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|6ed80cad-8f34-5072-ba59-5e49a859484c,ed40d127-f7e1-51c3-8a99-08585b63db50|BOOT0|F.Cu",
+      "evidence_hash": "ev4:92ced5f001b507c6"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.145707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 4; opening pad:R2/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        166.5,
+        89.825
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "45b9b73d-9ee0-5df0-9947-81debc1ddc68",
+        "e50caf0f-e335-5c45-898f-a544e3ff0179"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|45b9b73d-9ee0-5df0-9947-81debc1ddc68,e50caf0f-e335-5c45-898f-a544e3ff0179|GND|F.Cu",
+      "evidence_hash": "ev4:0a63e7aee2ea1563"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.6 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 5; opening pad:C13/1; exposed copper zone (net +3.3V); same-net; 4 thermal spokes (declared spoke 0.3 mm, relief gap 0.2 mm)",
+      "location": [
+        148.5,
+        99.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "4f2a9890-d512-5012-90bb-ac0032c15e8c",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,4f2a9890-d512-5012-90bb-ac0032c15e8c|+3.3V|F.Cu",
+      "evidence_hash": "ev4:098448203890dbcc"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.115707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 6; opening pad:C13/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        150.7000005,
+        99.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "4197fc95-a4ff-5ae5-9d73-ccb86993ea44",
+        "b4a3f3d6-88bf-59e6-a463-cf5acfd4ee09"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|4197fc95-a4ff-5ae5-9d73-ccb86993ea44,b4a3f3d6-88bf-59e6-a463-cf5acfd4ee09|GND|F.Cu",
+      "evidence_hash": "ev4:a422fd8c702f2fce"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 7; opening pad:C13/2; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        151.0,
+        99.135168
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749900000000025,
+      "required_value": 0.09,
+      "items": [
+        "4197fc95-a4ff-5ae5-9d73-ccb86993ea44",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,4197fc95-a4ff-5ae5-9d73-ccb86993ea44|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:a8c236b1c005c5ce"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.6 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 8; opening pad:C3/1; exposed copper zone (net +3.3V); same-net; 4 thermal spokes (declared spoke 0.3 mm, relief gap 0.2 mm)",
+      "location": [
+        132.5,
+        83.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "f5d1d4e2-f5f7-50f3-a810-7b14f0517f49",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,f5d1d4e2-f5f7-50f3-a810-7b14f0517f49|+3.3V|F.Cu",
+      "evidence_hash": "ev4:65dfc17a829037c7"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.145707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 9; opening pad:C3/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        134.5,
+        83.825
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "0c8f3f85-5dc4-5539-9cca-0220963af10e",
+        "3ff3d04e-a57c-5181-a905-acd73744c971"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|0c8f3f85-5dc4-5539-9cca-0220963af10e,3ff3d04e-a57c-5181-a905-acd73744c971|GND|F.Cu",
+      "evidence_hash": "ev4:f8eda3593d4ebba3"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 10; opening pad:C3/2; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        135.0,
+        83.1
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749904110113428,
+      "required_value": 0.09,
+      "items": [
+        "0c8f3f85-5dc4-5539-9cca-0220963af10e",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,0c8f3f85-5dc4-5539-9cca-0220963af10e|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:c7baf15848451759"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.45 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 11; opening pad:C16/1; exposed copper zone (net +3.3V); same-net; 3 thermal spokes (declared spoke 0.3 mm, relief gap 0.2 mm)",
+      "location": [
+        142.5,
+        86.2
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "4d24862f-393a-5684-ad41-4009886898cb",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,4d24862f-393a-5684-ad41-4009886898cb|+3.3V|F.Cu",
+      "evidence_hash": "ev4:58ed4d40b4a56751"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.145707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 12; opening pad:C16/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        140.5,
+        86.275
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "e036ff58-c57f-55fc-b3a5-52e69418aa94",
+        "5f95eb5c-4555-51c1-b41d-1a61cfe5f67b"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|5f95eb5c-4555-51c1-b41d-1a61cfe5f67b,e036ff58-c57f-55fc-b3a5-52e69418aa94|GND|F.Cu",
+      "evidence_hash": "ev4:47e41243c03eb15a"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 13; opening pad:C16/2; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        141.0,
+        86.2
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749904110113428,
+      "required_value": 0.09,
+      "items": [
+        "e036ff58-c57f-55fc-b3a5-52e69418aa94",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,e036ff58-c57f-55fc-b3a5-52e69418aa94|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:9c78ade0852dc692"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.0538916791 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 14; opening pad:C11/1; exposed copper segment (net OSC_OUT); same-net own-pad entry",
+      "location": [
+        142.05142775000002,
+        82.7735665
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "c24a52d1-6224-5fea-824e-892054cb8494",
+        "205545eb-7979-5731-ac46-c3f66c285193"
+      ],
+      "nets": [
+        "OSC_OUT"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|205545eb-7979-5731-ac46-c3f66c285193,c24a52d1-6224-5fea-824e-892054cb8494|OSC_OUT|F.Cu",
+      "evidence_hash": "ev4:5736d01a0d3013f5"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.10441553 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 15; opening pad:C11/1; exposed copper segment (net OSC_OUT); same-net own-pad entry",
+      "location": [
+        142.3175,
+        82.6
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "c24a52d1-6224-5fea-824e-892054cb8494",
+        "2868e428-c8ec-56bb-b10f-64ff3f53418f"
+      ],
+      "nets": [
+        "OSC_OUT"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|2868e428-c8ec-56bb-b10f-64ff3f53418f,c24a52d1-6224-5fea-824e-892054cb8494|OSC_OUT|F.Cu",
+      "evidence_hash": "ev4:6240f30a6e52fa62"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151033037 mm\u00b2; beyond owner pad copper 2.36707189e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 16; opening pad:C11/1; exposed copper segment (net OSC_OUT); same-net own-pad entry",
+      "location": [
+        142.71464459995389,
+        82.38535535094132
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "c24a52d1-6224-5fea-824e-892054cb8494",
+        "8ae56976-3b3c-5850-9b7a-5da7690669e0"
+      ],
+      "nets": [
+        "OSC_OUT"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|8ae56976-3b3c-5850-9b7a-5da7690669e0,c24a52d1-6224-5fea-824e-892054cb8494|OSC_OUT|F.Cu",
+      "evidence_hash": "ev4:26d37e26cafe2b89"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.115707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 17; opening pad:C11/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        144.7000005,
+        82.6
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "b765f331-9e8d-5d73-9124-d16a7f4cd767",
+        "6fd21acd-ec2b-564e-98ce-c377ee9d4cf6"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|6fd21acd-ec2b-564e-98ce-c377ee9d4cf6,b765f331-9e8d-5d73-9124-d16a7f4cd767|GND|F.Cu",
+      "evidence_hash": "ev4:c306465a1201198a"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.6 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 18; opening pad:R1/1; exposed copper zone (net +3.3V); same-net; 4 thermal spokes (declared spoke 0.3 mm, relief gap 0.2 mm)",
+      "location": [
+        164.5,
+        75.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "47063fbd-8d04-53a8-b3af-c61377a5cc0f",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,47063fbd-8d04-53a8-b3af-c61377a5cc0f|+3.3V|F.Cu",
+      "evidence_hash": "ev4:fa6c54c59a1e89c0"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151033238 mm\u00b2; beyond owner pad copper 2.36707193e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 19; opening pad:R1/2; exposed copper segment (net LED_K); same-net own-pad entry",
+      "location": [
+        166.28535549999998,
+        75.7146445
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "6be11bb6-623d-5102-b65b-c8f008bd6fd1",
+        "8e60e310-0063-5057-8850-41431d5f76f9"
+      ],
+      "nets": [
+        "LED_K"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|6be11bb6-623d-5102-b65b-c8f008bd6fd1,8e60e310-0063-5057-8850-41431d5f76f9|LED_K|F.Cu",
+      "evidence_hash": "ev4:328adab0a494d19d"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 20; opening pad:R1/2; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        167.0,
+        75.1
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749904110113428,
+      "required_value": 0.09,
+      "items": [
+        "6be11bb6-623d-5102-b65b-c8f008bd6fd1",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "LED_K"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,6be11bb6-623d-5102-b65b-c8f008bd6fd1|+3.3V,LED_K|F.Cu",
+      "evidence_hash": "ev4:556e23d3e4f3ae1a"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.6 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 21; opening pad:C1/1; exposed copper zone (net +5V); same-net; 4 thermal spokes (declared spoke 0.3 mm, relief gap 0.2 mm)",
+      "location": [
+        121.5,
+        85.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "367b7375-267e-5a7e-a810-2f0b8481b398",
+        "e203a635-0b2e-5386-acfa-2ba682f332c6"
+      ],
+      "nets": [
+        "+5V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|367b7375-267e-5a7e-a810-2f0b8481b398,e203a635-0b2e-5386-acfa-2ba682f332c6|+5V|F.Cu",
+      "evidence_hash": "ev4:86c763e9060041b4"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.115707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 22; opening pad:C1/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        123.7000005,
+        85.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "083fae8c-6180-5190-9bfb-af6c6d06fa50",
+        "0f0b45c7-5065-585b-be36-284794e3c2e1"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|083fae8c-6180-5190-9bfb-af6c6d06fa50,0f0b45c7-5065-585b-be36-284794e3c2e1|GND|F.Cu",
+      "evidence_hash": "ev4:49ef7c6f840dac3b"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 23; opening pad:C1/2; exposed copper zone (net +5V); different-net",
+      "location": [
+        124.0,
+        85.1485
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749900000000025,
+      "required_value": 0.09,
+      "items": [
+        "083fae8c-6180-5190-9bfb-af6c6d06fa50",
+        "e203a635-0b2e-5386-acfa-2ba682f332c6"
+      ],
+      "nets": [
+        "+5V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|083fae8c-6180-5190-9bfb-af6c6d06fa50,e203a635-0b2e-5386-acfa-2ba682f332c6|+5V,GND|F.Cu",
+      "evidence_hash": "ev4:df2538d1f8052b24"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.135707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 24; opening pad:D1/1; exposed copper segment (net LED_K); same-net own-pad entry",
+      "location": [
+        164.45,
+        79.2
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "b35ef74f-928f-50f8-9e54-da46265e86ed",
+        "874e0d16-51fd-5c9c-98ca-35562cb70648"
+      ],
+      "nets": [
+        "LED_K"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|874e0d16-51fd-5c9c-98ca-35562cb70648,b35ef74f-928f-50f8-9e54-da46265e86ed|LED_K|F.Cu",
+      "evidence_hash": "ev4:8755ade4a0f1f239"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.0298848151 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 25; opening pad:D1/2; exposed copper segment (net USER_LED); same-net own-pad entry",
+      "location": [
+        166.64010074801809,
+        80.02527
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "cbe332d3-0a15-515a-9b0b-a8de1db59ad4",
+        "493927a1-daa7-5693-903d-696f50603bab"
+      ],
+      "nets": [
+        "USER_LED"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|493927a1-daa7-5693-903d-696f50603bab,cbe332d3-0a15-515a-9b0b-a8de1db59ad4|USER_LED|F.Cu",
+      "evidence_hash": "ev4:e20cffa155ffd192"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.12141553 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 26; opening pad:D1/2; exposed copper segment (net USER_LED); same-net own-pad entry",
+      "location": [
+        166.55,
+        79.725
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "cbe332d3-0a15-515a-9b0b-a8de1db59ad4",
+        "a6b46395-a140-5ad0-91a1-dddb1e0b5f52"
+      ],
+      "nets": [
+        "USER_LED"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|a6b46395-a140-5ad0-91a1-dddb1e0b5f52,cbe332d3-0a15-515a-9b0b-a8de1db59ad4|USER_LED|F.Cu",
+      "evidence_hash": "ev4:2857f5b375ec7686"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.0535230784 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 27; opening pad:D1/2; exposed copper segment (net USER_LED); same-net own-pad entry",
+      "location": [
+        166.58462927279498,
+        79.97473
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "cbe332d3-0a15-515a-9b0b-a8de1db59ad4",
+        "dee6d4df-7725-5bbf-a71f-72db8d0fab57"
+      ],
+      "nets": [
+        "USER_LED"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|cbe332d3-0a15-515a-9b0b-a8de1db59ad4,dee6d4df-7725-5bbf-a71f-72db8d0fab57|USER_LED|F.Cu",
+      "evidence_hash": "ev4:d1f4626dc28d5120"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_solid; exposed area 0.437002892 mm\u00b2; beyond owner pad copper 7.76230504e-08 mm\u00b2; beside owner excess 0.201081929 mm\u00b2; assessment measurement 28; opening pad:U2/1; exposed copper zone (net +3.3V); same-net",
+      "location": [
+        145.33749999999998,
+        86.75
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "f110881f-688c-574f-95b4-8e5697d0f4a6",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,f110881f-688c-574f-95b4-8e5697d0f4a6|+3.3V|F.Cu",
+      "evidence_hash": "ev4:e9c01011bab7caed"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 29; opening pad:U2/5; exposed copper segment (net OSC_IN); same-net pass-through",
+      "location": [
+        144.6,
+        88.699553
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.1100009999999827,
+      "required_value": 0.09,
+      "items": [
+        "1cf213db-fc8a-50f7-bcf3-1971c5bc1526",
+        "cc9eccab-5a44-5b8f-be6a-95e8bbd2bb96"
+      ],
+      "nets": [
+        "OSC_IN"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|1cf213db-fc8a-50f7-bcf3-1971c5bc1526,cc9eccab-5a44-5b8f-be6a-95e8bbd2bb96|OSC_IN|F.Cu",
+      "evidence_hash": "ev4:fb0b028c01f00ccb"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.162000552 mm\u00b2; beyond owner pad copper 2.02884933e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 30; opening pad:U2/5; exposed copper segment (net OSC_IN); same-net own-pad entry",
+      "location": [
+        145.0187495,
+        88.7
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "1cf213db-fc8a-50f7-bcf3-1971c5bc1526",
+        "df76680f-60b2-5609-bbe0-d9b9f0232fa7"
+      ],
+      "nets": [
+        "OSC_IN"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|1cf213db-fc8a-50f7-bcf3-1971c5bc1526,df76680f-60b2-5609-bbe0-d9b9f0232fa7|OSC_IN|F.Cu",
+      "evidence_hash": "ev4:40433efe5a07f545"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 31; opening pad:U2/5; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        146.07357761285127,
+        88.66046263823416
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749965320055315,
+      "required_value": 0.09,
+      "items": [
+        "1cf213db-fc8a-50f7-bcf3-1971c5bc1526",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "OSC_IN"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,1cf213db-fc8a-50f7-bcf3-1971c5bc1526|+3.3V,OSC_IN|F.Cu",
+      "evidence_hash": "ev4:2d01ae99cd6802a7"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.0999962009 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 32; opening pad:U2/6; exposed copper segment (net OSC_OUT); same-net own-pad entry",
+      "location": [
+        145.0004995,
+        89.25
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "1170309f-03f5-5559-b24b-9fb671cded50",
+        "c37bef08-4cd5-5e36-a13b-fa8428fd7924"
+      ],
+      "nets": [
+        "OSC_OUT"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|1170309f-03f5-5559-b24b-9fb671cded50,c37bef08-4cd5-5e36-a13b-fa8428fd7924|OSC_OUT|F.Cu",
+      "evidence_hash": "ev4:0425eb4670a5c70a"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 33; opening pad:U2/6; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        146.075,
+        89.325
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749999999999773,
+      "required_value": 0.09,
+      "items": [
+        "1170309f-03f5-5559-b24b-9fb671cded50",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "OSC_OUT"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,1170309f-03f5-5559-b24b-9fb671cded50|+3.3V,OSC_OUT|F.Cu",
+      "evidence_hash": "ev4:5f824bc31b2eb76c"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "error",
+      "message": "Mask-to-copper disjoint: uncertain; exposed area 0 mm\u00b2; assessment measurement 34; opening pad:U2/7; exposed copper segment (net NRST); same-net pass-through",
+      "location": [
+        144.6,
+        89.799553
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.10000099999999178,
+      "required_value": 0.09,
+      "items": [
+        "5d426a58-5586-5df8-b087-1cf365640782",
+        "4247ddf3-c61e-54a2-864d-44803c3b0155"
+      ],
+      "nets": [
+        "NRST"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "mask_to_copper|4247ddf3-c61e-54a2-864d-44803c3b0155,5d426a58-5586-5df8-b087-1cf365640782|NRST|F.Cu",
+      "evidence_hash": "ev4:357af28debf1f5a1"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "error",
+      "message": "Mask-to-copper overlap: violation; exposed area 0.0159585973 mm\u00b2; beyond owner pad copper 1.30146493e-08 mm\u00b2; beside owner excess 0.0157529617 mm\u00b2; assessment measurement 35; opening pad:U2/7; exposed copper segment (net NRST); same-net pass-through",
+      "location": [
+        144.64999999999998,
+        89.79374999999999
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "5d426a58-5586-5df8-b087-1cf365640782",
+        "72f3b7ee-8ff3-59f7-afc9-5098bee997bc"
+      ],
+      "nets": [
+        "NRST"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "mask_to_copper|5d426a58-5586-5df8-b087-1cf365640782,72f3b7ee-8ff3-59f7-afc9-5098bee997bc|NRST|F.Cu",
+      "evidence_hash": "ev4:d59c6e640d18e547"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "error",
+      "message": "Mask-to-copper overlap: violation; exposed area 0.0147085971 mm\u00b2; beyond owner pad copper 1.30146493e-08 mm\u00b2; beside owner excess 0.0185056495 mm\u00b2; assessment measurement 36; opening pad:U2/7; exposed copper segment (net NRST); same-net own-pad entry",
+      "location": [
+        144.64994975,
+        89.79553899999999
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "5d426a58-5586-5df8-b087-1cf365640782",
+        "b16f7cad-2706-5cd8-ad68-db7a624db711"
+      ],
+      "nets": [
+        "NRST"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "mask_to_copper|5d426a58-5586-5df8-b087-1cf365640782,b16f7cad-2706-5cd8-ad68-db7a624db711|NRST|F.Cu",
+      "evidence_hash": "ev4:872e5712055d8b26"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.0247874667 mm\u00b2; beyond owner pad copper 1.55341751e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 37; opening pad:U2/7; exposed copper segment (net NRST); same-net own-pad entry",
+      "location": [
+        144.66803225,
+        89.766876
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "5d426a58-5586-5df8-b087-1cf365640782",
+        "b5f0ec18-73f9-5351-bfd7-8daac9701441"
+      ],
+      "nets": [
+        "NRST"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|5d426a58-5586-5df8-b087-1cf365640782,b5f0ec18-73f9-5351-bfd7-8daac9701441|NRST|F.Cu",
+      "evidence_hash": "ev4:02aea6eed52a6a0d"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.163001174 mm\u00b2; beyond owner pad copper 9.11067313e-09 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 38; opening pad:U2/7; exposed copper segment (net NRST); same-net own-pad entry",
+      "location": [
+        145.0187495,
+        89.75
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "5d426a58-5586-5df8-b087-1cf365640782",
+        "d6fd2a29-88ad-5bf5-b841-ab92ab754674"
+      ],
+      "nets": [
+        "NRST"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|5d426a58-5586-5df8-b087-1cf365640782,d6fd2a29-88ad-5bf5-b841-ab92ab754674|NRST|F.Cu",
+      "evidence_hash": "ev4:bd16bf8dc8aced03"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 39; opening pad:U2/7; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        146.07357761285127,
+        89.66046263823416
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749999560247297,
+      "required_value": 0.09,
+      "items": [
+        "5d426a58-5586-5df8-b087-1cf365640782",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "NRST"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,5d426a58-5586-5df8-b087-1cf365640782|+3.3V,NRST|F.Cu",
+      "evidence_hash": "ev4:0419e5dcd5ed5e19"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.163137081 mm\u00b2; beyond owner pad copper 1.13603807e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 40; opening pad:U2/8; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        145.6562505,
+        90.25
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "bb842333-fad7-5ce5-a475-fa5c26eec2dc",
+        "809d755f-e2f4-5772-8182-f3fc9122b95d"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|809d755f-e2f4-5772-8182-f3fc9122b95d,bb842333-fad7-5ce5-a475-fa5c26eec2dc|GND|F.Cu",
+      "evidence_hash": "ev4:ab0109c695d1aef3"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 41; opening pad:U2/8; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        146.01453736176583,
+        90.39857761285124
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749967647557434,
+      "required_value": 0.09,
+      "items": [
+        "bb842333-fad7-5ce5-a475-fa5c26eec2dc",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,bb842333-fad7-5ce5-a475-fa5c26eec2dc|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:1277bbc55d3d3fe3"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_solid; exposed area 0.437002892 mm\u00b2; beyond owner pad copper 7.76230504e-08 mm\u00b2; beside owner excess 0.16135986 mm\u00b2; assessment measurement 42; opening pad:U2/9; exposed copper zone (net +3.3V); same-net",
+      "location": [
+        145.33749999999998,
+        90.75
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "f4ddb45c-4f7a-5127-a04f-36c4716fd0bc",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,f4ddb45c-4f7a-5127-a04f-36c4716fd0bc|+3.3V|F.Cu",
+      "evidence_hash": "ev4:405a9218cc60b3a1"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.163137081 mm\u00b2; beyond owner pad copper 1.13603807e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 43; opening pad:U2/23; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        151.75,
+        94.02910514832303
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "bf222624-aa20-5769-976b-f0b15293543a",
+        "bae48f17-d6c3-560f-919e-44aaee8693a9"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|bae48f17-d6c3-560f-919e-44aaee8693a9,bf222624-aa20-5769-976b-f0b15293543a|GND|F.Cu",
+      "evidence_hash": "ev4:f52924729fe7142a"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 44; opening pad:U2/23; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        151.89857761285126,
+        94.33953736176584
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.1274998570162461,
+      "required_value": 0.09,
+      "items": [
+        "bf222624-aa20-5769-976b-f0b15293543a",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,bf222624-aa20-5769-976b-f0b15293543a|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:50e7d30017df47d0"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_solid; exposed area 0.437671148 mm\u00b2; beyond owner pad copper 8.11539723e-08 mm\u00b2; beside owner excess 0.2998766 mm\u00b2; assessment measurement 45; opening pad:U2/24; exposed copper zone (net +3.3V); same-net",
+      "location": [
+        152.25,
+        93.6625
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "2b0ad50b-6229-54f5-9363-39dc6941e86c",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,2b0ad50b-6229-54f5-9363-39dc6941e86c|+3.3V|F.Cu",
+      "evidence_hash": "ev4:2c2453f086d6bff6"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.163137081 mm\u00b2; beyond owner pad copper 1.13603807e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 46; opening pad:U2/25; exposed copper segment (net USER_LED); same-net own-pad entry",
+      "location": [
+        153.9812505,
+        92.25
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "25d5a26a-6e9e-56c3-b14c-6e31fe23dc27",
+        "02c6ca0e-0392-5473-a25e-ba919ce61981"
+      ],
+      "nets": [
+        "USER_LED"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|02c6ca0e-0392-5473-a25e-ba919ce61981,25d5a26a-6e9e-56c3-b14c-6e31fe23dc27|USER_LED|F.Cu",
+      "evidence_hash": "ev4:bbc771f3eca3a182"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 47; opening pad:U2/25; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        152.925,
+        92.175
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749999999999773,
+      "required_value": 0.09,
+      "items": [
+        "25d5a26a-6e9e-56c3-b14c-6e31fe23dc27",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "USER_LED"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,25d5a26a-6e9e-56c3-b14c-6e31fe23dc27|+3.3V,USER_LED|F.Cu",
+      "evidence_hash": "ev4:b423379bcd56e293"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.152100552 mm\u00b2; beyond owner pad copper 2.0288493e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 48; opening pad:U2/34; exposed copper segment (net SWDIO); same-net own-pad entry",
+      "location": [
+        154.0060005,
+        87.7
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "8e70d010-720c-53c0-b293-6af012fe5cbd",
+        "3145ef49-7886-5d68-ab82-43f4b8bf6270"
+      ],
+      "nets": [
+        "SWDIO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|3145ef49-7886-5d68-ab82-43f4b8bf6270,8e70d010-720c-53c0-b293-6af012fe5cbd|SWDIO|F.Cu",
+      "evidence_hash": "ev4:9e9d50524e0d7161"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.0455577472 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 49; opening pad:U2/34; exposed copper segment (net SWDIO); same-net own-pad entry",
+      "location": [
+        153.68700040625,
+        87.725
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "8e70d010-720c-53c0-b293-6af012fe5cbd",
+        "4be51552-4b68-569b-9b60-530441c06994"
+      ],
+      "nets": [
+        "SWDIO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|4be51552-4b68-569b-9b60-530441c06994,8e70d010-720c-53c0-b293-6af012fe5cbd|SWDIO|F.Cu",
+      "evidence_hash": "ev4:80f35a0689df3c40"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 50; opening pad:U2/34; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        152.925,
+        87.675
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749999999999773,
+      "required_value": 0.09,
+      "items": [
+        "8e70d010-720c-53c0-b293-6af012fe5cbd",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "SWDIO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,8e70d010-720c-53c0-b293-6af012fe5cbd|+3.3V,SWDIO|F.Cu",
+      "evidence_hash": "ev4:fb05625e041669d7"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.163137081 mm\u00b2; beyond owner pad copper 1.13603807e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 51; opening pad:U2/35; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        153.9812505,
+        87.25
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "e7a06965-21da-534a-b5e2-4fd129cf3e3a",
+        "c3b07223-58b9-56a4-816f-5b8181640f5d"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|c3b07223-58b9-56a4-816f-5b8181640f5d,e7a06965-21da-534a-b5e2-4fd129cf3e3a|GND|F.Cu",
+      "evidence_hash": "ev4:a7f32349f52ccac8"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 52; opening pad:U2/35; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        152.92642238714873,
+        87.33953736176584
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749982126005016,
+      "required_value": 0.09,
+      "items": [
+        "e7a06965-21da-534a-b5e2-4fd129cf3e3a",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,e7a06965-21da-534a-b5e2-4fd129cf3e3a|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:f99895bebfb6a829"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_solid; exposed area 0.437671148 mm\u00b2; beyond owner pad copper 8.11539723e-08 mm\u00b2; beside owner excess 0.299876492 mm\u00b2; assessment measurement 53; opening pad:U2/36; exposed copper zone (net +3.3V); same-net",
+      "location": [
+        153.66250000000002,
+        86.75
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "bb4728da-3dc4-5ea6-81ca-d528d4ef8191",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,bb4728da-3dc4-5ea6-81ca-d528d4ef8191|+3.3V|F.Cu",
+      "evidence_hash": "ev4:a6d0cb71797a9e58"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.05813436 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 54; opening pad:U2/37; exposed copper segment (net SWCLK); same-net own-pad entry",
+      "location": [
+        152.34482225,
+        85.15693350000001
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "ce9a5f57-64cb-5d05-be79-7b183933f8ed",
+        "21270e9a-d42e-5190-97d6-a14f30dc7125"
+      ],
+      "nets": [
+        "SWCLK"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|21270e9a-d42e-5190-97d6-a14f30dc7125,ce9a5f57-64cb-5d05-be79-7b183933f8ed|SWCLK|F.Cu",
+      "evidence_hash": "ev4:8322289bd1171e87"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 55; opening pad:U2/37; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        152.16046263823418,
+        86.07357761285125
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.1274996664451636,
+      "required_value": 0.09,
+      "items": [
+        "ce9a5f57-64cb-5d05-be79-7b183933f8ed",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "SWCLK"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,ce9a5f57-64cb-5d05-be79-7b183933f8ed|+3.3V,SWCLK|F.Cu",
+      "evidence_hash": "ev4:946c537a8e537ae4"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.0999962009 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 56; opening pad:U2/39; exposed copper segment (net SWO); same-net own-pad entry",
+      "location": [
+        151.25,
+        84.96875
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "eb30cedc-0e31-546c-97b7-6674dbe07e38",
+        "5d66f17e-051b-5543-9d52-5259237a91f8"
+      ],
+      "nets": [
+        "SWO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|5d66f17e-051b-5543-9d52-5259237a91f8,eb30cedc-0e31-546c-97b7-6674dbe07e38|SWO|F.Cu",
+      "evidence_hash": "ev4:0fd759a00ca86afe"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 57; opening pad:U2/39; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        151.16046263823418,
+        86.07357761285125
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.1274996664451636,
+      "required_value": 0.09,
+      "items": [
+        "eb30cedc-0e31-546c-97b7-6674dbe07e38",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "SWO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,eb30cedc-0e31-546c-97b7-6674dbe07e38|+3.3V,SWO|F.Cu",
+      "evidence_hash": "ev4:b00ff771855804d5"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.163237081 mm\u00b2; beyond owner pad copper 1.13603807e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 58; opening pad:U2/44; exposed copper segment (net BOOT0); same-net own-pad entry",
+      "location": [
+        148.75,
+        84.97114485167697
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "b837f4b6-8f86-5336-a559-fa4d12845d5c",
+        "408c0166-7b90-5421-93f2-13bc9a14221f"
+      ],
+      "nets": [
+        "BOOT0"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|408c0166-7b90-5421-93f2-13bc9a14221f,b837f4b6-8f86-5336-a559-fa4d12845d5c|BOOT0|F.Cu",
+      "evidence_hash": "ev4:d5e65e4a897a6cc9"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "error",
+      "message": "Mask-to-copper overlap: violation; exposed area 0.00616490396 mm\u00b2; beyond owner pad copper 5.79528123e-09 mm\u00b2; beside owner excess 0.0208155791 mm\u00b2; assessment measurement 59; opening pad:U2/44; exposed copper segment (net BOOT0); same-net own-pad entry",
+      "location": [
+        148.75,
+        84.624987
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "b837f4b6-8f86-5336-a559-fa4d12845d5c",
+        "d5319fc6-13d2-51aa-8649-75d495b8f226"
+      ],
+      "nets": [
+        "BOOT0"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "mask_to_copper|b837f4b6-8f86-5336-a559-fa4d12845d5c,d5319fc6-13d2-51aa-8649-75d495b8f226|BOOT0|F.Cu",
+      "evidence_hash": "ev4:d29b48abfbab7d5b"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 60; opening pad:U2/44; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        148.66046263823418,
+        86.07357761285125
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.1274996664451636,
+      "required_value": 0.09,
+      "items": [
+        "b837f4b6-8f86-5336-a559-fa4d12845d5c",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "BOOT0"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,b837f4b6-8f86-5336-a559-fa4d12845d5c|+3.3V,BOOT0|F.Cu",
+      "evidence_hash": "ev4:a60a6a26159a8a54"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.163137081 mm\u00b2; beyond owner pad copper 1.13603807e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 61; opening pad:U2/47; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        147.25,
+        85.70410514832304
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "5df9eeb7-a403-55c0-8c5e-51b1eeda1e87",
+        "acd85c75-cb02-56c7-92b3-158f1bdefbb4"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|5df9eeb7-a403-55c0-8c5e-51b1eeda1e87,acd85c75-cb02-56c7-92b3-158f1bdefbb4|GND|F.Cu",
+      "evidence_hash": "ev4:ad85e06410705e20"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 62; opening pad:U2/47; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        147.10142238714874,
+        84.66046263823416
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749998061557286,
+      "required_value": 0.09,
+      "items": [
+        "5df9eeb7-a403-55c0-8c5e-51b1eeda1e87",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,5df9eeb7-a403-55c0-8c5e-51b1eeda1e87|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:238f0276648e4af7"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_solid; exposed area 0.437671148 mm\u00b2; beyond owner pad copper 8.11539723e-08 mm\u00b2; beside owner excess 0.299876573 mm\u00b2; assessment measurement 63; opening pad:U2/48; exposed copper zone (net +3.3V); same-net",
+      "location": [
+        146.75,
+        85.3375
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "2920a83d-912a-5f28-a507-b89ce2ccd589",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,2920a83d-912a-5f28-a507-b89ce2ccd589|+3.3V|F.Cu",
+      "evidence_hash": "ev4:efc1b4972a73c912"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "error",
+      "message": "Mask-to-copper overlap: violation; exposed area 0.528545801 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0.144023408 mm\u00b2; assessment measurement 64; opening pad:J1/1; exposed copper zone (net +3.3V); same-net",
+      "location": [
+        173.5,
+        82.41313450000001
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "b291d436-c222-5d4a-a526-5ca557433940",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,b291d436-c222-5d4a-a526-5ca557433940|+3.3V|F.Cu",
+      "evidence_hash": "ev4:e13b6770d80d1354"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.185314352 mm\u00b2; beyond owner pad copper 2.20267904e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 65; opening pad:J1/2; exposed copper segment (net SWDIO); same-net own-pad entry",
+      "location": [
+        173.20156639314655,
+        85.98843357167405
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "e23dda17-4982-50a6-bc0f-8d629234f0ce",
+        "97b18d0a-4ab0-5682-a1a1-7a2a55de8d82"
+      ],
+      "nets": [
+        "SWDIO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|97b18d0a-4ab0-5682-a1a1-7a2a55de8d82,e23dda17-4982-50a6-bc0f-8d629234f0ce|SWDIO|F.Cu",
+      "evidence_hash": "ev4:c39a3d6d9d58762e"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 66; opening pad:J1/2; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        173.66550767730885,
+        86.5237308970836
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749950414773975,
+      "required_value": 0.09,
+      "items": [
+        "e23dda17-4982-50a6-bc0f-8d629234f0ce",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "SWDIO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,e23dda17-4982-50a6-bc0f-8d629234f0ce|+3.3V,SWDIO|F.Cu",
+      "evidence_hash": "ev4:3d2306f9ff8f631f"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "error",
+      "message": "Mask-to-copper disjoint: violation; exposed area 0 mm\u00b2; assessment measurement 67; opening pad:J1/3; exposed copper via (net SWCLK); same-net pass-through",
+      "location": [
+        172.87472460510986,
+        87.65421327463453
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.07429649526648,
+      "required_value": 0.09,
+      "items": [
+        "550dcaa9-99b1-533b-a3aa-0fb2c6b7f3c4",
+        "ad61a163-d080-5055-bb8c-ed3c0e406a48"
+      ],
+      "nets": [
+        "SWCLK"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "mask_to_copper|550dcaa9-99b1-533b-a3aa-0fb2c6b7f3c4,ad61a163-d080-5055-bb8c-ed3c0e406a48|SWCLK|F.Cu",
+      "evidence_hash": "ev4:69e5776933433029"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.17512458 mm\u00b2; beyond owner pad copper 2.53234322e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 68; opening pad:J1/3; exposed copper segment (net SWCLK); same-net own-pad entry",
+      "location": [
+        173.1516643202665,
+        87.95166440546011
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "550dcaa9-99b1-533b-a3aa-0fb2c6b7f3c4",
+        "da979b5e-6f49-55f9-bcb0-eb3ceb27251a"
+      ],
+      "nets": [
+        "SWCLK"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|550dcaa9-99b1-533b-a3aa-0fb2c6b7f3c4,da979b5e-6f49-55f9-bcb0-eb3ceb27251a|SWCLK|F.Cu",
+      "evidence_hash": "ev4:403ada5dde7e6ffa"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.0454155302 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 69; opening pad:J1/3; exposed copper segment (net SWCLK); same-net own-pad entry",
+      "location": [
+        173.465,
+        88.22999999999999
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "550dcaa9-99b1-533b-a3aa-0fb2c6b7f3c4",
+        "eb619f2f-974b-58ef-ae03-3ce2cb59446c"
+      ],
+      "nets": [
+        "SWCLK"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|550dcaa9-99b1-533b-a3aa-0fb2c6b7f3c4,eb619f2f-974b-58ef-ae03-3ce2cb59446c|SWCLK|F.Cu",
+      "evidence_hash": "ev4:99546938a6668d65"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 70; opening pad:J1/3; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        173.66550767730885,
+        89.0637308970836
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749950414773975,
+      "required_value": 0.09,
+      "items": [
+        "550dcaa9-99b1-533b-a3aa-0fb2c6b7f3c4",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "SWCLK"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,550dcaa9-99b1-533b-a3aa-0fb2c6b7f3c4|+3.3V,SWCLK|F.Cu",
+      "evidence_hash": "ev4:62bb055c3560700f"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.173621045 mm\u00b2; beyond owner pad copper 2.58908947e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 71; opening pad:J1/4; exposed copper segment (net SWO); same-net own-pad entry",
+      "location": [
+        173.14462156460536,
+        90.49462159323313
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "5a6970eb-5309-5b38-80d8-2a5de756d028",
+        "d29ad48a-a9ed-550e-9d5f-d3151981b6f2"
+      ],
+      "nets": [
+        "SWO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|5a6970eb-5309-5b38-80d8-2a5de756d028,d29ad48a-a9ed-550e-9d5f-d3151981b6f2|SWO|F.Cu",
+      "evidence_hash": "ev4:07c781e44b59617f"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.0474155302 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 72; opening pad:J1/4; exposed copper segment (net SWO); same-net own-pad entry",
+      "location": [
+        173.45999999999998,
+        90.77000000000001
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "5a6970eb-5309-5b38-80d8-2a5de756d028",
+        "f4dc4f00-22d4-5420-b975-d15712ac7ef2"
+      ],
+      "nets": [
+        "SWO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|5a6970eb-5309-5b38-80d8-2a5de756d028,f4dc4f00-22d4-5420-b975-d15712ac7ef2|SWO|F.Cu",
+      "evidence_hash": "ev4:74b72cc8552ea510"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 73; opening pad:J1/4; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        173.66550767730885,
+        91.6037308970836
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749950414773975,
+      "required_value": 0.09,
+      "items": [
+        "5a6970eb-5309-5b38-80d8-2a5de756d028",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "SWO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,5a6970eb-5309-5b38-80d8-2a5de756d028|+3.3V,SWO|F.Cu",
+      "evidence_hash": "ev4:00d923edf5535e4d"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.185314657 mm\u00b2; beyond owner pad copper 5.41318836e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 74; opening pad:J1/5; exposed copper segment (net NRST); same-net own-pad entry",
+      "location": [
+        173.12499967070556,
+        93.31022300000001
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "84f36059-dc09-5e7a-aa81-b1477c713a7f",
+        "f727ae97-44d1-5f5c-bb45-c8fb6d0ffc4e"
+      ],
+      "nets": [
+        "NRST"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|84f36059-dc09-5e7a-aa81-b1477c713a7f,f727ae97-44d1-5f5c-bb45-c8fb6d0ffc4e|NRST|F.Cu",
+      "evidence_hash": "ev4:f9814030546dc392"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 75; opening pad:J1/5; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        173.66550767730885,
+        94.1437308970836
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749950414773975,
+      "required_value": 0.09,
+      "items": [
+        "84f36059-dc09-5e7a-aa81-b1477c713a7f",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "NRST"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,84f36059-dc09-5e7a-aa81-b1477c713a7f|+3.3V,NRST|F.Cu",
+      "evidence_hash": "ev4:b5c74ab8e232cbf4"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.052434519 mm\u00b2; beyond owner pad copper 3.37625355e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 76; opening pad:J1/6; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        174.04369309552436,
+        96.35
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "d06f26f5-90c1-5281-bc2f-e221c87ed0e1",
+        "a96d99bd-419b-5cf1-9134-8d7d08b68d20"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|a96d99bd-419b-5cf1-9134-8d7d08b68d20,d06f26f5-90c1-5281-bc2f-e221c87ed0e1|GND|F.Cu",
+      "evidence_hash": "ev4:c18dd9cb6c06952d"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.172837569 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 77; opening pad:J1/6; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        173.75,
+        96.1
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "d06f26f5-90c1-5281-bc2f-e221c87ed0e1",
+        "f3b62d4d-ba17-5c2d-9e75-c977a1c83aad"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|d06f26f5-90c1-5281-bc2f-e221c87ed0e1,f3b62d4d-ba17-5c2d-9e75-c977a1c83aad|GND|F.Cu",
+      "evidence_hash": "ev4:ba7ff91c80ccd2c9"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 78; opening pad:J1/6; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        173.66550767730885,
+        96.68373089708359
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749950414773975,
+      "required_value": 0.09,
+      "items": [
+        "d06f26f5-90c1-5281-bc2f-e221c87ed0e1",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,d06f26f5-90c1-5281-bc2f-e221c87ed0e1|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:60ed7b96ab78770b"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.92 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 79; opening pad:U1/1; exposed copper zone (net +5V); same-net; 3 thermal spokes (declared spoke 0.4 mm, relief gap 0.3 mm)",
+      "location": [
+        122.94999999999999,
+        79.8
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "d2ac7be2-a969-53fe-87de-258d570f7606",
+        "e203a635-0b2e-5386-acfa-2ba682f332c6"
+      ],
+      "nets": [
+        "+5V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|d2ac7be2-a969-53fe-87de-258d570f7606,e203a635-0b2e-5386-acfa-2ba682f332c6|+5V|F.Cu",
+      "evidence_hash": "ev4:b3970ccc984d804a"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.215707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 80; opening pad:U1/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        123.8000005,
+        77.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "a32c0d54-b218-5024-a0a8-6e59160fa3f2",
+        "0002bf92-eacd-5169-881d-c7578b6720e9"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|0002bf92-eacd-5169-881d-c7578b6720e9,a32c0d54-b218-5024-a0a8-6e59160fa3f2|GND|F.Cu",
+      "evidence_hash": "ev4:f03f64f9c7fcd8df"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 81; opening pad:U1/2; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        124.35,
+        76.75
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749973058679406,
+      "required_value": 0.09,
+      "items": [
+        "a32c0d54-b218-5024-a0a8-6e59160fa3f2",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,a32c0d54-b218-5024-a0a8-6e59160fa3f2|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:ba9b1575d3b5fd61"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 82; opening pad:U1/2; exposed copper zone (net +5V); different-net",
+      "location": [
+        122.35,
+        78.25
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.1274995739945667,
+      "required_value": 0.09,
+      "items": [
+        "a32c0d54-b218-5024-a0a8-6e59160fa3f2",
+        "e203a635-0b2e-5386-acfa-2ba682f332c6"
+      ],
+      "nets": [
+        "+5V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|a32c0d54-b218-5024-a0a8-6e59160fa3f2,e203a635-0b2e-5386-acfa-2ba682f332c6|+5V,GND|F.Cu",
+      "evidence_hash": "ev4:2293c50e27640fab"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.395707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 83; opening pad:U1/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        129.65,
+        78.45
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "685a045e-20ad-51e3-a507-42beae7bca84",
+        "273bbde3-d9f2-5cf3-9203-ba2206ca8029"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|273bbde3-d9f2-5cf3-9203-ba2206ca8029,685a045e-20ad-51e3-a507-42beae7bca84|GND|F.Cu",
+      "evidence_hash": "ev4:66c58a606335f0a8"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 84; opening pad:U1/2; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        128.65,
+        79.4
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.1274994547970285,
+      "required_value": 0.09,
+      "items": [
+        "685a045e-20ad-51e3-a507-42beae7bca84",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,685a045e-20ad-51e3-a507-42beae7bca84|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:594c428279855c3a"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "error",
+      "message": "Mask-to-copper overlap: violation; exposed area 1.24 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0.144024308 mm\u00b2; assessment measurement 85; opening pad:U1/3; exposed copper zone (net +3.3V); same-net",
+      "location": [
+        123.35,
+        75.2
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "71d90ffe-7fd1-512f-b436-e5b84437fe5c",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,71d90ffe-7fd1-512f-b436-e5b84437fe5c|+3.3V|F.Cu",
+      "evidence_hash": "ev4:bfbf140ecc061dd3"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.6 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 86; opening pad:C2/1; exposed copper zone (net +3.3V); same-net; 4 thermal spokes (declared spoke 0.3 mm, relief gap 0.2 mm)",
+      "location": [
+        132.5,
+        77.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "0fe9ddf3-348d-5884-a80f-009611df319a",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,0fe9ddf3-348d-5884-a80f-009611df319a|+3.3V|F.Cu",
+      "evidence_hash": "ev4:f579ed52ce7e347e"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.145707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 87; opening pad:C2/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        134.5,
+        77.825
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "7bf3472a-e70d-59d0-9a06-9aefb25eaf37",
+        "35102a71-c689-5249-a4c1-eacb6c1e1321"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|35102a71-c689-5249-a4c1-eacb6c1e1321,7bf3472a-e70d-59d0-9a06-9aefb25eaf37|GND|F.Cu",
+      "evidence_hash": "ev4:2104c7b40244f2fe"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 88; opening pad:C2/2; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        135.0,
+        77.1
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749904110113428,
+      "required_value": 0.09,
+      "items": [
+        "7bf3472a-e70d-59d0-9a06-9aefb25eaf37",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,7bf3472a-e70d-59d0-9a06-9aefb25eaf37|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:8df134147eb3a667"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.6 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 89; opening pad:C15/1; exposed copper zone (net +3.3V); same-net; 4 thermal spokes (declared spoke 0.3 mm, relief gap 0.2 mm)",
+      "location": [
+        143.8,
+        84.6
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "707f1161-731d-5271-903f-730f116a8489",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,707f1161-731d-5271-903f-730f116a8489|+3.3V|F.Cu",
+      "evidence_hash": "ev4:d6f8849fd7d897d3"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.145707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 90; opening pad:C15/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        141.8,
+        84.925
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "0ad5d5ad-510e-5279-b9b1-3bff0726a6bc",
+        "5fa04072-0c71-55e7-9901-0bf1edc564b2"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|0ad5d5ad-510e-5279-b9b1-3bff0726a6bc,5fa04072-0c71-55e7-9901-0bf1edc564b2|GND|F.Cu",
+      "evidence_hash": "ev4:cdc6e3d6db895232"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 91; opening pad:C15/2; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        142.3,
+        84.595988
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749900000000025,
+      "required_value": 0.09,
+      "items": [
+        "0ad5d5ad-510e-5279-b9b1-3bff0726a6bc",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,0ad5d5ad-510e-5279-b9b1-3bff0726a6bc|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:a9f3ce589f1e0e07"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: own_pour_thermal; exposed area 0.6 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 92; opening pad:C12/1; exposed copper zone (net +3.3V); same-net; 4 thermal spokes (declared spoke 0.3 mm, relief gap 0.2 mm)",
+      "location": [
+        143.5,
+        99.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "2024e25b-cf6b-5661-a079-b1f16f5607f4",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,2024e25b-cf6b-5661-a079-b1f16f5607f4|+3.3V|F.Cu",
+      "evidence_hash": "ev4:4631d2064a06fb7c"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.115707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 93; opening pad:C12/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        145.7000005,
+        99.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "d327894d-52ad-5fac-9f09-324a0515e344",
+        "90436c85-0a35-5e56-ac94-d926f8a4bd7d"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|90436c85-0a35-5e56-ac94-d926f8a4bd7d,d327894d-52ad-5fac-9f09-324a0515e344|GND|F.Cu",
+      "evidence_hash": "ev4:25300fd63bc2a046"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 94; opening pad:C12/2; exposed copper zone (net +3.3V); different-net",
+      "location": [
+        146.0,
+        99.135168
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.12749900000000025,
+      "required_value": 0.09,
+      "items": [
+        "d327894d-52ad-5fac-9f09-324a0515e344",
+        "00bc93f5-d461-5ad8-a976-8a8f9e101c4d"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|00bc93f5-d461-5ad8-a976-8a8f9e101c4d,d327894d-52ad-5fac-9f09-324a0515e344|+3.3V,GND|F.Cu",
+      "evidence_hash": "ev4:433298769fec0382"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.165261994 mm\u00b2; beyond owner pad copper 4.94664267e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 95; opening pad:Y1/1; exposed copper segment (net OSC_IN); same-net own-pad entry",
+      "location": [
+        139.06,
+        77.87165162377117
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "0587a100-d13d-5eb9-81e5-02fcb330a171",
+        "592112fb-9ee1-5471-ab63-8e9606f3aa8b"
+      ],
+      "nets": [
+        "OSC_IN"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|0587a100-d13d-5eb9-81e5-02fcb330a171,592112fb-9ee1-5471-ab63-8e9606f3aa8b|OSC_IN|F.Cu",
+      "evidence_hash": "ev4:5253c25b1ee04f3b"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.165261994 mm\u00b2; beyond owner pad copper 4.94664267e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 96; opening pad:Y1/2; exposed copper segment (net OSC_OUT); same-net own-pad entry",
+      "location": [
+        143.94,
+        77.87165162377117
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "3031b31b-0b73-5bb6-801a-06c03d4c5bee",
+        "c006e28d-01b5-5b90-828d-c29e7200c107"
+      ],
+      "nets": [
+        "OSC_OUT"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|3031b31b-0b73-5bb6-801a-06c03d4c5bee,c006e28d-01b5-5b90-828d-c29e7200c107|OSC_OUT|F.Cu",
+      "evidence_hash": "ev4:aecbf6ecb17c5a72"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.0570612501 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 97; opening pad:C10/1; exposed copper segment (net OSC_IN); same-net own-pad entry",
+      "location": [
+        136.46537024999998,
+        84.02473
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "81a54af2-5859-5fa7-8452-be2f3dcc63cd",
+        "064503c8-4cd7-510b-9c4d-b7458690d69d"
+      ],
+      "nets": [
+        "OSC_IN"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|064503c8-4cd7-510b-9c4d-b7458690d69d,81a54af2-5859-5fa7-8452-be2f3dcc63cd|OSC_IN|F.Cu",
+      "evidence_hash": "ev4:352b3ce8b2c0b9b7"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.151033104 mm\u00b2; beyond owner pad copper 2.36707193e-08 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 98; opening pad:C10/1; exposed copper segment (net OSC_IN); same-net own-pad entry",
+      "location": [
+        136.71464455622404,
+        83.28535541615449
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "81a54af2-5859-5fa7-8452-be2f3dcc63cd",
+        "0719f808-7177-5f61-b3c6-7797108e7f27"
+      ],
+      "nets": [
+        "OSC_IN"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|0719f808-7177-5f61-b3c6-7797108e7f27,81a54af2-5859-5fa7-8452-be2f3dcc63cd|OSC_IN|F.Cu",
+      "evidence_hash": "ev4:20e2846926f11c58"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.13141553 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 99; opening pad:C10/1; exposed copper segment (net OSC_IN); same-net own-pad entry",
+      "location": [
+        136.5,
+        83.75
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "81a54af2-5859-5fa7-8452-be2f3dcc63cd",
+        "3a1e9536-7a0d-5c41-9302-bf4c97dd5352"
+      ],
+      "nets": [
+        "OSC_IN"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|3a1e9536-7a0d-5c41-9302-bf4c97dd5352,81a54af2-5859-5fa7-8452-be2f3dcc63cd|OSC_IN|F.Cu",
+      "evidence_hash": "ev4:b8eeb3a9a7f1eba1"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "error",
+      "message": "Mask-to-copper overlap: violation; exposed area 0.0167808654 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0.0247488768 mm\u00b2; assessment measurement 100; opening pad:C10/1; exposed copper segment (net OSC_IN); same-net own-pad entry",
+      "location": [
+        136.35235649999998,
+        84.09974349999999
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "81a54af2-5859-5fa7-8452-be2f3dcc63cd",
+        "8094a180-a242-53fb-b651-c4b029d773fd"
+      ],
+      "nets": [
+        "OSC_IN"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "mask_to_copper|8094a180-a242-53fb-b651-c4b029d773fd,81a54af2-5859-5fa7-8452-be2f3dcc63cd|OSC_IN|F.Cu",
+      "evidence_hash": "ev4:1a3a013663e20e16"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "info",
+      "message": "Mask-to-copper overlap: within_own_pad; exposed area 0.145707765 mm\u00b2; beyond owner pad copper 0 mm\u00b2; beside owner excess 0 mm\u00b2; assessment measurement 101; opening pad:C10/2; exposed copper segment (net GND); same-net own-pad entry",
+      "location": [
+        138.5,
+        83.825
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "ddc028c2-d509-5552-9540-4330d95aa8a4",
+        "4ac2662c-d355-5c47-8634-8bfddf22dd14"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper|4ac2662c-d355-5c47-8634-8bfddf22dd14,ddc028c2-d509-5552-9540-4330d95aa8a4|GND|F.Cu",
+      "evidence_hash": "ev4:42246d13e8d0e421"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 102; opening pad:J1/1; exposed copper zone (net GND); different-net",
+      "location": [
+        172.65,
+        84.0
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.12749945479704242,
+      "required_value": 0.09,
+      "items": [
+        "b291d436-c222-5d4a-a526-5ca557433940",
+        "f2efed49-2665-5921-9373-eb9c73df08fe"
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|b291d436-c222-5d4a-a526-5ca557433940,f2efed49-2665-5921-9373-eb9c73df08fe|+3.3V,GND|B.Cu",
+      "evidence_hash": "ev4:f7f6fa28df510960"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 103; opening pad:J1/2; exposed copper zone (net GND); different-net",
+      "location": [
+        173.5,
+        84.84
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.12749999999999773,
+      "required_value": 0.09,
+      "items": [
+        "e23dda17-4982-50a6-bc0f-8d629234f0ce",
+        "f2efed49-2665-5921-9373-eb9c73df08fe"
+      ],
+      "nets": [
+        "GND",
+        "SWDIO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|e23dda17-4982-50a6-bc0f-8d629234f0ce,f2efed49-2665-5921-9373-eb9c73df08fe|GND,SWDIO|B.Cu",
+      "evidence_hash": "ev4:00c4fd3a3ce25b5e"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "error",
+      "message": "Mask-to-copper disjoint: violation; exposed area 0 mm\u00b2; assessment measurement 104; opening pad:J1/3; exposed copper via (net SWCLK); same-net pass-through",
+      "location": [
+        172.87472460510986,
+        87.65421327463453
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.07429649526648,
+      "required_value": 0.09,
+      "items": [
+        "550dcaa9-99b1-533b-a3aa-0fb2c6b7f3c4",
+        "ad61a163-d080-5055-bb8c-ed3c0e406a48"
+      ],
+      "nets": [
+        "SWCLK"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "mask_to_copper|550dcaa9-99b1-533b-a3aa-0fb2c6b7f3c4,ad61a163-d080-5055-bb8c-ed3c0e406a48|SWCLK|B.Cu",
+      "evidence_hash": "ev4:e184205e5b0b3705"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 105; opening pad:J1/3; exposed copper zone (net GND); different-net",
+      "location": [
+        173.5,
+        89.08
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.1274999999999977,
+      "required_value": 0.09,
+      "items": [
+        "550dcaa9-99b1-533b-a3aa-0fb2c6b7f3c4",
+        "f2efed49-2665-5921-9373-eb9c73df08fe"
+      ],
+      "nets": [
+        "GND",
+        "SWCLK"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|550dcaa9-99b1-533b-a3aa-0fb2c6b7f3c4,f2efed49-2665-5921-9373-eb9c73df08fe|GND,SWCLK|B.Cu",
+      "evidence_hash": "ev4:056203efeec3b454"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 106; opening pad:J1/4; exposed copper zone (net GND); different-net",
+      "location": [
+        172.65,
+        90.77
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.1274999999999977,
+      "required_value": 0.09,
+      "items": [
+        "5a6970eb-5309-5b38-80d8-2a5de756d028",
+        "f2efed49-2665-5921-9373-eb9c73df08fe"
+      ],
+      "nets": [
+        "GND",
+        "SWO"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|5a6970eb-5309-5b38-80d8-2a5de756d028,f2efed49-2665-5921-9373-eb9c73df08fe|GND,SWO|B.Cu",
+      "evidence_hash": "ev4:b2593a915c8dde31"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "warning",
+      "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 107; opening pad:J1/5; exposed copper zone (net GND); different-net",
+      "location": [
+        172.65,
+        93.31
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.1274999999999977,
+      "required_value": 0.09,
+      "items": [
+        "84f36059-dc09-5e7a-aa81-b1477c713a7f",
+        "f2efed49-2665-5921-9373-eb9c73df08fe"
+      ],
+      "nets": [
+        "GND",
+        "NRST"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "mask_to_copper|84f36059-dc09-5e7a-aa81-b1477c713a7f,f2efed49-2665-5921-9373-eb9c73df08fe|GND,NRST|B.Cu",
+      "evidence_hash": "ev4:4a10834e8da31299"
+    },
+    {
+      "rule_id": "mask_to_copper",
+      "type": "mask_to_copper",
+      "severity": "error",
+      "message": "Mask-to-copper overlap: violation; exposed area 0.566699927 mm\u00b2; beyond owner pad copper 3.99884127e-07 mm\u00b2; beside owner excess 0.145202017 mm\u00b2; assessment measurement 108; opening pad:J1/6; exposed copper zone (net GND); same-net",
+      "location": [
+        173.5,
+        95.18693271104513
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.0,
+      "required_value": 0.09,
+      "items": [
+        "d06f26f5-90c1-5281-bc2f-e221c87ed0e1",
+        "f2efed49-2665-5921-9373-eb9c73df08fe"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "error",
+      "waived": false,
+      "key": "mask_to_copper|d06f26f5-90c1-5281-bc2f-e221c87ed0e1,f2efed49-2665-5921-9373-eb9c73df08fe|GND|B.Cu",
+      "evidence_hash": "ev4:3edf6f6fcee11368"
+    },
+    {
+      "rule_id": "mask_to_copper_openings",
+      "type": "unknown",
+      "severity": "info",
+      "message": "Mask-to-copper: 109 findings across 55 mask openings; per-opening: pad:J1/3 x6, pad:U2/7 x6, pad:J1/4 x4, pad:C10/1 x4, pad:J1/6 x4 (+50 more openings)",
+      "location": null,
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [],
+      "nets": [],
+      "witnesses": [],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "mask_to_copper_openings|||",
+      "evidence_hash": "ev4:b7f9218269c690b5"
+    }
+  ],
+  "meta_checks": {
+    "drc": {
+      "status": "FAILED",
+      "detail": "84 rules checked, 79 error(s), 44 warning(s)"
+    },
+    "erc": {
+      "status": "PASSED",
+      "detail": "0 error(s), 0 warning(s)"
+    },
+    "lvs": {
+      "status": "PASSED",
+      "detail": "label + copper: 0 mismatch(es)",
+      "mismatches": [],
+      "copper_mismatches": [],
+      "copper_vacuous": false,
+      "copper_bound_pad_count": 54,
+      "netlist_vacuous": false
+    },
+    "manifest": {
+      "status": "PASSED",
+      "detail": "bundle SHA-256 hashes verified; archived PCB matches current content"
+    },
+    "overall": "FAILED",
+    "schematic_missing": false,
+    "incomplete_categories": [],
+    "schematic": {
+      "path": "output/stm32_devboard.kicad_sch",
+      "source": "--schematic"
+    }
+  },
+  "coverage": {
+    "ampacity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "board_id": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "bypass_distance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "clearance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "connectivity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "connector_access": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "copper_sliver": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "courtyard_overlap": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "dangling_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "diffpair_clearance_intra": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_length_skew": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_routing_continuity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_uncoupled_length": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "dimensions": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "doc_drift": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "edge": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "fiducials": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "impedance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "isolated_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "mask_multi_segment": {
+      "status": "unknown:incomplete:mask_geometry (custom-rules)",
+      "state": "unknown",
+      "reason": "incomplete:mask_geometry (custom-rules)",
+      "blocking": false
+    },
+    "mask_negative_expansion": {
+      "status": "unknown:incomplete:mask_geometry (custom-rules)",
+      "state": "unknown",
+      "reason": "incomplete:mask_geometry (custom-rules)",
+      "blocking": false
+    },
+    "mask_to_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "match_group_length_skew": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "missing_plated_hole": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "model_coverage": {
+      "status": "unknown:host_library_refs (17 footprint(s); per-host detail: kct pcb model-audit)",
+      "state": "unknown",
+      "reason": "host_library_refs (17 footprint(s); per-host detail: kct pcb model-audit)",
+      "blocking": false
+    },
+    "netclass_agreement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "netclass_clearance_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netclass_floor": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netlist": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "pad_grid": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "path_ampacity": {
+      "status": "skipped:no_declared_current_paths",
+      "state": "skipped",
+      "reason": "no_declared_current_paths",
+      "blocking": true
+    },
+    "physical_copper_gap": {
+      "status": "skipped:opt_in:--physical-copper-gap",
+      "state": "skipped",
+      "reason": "opt_in:--physical-copper-gap",
+      "blocking": true
+    },
+    "pin1_marker": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "placement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "plane_split": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "pour_slot": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "redundant_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "reinforcement_incomplete": {
+      "status": "skipped:no_reinforcement_eligible_paths",
+      "state": "skipped",
+      "reason": "no_reinforcement_eligible_paths",
+      "blocking": true
+    },
+    "removed_pad_scan": {
+      "status": "skipped:no_footprint_swaps",
+      "state": "skipped",
+      "reason": "no_footprint_swaps",
+      "blocking": true
+    },
+    "routing_policy": {
+      "status": "skipped:no_declared_policies",
+      "state": "skipped",
+      "reason": "no_declared_policies",
+      "blocking": true
+    },
+    "sch_fields": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "segment_zone": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "sharp_trace_corner": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "silkscreen": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "single_pad_net": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "solder_mask": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "spec_conformance": {
+      "status": "unknown:unread_spec_keys:requirements.manufacturing.min_space",
+      "state": "unknown",
+      "reason": "unread_spec_keys:requirements.manufacturing.min_space",
+      "blocking": false
+    },
+    "thermal_asymmetry": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "tht_smd_spacing": {
+      "status": "skipped:opt_in:--mfr jlcpcb",
+      "state": "skipped",
+      "reason": "opt_in:--mfr jlcpcb",
+      "blocking": false
+    },
+    "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_type": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_under_body": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "via_zone": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "width_consistency": {
+      "status": "skipped:opt_in:--only",
+      "state": "skipped",
+      "reason": "opt_in:--only",
+      "blocking": false
+    },
+    "wire_run_courtyard_overlap": {
+      "status": "skipped:no_reinforcement_eligible_paths",
+      "state": "skipped",
+      "reason": "no_reinforcement_eligible_paths",
+      "blocking": true
+    },
+    "zero_length_segment": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "zones": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    }
+  }
+}

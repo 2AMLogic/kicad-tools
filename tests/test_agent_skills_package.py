@@ -169,10 +169,17 @@ def test_built_wheel_contains_skills_and_installs_from_it(tmp_path: Path) -> Non
         "sys.exit(main(sys.argv[1:]))"
     )
     env = {**os.environ, "PYTHONPATH": str(tmp_path / "site")}
-    for harness, review_path in (
-        ("claude-code", "kct/ee-review.md"),
-        ("codex", "kct-ee-review/SKILL.md"),
-        ("opencode", "kct/ee-review.md"),
+    model_hints = {
+        "ee-review": "opus",
+        "help": "sonnet",
+        "hv-isolation-loop": "sonnet",
+        "manufacturing-readiness": "sonnet",
+        "tapeout": "sonnet",
+    }
+    for harness, skill_path in (
+        ("claude-code", "kct/{skill}.md"),
+        ("codex", "kct-{skill}/SKILL.md"),
+        ("opencode", "kct/{skill}.md"),
     ):
         target = tmp_path / harness
         args = ["skills", "install", "--harness", harness, "--target", str(target)]
@@ -187,14 +194,18 @@ def test_built_wheel_contains_skills_and_installs_from_it(tmp_path: Path) -> Non
         assert run.returncode == 0, run.stderr[-2000:]
         assert str(tmp_path / "site") in run.stderr, "imported kicad_tools from outside the wheel"
         assert check_installed(target, harness).in_sync
-        fields, body = split_frontmatter((target / review_path).read_text(encoding="utf-8"))
-        assert fields.get("suggestedModel") == ("opus" if harness == "claude-code" else None)
         if harness == "claude-code":
             assert {p.name for p in (target / "kct").glob("*.md")} == _repo_skill_names()
-        else:
-            selection = body.split("## Model selection", 1)[1].split("## ", 1)[0]
-            assert "is set in the frontmatter above" not in selection, harness
-            assert re.search(r"Codex CLI and opencode[^.]*session[^.]*model", selection), harness
+        for skill, hint in model_hints.items():
+            path = target / skill_path.format(skill=skill)
+            fields, body = split_frontmatter(path.read_text(encoding="utf-8"))
+            expected_hint = hint if harness == "claude-code" else None
+            assert fields.get("suggestedModel") == expected_hint, path
+            if harness != "claude-code":
+                selection = body.split("## Model selection", 1)[1].split("## ", 1)[0]
+                assert "is set in the frontmatter above" not in selection, path
+                assert "this doc's frontmatter" not in selection, path
+                assert re.search(r"Codex CLI and opencode[^.]*session[^.]*model", selection), path
 
     guide = subprocess.run(
         [

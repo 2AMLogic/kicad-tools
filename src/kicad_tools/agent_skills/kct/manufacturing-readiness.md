@@ -25,7 +25,7 @@ The gates also need `jq` (Gates 1, 2 and 4 judge JSON reports with it) and a KiC
 
 ## Model selection
 
-This is a deterministic checklist-execution task — run three gates in order, read their exit codes and reports, and refuse sign-off on any failure. It does not require frontier judgment. Codex CLI and opencode use the session's selected model. When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a model for this task. An explicit dispatch choice or role configuration takes precedence.
+Run the three gates in order, read each exit code and report, and refuse sign-off if any gate fails. Codex CLI and opencode use the session’s selected model. When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a model for this task. An explicit dispatch choice or role configuration takes precedence.
 
 ## Arguments
 

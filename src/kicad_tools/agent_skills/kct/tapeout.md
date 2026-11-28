@@ -31,9 +31,9 @@ If the host has no usable offline parts catalog, `kct readiness` refuses with ex
 
 ## Model selection
 
-Like `{{skill:manufacturing-readiness}}`, this is deterministic checklist execution — run gates in order, read exit codes and reports, and refuse on any failure or unresolved BOM line. It does not require frontier judgment. Codex CLI and opencode use the session's selected model. When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a model for this task. An explicit dispatch choice or role configuration takes precedence.
+Run the gates in order and stop on a failed gate or an unresolved BOM line. Codex CLI and opencode use the session’s selected model. When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a model for this task. An explicit dispatch choice or role configuration takes precedence.
 
-One open question worth flagging rather than silently resolving: the **BOM-resolution gate** (Gate 4) can involve a judgment call when the part matcher returns an *ambiguous* candidate (multiple plausible LCSC parts) rather than a clean hit or a clean miss. This skill treats ambiguity conservatively — an ambiguous line is an **unresolved** line (human selection required), never an auto-accepted guess — so `sonnet` remains appropriate. If a future consumer needs the skill to *adjudicate* ambiguous matches, that is a reason to revisit the model, and it should be raised as a follow-up rather than papered over here.
+At Gate 4, an ambiguous match means the matcher found several plausible LCSC parts. Leave that BOM line **unresolved** until a person selects the part. Automated selection would require a separate change to Gate 4.
 
 ## Arguments
 

@@ -27,7 +27,9 @@ uv run kct build-native --check
 
 ## Model selection
 
-Like `manufacturing-readiness`, this is a deterministic pipeline-orchestration task — author/collect the inputs, run each command in order, read exit codes and reports, and refuse to advance on any failure. It does not require frontier judgment (the frontier-judgment step, the EE decision, is delegated to `{{skill:ee-review}}`, which is opus). Codex CLI and opencode use the session's selected model. When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a model for this task. An explicit dispatch choice or role configuration takes precedence.
+Run the checks in order, read their reports and stop at the first failed gate. Codex CLI and opencode use the session’s selected model. When the installed frontmatter includes `suggestedModel: sonnet`, it suggests a model for this task. An explicit dispatch choice or role configuration takes precedence.
+
+The `{{skill:ee-review}}` step calls for engineering judgment. Use the most capable reviewer available in the harness for that step.
 
 ## Arguments
 
@@ -168,7 +170,7 @@ HV nets should route on outer layers (creepage is a surface path) and to their a
 
 ### Step 7 — Decision + sign-off handoff (do NOT duplicate those skills)
 
-- **EE decision document:** hand the "which parts may move + binding constraints" question to **`{{skill:ee-review}} <issue-or-board>`** (opus). It writes the escalating-ladder decision doc; this loop does not re-implement it.
+- **EE decision document:** hand the "which parts may move + binding constraints" question to **`{{skill:ee-review}} <issue-or-board>`**. The reviewer documents the constraints and the order in which to try layout changes.
 - **Fab sign-off:** hand off to **`{{skill:manufacturing-readiness}} <board-path>`** (its Gate 4 already runs `kct audit --hv-standard ...`) or **`{{skill:tapeout}} <board-path>`** for the full fab-ready bundle. This loop does not re-implement sign-off.
 
 ## Guardrails (must hold — match sibling-skill conventions)
