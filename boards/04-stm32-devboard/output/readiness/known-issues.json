@@ -4,7 +4,7 @@
       "issue": 6269,
       "kind": "exception",
       "summary": "Paid 0.15 mm mechanical-drill via process (ruling #7147); the generic jlcpcb-tier1 kct check reports the reviewed vias as errors, the board's own check_manufacturing.py models the process",
-      "recorded": "2026-11-27",
+      "recorded": "2026-11-28",
       "errors": [
         {
           "rule": "dimension_annular_ring",
@@ -457,8 +457,8 @@
         {
           "rule": "dimension_via_drill",
           "at": [
-            172.6,
-            87.4
+            172.42,
+            87.58
           ]
         },
         {
@@ -481,12 +481,6 @@
           "item": "netclass:Default"
         }
       ]
-    },
-    {
-      "issue": 10664,
-      "kind": "defect",
-      "summary": "Ten same-net mask_to_copper errors block the board under the public readiness check; the copper repair is tracked here",
-      "recorded": "2026-11-27"
     }
   ]
 }

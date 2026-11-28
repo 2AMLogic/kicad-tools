@@ -1,7 +1,7 @@
 {
   "file": "output/stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "ab4c02899b71e0a248d8133692f06c2e630135870b08364d6813fbe83fd592c6",
+  "pcb_sha256": "bd9d473e0fc34ef7ece57a6456aa22d3d92d5a3866c8f320b3c8b28f0aba7281",
   "layers": 0,
   "summary": {
     "errors": 0,
@@ -57,29 +57,29 @@
       "rule_id": "pour_slot",
       "type": "unknown",
       "severity": "warning",
-      "message": "Possible pour slot between [OSC_OUT] and [NRST] on F.Cu at a 0.636 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct net class clearance - Power, kct net class clearance - Clock, kct attach zone - J1, kct net class clearance - Debug).",
+      "message": "Possible pour slot between [OSC_IN] and [OSC_OUT] on F.Cu at a 0.386 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct net class clearance - Power, kct net class clearance - Clock).",
       "location": [
-        144.144,
-        89.632
+        144.864,
+        88.993
       ],
       "layer": "F.Cu",
-      "actual_value": 0.6364999999999972,
+      "actual_value": 0.3864999999999972,
       "required_value": null,
       "items": [],
       "nets": [
-        "OSC_OUT",
-        "NRST"
+        "OSC_IN",
+        "OSC_OUT"
       ],
       "witnesses": [
-        "c37bef08-4cd5-5e36-a13b-fa8428fd7924",
-        "2ec70768-c464-525f-8c1d-943285442f4b"
+        "df76680f-60b2-5609-bbe0-d9b9f0232fa7",
+        "c37bef08-4cd5-5e36-a13b-fa8428fd7924"
       ],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
       "status": "warning",
       "waived": false,
-      "key": "pour_slot||NRST,OSC_OUT|F.Cu",
+      "key": "pour_slot||OSC_IN,OSC_OUT|F.Cu",
       "evidence_hash": null
     },
     {
@@ -88,7 +88,7 @@
       "severity": "warning",
       "message": "Possible pour slot between [OSC_OUT] and [NRST] on F.Cu at a 0.386 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct net class clearance - Power, kct net class clearance - Clock, kct attach zone - J1, kct net class clearance - Debug).",
       "location": [
-        144.5,
+        144.545,
         89.507
       ],
       "layer": "F.Cu",
@@ -144,29 +144,29 @@
       "rule_id": "pour_slot",
       "type": "unknown",
       "severity": "warning",
-      "message": "Possible pour slot between [OSC_IN] and [OSC_OUT] on F.Cu at a 0.386 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct net class clearance - Power, kct net class clearance - Clock).",
+      "message": "Possible pour slot between [SWDIO] and [SWCLK] on F.Cu at a 0.373 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct attach zone - J1, kct net class clearance - Power, kct net class clearance - Debug).",
       "location": [
-        144.864,
-        88.993
+        172.309,
+        87.286
       ],
       "layer": "F.Cu",
-      "actual_value": 0.3864999999999972,
+      "actual_value": 0.37275649276110306,
       "required_value": null,
       "items": [],
       "nets": [
-        "OSC_IN",
-        "OSC_OUT"
+        "SWDIO",
+        "SWCLK"
       ],
       "witnesses": [
-        "df76680f-60b2-5609-bbe0-d9b9f0232fa7",
-        "c37bef08-4cd5-5e36-a13b-fa8428fd7924"
+        "97b18d0a-4ab0-5682-a1a1-7a2a55de8d82",
+        "35bc11aa-c3ad-4044-be6a-bbd78f580e58"
       ],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
       "status": "warning",
       "waived": false,
-      "key": "pour_slot||OSC_IN,OSC_OUT|F.Cu",
+      "key": "pour_slot||SWCLK,SWDIO|F.Cu",
       "evidence_hash": null
     },
     {
@@ -339,16 +339,16 @@
       "schema_version": 1,
       "rule_id": "pour_slot",
       "severity": "warning",
-      "message": "Possible pour slot between [OSC_OUT] and [NRST] on F.Cu at a 0.636 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct net class clearance - Power, kct net class clearance - Clock, kct attach zone - J1, kct net class clearance - Debug).",
+      "message": "Possible pour slot between [OSC_IN] and [OSC_OUT] on F.Cu at a 0.386 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct net class clearance - Power, kct net class clearance - Clock).",
       "refs": [],
       "pads": [],
       "nets": [
-        "OSC_OUT",
-        "NRST"
+        "OSC_IN",
+        "OSC_OUT"
       ],
       "point": [
-        144.144,
-        89.632
+        144.864,
+        88.993
       ],
       "bbox": null,
       "layer": "F.Cu",
@@ -366,7 +366,7 @@
         "NRST"
       ],
       "point": [
-        144.5,
+        144.545,
         89.507
       ],
       "bbox": null,
@@ -396,16 +396,16 @@
       "schema_version": 1,
       "rule_id": "pour_slot",
       "severity": "warning",
-      "message": "Possible pour slot between [OSC_IN] and [OSC_OUT] on F.Cu at a 0.386 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct net class clearance - Power, kct net class clearance - Clock).",
+      "message": "Possible pour slot between [SWDIO] and [SWCLK] on F.Cu at a 0.373 mm gap. The track-to-zone clearance depends on unresolved rules (kct attach zone - U2, kct attach zone - J1, kct net class clearance - Power, kct net class clearance - Debug).",
       "refs": [],
       "pads": [],
       "nets": [
-        "OSC_IN",
-        "OSC_OUT"
+        "SWDIO",
+        "SWCLK"
       ],
       "point": [
-        144.864,
-        88.993
+        172.309,
+        87.286
       ],
       "bbox": null,
       "layer": "F.Cu",

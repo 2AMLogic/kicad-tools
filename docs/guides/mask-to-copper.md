@@ -6,10 +6,14 @@ expansion, pad-size and annular-ring checks. See [mask geometry](mask-geometry.m
 for the underlying geometry inspection APIs.
 
 To repair a track that enters its own pad off-centre (the `same-net own-pad
-entry` relation), or to nudge a disjoint `same-net pass-through` track or via
-clear of its own pad's opening, run the `fix-drc` repair pass:
+entry` relation), to nudge a disjoint `same-net pass-through` track or via
+clear of its own pad's opening, to remove a redundant same-net edge fragment
+on its pad, or to widen a pad's own-pour relief past the band the rule
+examines, run the `fix-drc` repair pass:
 `kct fix-drc board.kicad_pcb --only mask-copper` — see the
-[CLI reference](../reference/cli.md#fix-drc). The pass-through nudge
+[CLI reference](../reference/cli.md#fix-drc). An own-pour relief edits the
+pad's thermal gap; the pour re-fills around it on the zone refill that
+follows. The pass-through nudge
 translates the whole conductor (dragging every same-net end joined to it)
 away from the opening until it clears the policy clearance plus a margin;
 moves that would crowd other copper, a drill, another opening or pull an end

@@ -19,7 +19,7 @@ import pytest
 
 pytest.importorskip("shapely")
 
-from shapely.geometry import box  # noqa: E402
+from shapely.geometry import Point, box  # noqa: E402
 
 from kicad_tools.router.oracle_completion import (  # noqa: E402
     ClosureAttempt,
@@ -479,6 +479,28 @@ def _gnd_zone_link() -> OracleLink:
 
 class TestNeckedLink:
     """U2.20's shape: the class width cannot cross to same-net copper on the pad's own layer."""
+
+    def test_necked_via_preserves_the_mask_entry_clearance(self, tmp_path):
+        board = _fine_pitch_board(tmp_path)
+        closer = _closer({"GND": NetClassRouting(**GND)}, mask_entry_clearance=0.09)
+        attempt = ClosureAttempt()
+        closer._route_links(board, [_gnd_zone_link()], attempt)
+        assert attempt.applied == 1, attempt.notes
+
+        saved = PCB.load(str(board))
+        (via,) = saved.vias
+        (segment,) = saved.segments
+        assert segment.width == pytest.approx(GND["neck_trace_width"])
+        footprint = saved.get_footprint("U1")
+        assert footprint is not None
+        pad = next(pad for pad in footprint.pads if pad.number == "2")
+        centre = saved.get_pad_position("U1", "2")
+        assert centre is not None
+        x, y = centre
+        width, height = pad.size
+        land = box(x - width / 2, y - height / 2, x + width / 2, y + height / 2)
+        gap = Point(via.position).distance(land) - via.size / 2
+        assert gap >= closer.mask_entry_clearance
 
     def _route(self, tmp_path: Path, classes: dict | None, board_width: float = 0.2):
         board = _fine_pitch_board(tmp_path, thermal=True)

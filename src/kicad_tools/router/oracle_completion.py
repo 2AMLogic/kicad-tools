@@ -2318,7 +2318,7 @@ class PourLinkCloser:
         reach = pad_escape_reach(
             size, self.pour_width(net), float(getattr(cls, "clearance", None) or 0.0)
         )
-        neck_rules = replace(rules, trace_width=neck, width_by_layer={}, pad_entry_gap=0.0)
+        neck_rules = replace(rules, trace_width=neck, width_by_layer={})
         g = neck_rules.grid
         # ``route_link`` aligns its grid on the start at the writer's precision.
         cx, cy = round(pad_terminal.point[0], 2), round(pad_terminal.point[1], 2)

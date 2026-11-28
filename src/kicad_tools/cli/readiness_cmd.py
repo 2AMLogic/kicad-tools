@@ -52,6 +52,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
@@ -1900,8 +1901,8 @@ def _gate_kct_check(
         if introduced:
             shown = ", ".join(introduced[:3]) + (", ..." if len(introduced) > 3 else "")
             note = (
-                " [introduced by the copper_cleanup step (dedupe/prune/"
-                f"optimize-traces), absent from the committed board: {shown}; "
+                " [introduced by the copper_cleanup step (dedupe/redundant-copper/"
+                f"prune/optimize-traces), absent from the committed board: {shown}; "
                 "re-run with --skip-cleanup to keep the committed copper]"
             )
             outcome.detail += note
@@ -3359,14 +3360,87 @@ def _cleanup_optimize_step(options: ReadinessOptions) -> dict[str, Any]:
     }
 
 
+def _cleanup_redundant_step(options: ReadinessOptions) -> dict[str, Any]:
+    """``kct fix-drc --only redundant-copper`` step (Issue #10667).
+
+    Repair covered tracks, staircases and detours before prune can split a
+    covering track at a tap. Check each edit on the saved, refilled board
+    with the mask assessment and native DRC. Restore edits that fail.
+
+    A board with no targeted findings records a skip after one rule run.
+    Each verified repair round needs a mask assessment and native DRC.
+    Its exit status is not the verdict: ``fix-drc`` exits 2 on a board with
+    any warning outside the category, so the step reads its JSON instead.
+    """
+    import contextlib
+    import io
+
+    from kicad_tools.cli import fix_drc_cmd
+    from kicad_tools.drc.repair_redundant_copper import REPAIRED_RULES
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.checker import DRCChecker
+
+    pcb = PCB.load(str(options.pcb))
+    checker = DRCChecker(
+        pcb,
+        manufacturer=options.manufacturer,
+        layers=len(pcb.copper_layers),
+        warn_on_inactive_skew_rules=False,
+    )
+    findings = [
+        v
+        for v in checker.redundant_copper_rule().check(pcb, checker.design_rules).violations
+        if v.rule_id in REPAIRED_RULES
+    ]
+    if not findings:
+        return {"status": "not-needed", "findings": 0}
+
+    argv = [
+        str(options.pcb),
+        "--only",
+        "redundant-copper",
+        "--mfr",
+        options.manufacturer,
+        "--format",
+        "json",
+    ]
+    out, err = io.StringIO(), io.StringIO()
+    print(f"  copper_cleanup: verifying {len(findings)} redundant-copper edit(s) ...")
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = fix_drc_cmd.main(argv)
+    try:
+        doc = json.loads(out.getvalue())
+    except ValueError:
+        doc = {}
+    block = doc.get("redundant_copper") if isinstance(doc, dict) else None
+    if rc not in (0, 1, 2) or not isinstance(block, dict):
+        detail = (err.getvalue().strip() or out.getvalue().strip())[-300:] or f"exit {rc}"
+        return {"status": "failed", "findings": len(findings), "detail": detail}
+    unrepaired = block.get("unrepaired") or []
+    record: dict[str, Any] = {
+        "findings": len(findings),
+        "repaired": block.get("repaired", 0),
+        "unrepaired": len(unrepaired),
+    }
+    if unrepaired:
+        reasons: dict[str, int] = {}
+        for item in unrepaired:
+            reasons[str(item.get("reason"))] = reasons.get(str(item.get("reason")), 0) + 1
+        record["status"] = "partial"
+        record["detail"] = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items()))
+        return record
+    record["status"] = "applied"
+    return record
+
+
 def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
     """Run (generate) or count (verify) the copper cleanup.
 
-    ``dedupe -> prune -> optimize-traces --drc-aware`` (Issue #8633, extending
-    the #8218 dedupe step).  Must run before any hashing/refill so the DRC
-    cross-gate judges the cleaned board.  A skip is recorded, never silent, and
-    each step's counts land in ``steps``.  ``--drc-aware`` is verified only by
-    the kicad-cli refill DRC and creepage census the later gates run (#8632).
+    Dedupe first (#8218), repair redundant copper (#10667), then prune and
+    optimize traces (#8633). The repair needs the original covering tracks.
+    Prune and optimize run under the trace-quality guard. The later gates
+    check the cleaned board with native DRC after refill and a creepage
+    census (#8632). Each step records its counts or the reason it skipped.
     """
     if options.skip_cleanup:
         return {"copper_cleanup": "skipped"}
@@ -3387,12 +3461,93 @@ def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
     if stats["segments"] or stats["vias"]:
         pcb.save(str(options.pcb))
     steps: dict[str, Any] = {"dedupe": {"status": "applied", **removed}}
-    for name, step in (("prune", _cleanup_prune_step), ("optimize_traces", _cleanup_optimize_step)):
+    for name, step, guarded in (
+        ("redundant_copper", _cleanup_redundant_step, False),
+        ("prune", _cleanup_prune_step, True),
+        ("optimize_traces", _cleanup_optimize_step, True),
+    ):
         try:
-            steps[name] = step(options)
+            # The repair verifies its own edits. Guard the following passes
+            # against introducing sharp corners or redundant copper (#10667).
+            steps[name] = _guarded_cleanup_step(options, step) if guarded else step(options)
         except Exception as exc:  # recorded; the trace-quality gate still judges the board
             steps[name] = {"status": "failed", "detail": str(exc)}
     return {"copper_cleanup": "applied", "removed": removed, "steps": steps}
+
+
+def _avoidable_copper(
+    pcb_path: Path, manufacturer: str
+) -> tuple[frozenset[tuple[Any, ...]], Counter[tuple[Any, ...]]] | None:
+    """Identify sharp-corner sites and redundant-copper findings under the project's rules."""
+    try:
+        from kicad_tools.cli.check_cmd import build_check_rule_set
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.sharp_trace_corner import SharpTraceCornerRule
+
+        pcb = PCB.load(pcb_path)
+        checker = build_check_rule_set(pcb_path, manufacturer=manufacturer, pcb=pcb).checker
+        sharp = SharpTraceCornerRule().check(pcb, checker.design_rules)
+        redundant = checker.redundant_copper_rule().check(pcb, checker.design_rules)
+    except Exception:  # noqa: BLE001 - an unreadable board is the gates' to report
+        return None
+    sharp_sites = frozenset(
+        (
+            tuple(sorted(v.nets)),
+            v.layer or "",
+            round(v.location[0], 2) if v.location is not None else None,
+            round(v.location[1], 2) if v.location is not None else None,
+        )
+        for v in sharp.violations
+        if v.rule_id == "sharp_trace_corner"
+    )
+    redundant_sites = Counter(
+        (v.key, tuple(sorted(v.witnesses)), tuple(round(n, 2) for n in (v.location or ())))
+        for v in redundant.violations
+        if v.rule_id.startswith("redundant_copper")
+    )
+    return sharp_sites, redundant_sites
+
+
+def _guarded_cleanup_step(
+    options: ReadinessOptions, step: Callable[[ReadinessOptions], dict]
+) -> dict:
+    """Run a cleanup step and keep it only when it adds no such finding.
+
+    ``kct pcb prune`` and ``kct optimize-traces --drc-aware`` verify their
+    edits with native DRC, which does not see an explicit acute junction or a
+    split-off stub: on the repaired Board 03 the two passes together leave 21
+    new ``sharp_trace_corner`` findings and 20 new avoidable-copper ones
+    (Issue #10667).  The board before the step is put back when that happens,
+    and the step is recorded as ``not-applied`` with what it would have added.
+    """
+    pcb_path = Path(options.pcb)
+    before = _avoidable_copper(pcb_path, options.manufacturer)
+    if before is None:
+        return step(options)
+    snapshot = pcb_path.read_bytes()
+    record = step(options)
+    if record.get("status") != "applied":
+        return record
+    after = _avoidable_copper(pcb_path, options.manufacturer)
+    if after is not None:
+        new_sharp = len(after[0] - before[0])
+        new_redundant = (after[1] - before[1]).total()
+        if new_sharp or new_redundant:
+            pcb_path.write_bytes(snapshot)
+            added = ", ".join(
+                f"{count} {label}"
+                for count, label in (
+                    (new_sharp, "sharp_trace_corner"),
+                    (new_redundant, "redundant_copper"),
+                )
+                if count
+            )
+            return {
+                "status": "not-applied",
+                "detail": f"would introduce {added} finding(s)",
+                **{k: v for k, v in record.items() if k != "status"},
+            }
+    return record
 
 
 def _assembly_prep(options: ReadinessOptions) -> dict[str, str]:

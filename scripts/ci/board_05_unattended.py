@@ -13,7 +13,10 @@ that proof. It leaves the shipping path alone:
 2. ``kct route`` routes that board under the #6508 protocol flags
    (:data:`PROTOCOL_FLAGS`) at each ``--seed``. Since #7831 it chains the
    ``--complete`` lattice pass itself; ``--reserve-pour-only-passives`` has
-   been on by default since #7835, so it is not passed.
+   been on by default since #7835, so it is not passed. The one routing
+   input this script adds is :func:`unattended_net_class_map`: the router's
+   ``Power`` class with the reviewed pad-escape neck on ``+5V`` and ``GND``
+   (#9424), without which the pour weld leaves U2.16 and U2.20 open.
 3. The routed board gets the shipping recipe's fiducials and board ID (#8532).
    ``place-silk-refs --over-holes`` moves references that cross drills in this
    routing result (#9424). The prepared board is graded with the pinned toolchain
@@ -108,6 +111,16 @@ GRADING_SIBLINGS = (
     "fp-lib-table",
     "sym-lib-table",
 )
+
+#: Pour nets the router classifies as ``Power`` (0.50 mm) whose weld cannot
+#: leave its pad at that width (Issue #9424). Since #10631 the pour weld is
+#: sized for the class, and since #10709 it is necked only to a width the
+#: class declares -- so with the default class, which declares none, ``+5V``
+#: U2.16 and ``GND`` U2.20 stay open and the route exits 3.
+POUR_NECK_NETS: tuple[str, ...] = ("+5V", "GND")
+#: Where :func:`unattended_net_class_map` writes the route's ``--net-class-map``.
+#: Not ``net_class_map.json``: that is the derived sidecar ``kct route`` writes.
+NET_CLASS_MAP_NAME = "unattended.net_class_map.json"
 
 
 def _load_harness():
@@ -226,6 +239,42 @@ def stage_seed(generated: Path, run_dir: Path) -> Path:
 
 def route_flags(seed: int) -> list[str]:
     return [*PROTOCOL_FLAGS, "--seed", str(seed)]
+
+
+def unattended_net_class_map(run_dir: Path) -> Path:
+    """Write the route's ``--net-class-map``: the ``Power`` class with a declared neck.
+
+    The entries are the router's own :data:`~kicad_tools.router.rules.NET_CLASS_POWER`
+    with ``neck_trace_width`` set to the pad-escape neck the reviewed account
+    (``redesign/net_class_map.json``, #10430) declares for each of
+    :data:`POUR_NECK_NETS`.  ``kct route`` overlays a loaded map on its
+    name-classified defaults, so no other net's class changes.  Only the neck
+    is taken from the reviewed account: its ``GND`` entry also names another
+    class and another via size, and the rest of the account changes other
+    nets' routing settings, which is not what this proof is about.
+
+    ``RuntimeError`` when a neck is missing or is not a width below the class
+    width: the route is not run, rather than run with its pour weld stranded
+    or written below the class the project declares.
+    """
+    from dataclasses import replace
+
+    from kicad_tools.router.rules import NET_CLASS_POWER
+
+    reviewed = json.loads((REDESIGN / "net_class_map.json").read_text())
+    entries: dict[str, dict] = {}
+    for net in POUR_NECK_NETS:
+        entry = reviewed.get(net)
+        neck = entry.get("neck_trace_width") if isinstance(entry, dict) else None
+        valid = isinstance(neck, (int, float)) and not isinstance(neck, bool)
+        if not valid or not 0 < neck < NET_CLASS_POWER.trace_width:
+            raise RuntimeError(
+                f"reviewed net_class_map.json declares no pad-escape neck for {net!r}"
+            )
+        entries[net] = replace(NET_CLASS_POWER, neck_trace_width=float(neck)).to_dict()
+    path = run_dir / NET_CLASS_MAP_NAME
+    path.write_text(json.dumps(entries, indent=2) + "\n")
+    return path
 
 
 def prepare_for_grading(routed: Path) -> dict[str, list[str]]:
@@ -393,10 +442,11 @@ def run_seed(harness, generated: Path, work_dir: Path, seed: int, timeout: float
     run_dir = work_dir / f"seed-{seed}"
     inp = stage_seed(generated, run_dir)
     routed = run_dir / ROUTED_NAME
-    row: dict = {"seed": seed, "flags": route_flags(seed)}
+    flags = [*route_flags(seed), "--net-class-map", str(unattended_net_class_map(run_dir))]
+    row: dict = {"seed": seed, "flags": flags}
     with contextlib.suppress(OSError):
         row["loadavg_start"] = [round(x, 2) for x in os.getloadavg()]
-    row.update(harness.run_route(inp, routed, route_flags(seed), timeout, run_dir / "route.log"))
+    row.update(harness.run_route(inp, routed, flags, timeout, run_dir / "route.log"))
     log_facts = harness.parse_route_log((run_dir / "route.log").read_text(errors="replace"))
     row.update(
         {

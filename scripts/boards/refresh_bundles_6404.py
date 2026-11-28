@@ -90,6 +90,7 @@ refresh publishes nothing for that case (Issue #10727).
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -1059,6 +1060,19 @@ def stage_recipe_drc(
     log(f"  recipe {proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else 'run_drc'}")
 
 
+def _same_zip_members(previous: bytes, fresh: Path) -> bool:
+    """Compare the full member inventory and uncompressed contents across ZIP writers."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(previous)) as old, zipfile.ZipFile(fresh) as new:
+            names = old.namelist()
+            if len(set(names)) != len(names) or sorted(names) != sorted(new.namelist()):
+                return False
+            return all(old.read(name) == new.read(name) for name in names)
+    except zipfile.BadZipFile:
+        # A forced export can replace a damaged archive.
+        return False
+
+
 def stage_recipe_manufacturing(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> None:
     """Regenerate ``output/manufacturing`` through the recipe (board 04, #9536).
 
@@ -1069,6 +1083,9 @@ def stage_recipe_manufacturing(staged: Path, cfg: rr.BoardConfig, bundle: Bundle
     Gerber-member and assembly-drawing refresh lands on the final bundle.
     """
     assert bundle.recipe_manufacturing is not None
+    archive_name, _ = _project_archive(cfg)
+    project_zip = staged / archive_name
+    previous = project_zip.read_bytes() if project_zip.is_file() else None
     snippet = (
         "import runpy, sys; from pathlib import Path; "
         "recipe = runpy.run_path(sys.argv[1], run_name='refresh_bundles_recipe'); "
@@ -1092,6 +1109,9 @@ def stage_recipe_manufacturing(staged: Path, cfg: rr.BoardConfig, bundle: Bundle
             f"{bundle.recipe_manufacturing} generate_manufacturing failed: "
             f"{proc.stdout[-2000:]}{proc.stderr[-2000:]}"
         )
+    # The recipe rewrites the ZIP even when every delivered member stayed the same.
+    if previous is not None and _same_zip_members(previous, project_zip):
+        project_zip.write_bytes(previous)
     log("  recipe generate_manufacturing: bundle regenerated under the reviewed process")
 
 
