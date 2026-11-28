@@ -55,6 +55,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kicad_tools.router.pad_geometry import routing_pad_chamfer
 from kicad_tools.router.via_clearance import COORD_WRITE_GUARD_MM
 
 if TYPE_CHECKING:
@@ -649,31 +650,9 @@ def _uniform_pad_lands(fp: Any, pad: Any, layers: Collection[str]) -> dict[str, 
     return dict.fromkeys(layers, outline) if outline is not None else {}
 
 
-def _pad_has_cut_corner(pad: Any) -> bool:
-    """True when a ``roundrect`` pad cuts at least one corner (``chamfer`` list).
-
-    Unlike ``copper._pad_has_chamfer`` (which keeps a single selected corner on
-    the shared exact outline), this admits a one-corner list, so the named-pad
-    terminal lands on the cut copper too (Issue #10604).
-    """
-    node = getattr(pad, "_sexp_node", None)
-    if node is None or (getattr(pad, "shape", "") or "").lower() != "roundrect":
-        return False
-    corners = node.find("chamfer")
-    if corners is None or not getattr(corners, "children", None):
-        return False
-    return _chamfer_ratio(node) > 0
-
-
-def _chamfer_ratio(node: Any) -> float:
-    """The pad's ``chamfer_ratio``; an omitted one is KiCad's default 0.2."""
-    ratio = node.find("chamfer_ratio")
-    if ratio is None:
-        return 0.2
-    return ratio.get_float(0) or 0.0
-
-
-def _approximated_pad_box(fp: Any, pad: Any, geom: Any) -> Any:
+def _approximated_pad_box(
+    fp: Any, pad: Any, geom: Any, selected: frozenset[str], chamfer_ratio: float
+) -> Any:
     """Offset-aware conservative land for a pad the outline models only roughly.
 
     ``pad_copper_outline`` erodes the box of chamfered ``roundrect`` and
@@ -698,11 +677,9 @@ def _approximated_pad_box(fp: Any, pad: Any, geom: Any) -> Any:
     node = getattr(pad, "_sexp_node", None)
     shape = (getattr(pad, "shape", "") or "").lower()
     local: list[tuple[float, float]]
-    if node is not None and shape == "roundrect" and _pad_has_cut_corner(pad):
+    if chamfer_ratio > 0:
         short = min(w, h)
-        ratio = _chamfer_ratio(node)
-        cut = max(0.0, min(0.5, ratio)) * short
-        selected = {c.value for c in node.find("chamfer").children}
+        cut = chamfer_ratio * short
         round_ratio = getattr(pad, "roundrect_rratio", None)
         rounded = max(0.0, min(0.5, 0.25 if round_ratio is None else round_ratio)) * short
         local = []
@@ -756,11 +733,15 @@ def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None
             layers = _pad_layers(list(getattr(pad, "layers", []) or []), copper)
             if not layers:
                 return None
+            chamfer = routing_pad_chamfer(pad)
+            if chamfer is None:
+                return None
+            selected, chamfer_ratio = chamfer
             geom = pad_copper_outline(pad, fp.position, fp.rotation)
             if geom is None:
                 return None
-            if not pad_outline_is_exact(pad) or _pad_has_cut_corner(pad):
-                geom = _approximated_pad_box(fp, pad, geom)
+            if not pad_outline_is_exact(pad) or chamfer_ratio > 0:
+                geom = _approximated_pad_box(fp, pad, geom, selected, chamfer_ratio)
             c = geom.centroid
             stack = _padstack_lands(fp, pad, layers)
             # The ordinary named-pad route retains its existing approximation

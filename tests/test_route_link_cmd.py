@@ -614,6 +614,42 @@ class TestCommit:
         # No (chamfer_ratio): KiCad's 0.2 -> one 0.4 mm cut, 4 - 0.4**2 / 2.
         assert land.area == pytest.approx(4 - 0.4**2 / 2, abs=1e-6)
 
+    @pytest.mark.parametrize("ratio", ["abc", "-0.2", "0.9", "nan", "inf", "", "0.2 0.3"])
+    def test_unusable_chamfer_refuses_the_named_pad(self, tmp_path, capsys, ratio):
+        from kicad_tools.router.link_router import terminal_for_pad
+
+        board = self._diagonal_board(tmp_path, "omitted")
+        board.write_text(
+            board.read_text().replace(
+                "(chamfer top_left)", f"(chamfer_ratio {ratio}) (chamfer top_left)"
+            )
+        )
+        before = board.read_bytes()
+        assert terminal_for_pad(PCB.load(board), "P2", "1") is None
+        dest = tmp_path / "saved.kicad_pcb"
+        for mode in [("--probe",), ("-o", str(dest))]:
+            rc, result = _run(capsys, str(board), "--link", "SENSE P3.1 P2.1", *mode)
+            assert rc == 1
+            link = result["links"][0]
+            assert not link["routable"]
+            assert "P2.1" in link["reason"] and "chamfer" in link["reason"]
+        assert board.read_bytes() == before
+        assert not dest.exists()
+
+    @pytest.mark.parametrize(("ratio", "area"), [("0", 4.0), ("0.5", 3.5)])
+    def test_supported_chamfer_ratio_endpoints(self, tmp_path, ratio, area):
+        from kicad_tools.router.link_router import terminal_for_pad
+
+        board = self._diagonal_board(tmp_path, "omitted")
+        board.write_text(
+            board.read_text().replace(
+                "(chamfer top_left)", f"(chamfer_ratio {ratio}) (chamfer top_left)"
+            )
+        )
+        terminal = terminal_for_pad(PCB.load(board), "P2", "1")
+        assert terminal is not None
+        assert terminal.layers["F.Cu"].area == pytest.approx(area)
+
     @pytest.mark.parametrize("order", ["P3.1 P2.1", "P2.1 P3.1"])
     @pytest.mark.parametrize("kind", ["chamfered", "omitted", "trapezoid"])
     def test_offset_approximated_pad_on_a_diagonal_link(self, tmp_path, capsys, kind, order):
