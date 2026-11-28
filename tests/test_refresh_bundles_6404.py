@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1311,6 +1313,128 @@ def test_drift_exit_status_never_prints_clean_on_refused_or_blocked(mod, capsys)
     assert mod.drift_exit_status({}, blocked=["04-stm32-devboard"]) == 1
     out = capsys.readouterr().out
     assert "nothing to publish" not in out and "BLOCKED 04-stm32-devboard" in out
+
+
+# --------------------------------------------------------------------------- --check remediation (#10727)
+DRIVER = SCRIPT.relative_to(REPO).as_posix()
+CHECK_REPORT = "output/manufacturing/check-report.json"
+ANCHOR = "2026-10-18T00:00:00+00:00"
+
+
+def _stale_count_drift(mod, tmp_path, monkeypatch, unanchored_clock, capsys) -> tuple[Path, str]:
+    """A current bundle whose committed check report counts differ from a fresh run (5 vs 4).
+
+    Returns the board and the first ``--check``'s output.
+    """
+    board = _repin_board(mod, tmp_path, monkeypatch)
+    # The re-plot branch hashes the routed PCB's rule sidecars; the fake board has none.
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        (board / "output" / f"board_routed{suffix}").write_text("rules")
+    assert mod.main([str(board), "--checked-at", ANCHOR]) == 0
+    (board / CHECK_REPORT).write_bytes(_check_report({"pour_slot": 5}))
+    (board / "output" / "manufacturing" / "fill-consistency.json").write_text("{}")
+    monkeypatch.setattr(
+        mod, "run_check_report", lambda staged, cfg: _check_report({"pour_slot": 4})
+    )
+    assert mod.main([str(board), "--check"]) == 1
+    return board, capsys.readouterr().out
+
+
+def _printed_remediation(out: str) -> list[str]:
+    """The driver arguments of the remediation line ``--check`` printed."""
+    (line,) = [line.strip() for line in out.splitlines() if line.strip().startswith(DRIVER + " ")]
+    return shlex.split(line)[1:]
+
+
+def _count_and_list(out: str, claimed: str) -> tuple[int, list[str]]:
+    """The count a log line claims, and the indented file lines printed under it."""
+    lines = out.splitlines()
+    start = next(i for i, line in enumerate(lines) if re.search(claimed, line))
+    files = []
+    for line in lines[start + 1 :]:
+        if not line.startswith("    "):
+            break
+        files.append(line.strip())
+    return int(re.search(claimed, lines[start]).group(1)), files
+
+
+def _stub_replot(mod, monkeypatch):
+    """The forced re-plot path's externals (the plot itself needs kicad-cli); wiring stays real."""
+    monkeypatch.setattr(mod, "stage_replot", lambda *a, **k: [])
+    monkeypatch.setattr(mod, "stage_project_map", lambda *a, **k: [])
+    monkeypatch.setattr(
+        mod, "gate_saved_fill_drc", lambda *a: b'{"violations": [], "unconnected_items": []}'
+    )
+    monkeypatch.setattr(
+        mod,
+        "stage_refill",
+        lambda s, c: {
+            "changed": False,
+            "before_sha256": "a",
+            "after_sha256": "a",
+            "fill_identical": True,
+            "deltas_mm2": {},
+        },
+    )
+
+
+def test_check_remediation_repairs_a_stale_check_report_on_a_current_bundle(
+    mod, tmp_path, monkeypatch, unanchored_clock, capsys
+):
+    """The command ``--check`` names, run as printed, makes the next ``--check`` exit 0.
+
+    Issue #10727: on a current archive a plain refresh never re-runs the checker, so
+    "refresh it with this driver (without --check)" published 0 files and left the
+    report at ``pour_slot=5``.  The re-plot path is what re-runs the checker.
+    """
+    board, out = _stale_count_drift(mod, tmp_path, monkeypatch, unanchored_clock, capsys)
+
+    argv = _printed_remediation(out)
+    assert "--check" not in argv and "--force-replot" in argv
+    assert argv[-2:] == ["--checked-at", ANCHOR]
+    assert "re-plotted" in out
+    # The job summary prints from "^== --check" onward, so the repair must follow it.
+    assert out.index(DRIVER) > out.index("== --check")
+
+    _stub_replot(mod, monkeypatch)
+    assert mod.main(argv) == 0
+    report = board / CHECK_REPORT
+    assert mod.rule_counts(report.read_bytes()) == {("pour_slot", "warning"): 4}
+    capsys.readouterr()
+    assert mod.main([str(board), "--check"]) == 0
+
+
+def test_check_remediation_for_a_stale_bundle_is_the_plain_refresh(
+    mod, tmp_path, monkeypatch, unanchored_clock, capsys
+):
+    """The other drift class: a bundle a plain refresh republishes keeps the plain repair."""
+    board = _repin_board(mod, tmp_path, monkeypatch)
+    assert mod.main([str(board), "--checked-at", ANCHOR, "--check"]) == 1
+    out = capsys.readouterr().out
+
+    argv = _printed_remediation(out)
+    assert "--force-replot" not in argv and "--check" not in argv
+    assert Path(argv[0]).resolve() == board.resolve()
+    assert argv[-2:] == ["--checked-at", ANCHOR]
+    assert out.index(DRIVER) > out.index("== --check")
+
+    assert mod.main(argv) == 0
+    capsys.readouterr()
+    assert mod.main([str(board), "--checked-at", ANCHOR, "--check"]) == 0
+
+
+def test_check_lists_the_targets_the_comparison_added_on_their_own_line(
+    mod, tmp_path, monkeypatch, unanchored_clock, capsys
+):
+    """Issue #10727: ``would publish 0 file(s)`` was followed by the file ``--check`` appended."""
+    _, out = _stale_count_drift(mod, tmp_path, monkeypatch, unanchored_clock, capsys)
+
+    assert _count_and_list(out, r"would publish (\d+) file") == (0, [])
+    assert _count_and_list(out, r"--check: (\d+) committed check report") == (1, [CHECK_REPORT])
+    assert _count_and_list(out, r"DRIFT .*: a fresh run would publish (\d+) file") == (
+        1,
+        [CHECK_REPORT],
+    )
 
 
 def test_drift_workflow_checks_every_bundle_and_never_runs_per_pr(mod):
