@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.core.geometry import rotate_pad_offset
+from kicad_tools.geometry.copper import pad_chamfered_outline as _pad_chamfered_outline
 from kicad_tools.sexp.scan import iter_unquoted
 
 logger = logging.getLogger(__name__)
@@ -5185,48 +5186,6 @@ def _pad_copper_offset(node: SExp, rotation: float) -> tuple[float, float]:
     if offset is None:
         return (0.0, 0.0)
     return rotate_pad_offset(offset.get_float(0) or 0.0, offset.get_float(1) or 0.0, rotation)
-
-
-def _pad_chamfered_outline(
-    source: SExp | None, default_ratio: float
-) -> tuple[tuple[float, float], ...]:
-    """Boundary of a mixed chamfered/rounded pad, relative to its centre in board axes."""
-    if source is None or (corners := source.find_child("chamfer")) is None:
-        return ()
-    ratio = source.find_child("chamfer_ratio")
-    size = source.find_child("size")
-    if ratio is None or size is None:
-        return ()
-    width, height = size.get_float(0) or 0.0, size.get_float(1) or 0.0
-    short = min(width, height)
-    cut = min(0.5, ratio.get_float(0) or 0.0) * short
-    if cut <= 0:
-        return ()
-    rounding = source.find_child("roundrect_rratio")
-    rratio = rounding.get_float(0) if rounding is not None else None
-    rounded = (default_ratio if rratio is None else max(0.0, min(0.5, rratio))) * short
-    at = source.find_child("at")
-    rotation = (at.get_float(2) or 0.0) if at is not None else 0.0
-    selected = {item.value for item in corners.children}
-    vertices: list[tuple[float, float]] = []
-    for name, sx, sy, angle in (
-        ("top_left", -1, -1, 180),
-        ("top_right", 1, -1, 270),
-        ("bottom_right", 1, 1, 0),
-        ("bottom_left", -1, 1, 90),
-    ):
-        # A chamfer replaces the round on that corner. Its two tangent
-        # points describe one straight cut. Uncut corners retain the same
-        # inscribed arc resolution as pad_gate_polygon.
-        chamfered = name in selected
-        radius = cut if chamfered else rounded
-        steps = 1 if chamfered or radius == 0 else 32
-        cx, cy = sx * (width / 2 - radius), sy * (height / 2 - radius)
-        for i in range(steps + 1):
-            theta = math.radians(angle + 90 * i / steps)
-            x, y = cx + radius * math.cos(theta), cy + radius * math.sin(theta)
-            vertices.append(rotate_pad_offset(x, y, rotation))
-    return tuple(vertices)
 
 
 def _chamfered_outlines(node: SExp | None) -> dict:
