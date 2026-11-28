@@ -260,6 +260,37 @@ def test_collinear_continuation_is_reached_through_a_45_degree_jog():
     ]
 
 
+def test_plan_shift_refuses_an_off_grid_jog_leg():
+    pcb = PCB.create(width=50, height=50, center=False)
+    joint = (20, 15)
+    (mover,) = pcb.add_trace((10, 10), joint, net="B")
+    pcb.add_trace(joint, (20, 20), net="B")
+    pcb.add_trace(joint, (25, 15), net="B")
+
+    # The shift is perpendicular to the 2:1 run. Both neighbours must stay
+    # at the joint, so reaching the shifted run would require an off-grid jog.
+    assert _plan_shift(pcb, mover, -0.075, 0.15, []) == (
+        [],
+        "connected track would leave the angle grid",
+    )
+
+
+def test_mixed_follow_and_held_joint_stays_put_and_the_run_jogs():
+    def vertical_stub(pcb):
+        pcb.add_trace((20, 10.9), (20, 14), width=0.2, layer="F.Cu", net="B")
+
+    pcb = _board(0.7, extra=[_diagonal, vertical_stub])
+    result = cleanup_pour_slots(pcb, referee=_ok)
+
+    assert result.spread == 1
+    assert _net_geometry(pcb, "B") == [
+        ((10.0, 11.055), (19.845, 11.055)),
+        ((20.0, 10.9), (19.845, 11.055)),
+        ((20.0, 10.9), (20.0, 14.0)),
+        ((20.0, 10.9), (24.0, 14.9)),
+    ]
+
+
 def test_locked_diagonal_neighbour_leaves_the_pair_alone():
     def locked_diagonal(pcb):
         _diagonal(pcb)
