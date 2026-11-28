@@ -892,8 +892,11 @@ class DRCChecker:
                 with ``kct check`` (e.g. ``ManufacturingAudit``) opt in
                 so report and CLI verdicts cannot drift (issue #3497).
             pour_slot_clearances: Project and custom clearance rules for
-                track-to-zone gaps. When omitted the rule combines the
-                zone clearance with KiCad's default net-class clearance.
+                track-to-zone gaps. When omitted the ``pour_slot`` check
+                reads the ``.kicad_pro`` / ``.kicad_dru`` beside
+                ``pcb.path`` (the ``kct check`` reading, Issue #10683); a
+                PCB with no file path combines the zone clearance with
+                KiCad's default net-class clearance instead.
 
         Returns:
             DRCResults containing all violations found (after filtering,
@@ -1162,7 +1165,23 @@ class DRCChecker:
 
         Own CLI category (``pour_slot``) so ``--skip pour_slot`` works.
         Accepts board clearance rules or a mapping of per-net clearances.
+
+        With no argument the clearances come from the ``.kicad_pro`` /
+        ``.kicad_dru`` beside ``self.pcb.path`` -- the reading ``kct check``
+        applies -- so every ``check_all()`` caller grades the rule the same
+        way (Issue #10683).  A PCB with no file path (in-memory, or a test
+        double whose ``path`` is not a ``str`` / ``Path``) falls back to the
+        zone clearance combined with KiCad's default net-class clearance.
+        An explicit argument always takes precedence over the project files.
         """
+        if netclass_clearances is None:
+            from pathlib import Path
+
+            pcb_path = getattr(self.pcb, "path", None)
+            if isinstance(pcb_path, (str, Path)):
+                from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+                netclass_clearances = BoardClearanceRules.from_board(pcb_path)
         rule = PourSlotRule(netclass_clearances)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 

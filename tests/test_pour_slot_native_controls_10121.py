@@ -124,23 +124,20 @@ def test_control_p_genuine_slot_still_warns(tmp_path: Path) -> None:
     assert gap - 2 * CLEARANCE_MM < MIN_THICKNESS_MM
 
 
-@pytest.mark.parametrize(
-    ("gap", "default", "wide", "warnings"),
-    [
-        (0.55, 0.2, 0.2, 1),
-        (0.55, 0.2, 0.4, 0),
-        (0.65, 0.2, 0.4, 1),
-        (0.95, 0.2, 0.4, 0),
-        (0.95, 0.4, 0.4, 1),
-    ],
-)
-def test_check_and_audit_use_the_sibling_project_on_both_sides(
-    tmp_path, capsys, monkeypatch, gap, default, wide, warnings
-):
-    from kicad_tools.audit.auditor import ManufacturingAudit
+#: ``(gap, Default clearance, Wide clearance, expected pour_slot warnings)``.
+#: ``NET1`` sits in the ``Wide`` net class, so only a checker that reads the
+#: sibling project tells the two unequal rows from their default-only reading.
+PROJECT_MATRIX = [
+    (0.55, 0.2, 0.2, 1),
+    (0.55, 0.2, 0.4, 0),
+    (0.65, 0.2, 0.4, 1),
+    (0.95, 0.2, 0.4, 0),
+    (0.95, 0.4, 0.4, 1),
+]
 
-    pcb = _control_p(tmp_path, gap=gap)
-    board = tmp_path / "control_p.kicad_pcb"
+
+def _write_project(board: Path, default: float, wide: float) -> None:
+    """Give ``NET1`` a ``Wide`` net class beside ``board``."""
     settings = {
         "meta": {"version": 5},
         "classes": [
@@ -150,6 +147,21 @@ def test_check_and_audit_use_the_sibling_project_on_both_sides(
         "netclass_patterns": [{"netclass": "Wide", "pattern": "NET1"}],
     }
     board.with_suffix(".kicad_pro").write_text(json.dumps({"net_settings": settings}))
+
+
+def _pour_slot_count(results) -> int:
+    return sum(v.rule_id == "pour_slot" for v in results.violations)
+
+
+@pytest.mark.parametrize(("gap", "default", "wide", "warnings"), PROJECT_MATRIX)
+def test_check_and_audit_use_the_sibling_project_on_both_sides(
+    tmp_path, capsys, monkeypatch, gap, default, wide, warnings
+):
+    from kicad_tools.audit.auditor import ManufacturingAudit
+
+    pcb = _control_p(tmp_path, gap=gap)
+    board = tmp_path / "control_p.kicad_pcb"
+    _write_project(board, default, wide)
     assert _public_pour_slot_count(board, capsys) == warnings
     audit = ManufacturingAudit(board, manufacturer="jlcpcb")
     # The manufacturing checker owns pour_slot. Native geometry has a separate tally.
@@ -168,6 +180,129 @@ def _public_pour_slot_count(board: Path, capsys) -> int:
     report = json.loads(capsys.readouterr().out)
     assert report["coverage"]["pour_slot"]["state"] == "checked"
     return sum(f["rule_id"] == "pour_slot" for f in report["findings"])
+
+
+@pytest.mark.parametrize(("gap", "default", "wide", "warnings"), PROJECT_MATRIX)
+def test_unparameterized_checker_matches_public_check(
+    tmp_path, capsys, gap, default, wide, warnings
+):
+    """``check_all()`` and ``check_pour_slot()`` with no clearances read the
+    sibling project, exactly as ``kct check`` does (Issue #10683)."""
+    from kicad_tools.validate import DRCChecker
+
+    _control_p(tmp_path, gap=gap)
+    board = tmp_path / "control_p.kicad_pcb"
+    _write_project(board, default, wide)
+    assert _public_pour_slot_count(board, capsys) == warnings
+
+    checker = DRCChecker(PCB.load(str(board)), manufacturer="jlcpcb")
+    assert _pour_slot_count(checker.check_all()) == warnings
+    assert _pour_slot_count(checker.check_pour_slot()) == warnings
+
+
+@pytest.mark.parametrize(("gap", "default", "wide", "warnings"), PROJECT_MATRIX)
+def test_mfr_validate_matches_public_check(tmp_path, capsys, gap, default, wide, warnings):
+    """``kct mfr validate`` counts ``pour_slot`` the way ``kct check`` does,
+    in JSON and text mode (Issue #10683)."""
+    from kicad_tools.cli.mfr import main as mfr_main
+
+    _control_p(tmp_path, gap=gap)
+    board = tmp_path / "control_p.kicad_pcb"
+    _write_project(board, default, wide)
+    assert _public_pour_slot_count(board, capsys) == warnings
+
+    mfr_main(["validate", str(board), "jlcpcb", "--format", "json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["violations"] == []
+    poured = sum(w["rule_id"] == "pour_slot" for w in data["warnings"])
+    assert poured == warnings
+    # Text mode prints a single tally for every warning: check it against the
+    # non-pour-slot warnings of the JSON run.
+    other = len(data["warnings"]) - poured
+
+    mfr_main(["validate", str(board), "jlcpcb"])
+    out = capsys.readouterr().out
+    assert f"Warnings: {other + warnings} (run `kct check {board} --mfr jlcpcb` to list)" in out
+
+
+def test_explicit_clearances_override_the_sibling_project(tmp_path) -> None:
+    """Explicit clearances win over the project beside ``pcb.path`` (Issue #10683)."""
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+    from kicad_tools.validate import DRCChecker
+
+    # The project puts NET1 in ``Wide`` (0.40): the pair is packed, no slot.
+    _control_p(tmp_path, gap=0.55)
+    board = tmp_path / "control_p.kicad_pcb"
+    _write_project(board, 0.2, 0.4)
+    checker = DRCChecker(PCB.load(str(board)), manufacturer="jlcpcb")
+    assert _pour_slot_count(checker.check_pour_slot()) == 0
+    # An explicit mapping that ignores the project keeps 0.20: the slot is back.
+    assert _pour_slot_count(checker.check_pour_slot({"": 0.2})) == 1
+    assert _pour_slot_count(checker.check_all(pour_slot_clearances={"": 0.2})) == 1
+
+    # Every net in ``Default`` (0.20): a slot. An explicit rules object with
+    # the wider clearance packs it again.
+    _write_project(board, 0.2, 0.2)
+    checker = DRCChecker(PCB.load(str(board)), manufacturer="jlcpcb")
+    assert _pour_slot_count(checker.check_pour_slot()) == 1
+    wide = BoardClearanceRules(class_clearance={"Default": 0.4})
+    assert _pour_slot_count(checker.check_pour_slot(wide)) == 0
+    assert _pour_slot_count(checker.check_all(pour_slot_clearances=wide)) == 0
+
+
+@pytest.mark.parametrize("project", ["absent", "empty"])
+def test_checker_without_a_project_keeps_the_default_clearance(tmp_path, project) -> None:
+    """No readable sibling project: the default-clearance reading is unchanged."""
+    from kicad_tools.validate import DRCChecker
+    from kicad_tools.validate.rules.pour_slot import PourSlotRule
+
+    pcb = _control_p(tmp_path)
+    board = tmp_path / "control_p.kicad_pcb"
+    if project == "empty":
+        board.with_suffix(".kicad_pro").write_text("{}")
+    checker = DRCChecker(PCB.load(str(board)), manufacturer="jlcpcb")
+    expected = _pour_slot_count(PourSlotRule(None).check(pcb, checker.design_rules))
+    assert expected == 1
+    assert _pour_slot_count(checker.check_all()) == expected
+    assert _pour_slot_count(checker.check_pour_slot()) == expected
+
+
+def test_checker_without_a_board_path_keeps_the_default_clearances(monkeypatch) -> None:
+    """An in-memory or mocked PCB never resolves clearances from disk."""
+    from unittest.mock import MagicMock
+
+    import kicad_tools.validate.checker as checker_module
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+    from kicad_tools.validate import DRCChecker
+    from kicad_tools.validate.violations import DRCResults
+
+    def _no_disk_read(pcb_path):
+        raise AssertionError(f"clearances must not be read from {pcb_path!r}")
+
+    monkeypatch.setattr(BoardClearanceRules, "from_board", _no_disk_read)
+
+    # ``PCB.create()`` is never saved, so ``pcb.path`` is ``None``.
+    memory = DRCChecker(PCB.create(width=50, height=40, center=False), manufacturer="jlcpcb")
+    assert memory.pcb.path is None
+    assert _pour_slot_count(memory.check_all()) == 0
+    assert _pour_slot_count(memory.check_pour_slot()) == 0
+
+    # A ``MagicMock`` PCB: ``pcb.path`` is a mock, neither ``None`` nor a path.
+    seen = []
+
+    class _Rule:
+        def __init__(self, netclass_clearances=None):
+            seen.append(netclass_clearances)
+
+        def check(self, pcb, design_rules):
+            return DRCResults()
+
+    monkeypatch.setattr(checker_module, "PourSlotRule", _Rule)
+    pcb = MagicMock()
+    pcb.board_origin = (0.0, 0.0)
+    mocked = DRCChecker(pcb, manufacturer="jlcpcb", layers=4)
+    assert mocked.check_pour_slot().violations == []
+    assert seen == [None]
 
 
 @pytest.mark.parametrize("zone_clearance", [0.0, 0.1])
