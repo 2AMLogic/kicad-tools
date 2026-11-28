@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.analysis import analyze_layout_quality
+from kicad_tools.analysis.layout_quality import _classify_angle
+from kicad_tools.explain.checks.acid_trap import ANGLE_FLOAT_EPS_DEG, is_acute_corner_angle
 from kicad_tools.schema.pcb import PCB
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -586,6 +588,27 @@ def test_known_counts():
     assert report.outline_area_mm2 == pytest.approx(50 * 30, abs=1e-6)
 
 
+@pytest.mark.parametrize(
+    "angle",
+    [
+        *range(10, 92),
+        88.9,
+        89 - 2 * ANGLE_FLOAT_EPS_DEG,
+        89 - ANGLE_FLOAT_EPS_DEG,
+        89 - ANGLE_FLOAT_EPS_DEG / 2,
+        89.0001,
+    ],
+)
+def test_acute_and_right_angle_buckets_follow_the_gate(angle):
+    expected = "acute" if is_acute_corner_angle(angle) else "right_angle"
+    assert _classify_angle(angle) == expected
+
+
+@pytest.mark.parametrize("angle, expected", [(None, None), (9.9999, "turn_back"), (91.0001, None)])
+def test_angles_outside_the_acute_and_right_angle_buckets(angle, expected):
+    assert _classify_angle(angle) == expected
+
+
 def test_to_dict_shape_and_rounding():
     data = analyze_layout_quality(_load_pcb(KNOWN_COUNTS_PCB)).to_dict()
     assert data["via"] == {"track": 2, "ground": 1, "total": 3}
@@ -1077,7 +1100,6 @@ def _count_corners_pairwise_reference(pcb: PCB):
     from kicad_tools.analysis.layout_quality import (
         _CORNER_CLASSES,
         _VERTEX_DECIMALS,
-        _classify_angle,
         _net_display_name,
         _net_raw_name,
     )

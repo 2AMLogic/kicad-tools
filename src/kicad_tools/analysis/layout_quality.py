@@ -24,13 +24,12 @@ interior angle between the two legs at the shared endpoint:
 
 * ``turn_back`` -- angle below :data:`TURN_BACK_MAX_ANGLE_DEG` (10 deg).
   Overlapping copper or a dead-end stub, usually router debris after
-  rip-up. Passes DRC; it is what you clean up before ordering.
-* ``acute`` -- from :data:`TURN_BACK_MAX_ANGLE_DEG` up to (excluding)
-  ``MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG`` (89 deg): the acid-trap
-  range ``sharp_trace_corner`` already warns on.
-* ``right_angle`` -- 89..91 deg inclusive (``ANGLE_TOLERANCE_DEG`` around
-  90): a rounded right angle. The study found router output carried 2-5x
-  the right angles of hand or scripted copper.
+  rip-up.
+* ``acute`` -- angles of at least 10 deg inside the shared
+  ``sharp_trace_corner`` window.
+* ``right_angle`` -- from the window's guarded upper edge (nominally
+  89 deg) through 91 deg inclusive. The study found router output carried
+  2-5x the right angles of hand or scripted copper.
 
 Obtuse bends (a 45-deg chamfer has a 135-deg interior angle) and
 straight pass-throughs (180 deg) are not corners and are not counted.
@@ -167,19 +166,20 @@ def _cluster_endpoints(
 def _classify_angle(angle: float | None) -> str | None:
     """Bucket one interior angle into a corner class (or ``None``).
 
-    The acute/right-angle window is the shared acid-trap logic's own
-    (``MIN_TRACE_ANGLE_DEG``/``ANGLE_TOLERANCE_DEG``), imported rather
-    than copied. Imports stay function-local: ``kicad_tools.explain``
-    pulls in the whole checks package, which must not import this
-    package back at module load.
+    The shared sharp-corner predicate sets the acute/right-angle boundary.
+    The local import defers loading the checks package until classification.
     """
-    from kicad_tools.explain.checks.acid_trap import ANGLE_TOLERANCE_DEG, MIN_TRACE_ANGLE_DEG
+    from kicad_tools.explain.checks.acid_trap import (
+        ANGLE_TOLERANCE_DEG,
+        MIN_TRACE_ANGLE_DEG,
+        is_acute_corner_angle,
+    )
 
     if angle is None:
         return None
     if angle < TURN_BACK_MAX_ANGLE_DEG:
         return "turn_back"
-    if angle < MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG:
+    if is_acute_corner_angle(angle):
         return "acute"
     if angle <= MIN_TRACE_ANGLE_DEG + ANGLE_TOLERANCE_DEG:
         return "right_angle"
@@ -759,10 +759,10 @@ class LayoutQualityReport:
         track_vias: Vias on nets that do not classify as ground (the
             routing-exhaustion signal; includes net-less vias).
         ground_vias: Vias on ground-classified nets (stitching/plane ties).
-        right_angle_corners: Same-net joins with an interior angle of
-            89-91 deg, board-wide total.
-        acute_corners: Same-net joins with an interior angle of 10..89 deg
-            (the acid-trap population ``sharp_trace_corner`` warns on).
+        right_angle_corners: Same-net joins from the sharp-corner window's
+            upper edge through 91 deg inclusive, board-wide total.
+        acute_corners: Same-net joins of at least 10 deg inside the
+            sharp-corner window.
         turn_back_corners: Same-net joins with an interior angle under
             10 deg (overlaps / dead-end stubs).
         corners_per_net: Per-net breakdown of the three corner classes.
