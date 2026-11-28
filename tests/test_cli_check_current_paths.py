@@ -296,6 +296,33 @@ class TestEndpointFailClosed:
             pytest.param(
                 "roundrect",
                 0,
+                ("top_left", 0.0, None),
+                "17 18",
+                "12.60 14.60",
+                True,
+                id="missing-chamfer-ratio-intact",
+            ),
+            pytest.param(
+                "roundrect",
+                0,
+                ("bottom_right", 0.0, None),
+                "17 18",
+                "12.50 14.50",
+                True,
+                id="missing-chamfer-ratio-inward",
+            ),
+            pytest.param(
+                "roundrect",
+                0,
+                ("bottom_right", 0.0, 0.0),
+                "17 18",
+                "12.60 14.60",
+                True,
+                id="zero-chamfer-ratio",
+            ),
+            pytest.param(
+                "roundrect",
+                0,
                 ("bottom_right", 0.0, 0.14),
                 "17 18",
                 "13.20 13.70",
@@ -349,14 +376,6 @@ class TestEndpointFailClosed:
     @pytest.mark.parametrize(
         ("shape", "pad_tokens"),
         [
-            pytest.param(
-                "roundrect", "(roundrect_rratio 0.0) (chamfer bottom_right)", id="no-ratio"
-            ),
-            pytest.param(
-                "roundrect",
-                "(roundrect_rratio 0.0) (chamfer_ratio 0.0) (chamfer bottom_right)",
-                id="zero-ratio",
-            ),
             pytest.param(
                 "roundrect",
                 "(roundrect_rratio 0.0) (chamfer_ratio -0.1) (chamfer bottom_right)",

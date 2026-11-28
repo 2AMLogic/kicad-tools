@@ -4282,15 +4282,16 @@ def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float])
 
 
 _CHAMFER_CORNERS = frozenset({"top_left", "top_right", "bottom_left", "bottom_right"})
+_DEFAULT_CHAMFER_RATIO = 0.2
 
 
 def _corner_chamfer_ratio(pad: Pad, x: float, y: float) -> tuple[bool, float | None]:
     """Return ``(usable, cut_ratio)`` for this pad-local quadrant.
 
-    When a ``(chamfer ...)`` list is present with a missing or unusable
-    ``(chamfer_ratio ...)`` (or malformed corner tokens), ``usable`` is
-    ``False`` so the caller refuses the pad instead of falling back to an
-    uncut corner.
+    KiCad defaults ``chamfer_ratio`` to ``0.2`` when ``(chamfer ...)`` omits
+    the ratio token, and treats an explicit ``0`` as a zero-length straight
+    cut on the selected corner. Out-of-range or malformed tokens return
+    ``usable=False`` so the caller fails closed.
     """
     node = pad._sexp_node
     if node is None:
@@ -4306,10 +4307,13 @@ def _corner_chamfer_ratio(pad: Pad, x: float, y: float) -> tuple[bool, float | N
     ):
         return False, None
     ratios = node.find_children("chamfer_ratio")
-    if len(ratios) != 1 or len(ratios[0].children) != 1 or not ratios[0].children[0].is_atom:
+    if not ratios:
+        ratio: float | None = _DEFAULT_CHAMFER_RATIO
+    elif len(ratios) != 1 or len(ratios[0].children) != 1 or not ratios[0].children[0].is_atom:
         return False, None
-    ratio = ratios[0].get_float(0)
-    if ratio is None or not math.isfinite(ratio) or not 0 < ratio <= 0.5:
+    else:
+        ratio = ratios[0].get_float(0)
+    if ratio is None or not math.isfinite(ratio) or not 0 <= ratio <= 0.5:
         return False, None
     corner = ("top" if y < 0 else "bottom") + ("_left" if x < 0 else "_right")
     if not any(item.value == corner for item in corners.children):
