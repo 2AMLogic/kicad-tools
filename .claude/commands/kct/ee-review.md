@@ -13,14 +13,13 @@ Produce an **EE decision document** for an analog/placement-blocked board — an
 
 > **Scope (advisory only).** This skill produces **decisions, not copper**. It reads the board artifact, the `kct net-status --why` classification, the issue thread, and published/textbook/app-note evidence, then writes a single decision document (one issue comment in issue mode, or one `<board>/EE_REVIEW.md` in board mode). It **never routes copper, never places parts, never edits the `.kicad_pcb`, and never self-applies a work label.** The human approval gate is preserved: the owner ratifies the ladder + constraints before any builder executes them. Execution is the existing artifact-first builder pipeline's job, referee-gated by `kicad-cli pcb drc --refill-zones`.
 >
-> **Phase 1 (this doc) is a single opus-class reviewer.** It reads the inputs and writes the decision document directly. The Phase-2 research fan-out (4 sonnet researchers → opus planner) is *documented* below, but Phase 1 runs as one agent, dispatches no helper agents, and does not exercise the live paper-request / feature-request paths against paywalled sources. `--depth mvp` is the implicit default and the only supported mode in Phase 1.
+> **Phase 1 uses one reviewer.** The reviewer reads the inputs and writes the decision document directly. The Phase-2 research fan-out (4 sonnet researchers → opus planner) is *documented* below, but Phase 1 runs as one agent, dispatches no helper agents, and does not exercise the live paper-request / feature-request paths against paywalled sources. `--depth mvp` is the implicit default and the only supported mode in Phase 1.
 
 ## Model selection
 
-Model resolves through the harness's normal precedence chain (explicit dispatch param → harness role config → this doc's frontmatter `suggestedModel` → session default).
+Codex CLI and opencode use the session’s selected model for the review. When the installed skill includes `suggestedModel: opus` in its frontmatter, that field suggests a reviewer for synthesizing the engineering evidence. An explicit dispatch choice or role configuration takes precedence over that hint.
 
-- **Phase 1 (this doc): a single `opus`-class reviewer.** Synthesizing a binding EE decision is a judgment task where frontier capability pays off — the same reason the architect and judge roles use opus. `suggestedModel: opus` is set in the frontmatter above.
-- **Phase 2 (not implemented here): opus planner + sonnet researchers.** The research fan-out (`--depth full`) would dispatch 4 `sonnet`-class researchers under distinct lenses (theory / app notes / papers / in-repo precedent) — breadth work cheap models do well — then one `opus`-class planner synthesizes their briefs into the decision document. Phase 1 collapses both stages into the single opus reviewer.
+- **Phase 2 (not implemented here): opus planner + sonnet researchers.** The research fan-out (`--depth full`) would dispatch 4 `sonnet`-class researchers under distinct lenses (theory / app notes / papers / in-repo precedent) — breadth work cheap models do well — then one `opus`-class planner synthesizes their briefs into the decision document. In Phase 1, the reviewer carries out both stages directly.
 
 > **Claude Code only (Phase 2 fan-out).** Dispatching the four researchers as parallel helper agents with their own model tier relies on Claude Code's subagent dispatch. **Fallback for other harnesses:** run the four lenses sequentially in the same session — one research pass per lens, each ending in a short written brief — then do the planner synthesis over those briefs. Phase 1 (the only implemented mode) needs neither.
 
@@ -172,7 +171,7 @@ Artifact-first on `<board>/output/<name>_routed.kicad_pcb` (recipe unchanged; re
 
 ## Limitations (Phase 1)
 
-- **Single reviewer, no research fan-out.** The 4-lens researcher stage + planner synthesis is Phase 2 (`--depth full`). Phase 1 is one opus-class agent reading inputs directly.
+- **Single reviewer, no research fan-out.** The 4-lens researcher stage + planner synthesis is Phase 2 (`--depth full`). In Phase 1, the reviewer reads the inputs directly.
 - **Protocols documented, not live-exercised.** The feature-request and paper-request paths are embedded as instructions; the Phase-1 acceptance test does not encounter a paywalled block, so neither live path runs.
 - **Advisory only.** Output is a proposal for human ratification, never an auto-merged mutation and never a self-applied work label.
 

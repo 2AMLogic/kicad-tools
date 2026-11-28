@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from kicad_tools.drc.violation import DRCViolation
     from kicad_tools.router.link_router import _BoardModel
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.mask_geometry import MaskOpening
 
 __all__ = [
     "DEFAULT_ORACLE_ROUNDS",
@@ -1376,6 +1377,57 @@ def _split_pour_via_link(
     return OracleLink(net, endpoint(start), endpoint(end))
 
 
+def _weld_pad_openings(pcb_path: Path, only: frozenset[str]) -> dict[tuple[str, str], MaskOpening]:
+    """Resolve standard surface pad openings in absolute board coordinates."""
+    from shapely.affinity import translate  # type: ignore[import-untyped]
+
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.mask_geometry import (
+        ADVANCED_PAD_FEATURES,
+        MaskOpening,
+        board_mask_margin,
+        pad_mask_margin,
+        pad_mask_shapes,
+        pad_mask_sides,
+    )
+
+    pcb = PCB.load(str(pcb_path))
+    board_margin, declared = board_mask_margin(pcb)
+    lands: dict[tuple[str, str], MaskOpening] = {}
+    if board_margin is not None:
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                key = f"{fp.reference}.{pad.number}"
+                if key not in only or pad.type != "smd":
+                    continue
+                node = pad._sexp_node
+                if node is not None and any(
+                    node.find_child(tag) is not None for tag in ADVANCED_PAD_FEATURES
+                ):
+                    continue
+                margin, source = pad_mask_margin(
+                    pad, fp, board_margin, declared, board_version=pcb._file_version()
+                )
+                if margin is None:
+                    continue
+                try:
+                    land, opening = pad_mask_shapes(pad, fp, margin)
+                except ValueError:
+                    continue
+                for side in pad_mask_sides(pad):
+                    lands[key, side + ".Cu"] = MaskOpening(
+                        pad.uuid or key,
+                        side + ".Mask",
+                        f"pad:{pad.shape}",
+                        margin,
+                        source,
+                        margin < 0,
+                        translate(opening, *pcb.board_origin),
+                        translate(land, *pcb.board_origin),
+                    )
+    return lands
+
+
 @dataclass
 class PourLinkCloser:
     """Close pour-net links: weld the named pads into their planes, route the rest.
@@ -1444,11 +1496,22 @@ class PourLinkCloser:
     #: receive it unconditionally -- harmless there, since a via-in-pad seat
     #: is one copper union (``gap <= 0``) the band accepts anyway.
     same_net_pad_gap_mm: float = 0.0
+    #: Issue #10627: ``run_stitch``'s ``same_net_trace_gap_mm`` -- the fab-view
+    #: same-net via-annulus/leg-vs-TRACE slit-band edge (the caller-resolved
+    #: ``DesignRules.same_net_trace_gap_band_edge_mm``).  Full class-width weld
+    #: stubs are wide enough that two same-net stubs or a stub and a via
+    #: annulus can land 0.05-0.10 mm apart (``physical_copper_gap`` /
+    #: ``mask_to_copper`` on Board 07), so the weld keeps them out of the
+    #: band.  ``0`` disables the guard.
+    same_net_trace_gap_mm: float = 0.0
     #: Issue #8027: the router's ``PairwiseClearanceTable`` (``--voltage-map``).
     #: ``pair_clearance(P, N)`` is raised to ``table.required_clearance(P, N)``
     #: so oracle copper keeps the same HV ΔV gap as the lattice search.  ``None``
     #: leaves every clearance exactly as before.
     pairwise_table: Any | None = None
+
+    #: Manufacturer mask-to-copper clearance for wide pour-pad entries (mm).
+    mask_entry_clearance: float = 0.0
 
     # -- net-class clearance (Issue #6374) ----------------------------------------
 
@@ -1457,6 +1520,23 @@ class PourLinkCloser:
         cls = (self.net_class_map or {}).get(net_name or "")
         value = getattr(cls, "clearance", None) if cls is not None else None
         return max(self.clearance, float(value)) if value is not None else self.clearance
+
+    def pour_width(self, net_name: str | None) -> float:
+        """Width of new pour-completion copper on ``net_name`` (Issue #10627).
+
+        The net class's numeric ``trace_width`` -- narrower than the board
+        width included -- so a 0.50 mm ``Power`` class is not written at the
+        0.20 mm board default.  A missing map, net or usable class width uses
+        ``trace_width``.  A declared ``neck_trace_width`` is deliberately not
+        consulted: the agreement audit only excuses short pad-escape legs, so
+        all new completion copper (weld stubs included) takes the full class
+        width.
+        """
+        cls = (self.net_class_map or {}).get(net_name or "")
+        value = getattr(cls, "trace_width", None) if cls is not None else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return float(value)
+        return self.trace_width
 
     def pair_clearance(self, pour_net: str, other_net: str | None) -> float:
         """``c(P, N)``: the clearance copper on ``pour_net`` keeps from ``other_net``."""
@@ -1468,6 +1548,7 @@ class PourLinkCloser:
     def link_rules(self, base: Any, pcb: Any, pour_net: str) -> Any:
         """``base`` (a ``LinkRouteRules``) specialised to links on ``pour_net``.
 
+        Specialises the trace width (Issue #10627) as well as the clearance.
         Without a net-class map the rules are returned unchanged (so the
         routed copper is byte-identical to the single-scalar behaviour).
         """
@@ -1477,7 +1558,15 @@ class PourLinkCloser:
             num: self.pair_clearance(pour_net, getattr(net, "name", None))
             for num, net in pcb.nets.items()
         }
-        return replace(base, clearance=self.class_clearance(pour_net), clearance_by_net=by_net)
+        return replace(
+            base,
+            trace_width=self.pour_width(pour_net),
+            clearance=self.class_clearance(pour_net),
+            clearance_by_net=by_net,
+            pad_entry_gap=self.mask_entry_clearance
+            if self.pour_width(pour_net) > self.trace_width
+            else 0.0,
+        )
 
     @staticmethod
     def record_relaxation(
@@ -1833,9 +1922,9 @@ class PourLinkCloser:
         via centre (and every trace waypoint) stays within
         ``D = max_via_reach_mm(pad, weld_offset, weld_escape_distance)`` of
         the pad centre, and its copper extends ``max(via_size,
-        trace_width) / 2`` beyond that, so N counts exactly when its copper
-        is within ``D + max(via_size, trace_width) / 2 + c(P, N)`` of the pad
-        centre.
+        pour_width(P)) / 2`` beyond that (Issue #10627: P's own class width,
+        not the board width), so N counts exactly when its copper is within
+        ``D + max(via_size, pour_width(P)) / 2 + c(P, N)`` of the pad centre.
         """
         floor = max((self.class_clearance(net) for net in pads_by_net), default=self.clearance)
         if not self.net_class_map and self.pairwise_table is None:
@@ -1867,9 +1956,9 @@ class PourLinkCloser:
             )
         names = {num: getattr(net, "name", None) for num, net in pcb.nets.items()}
         candidates = [it for it in model.items if names.get(it.net) in stricter]
-        copper_half = max(self.via_size, self.trace_width) / 2
         best = floor
         for net, keys in pads_by_net.items():
+            copper_half = max(self.via_size, self.pour_width(net)) / 2
             for key in keys:
                 ref, _, number = key.partition(".")
                 t = terminal_for_pad(pcb, ref, number)
@@ -1897,11 +1986,50 @@ class PourLinkCloser:
         attempt: ClosureAttempt,
         avoid: Mapping[str, Sequence[tuple[float, float]]] | None = None,
     ) -> set[str]:
+        # Issue #10627: ``run_stitch`` takes one scalar width, so weld each
+        # width group on its own (groups in first-net order).  A classless-only
+        # input is a single group: the same one call sequence as before.
+        groups: dict[float, tuple[float, list[str]]] = {}
+        for net in sorted(pads_by_net):
+            width = self.pour_width(net)
+            groups.setdefault(round(width, 6), (width, []))[1].append(net)
+
+        every = frozenset(k for keys in pads_by_net.values() for k in keys)
+        welded: set[str] = set()
+        exhausted: set[str] = set()
+        for width, nets in groups.values():
+            group_pads = {net: pads_by_net[net] for net in nets}
+            welded |= self._weld_group(pcb_path, nets, group_pads, width, attempt, avoid, exhausted)
+        self.exhausted_stitch_pads.difference_update(every)
+        self.exhausted_stitch_pads.update(exhausted)
+        return welded
+
+    def _weld_group(
+        self,
+        pcb_path: Path,
+        nets: list[str],
+        pads_by_net: dict[str, set[str]],
+        trace_width: float,
+        attempt: ClosureAttempt,
+        avoid: Mapping[str, Sequence[tuple[float, float]]] | None,
+        exhausted: set[str],
+    ) -> set[str]:
+        """Weld one width group's named pads at ``trace_width`` (Issue #10627).
+
+        The initial attempt, forced retry and foreign-fill retry all stay
+        inside the group; its footprints, sites, vias, notes and exhausted
+        pads accumulate into ``attempt`` / ``exhausted``.
+        """
         from kicad_tools.cli.stitch_cmd import run_stitch, trace_to_track_segments
 
-        nets = sorted(pads_by_net)
         only = frozenset(k for keys in pads_by_net.values() for k in keys)
         clearance = self.weld_clearance(pcb_path, pads_by_net)
+
+        lands = (
+            _weld_pad_openings(pcb_path, only)
+            if trace_width > self.trace_width and self.mask_entry_clearance
+            else {}
+        )
 
         def stitch(pads: frozenset[str], force: frozenset[str], fills_yield: bool):
             return run_stitch(
@@ -1912,7 +2040,9 @@ class PourLinkCloser:
                 clearance=clearance,
                 offset=self.weld_offset,
                 escape_distance=self.weld_escape_distance,
-                trace_width=self.trace_width,
+                trace_width=trace_width,
+                entry_lands=lands,
+                mask_entry_clearance=self.mask_entry_clearance,
                 avoid_pad_overlap=self.avoid_via_in_pad,
                 only_pads=pads,
                 force_pads=force,
@@ -1925,6 +2055,7 @@ class PourLinkCloser:
                 # same-net pad slit band (off when the caller resolved no
                 # stackup edge).
                 same_net_pad_gap_mm=self.same_net_pad_gap_mm,
+                same_net_trace_gap_mm=self.same_net_trace_gap_mm,
             )
 
         force: frozenset[str] = frozenset()
@@ -1971,9 +2102,8 @@ class PourLinkCloser:
                     for seg in trace_to_track_segments(trace):
                         caps.append((seg.start_x, seg.start_y, seg.end_x, seg.end_y, seg.width / 2))
                 attempt.applied += 1
-        self.exhausted_stitch_pads.difference_update(only)
         if passes[-1].pads_skipped:
-            self.exhausted_stitch_pads.update(
+            exhausted.update(
                 f"{pad.reference}.{pad.pad_number}" for pad, _ in passes[-1].skip_details
             )
         for pad, reason in passes[-1].pads_skipped:

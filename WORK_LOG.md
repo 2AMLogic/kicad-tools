@@ -16,6 +16,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-28
 
+- **PR #10695**: docs: clarify model selection in the scaffold and journal skills
+- **PR #10672**: fix(boards): author board 02's reviewed net classes so release cleanup keeps its track widths
+- **PR #10666**: fix(report): apply project clearance rules to pour-slot warnings
+- **PR #10657**: fix(router): validate declared current paths on offset pad copper
+- **PR #10631**: fix: write pour-completion copper at the net-class width
+- **Issue #10688** (closed): board-recipe-scaffold and layout-journal still open Model selection with a bare suggestedModel assertion
+- **Issue #10663** (closed): Board 02 release cleanup narrows all 12 routed nets to 0.127 mm
+- **Issue #10656** (closed): Current-path check accepts a disconnected offset pad and rejects a bonded one
+- **Issue #10649** (closed): Design reports ignore project clearance rules when counting pour slots
 - **PR #10660**: fix: refuse readiness evidence produced without the parts catalog
 - **PR #10658**: feat: pin the jlcparts catalog location with KCT_JLCPARTS_CATALOG
 - **Issue #10655** (closed): get_catalog_path() resolves under XDG_CACHE_HOME, hiding the worker's jlcparts catalog from redirected sessions
