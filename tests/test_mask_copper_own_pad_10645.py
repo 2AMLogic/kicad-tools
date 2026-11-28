@@ -302,3 +302,22 @@ def test_declared_widths_are_compared_at_board_precision():
     assert _errors(board(0.21)) == ["t0"]
     assert _errors(board(0.22)) == ["t0"]
     assert _errors(board(0.2 + 1e-7)) == []
+
+
+@pytest.mark.parametrize(
+    "far,stub",
+    [(10.98, ()), (12, (((10, Y), (10, 10.3)),))],
+    ids=["end-cap-beside-far-edge", "pass-through-with-inside-branch"],
+)
+def test_split_after_inside_endpoint_preserves_condition_4(far, stub):
+    single = _board(((7, Y), (far, Y)), *stub, max_error=0.005)
+    split = _board(*ENTRY, ((10, Y), (far, Y)), *stub, max_error=0.005)
+    for board in (single, split):
+        result, measured = _at_u1(board)
+        assert _severity(result, "t0") == "error"
+        assert measured["t0"].within_own_pad_failed_condition == 4
+        assert measured["t0"].beside_owner_excess_mm2 > 0
+
+
+def test_split_after_inside_endpoint_allows_a_clean_final_cap():
+    assert _errors(_board(*ENTRY, ((10, Y), (10.8, Y)), max_error=0.005)) == []

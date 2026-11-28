@@ -655,7 +655,7 @@ def _tracks_at(conductors, index, net, point, tolerance):
     return found
 
 
-def _collinear_step(current, joint, outer, heading, norm, width, net, conductors, index, tol):
+def _collinear_step(current, joint, outer, heading, norm, width, joined, tol):
     """``(identity, item, copper, far end)`` of the unbranched collinear piece at *joint*.
 
     Only when *current* and one other straight, same-net segment are the only
@@ -663,7 +663,6 @@ def _collinear_step(current, joint, outer, heading, norm, width, net, conductors
     the same declared width, lies on the line through *outer* along *heading*
     within *tol* and runs forward of the joint. ``None`` otherwise.
     """
-    joined = _tracks_at(conductors, index, net, joint, tol)
     if len(joined) != 2 or current not in (entry[0] for entry in joined):
         return None
     following_identity, following, copper = joined[0] if joined[0][0] != current else joined[1]
@@ -691,13 +690,11 @@ def _continuation_end(identity, item, core, conductors, index, tolerance):
     -- only when the two are the only tracks, arcs or vias at that joint
     (counting any that pass through it), so a branch stops the walk -- which
     must be of the same declared width, lie on the segment's own line within
-    *tolerance* and run forward of the joint, never back. A far end strictly
-    inside ``core`` (the pad shrunk by the construction budget) ends the walk
-    with that end, unless the same straight run goes on and leaves the pad
-    (a pass-through, not an entry that ends inside); any other end is the next
-    joint. The walk is finite: every step moves strictly forward along the one
-    line, and a segment is never entered twice. The chain copper is the union
-    of the pieces walked. ``None`` when no chain reaches the pad.
+    *tolerance* and run forward of the joint, never back. After entering
+    ``core`` (the pad shrunk by the construction budget), the run must stay
+    inside and end at a joint touched only by its final piece. Each step moves
+    forward along the line and visits a new segment. The chain copper is the
+    union of all visited pieces. Return ``None`` without a proven inside end.
     """
     from shapely.geometry import Point
     from shapely.ops import unary_union  # type: ignore[import-untyped]
@@ -713,44 +710,21 @@ def _continuation_end(identity, item, core, conductors, index, tolerance):
             return None
         joint, current, visited = first, identity, {identity}
         pieces = [next(c for i, _, c in conductors if i == identity)]
+        inside = False
         while True:
-            step = _collinear_step(
-                current, joint, outer, heading, norm, width, net, conductors, index, tolerance
-            )
+            joined = _tracks_at(conductors, index, net, joint, tolerance)
+            if inside and len(joined) == 1 and joined[0][0] == current:
+                return (outer, joint, unary_union(pieces))
+            step = _collinear_step(current, joint, outer, heading, norm, width, joined, tolerance)
             if step is None or step[0] in visited:
                 break
             following_identity, _, copper, far = step
+            far_inside = core.contains(Point(far))
+            if inside and not far_inside:
+                break
             pieces.append(copper)
-            if core.contains(Point(far)):
-                # The run must end inside the pad: keep walking the same line.
-                onward, onward_joint, seen = following_identity, far, set(visited)
-                seen.add(following_identity)
-                exits = False
-                while True:
-                    more = _collinear_step(
-                        onward,
-                        onward_joint,
-                        outer,
-                        heading,
-                        norm,
-                        width,
-                        net,
-                        conductors,
-                        index,
-                        tolerance,
-                    )
-                    if more is None or more[0] in seen:
-                        break
-                    if not core.contains(Point(more[3])):
-                        exits = True
-                        break
-                    seen.add(more[0])
-                    onward, onward_joint = more[0], more[3]
-                if exits:
-                    break
-                return (outer, far, unary_union(pieces))
             visited.add(following_identity)
-            current, joint = following_identity, far
+            current, joint, inside = following_identity, far, far_inside
     return None
 
 
