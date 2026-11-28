@@ -926,8 +926,8 @@ def stage_replot(
     return written
 
 
-def stage_check_report(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> None:
-    """Write the bundle's ``kct check`` report (board-relative path, so reproducible).
+def run_check_report(staged: Path, cfg: rr.BoardConfig) -> bytes:
+    """Run the bundle's ``kct check`` (board-relative path, so reproducible); return the report.
 
     A board with a ``check_script`` (board 04) runs that instead, as its gate does.
     """
@@ -956,8 +956,47 @@ def stage_check_report(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) 
         run(command, cwd=staged, env=env)
         if not report.is_file():
             raise GateFailure("the check did not produce a report")
-        data = report.read_bytes()
-    _write_targets(staged, bundle.check_reports, data)
+        return report.read_bytes()
+
+
+def stage_check_report(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> None:
+    """Write the bundle's ``kct check`` report into every committed target."""
+    _write_targets(staged, bundle.check_reports, run_check_report(staged, cfg))
+
+
+def rule_counts(report: bytes) -> dict[str, int] | None:
+    """Per-rule violation counts of a check report; ``None`` when it is not a report."""
+    try:
+        data = json.loads(report)
+        violations = data.get("violations", [])
+        counts: dict[str, int] = {}
+        for violation in violations:
+            counts[violation["rule_id"]] = counts.get(violation["rule_id"], 0) + 1
+    except (ValueError, AttributeError, KeyError, TypeError):
+        return None
+    return counts
+
+
+def stale_check_reports(
+    board: Path, staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig
+) -> list[str]:
+    """Committed check reports whose per-rule counts differ from the current checker (Issue #10692).
+
+    The refresh only re-runs the checker when the archive is stale, so a bundle
+    that is self-consistent but was checked under older rules would otherwise
+    compare clean.  Only per-rule counts are compared: the report's bytes also
+    carry archive-level noise that is not checker drift.
+    """
+    committed_targets = [t for t in bundle.check_reports if (board / t).is_file()]
+    if not committed_targets:
+        return []
+    fresh = rule_counts(run_check_report(staged, cfg))
+    stale = []
+    for target in committed_targets:
+        committed = board / target
+        if fresh is None or rule_counts(committed.read_bytes()) != fresh:
+            stale.append(target)
+    return stale
 
 
 def stage_recipe_drc(
@@ -1050,6 +1089,7 @@ def refresh_bundle(
     known_issue: list[str] | None = None,
     resolve_known_issue: list[str] | None = None,
     on_verdict: Callable[[str], None] | None = None,
+    compare_checks: bool = False,
 ) -> list[str]:
     cfg = rr.BOARDS[board.name]
     bundle = BUNDLES[board.name]
@@ -1128,7 +1168,7 @@ def refresh_bundle(
                         "published DRC preflight disagrees with output/drc_report.json"
                     )
 
-        return rr.repin_staged(
+        would_publish = rr.repin_staged(
             board,
             staged,
             cfg,
@@ -1141,6 +1181,13 @@ def refresh_bundle(
             after_manifest=after_manifest if stale else None,
             on_verdict=on_verdict,
         )
+        if compare_checks and not stale:
+            # Issue #10692: a current archive skips the checker above, so compare
+            # the committed per-rule counts to a fresh run here.
+            for target in stale_check_reports(board, staged, cfg, bundle):
+                if target not in would_publish:
+                    would_publish.append(target)
+        return would_publish
 
 
 def committed_checked_at(board: Path) -> str:
@@ -1267,6 +1314,7 @@ def main(argv: list[str] | None = None) -> int:
                 build_dir=args.build_dir.resolve() if args.build_dir else None,
                 force_replot=args.force_replot,
                 dry_run=args.dry_run or args.check,
+                compare_checks=args.check,
                 known_issue=args.known_issue,
                 resolve_known_issue=args.resolve_known_issue,
                 on_verdict=verdict.publish,

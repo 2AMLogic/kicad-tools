@@ -1160,6 +1160,57 @@ def test_check_exits_one_when_a_committed_report_is_edited(
     assert board.name in out and "output/drc_report.json" in out
 
 
+def _check_report(rules: dict[str, int], *, noise: str = "") -> bytes:
+    violations = [{"rule_id": r, "message": noise} for r, n in rules.items() for _ in range(n)]
+    return json.dumps(
+        {"summary": {"warnings": sum(rules.values())}, "violations": violations}
+    ).encode()
+
+
+def test_check_names_a_stale_check_report_on_a_current_bundle(
+    mod, tmp_path, monkeypatch, unanchored_clock, capsys
+):
+    """A self-consistent bundle whose committed per-rule counts disagree with the checker.
+
+    Issue #10692: Board 04's ``pour_slot`` read 5 against a fresh 4 while the
+    archive was current, so the refresh never re-ran the checker.  The stale
+    report itself must be named, not just ``readiness.json``.
+    """
+    board = _repin_board(mod, tmp_path, monkeypatch)
+    assert mod.main([str(board), "--checked-at", "2026-10-18T00:00:00+00:00"]) == 0
+    report = board / "output" / "manufacturing" / "check-report.json"
+    report.write_bytes(_check_report({"pour_slot": 5}))
+    monkeypatch.setattr(
+        mod, "run_check_report", lambda staged, cfg: _check_report({"pour_slot": 4})
+    )
+    before = report.read_bytes()
+
+    assert mod.main([str(board), "--check"]) == 1
+    assert report.read_bytes() == before
+    out = capsys.readouterr().out
+    assert "--check DRIFT" in out and "output/manufacturing/check-report.json" in out
+    assert "nothing to publish" not in out
+
+
+def test_check_ignores_report_noise_that_is_not_a_rule_count(
+    mod, tmp_path, monkeypatch, unanchored_clock
+):
+    board = _repin_board(mod, tmp_path, monkeypatch)
+    assert mod.main([str(board), "--checked-at", "2026-10-18T00:00:00+00:00"]) == 0
+    report = board / "output" / "manufacturing" / "check-report.json"
+    report.write_bytes(_check_report({"pour_slot": 4}, noise="old wording"))
+    monkeypatch.setattr(
+        mod, "run_check_report", lambda staged, cfg: _check_report({"pour_slot": 4}, noise="new")
+    )
+    assert mod.main([str(board), "--check"]) == 0
+
+
+def test_rule_counts_reads_violations_and_rejects_non_reports(mod):
+    assert mod.rule_counts(_check_report({"pour_slot": 2, "x": 1})) == {"pour_slot": 2, "x": 1}
+    assert mod.rule_counts(b"not json") is None
+    assert mod.rule_counts(b'{"violations": [{"no_rule": 1}]}') is None
+
+
 def test_check_anchors_each_board_to_its_committed_checked_at(
     mod, tmp_path, monkeypatch, unanchored_clock
 ):
