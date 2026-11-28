@@ -178,6 +178,78 @@ def test_never_reads_routing_json(mod):
     assert "from routing import" not in code
 
 
+def test_unattended_route_declares_the_reviewed_pour_neck(mod, tmp_path):
+    """The route's class map declares the pad-escape neck the pour weld needs (#9424).
+
+    The router classifies ``+5V`` and ``GND`` as ``Power`` (0.50 mm) and
+    declares no ``neck_trace_width``, so since #10631/#10709 the weld that
+    cannot leave U2's 0.40 mm pins at 0.50 mm stays open rather than being
+    written below the class width: the route exits 3 with two pour links
+    unconnected.  The reviewed account declares the neck; the unattended
+    route takes exactly that declaration and nothing else from it.
+    """
+    from dataclasses import replace
+
+    from kicad_tools.router.oracle_completion import PourLinkCloser
+    from kicad_tools.router.rules import NET_CLASS_POWER, net_class_map_from_path
+
+    reviewed = json.loads((mod.REDESIGN / "net_class_map.json").read_text())
+    path = mod.unattended_net_class_map(tmp_path)
+    loaded = net_class_map_from_path(path, pcb_path=tmp_path / "none.kicad_pcb")
+    assert sorted(loaded) == sorted(mod.POUR_NECK_NETS) == ["+5V", "GND"]
+    for net, routing in loaded.items():
+        neck = reviewed[net]["neck_trace_width"]
+        assert 0 < neck < NET_CLASS_POWER.trace_width
+        # The router's own Power class plus the reviewed neck, nothing else:
+        # every other net keeps the class the name classifier gives it.
+        assert routing == replace(NET_CLASS_POWER, neck_trace_width=neck)
+    # The router-side consumer: the pour weld may neck these two nets only.
+    rules = {"via_size": 0.6, "via_drill": 0.3, "clearance": 0.2, "trace_width": 0.2}
+    undeclared = PourLinkCloser(net_class_map={"+5V": NET_CLASS_POWER}, **rules)
+    assert undeclared.neck_width("+5V") is None
+    declared = PourLinkCloser(net_class_map=loaded, **rules)
+    assert declared.neck_width("+5V") == reviewed["+5V"]["neck_trace_width"]
+    assert declared.neck_width("GND") == reviewed["GND"]["neck_trace_width"]
+
+
+def test_unattended_route_without_a_reviewed_neck_refuses_to_route(mod, monkeypatch, tmp_path):
+    """No declared neck, no route: the weld is never silently left to the board width."""
+    redesign = tmp_path / "redesign"
+    redesign.mkdir()
+    (redesign / "net_class_map.json").write_text(json.dumps({"+5V": {"neck_trace_width": 0.15}}))
+    monkeypatch.setattr(mod, "REDESIGN", redesign)
+    with pytest.raises(RuntimeError, match="declares no pad-escape neck for 'GND'"):
+        mod.unattended_net_class_map(tmp_path / "run")
+
+
+def test_run_seed_passes_the_neck_map_to_the_route(mod, tmp_path):
+    seen = {}
+
+    class Harness:
+        def run_route(self, inp, routed, flags, timeout, log):
+            seen["flags"] = flags
+            Path(log).write_text("")
+            return {"exit_code": 0, "wall_s": 0.0}
+
+        def parse_route_log(self, text):
+            return {}
+
+        def pick_artifact(self, routed, code):
+            return None, None
+
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    for name in (mod.PCB_NAME, "bldc_controller.kicad_pro", *mod.GRADING_SIBLINGS):
+        (generated / name).write_text("")
+    run_dir = tmp_path / "seed-42"
+    row = mod.run_seed(Harness(), generated, tmp_path, 42, 60.0)
+    map_path = run_dir / mod.NET_CLASS_MAP_NAME
+    assert seen["flags"][: len(mod.route_flags(42))] == mod.route_flags(42)
+    assert seen["flags"][-2:] == ["--net-class-map", str(map_path)]
+    assert row["flags"] == seen["flags"]
+    assert sorted(json.loads(map_path.read_text())) == ["+5V", "GND"]
+
+
 def test_post_route_prep_runs_on_the_finished_board(mod, monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(
