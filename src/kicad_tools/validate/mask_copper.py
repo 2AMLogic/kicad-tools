@@ -700,7 +700,7 @@ def _continuation_end(identity, item, core, conductors, index, tolerance):
     of the pieces walked. ``None`` when no chain reaches the pad.
     """
     from shapely.geometry import Point
-    from shapely.ops import unary_union
+    from shapely.ops import unary_union  # type: ignore[import-untyped]
 
     ends = item["endpoints_mm"]
     width = item["width_mm"]
@@ -1088,7 +1088,7 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[ReinforceRun]:
     really stands on, within the strip tolerance (Issue #9315).
     """
     from shapely.geometry import Point
-    from shapely.ops import unary_union  # type: ignore[import-untyped]
+    from shapely.ops import unary_union
 
     from .rules.reinforcement_incomplete import MASK_TOLERANCE_MM
 
