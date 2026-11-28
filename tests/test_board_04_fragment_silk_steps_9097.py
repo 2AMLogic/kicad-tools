@@ -179,7 +179,7 @@ def test_main_wires_fragment_merge_and_silk_gate_before_the_refill() -> None:
             "merge_fragment_runs(routed_path)",
             "finalize_silkscreen(routed_path)",
             "check_silk_clear_of_holes(routed_path)",
-            "fill_success = fill_zones(routed_path)",
+            "fill_success = refill_pour_authoritative(routed_path)",
         )
     ]
     assert order == sorted(order)
