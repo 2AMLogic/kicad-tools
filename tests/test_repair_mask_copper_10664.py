@@ -25,7 +25,7 @@ from kicad_tools.drc.repair_mask_copper import (
 from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
 from kicad_tools.router.quantize import is_45_aligned
-from kicad_tools.sexp import parse_file
+from kicad_tools.sexp import SExp, parse_file
 from kicad_tools.validate.mask_copper import MaskCopperAssessment
 
 PAD = "pad-r1-1"
@@ -219,7 +219,9 @@ def test_pour_relief_dry_run_leaves_the_pad_alone(tmp_path):
 @pytest.mark.parametrize(
     ("zone", "pad_extra", "reason"),
     [
-        (_zone("solid"), "", "pour_relief_not_thermal"),
+        # KiCad saves a solid zone as (connect_pads yes (clearance ...)).
+        (_zone("yes"), "", "pour_relief_not_thermal"),
+        (_zone("thru_hole_only"), "", "pour_relief_not_thermal"),
         (_zone("no"), "", "pour_relief_not_thermal"),
         (_zone(), " (zone_connect 2)", "pour_relief_not_thermal"),
         (_zone(gap=0.3), "", "pour_relief_already_wide"),
@@ -233,6 +235,31 @@ def test_pour_relief_is_declined_where_it_cannot_apply(tmp_path, zone, pad_extra
     assert result.repaired == 0
     assert [u.reason for u in result.unrepaired] == [reason]
     assert board.read_text() == before
+
+
+@pytest.mark.parametrize(
+    ("pad_mode", "footprint_mode", "zone_style", "thermal"),
+    [
+        (1, 2, "yes", True),
+        (-1, 1, "yes", True),
+        (-1, 2, "", False),
+        (-1, -1, "", True),
+        (-1, -1, "yes", False),
+        (0, 1, "", False),
+    ],
+)
+def test_pour_relief_resolves_pad_and_footprint_overrides(
+    tmp_path, pad_mode, footprint_mode, zone_style, thermal
+):
+    board = _board(tmp_path, "", zone=_zone(zone_style), pad_extra=f" (zone_connect {pad_mode})")
+    doc = parse_file(board)
+    doc.find("footprint").append(SExp.list("zone_connect", footprint_mode))
+    board.write_text(doc.to_string())
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_finding(ZONE, "same-net")], **RELIEF)
+    repairer.save(board)
+    assert [u.reason for u in result.unrepaired] == ([] if thermal else ["pour_relief_not_thermal"])
+    assert _pad_gap(board, PAD) == (0.2 if thermal else None)
 
 
 def test_pour_relief_reads_the_board_not_the_message(tmp_path):

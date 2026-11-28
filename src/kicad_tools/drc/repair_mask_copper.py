@@ -1955,19 +1955,16 @@ class MaskCopperRepairer(CopperGapRepairer):
         footprint's, else the zone's ``connect_pads`` (thermal when no mode
         is written).  ``3`` is thermal for a plated through-hole pad only.
         """
-        mode: int | None = None
         for node in (pad_node, footprint_node):
             own = node.find_child("zone_connect") if node is not None else None
             if own is not None:
                 mode = own.get_int(0)
-                break
-        if mode is None:
-            connect = zone.find_child("connect_pads")
-            style = connect.get_value(0) if connect is not None else None
-            if not isinstance(style, str):
-                style = "yes"  # no mode written: thermal relief for every pad
-            mode = {"no": 0, "yes": 1, "solid": 2, "thru_hole_only": 3}.get(style)
-        return mode == 1 or (mode == 3 and thru_hole)
+                if mode is not None and mode != -1:  # -1 inherits from the next level
+                    return mode == 1 or (mode == 3 and thru_hole)
+        # KiCad omits the mode for thermal relief and writes "yes" for a solid join.
+        connect = zone.find_child("connect_pads")
+        style = connect.get_first_atom() if connect is not None else None
+        return style is None or (style == "thru_hole_only" and thru_hole)
 
     def _widen_pour_relief(
         self,
