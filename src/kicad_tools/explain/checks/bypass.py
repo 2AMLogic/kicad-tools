@@ -57,14 +57,16 @@ class BypassCapDistanceCheck:
             if not self.schematic_path.exists():
                 raise CheckIncomplete(f"schematic not found: {self.schematic_path}")
             return self.schematic_path
-        if pcb.path is None:
+        from kicad_tools.schema.pcb import source_path_of
+        from kicad_tools.sync.discover import resolve_schematic_for_pcb
+
+        source = source_path_of(pcb)
+        if source is None:
             raise CheckIncomplete(
                 "needs a schematic to know which pin each bypass cap decouples; "
                 "the PCB was not loaded from a file, so none can be resolved"
             )
-        from kicad_tools.sync.discover import resolve_schematic_for_pcb
-
-        resolved = resolve_schematic_for_pcb(pcb.path)
+        resolved = resolve_schematic_for_pcb(source)
         if resolved is None:
             raise CheckIncomplete(
                 "no schematic found next to the PCB; bypass-cap distances need the "

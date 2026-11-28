@@ -16,7 +16,7 @@ from shapely.geometry import Point, Polygon  # type: ignore[import-untyped]
 
 from kicad_tools.cli import runner
 from kicad_tools.exceptions import KiCadToolsError
-from kicad_tools.schema.pcb import PCB, Segment, Via
+from kicad_tools.schema.pcb import PCB, Segment, Via, source_path_of
 from kicad_tools.sidecars import copy_project_sidecars, stage_project_rules
 from kicad_tools.validate.connectivity import ConnectivityValidator
 from kicad_tools.validate.copper_contact import (
@@ -318,7 +318,7 @@ def _evaluate(
     rule_files: Sequence[Path] | None = None,
     include: Callable[[PourStub], bool] | None = None,
 ) -> PourStubProof | None:
-    source = pcb.path
+    source = source_path_of(pcb)
     if source is None or not pcb.zones or not pcb.segments:
         return None
     try:

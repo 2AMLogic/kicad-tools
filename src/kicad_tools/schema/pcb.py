@@ -278,6 +278,23 @@ def pad_net_names(pcb: PCB) -> set[str]:
     return {pad.net_name for _fp, pad in iter_copper_pads(pcb) if pad.net_name}
 
 
+def source_path_of(pcb: PCB) -> Path | None:
+    """The file whose siblings a PCB's project data is read from.
+
+    ``pcb.path`` keeps the caller's relative spelling, so a process that
+    changes its working directory between load and lookup would read another
+    project's ``.kicad_pro`` / ``.kicad_dru`` / schematic / ledger beside the
+    same relative name (issues #10683, #10743).  :attr:`PCB.source_path` is the
+    absolute path captured at load or the last successful save.  A PCB-like
+    object that exposes only ``path`` falls back to it; a board created in
+    memory has neither and gets ``None``.
+    """
+    path = getattr(pcb, "source_path", None)
+    if not isinstance(path, (str, Path)):
+        path = getattr(pcb, "path", None)
+    return Path(path) if isinstance(path, (str, Path)) else None
+
+
 def canonicalize_power_net(name: str) -> str:
     """Return the canonical form of a power-rail net name.
 
