@@ -143,6 +143,9 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(module, "finalize_silkscreen", lambda *a, **k: True)
         monkeypatch.setattr(module, "check_silk_clear_of_holes", lambda *a, **k: True)
         monkeypatch.setattr(module, "fill_zones", lambda *a, **k: True)
+        # Issue #10680: so does the authoritative refill that replaces the
+        # carved final fill.
+        monkeypatch.setattr(module, "refill_pour_authoritative", lambda *a, **k: True)
         # Issue #10664: the mask repair reads the routed PCB too.
         monkeypatch.setattr(
             module, "repair_mask_copper", lambda *a, **k: MaskRepairOutcome(0, 0, 0)

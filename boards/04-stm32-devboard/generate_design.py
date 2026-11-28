@@ -3052,6 +3052,56 @@ def fill_zones(routed_path: Path) -> bool:
     return True
 
 
+def refill_pour_authoritative(routed_path: Path) -> bool:
+    """
+    Re-pour every zone with KiCad's own fill engine (issue #10680).
+
+    :func:`fill_zones` runs ``kct zones fill``, which follows the native fill
+    with the #3711 foreign-pad carve: every foreign pad is kept
+    ``connect_pads clearance + min_thickness / 2`` away (0.225 mm for this
+    board's +3.3V zone).  A declared-solid pad at 0.5 mm pitch -- U2/9, between
+    U2/8 (GND) and U2/10 (no net) -- is cut back to a 0.25 mm channel at one
+    rim and a dead-end stub at the other, which the public ``mask_to_copper``
+    check reads as a thermal relief the pad never declared (exposed 0.4019 mm²,
+    0.0549 mm² beside the opening).  KiCad's fill honours the board's own
+    ``.kicad_dru`` instead (the U2 attach-zone rule spaces the pour 0.127 mm
+    from U2/8), so the pour wraps the rim and the join is solid.
+
+    This is the same refill ``kct fix-drc --only mask-copper`` saves (#10664)
+    and the native DRC gate measures.  The shipped pour must be this one:
+    re-pouring with the carve after the mask repair is what reintroduced the
+    U2/9 finding on every fresh regen.  The refill is saved in place; through
+    ``run_pinned_if_docker`` it resolves to the pinned image under
+    ``KCT_KICAD_DOCKER=1`` like the recipe's other native steps.  Returns True
+    when the saved board carries the refill.
+    """
+    from kicad_tools.cli.kicad_toolchain import run_pinned_if_docker
+    from kicad_tools.cli.runner import run_refill_zones
+
+    print("\n" + "=" * 60)
+    print("Re-pouring zones with KiCad's fill engine (issue #10680)...")
+    print("=" * 60)
+
+    authored_uuids = uuids_in_file(routed_path)
+    outcome: dict[str, Any] = {}
+
+    def refill() -> int:
+        result = run_refill_zones(routed_path, require_save=True)
+        outcome["result"] = result
+        return 0 if result.success else 1
+
+    if run_pinned_if_docker(refill, [routed_path.parent]) != 0:
+        result = outcome.get("result")
+        print(
+            f"\n   FAILED: authoritative zone refill did not save: {getattr(result, 'stderr', '')}"
+        )
+        return False
+    if uuids_in_file(routed_path) - authored_uuids:
+        canonicalize_pcb_file_uuids(routed_path, keep=authored_uuids)
+    print("\n   SUCCESS: authoritative zone refill completed")
+    return True
+
+
 CURATED_README = """\
 STM32 development board — fabrication and assembly package
 
@@ -3498,7 +3548,11 @@ def main() -> int:
         if not check_silk_clear_of_holes(routed_path):
             raise RuntimeError("check_silk_clear_of_holes did not pass (#9455)")
 
-        fill_success = fill_zones(routed_path)
+        # Issue #10680: the shipped pour is KiCad's own fill.  The mask repair
+        # above leaves that refill on the board; the carved ``kct zones fill``
+        # that used to run here re-necked the declared-solid U2/9 and
+        # reintroduced its ``mask_to_copper`` error on every fresh regen.
+        fill_success = refill_pour_authoritative(routed_path)
 
         # Step 7: Run DRC.  Issue #3912: run_drc still runs for its
         # side-effect -- it writes ``output/drc_report.json`` (the sidecar
