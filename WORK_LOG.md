@@ -16,6 +16,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-28
 
+- **PR #10718**: test: derive model hints from skills with a Model selection section
+- **PR #10713**: fix: report kct route as UNVERIFIED when the pour completion loop raises
+- **PR #10709**: fix(router): neck a pour weld the class width cannot place
+- **Issue #10717** (closed): Derive model_hints from the skills that have a '## Model selection' section
+- **Issue #10710** (closed): kct route exits 0 (SUCCESS) when the pour-oracle stage raises internally and pour pads stay open
 - **PR #10714**: fix(router): refuse unsupported chamfers on named pad links
 - **Issue #10711** (closed): link_router._chamfer_ratio over-claims a cut corner on a malformed or negative chamfer_ratio, where current_paths fails closed
 - **PR #10705**: docs: clarify model selection in the tapeout, readiness, HV-loop and help skills
