@@ -644,9 +644,9 @@ base.
 | Revision | Seed | Route exit | Nets | Connections | Native DRC err / warn / open | ERC | Nightly errors / warnings | Copper and label LVS | Vias | Wall (s) |
 | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | ---: |
 | `2d894a267` (base) | 42 | 3 | 44/46 | 141/143 | 0 / 0 / 2 | 0 | 0 / 12 | copper dirty | 120 | 397.6 |
-| this change | 42 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 14 | clean | 122 | 585.7 |
-| this change | 7 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 14 | clean | 122 | 586.1 |
-| this change | 1337 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 14 | clean | 122 | 586.1 |
+| this change (synced with `0bb1e449b`) | 42 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 15 | clean | 122 | 700.1 |
+| this change (synced with `0bb1e449b`) | 7 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 15 | clean | 122 | 700.1 |
+| this change (synced with `0bb1e449b`) | 1337 | 0 | 46/46 | 143/143 | 0 / 0 / 0 | 0 | 0 / 15 | clean | 122 | 699.9 |
 
 The three seeds of this change were routed in parallel on the same host,
 with a test run beside them, and saved byte-identical boards (SHA-256
@@ -672,7 +672,10 @@ as 2 `netclass_track_width_mismatch` warnings (`+5V`, `GND`) -- the two
 findings the board carried before #10627, back because the default `Power`
 class declares no `neck_trace_width` for the agreement rule to excuse. The
 reviewed map (`redesign/net_class_map.json`) declares 0.15 mm for both nets;
-the unattended route does not read it. The other 12 warnings are unchanged
-from the base (8 `redundant_copper_covered`, 4 `redundant_copper_detour`).
+the unattended route does not read it. Twelve of the other warnings are the
+base's (8 `redundant_copper_covered`, 4 `redundant_copper_detour`). The last
+is one `sharp_trace_corner` on `RESET` at (160.10, 95.06): the same board
+bytes measured 14 warnings before this branch was synced with `origin/main`
+@ `0bb1e449b`, whose `3e453299a` made that rule detect acute branches.
 `--skip mask_to_copper` stays, and the full-mask counts were not re-measured
 here.
