@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import combinations
 from operator import itemgetter
@@ -90,7 +90,9 @@ def _copper_discs(pcb: PCB) -> list[tuple[str, tuple[str, ...], float, float, fl
     from .clearance import CopperElement
 
     discs: list[tuple[str, tuple[str, ...], float, float, float, Any]] = []
-    for fp in pcb.footprints:
+    # ``getattr``: rule tests drive this with duck-typed boards that carry
+    # tracks and vias but no footprints.
+    for fp in getattr(pcb, "footprints", None) or []:
         for pad in fp.pads:
             dx, dy = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
             try:
@@ -316,6 +318,54 @@ def _contacts(
             if tolerance < along < length_sq - tolerance and abs(across) < tolerance:
                 t = along / length_sq
                 yield ax + t * dx, ay + t * dy
+
+
+def sharp_vertex(
+    pcb: PCB,
+    net_name: str,
+    layer: str,
+    point: tuple[float, float],
+    *,
+    added: Sequence[Any] = (),
+    removed: Sequence[Any] = (),
+    copper_discs: Sequence[tuple[str, tuple[str, ...], float, float, float, Any]] | None = None,
+) -> tuple[float, str] | None:
+    """``(angle, corner_class)`` were ``sharp_trace_corner`` to report ``point``.
+
+    The vertex ``pcb`` has at ``point`` on ``net_name`` / ``layer`` once the
+    tracks ``removed`` (by identity, as ``pcb.segments`` holds them) are gone
+    and the ``added`` tracks (:class:`Segment` objects) are present. It uses
+    the rule's own junction search, so a branch that lands inside a continuous
+    track is judged exactly as the rule judges it (issue #10675): an edit that
+    taps a straight run at 45 deg is declined here, not only when the saved
+    board is re-checked. ``kct fix-drc --only redundant-copper`` (issue #10667)
+    calls it to decline a candidate before it is applied.
+
+    Callers evaluating many candidate vertices on one board can pass
+    ``copper_discs`` precomputed via :func:`_copper_discs` to avoid rebuilding
+    every pad polygon per call.
+    """
+    from kicad_tools.explain.checks.acid_trap import AcidTrapCheck
+
+    discs = _copper_discs(pcb) if copper_discs is None else copper_discs
+    if _is_buried(discs, net_name, layer, point):
+        return None
+    tracks = [
+        s
+        for s in pcb.segments
+        if s.layer == layer
+        and (s.net_name or "") == net_name
+        and all(s is not gone for gone in removed)
+    ]
+    tracks.extend(added)
+    check = AcidTrapCheck()
+    for joint in _group_junctions(tracks, check):
+        if math.dist(joint.location, point) > 0.02:
+            continue
+        angle = min(joint.open_angles(check), default=None)
+        if angle is not None:
+            return angle, "junction" if joint.leg_count >= 3 else "bend"
+    return None
 
 
 class SharpTraceCornerRule(DRCRule):

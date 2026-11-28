@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -283,10 +284,12 @@ def _zone_strip(layer="F.Cu"):
 def _branch(offset):
     """Same-net diagonal parallel to the shortcut at the given centreline gap.
 
-    Ends at 3.6 along the run so its tip stays clear of the replacement's
-    second leg (only the parallel side edge faces the shortcut).
+    Ends 3.3 along the run so its tip stays clear of the replacement's second
+    leg and of the chain's own second leg (only the parallel side edge faces
+    the shortcut).  At 3.6 the ``0.4`` branch's tip landed on that leg --
+    a tap, which since Issue #10667 cuts the chain there instead.
     """
-    return _track((offset, -offset), (3.6 + offset, 3.6 - offset))
+    return _track((offset, -offset), (3.3 + offset, 3.3 - offset))
 
 
 DIAGONAL_FIRST = " -> (4.00, 4.00) -> "
@@ -838,3 +841,162 @@ def test_overlap_pad_bypass_rejected_falls_back_to_pieces(tmp_path):
     (finding,) = _stair_findings(RedundantCopperRule().check(pcb, None))
     assert finding.location == (0.5, 1.5)
     assert "(0.50, 1.50) -> (4.50, 1.50) -> (6.00, 3.00)" in finding.message
+
+
+# --- same-net track junctions (Issue #10667) ---------------------------------
+#
+# Board 03 [RESET B.Cu, JOY_X F.Cu]: the chain walk only ever saw segment
+# endpoints, so a same-net track landing mid-span on a chain segment (or
+# touching a chain node by overlap) was invisible.  The reported shortcut ran
+# straight past the landing and, once applied, orphaned the landing track.
+# The pad / via centre rule of Issue #9817 ("a terminal is never a
+# pass-through vertex") applies to tracks the same way.
+
+# The staircase of Issue #8831 with a same-net tap landing at (14, 4), the
+# midpoint of its (12, 4) -> (16, 4) leg.
+_LANDING_Y = 9.0
+
+
+def _staircase_with_landing(layer="F.Cu"):
+    tap = _Seg((14, 4), (14, _LANDING_Y), width=2.6, net_name="PWR", layer=layer)
+    return [*_staircase(), tap]
+
+
+def test_staircase_control_without_landing_spans_the_whole_chain():
+    (finding,) = _stair_findings(_run(_staircase()))
+    assert "from (0.00, 0.00) to (24.00, 10.00)" in finding.message
+
+
+def _reported_path(finding) -> list[tuple[float, float]]:
+    text = finding.message.split("saves")[1].split("(`kct")[0]
+    return [
+        tuple(float(v) for v in p.split(",")) for p in re.findall(r"\(([\d.]+, [\d.]+)\)", text)
+    ]
+
+
+def _on_path(point, path) -> bool:
+    for a, b in zip(path, path[1:], strict=False):
+        u = ((point[0] - a[0]) * (b[0] - a[0]) + (point[1] - a[1]) * (b[1] - a[1])) / math.dist(
+            a, b
+        ) ** 2
+        if (
+            -1e-9 <= u <= 1 + 1e-9
+            and math.dist(point, (a[0] + u * (b[0] - a[0]), a[1] + u * (b[1] - a[1]))) <= 1e-6
+        ):
+            return True
+    return False
+
+
+def test_staircase_chain_is_cut_at_a_same_net_track_landing():
+    """No shortcut may run past the tap: each piece is judged on its own.
+
+    The piece before the tap may replace its cut segment whole, running on
+    through the tap, which then stays mid-span (Issue #10667); the piece
+    after it starts at the tap.  Either way the tap stays on the copper.
+    """
+    found = _stair_findings(_run(_staircase_with_landing()))
+    assert {v.location for v in found} == {(0.0, 0.0), (14.0, 4.0)}
+    for finding in found:
+        path = _reported_path(finding)
+        assert _on_path((14.0, 4.0), path), path
+        assert "from (0.00, 0.00) to (24.00, 10.00)" not in finding.message
+
+
+def test_staircase_landing_on_another_layer_does_not_cut_the_chain():
+    (finding,) = _stair_findings(_run(_staircase_with_landing(layer="B.Cu")))
+    assert "from (0.00, 0.00) to (24.00, 10.00)" in finding.message
+
+
+def test_staircase_foreign_landing_does_not_cut_the_chain():
+    tap = _Seg((14, 4), (14, _LANDING_Y), width=0.2, net_number=2, net_name="OTHER")
+    (finding,) = _stair_findings(_run([*_staircase(), tap]))
+    assert "from (0.00, 0.00) to (24.00, 10.00)" in finding.message
+
+
+def test_detour_through_a_same_net_landing_is_not_one_detour():
+    """Board 03 [VBUS F.Cu]: a path that passes a junction is two runs.
+
+    (0,0) -> (0,5) -> (5,5) -> (5,0) is a detour on its own; with a same-net
+    tap landing on its top leg the run up to the tap and the run past it are
+    separate conductors, neither of which detours.
+    """
+    loop = [_Seg((0, 0), (0, 5)), _Seg((0, 5), (5, 5)), _Seg((5, 5), (5, 0))]
+    assert _ids(_run(loop)) == ["redundant_copper_detour"]  # control
+    tap = _Seg((2.5, 5), (2.5, 9))
+    assert _run([*loop, tap]).violations == []
+
+
+def test_detour_through_a_same_net_via_centre_is_not_one_detour():
+    segs = [_Seg((0, 0), (0, 5)), _Seg((0, 5), (1, 5)), _Seg((1, 5), (1, 0))]
+    assert _ids(_run(segs)) == ["redundant_copper_detour"]  # control
+    assert _run(segs, [_Via((0, 5))]).violations == []
+
+
+def test_detour_through_an_overlap_held_track_end_is_not_one_detour():
+    """The corner node is touched by a same-net track that ends 0.15 mm away.
+
+    Nothing lands on a centreline and no endpoint coincides; the copper
+    simply merges (0.05 mm).  The node is a junction all the same.
+    """
+    loop = [_Seg((0, 0), (0, 5)), _Seg((0, 5), (5, 5)), _Seg((5, 5), (5, 0))]
+    overlap = _Seg((0, 5.15), (-3, 8.15))
+    assert _run([*loop, overlap]).violations == []
+
+
+# Board 03 [JOY_X F.Cu]: the chain leaves a trunk a tap joins at 45 degrees,
+# and a foreign track sits where the longer way past the tap would run.
+# The trunk (0,0) -> (6,0) carries the tap at (3,0) and runs on into the
+# two-segment tail; the staircase is the trunk's piece past the tap plus the tail.
+_JOY_TRUNK = ((0, 0), (6, 0))
+_JOY_TAIL = ((6, 0), (6.8, -0.8), (9.66, -0.8))
+_JOY_TAP = ((3, 0), (1.5, 1.5))
+_JOY_BLOCKER = ((7.0, 0.3), (9.0, 0.3))
+
+
+def _joy_board(*, tap=True, blocker=True):
+    segs = [_Seg(_JOY_TRUNK[0], _JOY_TRUNK[1]), *(_Seg(a, b) for a, b in _zip_pairs(_JOY_TAIL))]
+    if tap:
+        segs.append(_Seg(*_JOY_TAP))
+    if blocker:
+        segs.append(_Seg(*_JOY_BLOCKER, net_number=2, net_name="OTHER"))
+    return segs
+
+
+def _zip_pairs(points):
+    return list(zip(points, points[1:], strict=False))
+
+
+def test_shortcut_that_opens_an_acute_corner_is_not_reported():
+    """Trimming at the tap exposes its 45-degree wedge; round it is blocked.
+
+    Trimming the trunk at the tap makes the trunk's end and the tap an
+    explicit 45-degree corner.  Replacing the trunk whole is legal only
+    along its own line, which runs into the foreign track.  No legal path
+    remains, so nothing is asked for.
+    """
+    assert _stair_findings(_run(_joy_board())) == []
+
+
+def test_shortcut_through_the_tap_is_reported_when_the_line_is_clear():
+    """Without the foreign track the trunk is replaced along its own line,
+    and the tap stays mid-span on it."""
+    (finding,) = _stair_findings(_run(_joy_board(blocker=False)))
+    assert "(0.00, 0.00) -> (8.86, 0.00) -> (9.66, -0.80)" in finding.message
+    assert _on_path((3.0, 0.0), _reported_path(finding))
+
+
+def test_staircase_without_the_tap_is_reported_as_before():
+    """Control: the same chain with no tap takes the diagonal-first path."""
+    (finding,) = _stair_findings(_run(_joy_board(tap=False)))
+    assert "(0.00, 0.00) -> (0.80, -0.80) -> (9.66, -0.80)" in finding.message
+
+
+def test_fragment_run_is_not_cut_by_a_landing():
+    """Fragments are still counted along the whole run (Issue #8218).
+
+    The tap lands mid-span, where the endpoint walk never saw it; a tap on a
+    run node is a junction and already splits the run.
+    """
+    run = [_Seg((i * 0.08, 0), ((i + 1) * 0.08, 0)) for i in range(4)]
+    tap = _Seg((0.12, 0), (0.12, 2))
+    assert _ids(_run([*run, tap])) == ["redundant_copper_fragments"]

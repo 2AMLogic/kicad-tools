@@ -17,9 +17,12 @@ error), each with a location:
 ``redundant_copper_detour``
     A chain of segments (joined through degree-2 nodes) whose routed
     length exceeds ``DETOUR_RATIO`` times the straight distance between
-    its ends, and is longer than ``DETOUR_MIN_LENGTH_MM``.  Known
-    limitation: intentional length-tuning meanders (match groups, diff
-    pairs) are also reported; treat those as expected advisories.
+    its ends, and is longer than ``DETOUR_MIN_LENGTH_MM``.  The chain ends
+    at every junction -- a same-net pad or via, and a same-net track that
+    lands on the chain or touches one of its nodes (Issue #10667) -- so two
+    conductors meeting at a tap are never read as one long way round.
+    Known limitation: intentional length-tuning meanders (match groups,
+    diff pairs) are also reported; treat those as expected advisories.
 
 ``redundant_copper_staircase``
     A chain of >= ``STAIRCASE_MIN_SEGMENTS`` same-net, same-layer segments
@@ -28,7 +31,7 @@ error), each with a location:
     bends that is clear of foreign copper at the chain's width plus
     clearance (Issue #8831).  ``redundant_copper_detour`` cannot see this: a
     staircase hugging a diagonal has a length ratio near 1.  Repair with
-    ``kct optimize-traces``.
+    ``kct optimize-traces`` or ``kct fix-drc --only redundant-copper``.
 
     The fewer-bend path is reported only when it is legal copper (Issue
     #9817): every leg clears foreign copper at the pair requirement
@@ -45,9 +48,13 @@ error), each with a location:
     #9862). An explicit threshold applies to all copper. The fab-view policy
     keeps zone-fill gaps informational. A rejected bend falls through to the
     next candidate.
-    Staircase chains end at same-net pad copper and same-net via centres:
-    a pad or via centre is a terminal, never a pass-through vertex, so a
-    "shortcut" can never bypass and disconnect it; a node joined to
+    Chains end at junctions: same-net pad copper and same-net via centres
+    (Issue #9817) -- a pad or via centre is a terminal, never a pass-through
+    vertex, so a "shortcut" can never bypass and disconnect it -- and, since
+    Issue #10667, same-net tracks: a chain is cut where a track lands on the
+    centreline of one of its segments, and at a node a track touches by
+    overlap.  Each piece is judged on its own, so a shortcut always starts
+    or ends at the tap it would otherwise have orphaned.  A node joined to
     same-net copper only by overlap may be spanned when the replacement
     copper keeps contact with every terminal it spans (Issue #9848).
 
@@ -71,16 +78,21 @@ error), each with a location:
     ``COVERED_TOL_MM``, shared with ``kct pcb prune``), i.e. it is wholly
     hidden under the longer one.  Exact duplicates are only
     reported as ``redundant_copper_duplicate``.  Repair with
-    ``kct pcb prune`` (connectivity-guarded), not ``dedupe``.
+    ``kct pcb prune`` (connectivity-guarded), not ``dedupe``, or with the
+    verified ``kct fix-drc --only redundant-copper`` (Issue #10667), which
+    also rewrites the staircases and detours above.
 
-Redundant *branches* and the repair passes are the scope of #8216; this
-rule only reports.
+The repair itself lives in ``kicad_tools.drc.repair_redundant_copper``;
+this rule reports, and its chain walk and shortcut gates are what that
+repair re-runs so an applied edit is held to the standard that reported it.
+Redundant *branches* are the scope of #8216.
 """
 
 from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from kicad_tools.core.layers import via_spans_layer
@@ -120,6 +132,13 @@ STAIRCASE_MASK_AREA_TOL_MM2 = 1e-6
 TERMINAL_CENTRE_EPS_MM = 0.01
 #: Rounding allowance for a physically touching pair of copper edges.
 _CONTACT_EPS_MM = 1e-9
+#: How far (mm) a tap may lie from a replacement leg's centreline and still
+#: count as kept by it -- the line ``redundant_copper_covered`` reads.
+_COVERED_TOL = 1e-3
+#: Projection parameter, at each end of a chain edge, inside which a track
+#: end is the edge's own node (already a junction) rather than a mid-span
+#: landing; it only absorbs float noise in the projection.
+_LANDING_END_EPS = 1e-9
 #: Construction uncertainty (mm) of the analytic mask model -- the same
 #: budget ``mask_copper`` derives from its export provenance: twice the
 #: per-construction curve error plus the 4 nm float term.
@@ -146,6 +165,15 @@ def _q(point: tuple[float, float]) -> tuple[float, float]:
     return (round(point[0], _QUANT), round(point[1], _QUANT))
 
 
+def _along(p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Where ``p`` falls on the line ``a`` -> ``b`` (0 at ``a``, 1 at ``b``)."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length2 = dx * dx + dy * dy
+    if length2 <= 0.0:
+        return 0.0
+    return ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length2
+
+
 class _MaskZone(NamedTuple):
     """One pad's mask-opening zone (Issue #9817) and its owner's geometry.
 
@@ -159,6 +187,39 @@ class _MaskZone(NamedTuple):
     opening: Any  # the opening itself
     margin: float  # the pad's effective mask expansion
     kind: str  # native object kind, e.g. ``pad:rect``
+
+
+class _ChainOption(NamedTuple):
+    """One way to replace a chain the walk ended at a junction (Issue #10667).
+
+    ``steps`` are what the copper gates judge: a cut end segment replaced
+    whole where the new leg runs on through its tap.  ``ends`` are the
+    replacement's two end nodes, ``landings`` the ``(tap node, at the first
+    end)`` pairs the leg must keep, ``trims`` whether each cut end is instead
+    trimmed at its junction (``False`` for a whole end segment).
+    """
+
+    steps: tuple
+    ends: tuple[tuple[float, float], tuple[float, float]]
+    landings: tuple
+    trims: tuple[bool, bool]
+
+
+class _ChainGraph(NamedTuple):
+    """A (net, layer) group's chain graph with every junction marked.
+
+    ``edges`` / ``node_edges`` are :meth:`RedundantCopperRule._endpoint_graph`'s,
+    cut at every same-net track junction (Issue #10667).  ``stops`` are the
+    nodes a chain ends at; ``overlap_nodes`` the nodes a same-net pad or via
+    spans only by overlap (Issue #9848); ``terminals`` the copper shape of
+    every same-net pad and via on the layer.
+    """
+
+    edges: list[Any]
+    node_edges: dict[tuple[float, float], list[int]]
+    stops: frozenset
+    overlap_nodes: frozenset
+    terminals: tuple
 
 
 def _pad_kind(pad: Any) -> str:
@@ -213,8 +274,53 @@ class RedundantCopperRule(DRCRule):
         self._gap_mm = physical_copper_gap_mm
         self._gap_policy = fab_view_gap_policy
         self._gap_oracle: Any | None = None
+        # The Board 04 repair also reads foreign copper on a fresh rule instance.
+        self._static_foreign_cache: dict[str, list[tuple[Any, float, float, float, float]]] = {}
 
-    def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
+    def bind(self, pcb: PCB, design_rules: DesignRules | None) -> None:
+        """Set the per-board state the chain gates read, without reporting.
+
+        ``check`` calls this first; the redundant-copper repair
+        (``kicad_tools.drc.repair_redundant_copper``) calls it on the board it
+        is editing so its candidate shortcuts are judged by exactly the gates
+        that reported them (Issue #10667).
+        """
+        self._origin = board_origin(pcb)
+        self._pcb = pcb
+        self._clearance = (
+            getattr(design_rules, "min_clearance_mm", None) or STAIRCASE_DEFAULT_CLEARANCE_MM
+        )
+        self._requirement = self._pair_requirement(pcb)
+        self._req_cache: dict[tuple[int, int], float] = {}
+        self._foreign_cache: dict[str, list[tuple[Any, float, float, float, float]]] = {}
+        self._static_foreign_cache.clear()
+        self._mask_cache: dict[str, list[_MaskZone]] = {}
+        self._copper_discs_cache: list[Any] | None = None
+        self._gap_oracle = None  # Rebuild lazily for this PCB.
+
+    def invalidate_copper(self) -> None:
+        """Forget per-layer copper caches after an edit (pads and masks keep)."""
+        self._foreign_cache = {}
+        self._gap_oracle = None
+
+    def _copper_discs(self) -> list[Any]:
+        """Pad/via burial discs for the bound PCB, built once per ``bind``."""
+        if self._copper_discs_cache is None:
+            from .sharp_trace_corner import _copper_discs
+
+            self._copper_discs_cache = _copper_discs(self._pcb)
+        return self._copper_discs_cache
+
+    @staticmethod
+    def chain_groups(pcb: PCB) -> dict[tuple[int, str], list[Any]]:
+        """Routed segments grouped by ``(net_number, layer)``."""
+        groups: dict[tuple[int, str], list[Any]] = defaultdict(list)
+        for seg in pcb.segments:
+            if seg.layer and seg.width > 0:
+                groups[(seg.net_number, seg.layer)].append(seg)
+        return groups
+
+    def check(self, pcb: PCB, design_rules: DesignRules | None) -> DRCResults:
         results = DRCResults()
         results.rules_checked = 1
         for rid in (
@@ -230,21 +336,9 @@ class RedundantCopperRule(DRCRule):
         results.rules_checked_by_rule["redundant_copper_pour_stub"] = 0
 
         segments = [s for s in pcb.segments if s.layer and s.width > 0]
-        self._origin = board_origin(pcb)
+        self.bind(pcb, design_rules)
         self._check_duplicates(segments, results)
-
-        groups: dict[tuple[int, str], list[Any]] = defaultdict(list)
-        for seg in segments:
-            groups[(seg.net_number, seg.layer)].append(seg)
-        self._pcb = pcb
-        self._clearance = (
-            getattr(design_rules, "min_clearance_mm", None) or STAIRCASE_DEFAULT_CLEARANCE_MM
-        )
-        self._requirement = self._pair_requirement(pcb)
-        self._foreign_cache: dict[str, list[Any]] = {}
-        self._mask_cache: dict[str, list[_MaskZone]] = {}
-        self._gap_oracle = None  # Rebuild lazily for this PCB.
-        for segs in groups.values():
+        for segs in self.chain_groups(pcb).values():
             self._check_chains(segs, results)
             self._check_covered(segs, results)
 
@@ -367,8 +461,53 @@ class RedundantCopperRule(DRCRule):
                     break
 
     def _check_chains(self, segs: list[Any], results: DRCResults) -> None:
-        """Fragment-run and detour detection over same-net/layer chains."""
-        # Drop exact duplicates so they don't distort node degrees.
+        """Fragment, detour and staircase detection over same-net/layer chains."""
+        plain_edges, plain_nodes = self._endpoint_graph(segs)
+        if not plain_edges:
+            return
+        visited: set[int] = set()
+        for start_idx in range(len(plain_edges)):
+            if start_idx not in visited:
+                chain = self._walk_chain(start_idx, plain_edges, plain_nodes, visited)
+                self._report_chain(chain, results)
+
+        graph = self._junction_graph(segs)
+        for chain in self._detour_chains(graph):
+            self._report_detour(chain, results)
+        self._report_staircases(graph, results, graph.terminals)
+
+    def _report_staircases(
+        self, graph: _ChainGraph, results: DRCResults, terminal_shapes: tuple[KShape, ...]
+    ) -> None:
+        """Report each chain's shortcut, else the pieces its overlap nodes cut
+        it into (Issue #9848: never both)."""
+        for chain in self._walk_graph(graph, graph.stops):
+            first_seg = chain[0][0]
+            label, layer = self._net_label(first_seg), first_seg.layer
+            if self._report_staircase(chain, label, layer, results, terminal_shapes):
+                continue
+            if not any(step[2] in graph.overlap_nodes for step in chain[:-1]):
+                continue
+            piece: list[Any] = []
+            for step in chain:
+                piece.append(step)
+                if step[2] in graph.overlap_nodes:
+                    if len(piece) > 1:
+                        self._report_staircase(piece, label, layer, results, terminal_shapes)
+                    piece = []
+            if len(piece) > 1:
+                self._report_staircase(piece, label, layer, results, terminal_shapes)
+
+    @staticmethod
+    def _endpoint_graph(
+        segs: list[Any],
+    ) -> tuple[list[Any], dict[tuple[float, float], list[int]]]:
+        """``(edges, node_edges)`` of the plain endpoint graph.
+
+        Exact duplicates are dropped so they don't distort node degrees.  An
+        edge is ``((a, b), segment)`` with ``a <= b``; ``node_edges`` maps a
+        node to the indices of the edges meeting there.
+        """
         unique: dict[tuple[Any, ...], Any] = {}
         for seg in segs:
             a, b = _q(seg.start), _q(seg.end)
@@ -376,30 +515,36 @@ class RedundantCopperRule(DRCRule):
                 continue
             unique.setdefault((a, b) if a <= b else (b, a), seg)
         edges = list(unique.items())
-        if not edges:
-            return
         node_edges: dict[tuple[float, float], list[int]] = defaultdict(list)
         for i, ((a, b), _s) in enumerate(edges):
             node_edges[a].append(i)
             node_edges[b].append(i)
+        return edges, node_edges
 
-        visited: set[int] = set()
-        for start_idx in range(len(edges)):
-            if start_idx in visited:
-                continue
-            chain = self._walk_chain(start_idx, edges, node_edges, visited)
-            self._report_chain(chain, results)
+    def _junction_graph(self, segs: list[Any]) -> _ChainGraph:
+        """The endpoint graph with every junction a chain must stop at.
 
-        # Issue #9817: for the staircase shortcut a same-net pad or via is a
-        # chain terminal, never a pass-through vertex -- straightening across
-        # it would bypass and disconnect it.  (Fragment and detour chains are
-        # walked as before.)  Issue #9848: a node AT a terminal's centre
-        # stays a hard stop; a node on the terminal's copper only by overlap
-        # may be spanned when the replacement copper keeps contact with every
-        # terminal it spans, else the chain falls back to the pieces split
-        # at those nodes (the pre-#9848 findings).
+        Issue #9817: for the staircase shortcut a same-net pad or via is a
+        chain terminal, never a pass-through vertex -- straightening across it
+        would bypass and disconnect it.  Issue #9848: a node AT a terminal's
+        centre stays a hard stop (``stops``); a node on the terminal's copper
+        only by overlap (``overlap_nodes``) may be spanned when the
+        replacement copper keeps contact with every terminal it spans, else
+        the chain falls back to the pieces split at those nodes.
+
+        Issue #10667: the same holds for same-net *tracks*.  A track landing
+        mid-span on a chain segment, or touching a chain node by overlap, is a
+        junction the endpoint graph never saw: Board 03's reported shortcut
+        ran past such a landing and, once applied, left the landing track
+        dangling.  :meth:`_junction_edges` cuts the edges there; the cuts are
+        stops for the detour measurement too, so a run through a junction is
+        never read as one long detour.
+        """
+        edges, node_edges = self._endpoint_graph(segs)
+        if not edges:
+            return _ChainGraph(edges, node_edges, frozenset(), frozenset(), ())
+        edges, node_edges, junction_stops = self._junction_edges(edges, node_edges, segs)
         terminals = self._terminal_shapes(segs[0].net_number, segs[0].layer)
-        terminal_shapes = [shape for _centre, shape in terminals]
         centre_stops: set[tuple[float, float]] = set()
         overlap_nodes: set[tuple[float, float]] = set()
         for node, idxs in node_edges.items():
@@ -411,27 +556,130 @@ class RedundantCopperRule(DRCRule):
                 centre_stops.add(node)
             elif centres:
                 overlap_nodes.add(node)
-        visited = set()
-        for start_idx in range(len(edges)):
-            if start_idx in visited:
+        return _ChainGraph(
+            edges,
+            node_edges,
+            frozenset(junction_stops | centre_stops),
+            frozenset(overlap_nodes),
+            tuple(shape for _centre, shape in terminals),
+        )
+
+    @staticmethod
+    def _junction_edges(
+        edges: list[Any],
+        node_edges: dict[tuple[float, float], list[int]],
+        segments: list[Any],
+    ) -> tuple[list[Any], dict[tuple[float, float], list[int]], set[tuple[float, float]]]:
+        """Cut ``edges`` where a same-net track of this layer joins one mid-span.
+
+        Returns ``(edges, node_edges, stops)``.  Every chain edge a track end
+        lands on the centreline of is cut at that end's node -- the one clean
+        track join, as ``kct pcb prune`` models it; an end merely touching the
+        copper from beside is not a landing -- and each cut node is a stop.  So
+        is a two-edge node whose copper a same-net track touches without
+        ending there.  Pieces keep the landing segment, so a chain that ends
+        on a piece still names it; the pieces of one segment are never in one
+        chain.
+        """
+        cut: dict[int, list[tuple[float, tuple[float, float]]]] = {}
+        for index, ((a, b), seg) in enumerate(edges):
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            length2 = dx * dx + dy * dy
+            if length2 <= 0.0:
                 continue
-            chain = self._walk_chain(start_idx, edges, node_edges, visited, centre_stops)
-            if not chain:
+            points: dict[tuple[float, float], float] = {}
+            for other in segments:
+                if other is seg:
+                    continue
+                for end in (other.start, other.end):
+                    u = ((end[0] - a[0]) * dx + (end[1] - a[1]) * dy) / length2
+                    if not _LANDING_END_EPS < u < 1.0 - _LANDING_END_EPS:
+                        continue
+                    cx, cy = a[0] + u * dx, a[1] + u * dy
+                    if math.hypot(end[0] - cx, end[1] - cy) > COVERED_TOL_MM:
+                        continue
+                    node = _q(end)
+                    if node != a and node != b:
+                        points[node] = u
+            if points:
+                cut[index] = sorted((u, node) for node, u in points.items())
+
+        split: list[Any] = []
+        for index, edge in enumerate(edges):
+            (a, b), seg = edge
+            chain_pts = [a, *[node for _u, node in cut.get(index, ())], b]
+            split.extend(
+                (((p, q), seg) if p <= q else ((q, p), seg))
+                for p, q in zip(chain_pts, chain_pts[1:], strict=False)
+                if p != q
+            )
+        rebuilt: dict[tuple[float, float], list[int]] = defaultdict(list)
+        for i, ((a, b), _s) in enumerate(split):
+            rebuilt[a].append(i)
+            rebuilt[b].append(i)
+        stops: set[tuple[float, float]] = {node for points in cut.values() for _u, node in points}
+        # An overlap-held join: a same-net track's copper touches a two-edge
+        # node without any of its own edges ending there.  The chain's own
+        # neighbours don't count -- a track that also meets an adjacent node
+        # is anchored there, and that node is a junction in its own right.
+        for node, idxs in rebuilt.items():
+            if len(idxs) != 2 or node in stops:
                 continue
-            first_seg = chain[0][0]
-            label = self._net_label(first_seg)
-            if self._report_staircase(chain, label, first_seg.layer, results, terminal_shapes):
-                continue
-            if not any(step[2] in overlap_nodes for step in chain[:-1]):
+            first, second = split[idxs[0]][1], split[idxs[1]][1]
+            (a1, b1), (a2, b2) = split[idxs[0]][0], split[idxs[1]][0]
+            own = {_q(a1), _q(b1), _q(a2), _q(b2)}
+            disc = KVia(*node, diameter=max(first.width or 0.0, second.width or 0.0))
+            for other in segments:
+                if other is first or other is second:
+                    continue
+                if any(_q(p) in own for p in (other.start, other.end)):
+                    continue
+                if copper_gap(disc, segment_shape(other)) <= _CONTACT_EPS_MM:
+                    stops.add(node)
+                    break
+        return split, rebuilt, stops
+
+    def _detour_chains(self, graph: _ChainGraph) -> list[list[Any]]:
+        """Maximal runs between junctions: every hard stop, and every node a
+        same-net pad or via spans only by overlap (a terminal all the same)."""
+        return self._walk_graph(graph, graph.stops | graph.overlap_nodes)
+
+    def _staircase_chains(self, graph: _ChainGraph) -> list[list[Any]]:
+        """Every chain the staircase rule judges, whole first.
+
+        A chain through an overlap node is tried whole (Issue #9848: legal
+        when the replacement keeps every spanned terminal's contact), then as
+        the pieces split at those nodes (the pre-#9848 findings).
+        """
+        chains = self._walk_graph(graph, graph.stops)
+        whole = list(chains)
+        for chain in whole:
+            if not any(step[2] in graph.overlap_nodes for step in chain[:-1]):
                 continue
             piece: list[Any] = []
             for step in chain:
                 piece.append(step)
-                if step[2] in overlap_nodes:
-                    self._report_staircase(piece, label, first_seg.layer, results, terminal_shapes)
+                if step[2] in graph.overlap_nodes:
+                    if len(piece) > 1:
+                        chains.append(piece)
                     piece = []
-            if piece:
-                self._report_staircase(piece, label, first_seg.layer, results, terminal_shapes)
+            if len(piece) > 1:
+                chains.append(piece)
+        return chains
+
+    @staticmethod
+    def _walk_graph(graph: _ChainGraph, stops: frozenset) -> list[list[Any]]:
+        chains: list[list[Any]] = []
+        visited: set[int] = set()
+        for start_idx in range(len(graph.edges)):
+            if start_idx in visited:
+                continue
+            chain = RedundantCopperRule._walk_chain(
+                start_idx, graph.edges, graph.node_edges, visited, stops
+            )
+            if chain:
+                chains.append(chain)
+        return chains
 
     def _terminal_shapes(self, net: int, layer: str) -> list[tuple[tuple[float, float], KShape]]:
         """``(centre, copper shape)`` per same-net pad/via on ``layer``."""
@@ -439,7 +687,7 @@ class RedundantCopperRule(DRCRule):
             return []
         return [
             ((elem.geometry[0], elem.geometry[1]), elem.kernel_shape())
-            for elem in self._foreign_elements(layer)
+            for elem, *_ in self._static_foreign_elements(layer)
             if elem.net_number == net and elem.element_type in ("pad", "via")
         ]
 
@@ -485,6 +733,13 @@ class RedundantCopperRule(DRCRule):
         return back_steps + forward
 
     def _report_chain(self, chain: list[Any], results: DRCResults) -> None:
+        """Report the fragment runs of one plain (un-cut) chain.
+
+        Kept as the hook a recipe subclasses to collect the chains that
+        carry a run (board 04's ``merge_fragment_runs``, Issue #9097).
+        Detours are no longer measured here: Issue #10667 moved them to the
+        junction-bounded runs of :meth:`_report_detour`.
+        """
         if not chain:
             return
         first_seg = chain[0][0]
@@ -517,9 +772,21 @@ class RedundantCopperRule(DRCRule):
                 )
             run = []
 
-        # Detour: routed length vs straight distance between chain ends.
-        routed = sum(math.dist(s.start, s.end) for s, _f, _t in chain)
-        ends = (chain[0][1], chain[-1][2])
+    def _report_detour(self, chain: list[Any], results: DRCResults) -> None:
+        """Detour: routed length vs straight distance between the run's ends.
+
+        The run is walked between junctions (Issue #10667), so two conductors
+        meeting at a tap are never read as one long way round.
+        """
+        if not chain:
+            return
+        first_seg = chain[0][0]
+        label = self._net_label(first_seg)
+        layer = first_seg.layer
+
+        pts = self.chain_points(chain)
+        routed = sum(math.dist(p, q) for p, q in zip(pts, pts[1:], strict=False))
+        ends = (pts[0], pts[-1])
         straight = math.dist(*ends)
         if len(chain) >= 2 and routed >= DETOUR_MIN_LENGTH_MM and straight > 0:
             ratio = routed / straight
@@ -541,44 +808,103 @@ class RedundantCopperRule(DRCRule):
                     )
                 )
 
+    @staticmethod
+    def _step_line(step: tuple[Any, tuple[float, float], tuple[float, float]]) -> tuple[Any, Any]:
+        """``(segment, (a, b))`` -- the centreline the walk traversed.
+
+        A step on a whole segment is the segment itself; a step on one piece
+        of a segment cut at a junction (Issue #10667) is just that piece's
+        node-to-node line.  The other piece stays on the board whoever wins
+        the shortcut, so it is never copper the shortcut may count as
+        replaced or as its own contact.
+        """
+        seg, frm, to = step
+        # The walk rounds its nodes to 1 um, so compare rounded keys, not
+        # the segment's own (possibly 1 nm) coordinates.
+        whole = (_q(seg.start), _q(seg.end))
+        if (frm, to) in ((whole[0], whole[1]), (whole[1], whole[0])):
+            return seg, (seg.start, seg.end)
+        return seg, (frm, to)
+
+    @classmethod
+    def _step_shapes(cls, chain: Sequence[Any]) -> list[KSegment]:
+        """The copper of each chain step, exactly as the walk traversed it."""
+        shapes: list[KSegment] = []
+        for step in chain:
+            seg, (a, b) = cls._step_line(step)
+            shapes.append(KSegment(a[0], a[1], b[0], b[1], seg.width))
+        return shapes
+
     # -- staircase (Issue #8831) ------------------------------------------
 
+    @staticmethod
+    def _element_bounds(elem: Any) -> tuple[float, float, float, float]:
+        """Conservative axis-aligned bounding box ``(minx, miny, maxx, maxy)``."""
+        if elem.element_type == "segment":
+            x1, y1, x2, y2, w = elem.geometry
+            hw = w / 2.0
+            return (min(x1, x2) - hw, min(y1, y2) - hw, max(x1, x2) + hw, max(y1, y2) + hw)
+        poly = getattr(elem, "polygon", None)
+        if poly is not None and not poly.is_empty:
+            minx, miny, maxx, maxy = poly.bounds
+            return (float(minx), float(miny), float(maxx), float(maxy))
+        cx, cy, w, h = elem.geometry[:4]
+        r = math.hypot(w, h) / 2.0
+        return (cx - r, cy - r, cx + r, cy + r)
+
+    def _static_foreign_elements(self, layer: str) -> list[tuple[Any, float, float, float, float]]:
+        """Via/pad copper on ``layer``, cached across segment-only edits."""
+        from .clearance import CopperElement
+
+        if layer in self._static_foreign_cache:
+            return self._static_foreign_cache[layer]
+        pcb = self._pcb
+        elems: list[tuple[Any, float, float, float, float]] = []
+        for via in pcb.vias:
+            if via_spans_layer(via.layers, layer):
+                elem = CopperElement(
+                    element_type="via",
+                    layer="*",
+                    net_number=via.net_number,
+                    geometry=(via.position[0], via.position[1], via.size, via.size),
+                    reference="",
+                    explicit_layers=tuple(via.layers),
+                )
+                elems.append((elem, *self._element_bounds(elem)))
+        for fp in getattr(pcb, "footprints", None) or []:
+            for pad in getattr(fp, "pads", None) or []:
+                pad_layers = getattr(pad, "layers", None) or []
+                if layer in pad_layers or "*.Cu" in pad_layers:
+                    elem = CopperElement.from_pad(pad, fp)
+                    elems.append((elem, *self._element_bounds(elem)))
+        self._static_foreign_cache[layer] = elems
+        return elems
+
     def _foreign_elements(self, layer: str) -> list[Any]:
-        """Segment/via/pad copper on ``layer``, as clearance-kernel elements."""
+        """Return copper elements for the existing Board 04 clearance check."""
+        return [row[0] for row in self._foreign_elements_with_bounds(layer)]
+
+    def _foreign_elements_with_bounds(
+        self, layer: str
+    ) -> list[tuple[Any, float, float, float, float]]:
+        """Segment/via/pad copper on ``layer``, as ``(CopperElement, minx, miny, maxx, maxy)``."""
         from .clearance import CopperElement
 
         if layer in self._foreign_cache:
             return self._foreign_cache[layer]
         pcb = self._pcb
-        elems: list[Any] = []
+        elems: list[tuple[Any, float, float, float, float]] = []
         for seg in pcb.segments:
             if seg.layer == layer and seg.width > 0:
-                elems.append(
-                    CopperElement(
-                        element_type="segment",
-                        layer=layer,
-                        net_number=seg.net_number,
-                        geometry=(seg.start[0], seg.start[1], seg.end[0], seg.end[1], seg.width),
-                        reference="",
-                    )
+                elem = CopperElement(
+                    element_type="segment",
+                    layer=layer,
+                    net_number=seg.net_number,
+                    geometry=(seg.start[0], seg.start[1], seg.end[0], seg.end[1], seg.width),
+                    reference="",
                 )
-        for via in pcb.vias:
-            if via_spans_layer(via.layers, layer):
-                elems.append(
-                    CopperElement(
-                        element_type="via",
-                        layer="*",
-                        net_number=via.net_number,
-                        geometry=(via.position[0], via.position[1], via.size, via.size),
-                        reference="",
-                        explicit_layers=tuple(via.layers),
-                    )
-                )
-        for fp in getattr(pcb, "footprints", None) or []:
-            for pad in getattr(fp, "pads", None) or []:
-                pad_layers = getattr(pad, "layers", None) or []
-                if layer in pad_layers or "*.Cu" in pad_layers:
-                    elems.append(CopperElement.from_pad(pad, fp))
+                elems.append((elem, *self._element_bounds(elem)))
+        elems.extend(self._static_foreign_elements(layer))
         self._foreign_cache[layer] = elems
         return elems
 
@@ -595,7 +921,13 @@ class RedundantCopperRule(DRCRule):
             pair_clearance_tolerance_mm,
         )
 
+        hw = width / 2.0
+        foreign = self._foreign_elements_with_bounds(layer)
         for a, b in path:
+            c_minx = min(a[0], b[0]) - hw
+            c_miny = min(a[1], b[1]) - hw
+            c_maxx = max(a[0], b[0]) + hw
+            c_maxy = max(a[1], b[1]) + hw
             cand = CopperElement(
                 element_type="segment",
                 layer=layer,
@@ -603,11 +935,18 @@ class RedundantCopperRule(DRCRule):
                 geometry=(a[0], a[1], b[0], b[1], width),
                 reference="",
             )
-            for other in self._foreign_elements(layer):
+            for other, o_minx, o_miny, o_maxx, o_maxy in foreign:
                 if other.net_number == net:
                     continue
-                gap = _calculate_clearance(cand, other)[0]
                 required = self._required_clearance(net, other.net_number)
+                if (
+                    c_maxx + required < o_minx
+                    or o_maxx + required < c_minx
+                    or c_maxy + required < o_miny
+                    or o_maxy + required < c_miny
+                ):
+                    continue
+                gap = _calculate_clearance(cand, other)[0]
                 # Same pair rule as ``netclass_clearance_copper`` (Issue
                 # #9848): an exact tie is legal copper, not float noise.
                 if not drc_clear(gap, required, band_mm=pair_clearance_tolerance_mm(cand, other)):
@@ -635,9 +974,15 @@ class RedundantCopperRule(DRCRule):
             return None
 
     def _required_clearance(self, net_a: int, net_b: int) -> float:
+        key = (net_a, net_b) if net_a <= net_b else (net_b, net_a)
+        cached = self._req_cache.get(key)
+        if cached is not None:
+            return cached
         requirement = self._requirement
         assert requirement is not None
-        return max(float(self._clearance), float(requirement(net_a, net_b)))
+        value = max(float(self._clearance), float(requirement(net_a, net_b)))
+        self._req_cache[key] = value
+        return value
 
     def _slit_oracle(self) -> Any | None:
         """The physical-gap slit oracle when a policy is active (Issue #9862).
@@ -715,7 +1060,7 @@ class RedundantCopperRule(DRCRule):
     def _mask_clear(
         self,
         cand: list[tuple[float, float]],
-        chain: list[Any],
+        chain: Sequence[Any],
         layer: str,
         width: float,
         net: int,
@@ -741,7 +1086,10 @@ class RedundantCopperRule(DRCRule):
 
         new = LineString(cand).buffer(width / 2.0)
         old = unary_union(
-            [LineString([s.start, s.end]).buffer(s.width / 2.0) for s, _f, _t in chain]
+            [
+                LineString([a, b]).buffer(seg.width / 2.0)
+                for seg, (a, b) in (self._step_line(step) for step in chain)
+            ]
         )
         new = new.difference(old)
         if new.area <= STAIRCASE_MASK_AREA_TOL_MM2:
@@ -802,24 +1150,17 @@ class RedundantCopperRule(DRCRule):
                 bends += 1
         return bends
 
-    def _report_staircase(
-        self,
-        chain: list[Any],
-        label: str,
-        layer: str,
-        results: DRCResults,
-        terminal_shapes: list[KShape],
-    ) -> bool:
-        """Report one staircase shortcut; ``True`` when one was reported.
+    @staticmethod
+    def chain_points(chain: Sequence[Any]) -> list[tuple[float, float]]:
+        """The polyline a chain's steps traverse, end to end."""
+        return [chain[0][1], *[step[2] for step in chain]]
 
-        Every pad or via touched by the original copper must still meet
-        the replacement, including contacts along a segment or at its edge.
-        """
+    def _is_staircase(self, chain: Sequence[Any]) -> bool:
+        """Whether ``chain`` has a bend to save at all (Issue #8831)."""
         if len(chain) < STAIRCASE_MIN_SEGMENTS:
             return False
-        pts = [chain[0][1], *[step[2] for step in chain]]
-        start, end = pts[0], pts[-1]
-        straight = math.dist(start, end)
+        pts = self.chain_points(chain)
+        straight = math.dist(pts[0], pts[-1])
         if straight < 1e-6:
             return False
         # Monotone in both axes: a serpentine / fold-back (length tuning,
@@ -831,70 +1172,308 @@ class RedundantCopperRule(DRCRule):
         routed = sum(math.dist(p, q) for p, q in zip(pts, pts[1:], strict=False))
         if routed / straight > DETOUR_RATIO:
             return False  # redundant_copper_detour's territory
-        bends = self._bend_count(pts)
-        if bends < 2:
-            return False
+        return self._bend_count(pts) >= 2
+
+    @staticmethod
+    def shortcut_candidates(pts: list[tuple[float, float]]) -> list[list[tuple[float, float]]]:
+        """The fewer-bend paths between a chain's ends, preferred first.
+
+        One straight path when the ends share an axis or a 45-degree line;
+        else the 45-degree leg followed by the H/V leg, then the other order.
+        """
+        start, end = pts[0], pts[-1]
         dx, dy = end[0] - start[0], end[1] - start[1]
         diag = min(abs(dx), abs(dy))
         mid_d = (start[0] + math.copysign(diag, dx), start[1] + math.copysign(diag, dy))
         mid_o = (end[0] - math.copysign(diag, dx), end[1] - math.copysign(diag, dy))
-        candidates = [[start, end]] if diag < 1e-6 else []
-        if diag >= 1e-6:
-            if math.dist(mid_d, end) < 1e-6:
-                candidates.append([start, end])
+        if diag < 1e-6 or math.dist(mid_d, end) < 1e-6:
+            return [[start, end]]
+        return [[start, mid_d, end], [start, mid_o, end]]
+
+    @classmethod
+    def _step_segments(cls, chain: Sequence[Any]) -> list[Any]:
+        """One segment per step: the segment itself, or the piece of it the
+        step traverses when a junction cut it (Issue #10667).
+
+        The slit oracle then removes exactly the copper the shortcut
+        replaces and judges the rest of the landing segment as copper that
+        stays.
+        """
+        from kicad_tools.schema.pcb import Segment
+
+        out: list[Any] = []
+        for step in chain:
+            seg, (a, b) = cls._step_line(step)
+            if (a, b) == (seg.start, seg.end):
+                out.append(seg)
             else:
-                candidates.extend([[start, mid_d, end], [start, mid_o, end]])
+                out.append(
+                    Segment(
+                        start=a,
+                        end=b,
+                        width=seg.width,
+                        layer=seg.layer,
+                        net_number=seg.net_number,
+                        net_name=seg.net_name,
+                    )
+                )
+        return out
+
+    def shortcut_reason(
+        self,
+        chain: Sequence[Any],
+        cand: list[tuple[float, float]],
+        terminal_shapes: Sequence[KShape],
+        width: float | None = None,
+    ) -> str | None:
+        """Why ``cand`` must not replace ``chain`` as copper; ``None`` when it is legal.
+
+        The gates :meth:`_report_staircase` applies to the copper itself
+        (Issues #9817 / #9848 / #9862): clearance at the pair requirement,
+        every spanned terminal still touched, no new copper in a mask-opening
+        zone, no slit the active physical-gap policy reports.  Whether the
+        path keeps the chain's taps and opens no acute corner is
+        :meth:`option_reason`, which calls this first.
+        """
         if self._requirement is None:
-            return False  # net classes cannot be modelled: no shortcut is provably legal
-        net = chain[0][0].net_number
-        width = max(s.width for s, _f, _t in chain)
-        chain_segments = [segment for segment, _start, _end in chain]
-        old = [segment_shape(segment) for segment in chain_segments]
+            return "netclass_unresolved"  # net classes cannot be modelled
+        if self._bend_count(cand) >= self._bend_count(self.chain_points(chain)):
+            return "no_bend_saved"
+        first = chain[0][0]
+        net, layer = first.net_number, first.layer
+        if width is None:
+            width = max(seg.width for seg, _f, _t in chain)
+        old = self._step_shapes(chain)
         contacts = [
             terminal
             for terminal in terminal_shapes
             if any(copper_gap(segment, terminal) <= _CONTACT_EPS_MM for segment in old)
         ]
-        for cand in candidates:
-            new_bends = self._bend_count(cand)
-            if new_bends >= bends:
+        legs = list(zip(cand, cand[1:], strict=False))
+        # Every pad or via touched by the original copper must still meet the
+        # replacement, including contacts along a segment or at its edge.
+        if contacts and not self._contacts_kept(legs, width, contacts):
+            return "terminal_contact_lost"
+        if not self._path_clear(legs, net, layer, width):
+            return "would_violate_clearance"
+        if not self._mask_clear(cand, chain, layer, width, net):
+            return "new_copper_in_mask_zone"
+        # Issue #9862: the replacement must not open a copper slit the active
+        # physical-gap policy reports (same-net branches and zone fills
+        # included).
+        oracle = self._slit_oracle()
+        if oracle is not None and oracle.rejects(layer, self._step_segments(chain), cand, width):
+            return "would_open_copper_slit"
+        return None
+
+    @classmethod
+    def chain_options(cls, chain: list[Any]) -> list[_ChainOption]:
+        """The ways ``chain`` can be replaced, preferred first (Issue #10667).
+
+        A chain the walk ended at a junction sits on a cut segment whose other
+        piece stays.  *Trimming* that segment at the junction keeps its copper
+        but makes the junction an explicit vertex -- and a tap meeting the new
+        leg at 45 degrees is then a ``sharp_trace_corner`` it never was while
+        it sat mid-span.  *Replacing* the whole segment instead runs the new
+        leg on through the tap, which stays mid-span, when the leg's line
+        passes it.  Each cut end offers both, fewest trims first; a whole end
+        segment has the one reading.
+        """
+        pts = cls.chain_points(chain)
+        ends: list[tuple[Any, tuple[float, float], tuple[float, float]] | None] = []
+        for index, inner_index in ((0, 1), (-1, -2)):
+            seg, (a, b) = cls._step_line(chain[index])
+            if (a, b) == (seg.start, seg.end):
+                ends.append(None)
                 continue
-            legs = list(zip(cand, cand[1:], strict=False))
-            if contacts and not self._contacts_kept(legs, width, contacts):
-                continue
-            if not self._path_clear(legs, net, layer, width):
-                continue
-            if not self._mask_clear(cand, chain, layer, width, net):
-                continue
-            # Issue #9862: the replacement must not open a copper slit the
-            # active physical-gap policy reports (same-net branches and zone
-            # fills included); a rejected bend falls through to the next one.
-            oracle = self._slit_oracle()
-            if oracle is not None and oracle.rejects(layer, chain_segments, cand, width):
-                continue
-            ox, oy = getattr(self, "_origin", (0.0, 0.0))
-            via_pts = " -> ".join(f"({x + ox:.2f}, {y + oy:.2f})" for x, y in cand)
-            results.add(
-                DRCViolation(
-                    rule_id="redundant_copper_staircase",
-                    severity="warning",
-                    message=(
-                        f"Track staircase: [{label}] on {layer} uses {len(chain)} segments "
-                        f"({bends} bends) from ({start[0] + ox:.2f}, {start[1] + oy:.2f}) to "
-                        f"({end[0] + ox:.2f}, {end[1] + oy:.2f}); a clear path with {new_bends} "
-                        f"bend(s) saves {bends - new_bends}: {via_pts} "
-                        f"(`kct optimize-traces` rewrites this)"
-                    ),
-                    location=start,
-                    layer=layer,
-                    actual_value=float(bends),
-                    required_value=float(new_bends),
-                    witnesses=tuple(segment_witness(s, self._origin) for s in chain_segments),
-                    nets=(label,),
+            far = max((seg.start, seg.end), key=lambda p: math.dist(p, pts[inner_index]))
+            ends.append((seg, far, pts[index]))
+        treatments = [["replace", "trim"] if end is not None else ["keep"] for end in ends]
+        combos = sorted(
+            ((a, b) for a in treatments[0] for b in treatments[1]),
+            key=lambda how: sum(treatment == "trim" for treatment in how),
+        )
+        options: list[_ChainOption] = []
+        for how in combos:
+            steps = list(chain)
+            ends_out: list[tuple[float, float]] = []
+            landings: list[tuple[tuple[float, float], bool]] = []
+            for index, treatment in ((0, how[0]), (-1, how[1])):
+                end = ends[0 if index == 0 else 1]
+                if end is None:
+                    ends_out.append(pts[index])
+                    continue
+                seg, far, node = end
+                if treatment == "replace":
+                    other = seg.start if _q(far) == _q(seg.end) else seg.end
+                    steps[index] = (seg, far, other)
+                    ends_out.append(far)
+                    landings.append((node, index == 0))
+                else:
+                    ends_out.append(node)
+            options.append(
+                _ChainOption(
+                    steps=tuple(steps),
+                    ends=(ends_out[0], ends_out[1]),
+                    landings=tuple(landings),
+                    trims=(how[0] == "trim", how[1] == "trim"),
                 )
             )
-            return True
+        return options
+
+    def option_reason(
+        self,
+        chain: Sequence[Any],
+        option: _ChainOption,
+        cand: list[tuple[float, float]],
+        terminal_shapes: Sequence[KShape],
+        width: float | None = None,
+    ) -> str | None:
+        """Why ``cand`` must not replace ``chain`` the way ``option`` reads it.
+
+        :meth:`shortcut_reason` on the copper, then what a junction demands: a
+        tap the chain was cut at must stay on the replacement (mid-span when
+        the whole cut segment goes), and no vertex of the replacement may be
+        a ``sharp_trace_corner``.  Without the second gate the rule asks for a
+        rewrite ``kct check`` then reports: Board 03's JOY_X trunk ends at a
+        tap it meets at 45 degrees.
+        """
+        why = self.shortcut_reason(option.steps, cand, terminal_shapes, width)
+        if why is not None:
+            return why
+        for node, at_first in option.landings:
+            a, b = (cand[0], cand[1]) if at_first else (cand[-2], cand[-1])
+            if _point_seg_dist(node, a, b) > _COVERED_TOL:
+                return "tap_off_replacement"
+            if not _COVERED_TOL < _along(node, a, b) < 1.0 - _COVERED_TOL:
+                return "tap_on_replacement_vertex"
+        return self.corner_reason(chain, option, cand, width)
+
+    def corner_reason(
+        self,
+        chain: Sequence[Any],
+        option: _ChainOption,
+        cand: list[tuple[float, float]],
+        width: float | None = None,
+    ) -> str | None:
+        """The ``sharp_trace_corner`` the replacement would open, else ``None``.
+
+        Every vertex of ``cand`` is judged with that rule's own test against
+        the copper the board has there once the edit is applied: the chain's
+        segments gone, a trimmed end segment ending at its junction, the new
+        legs present.
+        """
+        from kicad_tools.schema.pcb import Segment
+
+        from .sharp_trace_corner import sharp_vertex
+
+        first = chain[0][0]
+        if width is None:
+            width = max(seg.width for seg, _f, _t in chain)
+        added = [
+            Segment(start=a, end=b, width=width, layer=first.layer, net_number=first.net_number)
+            for a, b in zip(cand, cand[1:], strict=False)
+        ]
+        pts = self.chain_points(chain)
+        for index, trims in ((0, option.trims[0]), (-1, option.trims[1])):
+            if not trims:
+                continue
+            seg = chain[index][0]
+            node = option.ends[0 if index == 0 else 1]
+            kept = max(
+                (seg.start, seg.end), key=lambda p: math.dist(p, pts[1 if index == 0 else -2])
+            )
+            added.append(
+                Segment(
+                    start=kept,
+                    end=node,
+                    width=seg.width,
+                    layer=first.layer,
+                    net_number=first.net_number,
+                )
+            )
+        discs = self._copper_discs()
+        for node in cand:
+            found = sharp_vertex(
+                self._pcb,
+                first.net_name,
+                first.layer,
+                node,
+                added=added,
+                removed=[seg for seg, _f, _t in chain],
+                copper_discs=discs,
+            )
+            if found is not None:
+                return f"sharp_corner_{found[0]:.0f}deg"
+        return None
+
+    def _report_staircase(
+        self,
+        chain: list[Any],
+        label: str,
+        layer: str,
+        results: DRCResults,
+        terminal_shapes: Sequence[KShape],
+    ) -> bool:
+        """Report one staircase shortcut; ``True`` when one was reported."""
+        if not self._is_staircase(chain):
+            return False
+        pts = self.chain_points(chain)
+        start, end = pts[0], pts[-1]
+        bends = self._bend_count(pts)
+        width = max(s.width for s, _f, _t in chain)
+        for option in self.chain_options(chain):
+            for cand in self.shortcut_candidates(list(option.ends)):
+                if self.option_reason(chain, option, cand, terminal_shapes, width) is not None:
+                    continue  # a rejected bend falls through to the next one
+                new_bends = self._bend_count(cand)
+                ox, oy = self._origin
+                via_pts = " -> ".join(f"({x + ox:.2f}, {y + oy:.2f})" for x, y in cand)
+                results.add(
+                    DRCViolation(
+                        rule_id="redundant_copper_staircase",
+                        severity="warning",
+                        message=(
+                            f"Track staircase: [{label}] on {layer} uses {len(chain)} segments "
+                            f"({bends} bends) from ({start[0] + ox:.2f}, {start[1] + oy:.2f}) to "
+                            f"({end[0] + ox:.2f}, {end[1] + oy:.2f}); a clear path with {new_bends} "
+                            f"bend(s) saves {bends - new_bends}: {via_pts} "
+                            f"(`kct optimize-traces` rewrites this)"
+                        ),
+                        location=start,
+                        layer=layer,
+                        actual_value=float(bends),
+                        required_value=float(new_bends),
+                        witnesses=tuple(segment_witness(s, self._origin) for s, _f, _t in chain),
+                        nets=(label,),
+                    )
+                )
+                return True
         return False
+
+    def chain_for(self, witnesses: Sequence[str], kind: str = "staircase") -> list[Any] | None:
+        """The chain a staircase / detour finding's ``witnesses`` name, in walk
+        order, on the bound board; ``None`` when no chain matches.
+
+        The redundant-copper repair (Issue #10667) re-derives its chains this
+        way so it rewrites exactly the copper the finding named -- including a
+        piece of a segment a junction cut.
+        """
+        pcb = self._pcb
+        origin = self._origin
+        wanted = tuple(witnesses)
+        if not wanted:
+            return None
+        groups = self.chain_groups(pcb)
+        first = next((s for s in pcb.segments if segment_witness(s, origin) == wanted[0]), None)
+        if first is None:
+            return None
+        graph = self._junction_graph(groups[(first.net_number, first.layer)])
+        chains = self._detour_chains(graph) if kind == "detour" else self._staircase_chains(graph)
+        for chain in chains:
+            if tuple(segment_witness(seg, origin) for seg, _f, _t in chain) == wanted:
+                return chain
+        return None
 
     @staticmethod
     def _contacts_kept(

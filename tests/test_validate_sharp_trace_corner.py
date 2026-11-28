@@ -325,3 +325,24 @@ def test_jlc_flagged_fold_backs_are_reported(tmp_path, vertex):
     assert len(v) == 1
     assert v[0].layer == layer
     assert v[0].actual_value == pytest.approx(45.0, abs=0.5)
+
+
+def test_sharp_vertex_sees_an_added_branch_inside_a_continuous_track(tmp_path):
+    """A repair that taps a straight run at 45 deg opens a junction (PR #10698).
+
+    ``sharp_vertex`` must judge it with the rule's continuous-track search, not
+    only at shared endpoints, so the edit is declined before it is applied and
+    a new finding cannot replace an old one.
+    """
+    from kicad_tools.schema.pcb import Segment
+    from kicad_tools.validate.rules.sharp_trace_corner import sharp_vertex
+
+    p = tmp_path / "b.kicad_pcb"
+    p.write_text(_board(_seg((0, 0), (5, 0)), _seg((5, 0), (10, 0))))
+    pcb = PCB.load(str(p))
+    for s in pcb.segments:
+        s.net_name = "SIG"
+    assert sharp_vertex(pcb, "SIG", "F.Cu", (5, 2)) is None
+    branch = Segment(start=(5, 0), end=(8, 3), width=0.2, layer="F.Cu", net_number=1)
+    found = sharp_vertex(pcb, "SIG", "F.Cu", (5, 0), added=[branch])
+    assert found is not None and found[0] == pytest.approx(45, abs=1) and found[1] == "junction"
