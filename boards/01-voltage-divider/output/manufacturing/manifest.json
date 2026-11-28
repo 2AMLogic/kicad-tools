@@ -43,15 +43,15 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "ecc4ceae5e06c5728c06053648a9c631535bb4043b097d32ed9dcb8287c764bc",
-      "size": 2420
+      "sha256": "886961007c4f80db7d445c46f727bfa9f800f1be5542533a829bb46fcd2bb420",
+      "size": 2217
     },
     "assembly-back.pdf": {
-      "sha256": "83b951fbe28c9f33bf071517cfc55cf751b4df54a434be67e0c7487b2b2444f9",
+      "sha256": "1b87a266377db1dadf6539c1799f0cd9ae1881ba978d8b27405e55a268670240",
       "size": 8804
     },
     "assembly-front.pdf": {
-      "sha256": "1c279385d6a7c3e1776eee5601497fb9c444fd88a843174ce94c8fe048a4f88f",
+      "sha256": "9b42685b0a8d78e10340e23ca8288005ee698174a60d92f213a8fe965fba260a",
       "size": 18775
     },
     "bom_jlcpcb.csv": {
@@ -59,7 +59,7 @@
       "size": 175
     },
     "check-report.json": {
-      "sha256": "5a5562690534425ee1210e48b09690004b81d137ad7a83b87fb6abec13d539ce",
+      "sha256": "47ce77067243f7a697df39d3ad75817a0f64fe6847564b6044b6f7c076cdd813",
       "size": 116944
     },
     "cpl_jlcpcb.csv": {
@@ -115,15 +115,15 @@
       "size": 2464
     },
     "report.pdf": {
-      "sha256": "0216430676d4f88f0606e828e2cb8420505978a3df252363e84c4f178e439e86",
-      "size": 903712
+      "sha256": "ef303078fa09f5c7c1f4d68abfa169f69d0048811e6047ac235a76df89a1c171",
+      "size": 903153
     },
     "schematic.pdf": {
-      "sha256": "71fc8be3238eec96820d5f8cd666990d4cc511d10ca2aa41b8057cd4c01d075e",
+      "sha256": "a991e62113ca25938e8bf7a93f51c3aec574ba70aeeea71b1b57dedf48fba403",
       "size": 47852
     }
   },
-  "generated_at": "2026-11-27T19:00:00+00:00",
+  "generated_at": "2026-11-27T20:57:03+00:00",
   "kicad_tools_version": "0.29.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -378,30 +378,50 @@
       "status": "OK"
     },
     {
-      "details": "unverified: J1 -> C7501260, R1 -> C17414, R2 -> C17414, J2 -> C7501260",
-      "message": "0 of 4 assigned item(s) verified (no source); 4 unverifiable (not in parts cache or offline catalog)",
+      "message": "4 of 4 assigned item(s) verified against offline catalog and parts cache; no LCSC value/package mismatches",
       "name": "bom_lcsc_values",
-      "status": "WARN"
+      "status": "OK"
     },
     {
       "data": {
         "inventory_covered": [],
         "order_boards": 5,
-        "parts": [],
+        "parts": [
+          {
+            "age_days": 2,
+            "lcsc": "C17414",
+            "per_board": 2,
+            "refs": [
+              "R1",
+              "R2"
+            ],
+            "source": "live",
+            "stock": 43985975,
+            "verified": false
+          },
+          {
+            "age_days": null,
+            "lcsc": "C7501260",
+            "per_board": 2,
+            "refs": [
+              "J1",
+              "J2"
+            ],
+            "source": "offline_catalog",
+            "stock": 27339,
+            "verified": false
+          }
+        ],
         "sources": {
-          "offline_catalog": "missing",
-          "parts_cache": "miss"
+          "offline_catalog": "hit",
+          "parts_cache": "hit"
         },
         "strict": false,
-        "unresolved": [
-          "C17414",
-          "C7501260"
-        ]
+        "unresolved": []
       },
-      "details": "C17414, C7501260",
-      "message": "Stock not verified: 2 assigned LCSC number(s) found in neither the parts cache nor the offline catalog; parts cache searched, no matching row; offline catalog not available on the generating host (no catalog file)",
+      "message": "2 LCSC part(s) have recorded stock for 5 board(s)",
       "name": "bom_lcsc_stock",
-      "status": "WARN"
+      "status": "OK"
     },
     {
       "message": "BOM and PCB references match (4 components)",
